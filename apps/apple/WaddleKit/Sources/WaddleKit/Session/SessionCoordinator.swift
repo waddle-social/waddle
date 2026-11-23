@@ -109,9 +109,10 @@ public final class SessionCoordinator {
     @ObservationIgnored var inboxHydrateTask: Task<Void, Never>?
     @ObservationIgnored var inboxHydrateRetryDelays: [TimeInterval] = [2, 8]
     /// A directory lookup that could not read the account's bookmarks is
-    /// tried again after these delays (`scheduleDirectoryRetry`).
+    /// tried again after these delays, then after the last one until it
+    /// reads them (`scheduleDirectoryRetry`).
     @ObservationIgnored var directoryRetryTask: Task<Void, Never>?
-    @ObservationIgnored var directoryRetryDelays: [TimeInterval] = [2, 8]
+    @ObservationIgnored var directoryRetryDelays: [TimeInterval] = [2, 8, 30, 60]
     /// Rows whose last `<mark-read/>` the server refused, with the newest
     /// stanza id that read covered. The row is not read again automatically
     /// while the server still reports that id; a newer message retries.

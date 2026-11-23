@@ -116,15 +116,19 @@ extension SessionCoordinator {
     }
 
     /// Reads the directory again when a lookup could not read the
-    /// account's bookmarks: after `directoryRetryDelays` (2 s, then 8 s),
-    /// until one reads them, abandoned if the stream changes. Off the ready
-    /// pipeline, so sends are not held behind it.
+    /// account's bookmarks: after each of `directoryRetryDelays`, then
+    /// after the last of them again and again, until one reads them.
+    /// Until then no space room is joined, so it gives up only when the
+    /// stream changes. Off the ready pipeline, so sends are not held
+    /// behind it.
     func scheduleDirectoryRetry(delays: [TimeInterval]? = nil) {
         guard directoryRetryTask == nil else { return }
         let delays = delays ?? directoryRetryDelays
+        guard let longest = delays.last else { return }
         let epoch = connectionEpoch
         directoryRetryTask = Task { [weak self] in
-            for delay in delays {
+            for attempt in 0... {
+                let delay = attempt < delays.count ? delays[attempt] : longest
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 // Cancelled when the stream changes, which also frees the slot.
                 guard let self, !Task.isCancelled else { return }

@@ -230,6 +230,23 @@ struct LeaveRoomTests {
         #expect(coordinator.unread.count(for: roomConversation) == 0)
     }
 
+    /// Until then no space room is joined, so the reads go on, less often.
+    @Test func theBookmarksAreReadAgainUntilTheyLoad() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directoryRetryDelays = [0.01]
+        port.topology = Topology(spaces: [], channels: [general], ownBookmarksLoaded: false)
+        await coordinator.refreshDirectory()
+
+        await eventually { port.topologyRequests >= 4 }
+        #expect(port.joined.isEmpty)
+        port.topology = Topology(spaces: [], channels: [general])
+        await eventually { coordinator.directoryRetryTask == nil }
+
+        #expect(port.joined == [room])
+    }
+
     @Test func theBookmarksAreNotReadAgainForAnOldStream() {
         let (coordinator, _) = online()
         coordinator.scheduleDirectoryRetry(delays: [60])
