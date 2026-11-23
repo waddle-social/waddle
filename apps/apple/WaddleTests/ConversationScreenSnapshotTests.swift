@@ -39,6 +39,17 @@ final class ConversationScreenSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .wideDesktop)
     }
 
+    /// The split view builds the conversation screen twice; the second
+    /// must still show the "New messages" divider the first open found.
+    func testSplitRoomWithUnreadMessages() async throws {
+        let sample = SampleSession()
+        sample.seedGeneral()
+        sample.coordinator.unread.set(2, for: .room(SampleSession.general))
+        sample.navigation.selection = .room(SampleSession.general)
+        try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
+        XCTAssertNotNil(sample.coordinator.unreadAnchor(for: .room(SampleSession.general)))
+    }
+
     func testSplitDirect() async throws {
         let sample = SampleSession()
         sample.seedTheo()

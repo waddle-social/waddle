@@ -28,14 +28,15 @@ struct ConversationScreen: View {
 }
 
 /// The screen body, created once per conversation so its action model
-/// and unread anchor reset when the conversation changes.
+/// resets when the conversation changes. The "New messages" divider's
+/// place is the session's: the split view builds this screen twice, and
+/// the second never sees the messages unread.
 private struct ConversationContent: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(AppState.self) private var app
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actions: MessageActionModel
-    @State private var unreadAnchorID: String?
     @State private var showsPinsSheet = false
     /// A focus request whose row is not loaded yet, while history pages in.
     @State private var pendingFocus: FocusRequest?
@@ -53,7 +54,8 @@ private struct ConversationContent: View {
 
     var body: some View {
         let header = ConversationHeaderText.make(for: conversation, session: session)
-        ConversationTimelineContainer(conversation: conversation, header: header, unreadAnchorID: unreadAnchorID)
+        ConversationTimelineContainer(
+            conversation: conversation, header: header, unreadAnchorID: session.unreadAnchor(for: conversation))
             // Opposite the jump-to-latest pill, which sits at the newest
             // edge: the top in the social order.
             .overlay(alignment: newestFirst ? .bottom : .top) {
@@ -111,7 +113,7 @@ private struct ConversationContent: View {
                     .environment(navigation)
             }
             .task(id: conversation) {
-                await open()
+                await session.open(conversation)
             }
             .onChange(of: navigation.focusRequest, initial: true) { _, request in
                 guard let request, request.conversation == conversation else { return }
@@ -156,16 +158,6 @@ private struct ConversationContent: View {
                     .padding(.bottom, Theme.Spacing.xs)
             }
         }
-    }
-
-    /// Captures the unread count before opening clears it, so the divider
-    /// lands before the first message that was unread.
-    private func open() async {
-        let unread = session.unread.count(for: conversation)
-        await session.open(conversation)
-        guard unread > 0, !Task.isCancelled else { return }
-        let items = session.timelines.timeline(for: conversation).feedItems
-        unreadAnchorID = TimelineUnreadAnchor.firstUnreadID(in: items, unreadCount: unread)
     }
 
     private var revealPhase: TimelineRevealBanner.Phase? {

@@ -120,6 +120,13 @@ public final class SessionCoordinator {
     /// there stay addressable by username in that room's sends.
     @ObservationIgnored var mentionSearches = MentionDirectorySearch()
     @ObservationIgnored var visibleConversation: ConversationID?
+    /// Conversation screens showing each conversation: `open` counts one
+    /// in, `close` one out. The split view builds a screen twice, so a
+    /// second can open while the first is still up.
+    @ObservationIgnored var conversationScreens: [ConversationID: Int] = [:]
+    /// Where each conversation on screen puts its "New messages" divider:
+    /// the first row that was unread when the first of its screens opened.
+    var unreadAnchors: [ConversationID: String] = [:]
     /// The room thread on screen, if any.
     @ObservationIgnored var visibleThread: ThreadKey?
     @ObservationIgnored var isAppActive = true

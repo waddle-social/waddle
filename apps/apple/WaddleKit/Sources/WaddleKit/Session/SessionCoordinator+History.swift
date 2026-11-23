@@ -7,6 +7,15 @@ extension SessionCoordinator {
     /// Called when a conversation comes on screen: marks it active, loads
     /// the newest page once, and marks it read.
     public func open(_ conversation: ConversationID) async {
+        // Read before the badge is cleared below. A second screen opening a
+        // conversation already on screen finds nothing unread and keeps the
+        // first screen's divider.
+        let unreadAtOpen = unread.count(for: conversation)
+        let isFirstScreen = conversationScreens[conversation, default: 0] == 0
+        conversationScreens[conversation, default: 0] += 1
+        if isFirstScreen, unreadAnchors[conversation] != nil {
+            unreadAnchors[conversation] = nil
+        }
         visibleConversation = conversation
         unread.setActive(isAppActive ? conversation : nil)
         inbox.markRead(conversation.jid)
@@ -17,6 +26,12 @@ extension SessionCoordinator {
         if !history.state(of: conversation).hasLoadedLatest {
             await loadLatest(conversation)
         }
+        // Placed by the open that saw the messages unread, even when its own
+        // screen has gone meanwhile, as long as one is still up.
+        if unreadAtOpen > 0, conversationScreens[conversation, default: 0] > 0 {
+            unreadAnchors[conversation] = TimelineUnreadAnchor.firstUnreadID(
+                in: timelines.timeline(for: conversation).feedItems, unreadCount: unreadAtOpen)
+        }
         await markDisplayedIfVisible(conversation)
         if conversation.isRoom {
             await refreshPins(in: conversation.jid)
@@ -24,8 +39,22 @@ extension SessionCoordinator {
         }
     }
 
-    /// Called when a conversation leaves the screen.
+    /// The row the conversation's "New messages" divider sits above, while
+    /// a screen shows it; nil when nothing was unread.
+    public func unreadAnchor(for conversation: ConversationID) -> String? {
+        unreadAnchors[conversation]
+    }
+
+    /// Called when a conversation leaves the screen. Its divider goes with
+    /// the last screen showing it.
     public func close(_ conversation: ConversationID) {
+        let screens = conversationScreens[conversation, default: 0] - 1
+        if screens > 0 {
+            conversationScreens[conversation] = screens
+        } else {
+            conversationScreens[conversation] = nil
+            unreadAnchors[conversation] = nil
+        }
         if visibleConversation == conversation {
             visibleConversation = nil
         }
