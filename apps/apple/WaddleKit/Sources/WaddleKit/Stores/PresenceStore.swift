@@ -176,7 +176,9 @@ public final class PresenceStore {
             return .ignored
         }
         // The most available resource represents the contact.
-        let best = resources[bare]?.values.min { $0.availability < $1.availability }
+        let best = resources[bare]?.values.min {
+            $0.availability.mostAvailableRank < $1.availability.mostAvailableRank
+        }
         if contacts[bare] != best {
             contacts[bare] = best
         }
