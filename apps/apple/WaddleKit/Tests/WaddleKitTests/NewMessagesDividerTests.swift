@@ -62,16 +62,29 @@ struct NewMessagesDividerTests {
         #expect(coordinator.unreadAnchor(for: roomConversation) == row("s2", in: coordinator))
     }
 
-    @Test func leavingTheConversationForgetsTheDivider() async {
+    /// The first screen opens, is gone, and the next opens; on a phone a
+    /// thread or the details cover the conversation and uncover it.
+    @Test func theDividerStaysWhenTheConversationIsOpenedAgain() async {
         let (coordinator, port) = online()
         port.historyPages = [archived(["s1", "s2", "s3"])]
         coordinator.unread.set(2, for: roomConversation)
         await coordinator.open(roomConversation)
+        coordinator.close(roomConversation)
+
         await coordinator.open(roomConversation)
 
+        #expect(coordinator.unreadAnchor(for: roomConversation) == row("s2", in: coordinator))
+    }
+
+    @Test func openingAnotherConversationForgetsTheDivider() async {
+        let (coordinator, port) = online()
+        port.historyPages = [archived(["s1", "s2", "s3"])]
+        coordinator.unread.set(2, for: roomConversation)
+        await coordinator.open(roomConversation)
         coordinator.close(roomConversation)
-        #expect(coordinator.unreadAnchor(for: roomConversation) != nil)
-        coordinator.close(roomConversation)
+
+        await coordinator.open(bobConversation)
+        coordinator.close(bobConversation)
         #expect(coordinator.unreadAnchor(for: roomConversation) == nil)
 
         // Back again with everything read: no divider.

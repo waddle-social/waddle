@@ -121,12 +121,14 @@ public final class SessionCoordinator {
     /// there stay addressable by username in that room's sends.
     @ObservationIgnored var mentionSearches = MentionDirectorySearch()
     @ObservationIgnored var visibleConversation: ConversationID?
-    /// Conversation screens showing each conversation: `open` counts one
-    /// in, `close` one out. The split view builds a screen twice, so a
-    /// second can open while the first is still up.
-    @ObservationIgnored var conversationScreens: [ConversationID: Int] = [:]
-    /// Where each conversation on screen puts its "New messages" divider:
-    /// the first row that was unread when the first of its screens opened.
+    /// The conversation `open` was last called for. Screens open and close
+    /// a conversation more than once while it stays the one being read:
+    /// the split view builds its screen twice, and on a phone a thread or
+    /// its details cover it and uncover it again.
+    @ObservationIgnored var lastOpenedConversation: ConversationID?
+    /// Where the last opened conversation puts its "New messages" divider:
+    /// the first row that was unread when it was opened. Kept until another
+    /// conversation is opened, as the web does.
     var unreadAnchors: [ConversationID: String] = [:]
     /// The room thread on screen, if any.
     @ObservationIgnored var visibleThread: ThreadKey?
@@ -445,6 +447,8 @@ public final class SessionCoordinator {
         refusedInboxReads.removeAll()
         cancelInboxHydrate()
         cancelDirectoryRetry()
+        lastOpenedConversation = nil
+        unreadAnchors.removeAll()
         threadHistory.clear()
         unreadOverview.reset()
         community.reset()
