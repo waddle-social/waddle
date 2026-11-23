@@ -39,9 +39,10 @@ final class GroupAddPeopleModel {
 
     /// Adds the member list to who is never offered, so people who are
     /// offline are left out too. If it cannot load, what is known stands.
+    /// The banned, which owners and admins read with it, are not members.
     func excludeMembers(from load: () async throws -> [RoomMember]) async {
         guard let members = try? await load() else { return }
-        excluded.formUnion(members.map(\.jid))
+        excluded.formUnion(members.filter { $0.affiliation != .outcast }.map(\.jid))
         tokens.removeAll { excluded.contains($0.jid) }
     }
 
