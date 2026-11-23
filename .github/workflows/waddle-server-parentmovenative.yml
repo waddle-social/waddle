@@ -181,6 +181,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: parentMoveNativeBuildClosure
       run: nix build --no-link ../#waddle-server ../#checks.x86_64-linux.waddle-server-clippy ../#checks.x86_64-linux.waddle-server-fmt
       working-directory: server
@@ -367,6 +375,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: parentMoveNativeProof
       run: cuenv task parentMoveNativeProof --skip-dependencies
       working-directory: server

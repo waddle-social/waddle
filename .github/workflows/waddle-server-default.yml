@@ -397,6 +397,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: fmt
       run: cuenv task fmt --skip-dependencies
       working-directory: server
@@ -535,6 +543,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainBuildExtensionModules
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-runtime
       working-directory: server
@@ -673,6 +689,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainBuildImageStream
       run: nix build --print-build-logs ../#waddle-server-image-stream
       working-directory: server
@@ -861,6 +885,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainChecks
       run: cuenv task mainChecks --skip-dependencies
       working-directory: server
@@ -1049,6 +1081,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainClippy
       run: cuenv task mainClippy --skip-dependencies
       working-directory: server
@@ -1187,6 +1227,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainDoctest
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-doctest
       working-directory: server
@@ -1375,6 +1423,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: mainTest
       run: cuenv task mainTest --skip-dependencies
       working-directory: server
@@ -1561,6 +1617,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixTestLocal
       run: cuenv task nixTestLocal --skip-dependencies
       working-directory: server
@@ -1764,6 +1828,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: publishContainerImage
       run: cuenv task publishContainerImage --skip-dependencies
       working-directory: server

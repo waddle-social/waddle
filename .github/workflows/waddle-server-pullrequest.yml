@@ -275,6 +275,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixBuildCi
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-ci-build
       working-directory: server
@@ -411,6 +419,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixBuildExtensionModules
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-runtime
       working-directory: server
@@ -547,6 +563,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixBuildImageStream
       run: nix build --print-build-logs ../#waddle-server-image-stream
       working-directory: server
@@ -683,6 +707,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixClippy
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-clippy
       working-directory: server
@@ -819,6 +851,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixDoctest
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-doctest
       working-directory: server
@@ -1005,6 +1045,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: pullRequestChecks
       run: cuenv task pullRequestChecks --skip-dependencies
       working-directory: server

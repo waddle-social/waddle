@@ -263,6 +263,14 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: cuenv:contributor:bun.workspace.setup
       run: 'true'
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: Setup 1Password
       run: cuenv secrets setup onepassword
       env:

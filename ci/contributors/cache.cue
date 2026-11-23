@@ -131,5 +131,17 @@ import "github.com/cuenv/cuenv/schema"
 			        handle.write(f"{k}={v}\\n")
 			PY
 			"""
+	}, {
+		id:       "namespace-bazel-cache.status"
+		label:    "Check Namespace Bazel Remote Cache"
+		priority: 15
+		script: """
+			set -euo pipefail
+			if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+			  echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+			  exit 0
+			fi
+			cuenv cache status || true
+			"""
 	}]
 }

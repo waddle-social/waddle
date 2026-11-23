@@ -204,6 +204,14 @@ jobs:
         "$cuenv_bin/cuenv" sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: federationGrantFenceProof
       run: cuenv task federationGrantFenceProof --skip-dependencies
       working-directory: server

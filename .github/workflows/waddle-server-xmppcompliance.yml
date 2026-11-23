@@ -202,6 +202,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixXmppUnitTests
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-unit-tests
       working-directory: server
@@ -338,6 +346,14 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
+    - name: Check Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        if [ -z "${CUENV_REMOTE_CACHE:-}" ]; then
+          echo "Namespace Bazel remote cache not configured on this runner; using local cache only."
+          exit 0
+        fi
+        cuenv cache status || true
     - name: nixXmppXepIntegration
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-xep-integration
       working-directory: server
