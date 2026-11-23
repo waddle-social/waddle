@@ -38,6 +38,9 @@ private struct ConversationContent: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actions: MessageActionModel
     @State private var showsPinsSheet = false
+    /// Names this screen to the session: the split view can hold two
+    /// screens for one conversation.
+    @State private var screenID = ConversationScreenID()
     /// A focus request whose row is not loaded yet, while history pages in.
     @State private var pendingFocus: FocusRequest?
     @State private var showsRevealMiss = false
@@ -114,7 +117,9 @@ private struct ConversationContent: View {
                     .environment(navigation)
             }
             .task(id: conversation) {
-                await session.open(conversation)
+                // A screen that went before this ran has already closed.
+                guard !Task.isCancelled else { return }
+                await session.open(conversation, screen: screenID)
             }
             .onChange(of: navigation.focusRequest, initial: true) { _, request in
                 guard let request, request.conversation == conversation else { return }
@@ -131,7 +136,7 @@ private struct ConversationContent: View {
                 showsRevealMiss = false
             }
             .onDisappear {
-                session.close(conversation)
+                session.close(conversation, screen: screenID)
                 session.stopTyping(in: conversation, notify: true)
             }
     }

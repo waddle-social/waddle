@@ -337,6 +337,11 @@ final class FakePort: XmppPort {
         held.forEach { $0.resume() }
     }
 
+    /// Answers one held lookup, so lookups can answer out of order.
+    func releaseTopology(at index: Int) {
+        heldTopology.remove(at: index).resume()
+    }
+
     func releaseTopology() {
         let held = heldTopology
         heldTopology = []

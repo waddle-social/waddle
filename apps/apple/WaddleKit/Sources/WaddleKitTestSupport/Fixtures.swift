@@ -71,3 +71,16 @@ func reaction(_ emojis: [String], to target: String, from nick: String, at times
     message.reaction = WireMessage.Reaction(targetID: target, emojis: emojis)
     return message
 }
+
+/// The one screen of a test that shows each conversation on a single screen.
+let onlyScreen = ConversationScreenID()
+
+extension SessionCoordinator {
+    func open(_ conversation: ConversationID) async {
+        await open(conversation, screen: onlyScreen)
+    }
+
+    func close(_ conversation: ConversationID) {
+        close(conversation, screen: onlyScreen)
+    }
+}

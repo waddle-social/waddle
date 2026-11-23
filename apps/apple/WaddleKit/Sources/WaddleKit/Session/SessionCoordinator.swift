@@ -121,6 +121,10 @@ public final class SessionCoordinator {
     /// there stay addressable by username in that room's sends.
     @ObservationIgnored var mentionSearches = MentionDirectorySearch()
     @ObservationIgnored var visibleConversation: ConversationID?
+    /// The screens showing `visibleConversation`. The Mac split view can
+    /// hold two for one conversation, and it stays visible until the last
+    /// of them closes.
+    @ObservationIgnored var visibleScreens: Set<ConversationScreenID> = []
     /// The conversation `open` was last called for. Screens open and close
     /// a conversation more than once while it stays the one being read:
     /// the split view builds its screen twice, and on a phone a thread or
@@ -145,6 +149,9 @@ public final class SessionCoordinator {
     @ObservationIgnored var lookupsBeforeDestruction: [BareJID: Int] = [:]
     /// Directory lookups begun this session.
     @ObservationIgnored var lookupsBegun = 0
+    /// The newest lookup whose answer the directory holds: its number
+    /// and what it found.
+    @ObservationIgnored var newestLookupApplied: (number: Int, found: DirectoryLookup)?
     /// Rooms whose delete got no clear answer (timed out, cut off). They
     /// may be gone, so they are not joined again this session.
     @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []
