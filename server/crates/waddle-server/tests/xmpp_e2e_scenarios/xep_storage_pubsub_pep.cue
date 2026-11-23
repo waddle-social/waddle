@@ -88,6 +88,55 @@ scenario: #Scenario & {
 				},
 			]
 		},
+		// XEP-0030 Security Considerations: discovery of another account is
+		// answered only for a presence subscriber (from/both), so bob first
+		// subscribes to admin and admin approves.
+		#SendIq & {
+			actor: adminPhone
+			type:  "get"
+			id:    "cue-admin-roster-get"
+			payload: #XmlElement & {name: "query", ns: "jabber:iq:roster"}
+		},
+		#ExpectIq & {target: adminPhone, id: "cue-admin-roster-get", type: "result"},
+		#SendIq & {
+			actor: bobPhone
+			type:  "get"
+			id:    "cue-bob-roster-get"
+			payload: #XmlElement & {name: "query", ns: "jabber:iq:roster"}
+		},
+		#ExpectIq & {target: bobPhone, id: "cue-bob-roster-get", type: "result"},
+		#SendPresence & {actor: adminPhone},
+		#SendPresence & {actor: bobPhone, to: adminPhone.bareJid, type: "subscribe"},
+		#ExpectPresence & {
+			target:   adminPhone
+			contains: ["type='subscribe'", "from='\(bobPhone.bareJid)'"]
+		},
+		#SendPresence & {actor: adminPhone, to: bobPhone.bareJid, type: "subscribed"},
+		#ExpectPresence & {
+			target:   bobPhone
+			contains: ["type='subscribed'", "from='\(adminPhone.bareJid)'"]
+		},
+		#ExpectIq & {
+			target:   adminPhone
+			type:     "set"
+			contains: ["jabber:iq:roster", "subscription='from'"]
+		},
+		#ExpectIq & {
+			target:   bobPhone
+			type:     "set"
+			contains: ["jabber:iq:roster", "ask='subscribe'"]
+		},
+		#ExpectIq & {
+			target:   bobPhone
+			type:     "set"
+			contains: ["jabber:iq:roster", "subscription='to'"]
+		},
+		// The server delivers the subscribe request to admin a second time;
+		// the scenario must consume every pending frame.
+		#ExpectPresence & {
+			target:   adminPhone
+			contains: ["type='subscribe'", "from='\(bobPhone.bareJid)'"]
+		},
 		#SendIq & {
 			actor: bobPhone
 			type:  "get"

@@ -1867,6 +1867,41 @@ async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
         .expect("bob jid");
 
     let query = disco_info_iq_frame("session-pep", "alice-session@example.com", None);
+
+    // XEP-0030 Security Considerations: without a presence subscription of
+    // type from/both, bob is told the account is unavailable.
+    let denied = handle_iq(
+        &query,
+        "example.com",
+        "muc.example.com",
+        state.as_ref(),
+        Some(&bob),
+        &ready_phase(&bob_jid),
+    )
+    .await;
+    assert!(
+        denied
+            .first()
+            .is_some_and(|frame| frame.contains("service-unavailable")),
+        "unsubscribed cross-user disco must be service-unavailable: {denied:?}"
+    );
+
+    // Alice shares her presence with bob (roster subscription `from`).
+    let alice_bare: jid::BareJid = "alice-session@example.com".parse().expect("alice bare jid");
+    let bob_bare = bob_jid.to_bare();
+    let db = crate::server::routes::websocket::s2s_accounts::database(state.as_ref())
+        .await
+        .expect("account database");
+    crate::server::xmpp_roster_state::update_roster_subscription(
+        db,
+        &alice_bare,
+        &bob_bare,
+        waddle_xmpp::roster::Subscription::From,
+        None,
+    )
+    .await
+    .expect("alice shares presence with bob");
+
     let responses = handle_iq(
         &query,
         "example.com",
@@ -1909,7 +1944,7 @@ async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
         .first()
         .expect("missing session-backed PEP disco");
     assert!(
-        missing_response.contains("item-not-found"),
+        missing_response.contains("service-unavailable"),
         "unknown local user should not expose PEP disco: {missing_response}"
     );
 }
