@@ -25,8 +25,16 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var isCameraOn = false
     private(set) var isMicrophoneBlocked = false
     private(set) var isCameraBlocked = false
-    private(set) var participantIdentities: [String] = []
-    private(set) var speakingIdentities: Set<String> = []
+    private(set) var participants: [CallMediaParticipant] = []
+    private(set) var activeSpeakersLoudestFirst: [String] = []
+    private(set) var dockCameraIdentities = CallDockCameraIdentities()
+    private var cameraTracks: [String: VideoTrack] = [:]
+    /// LiveKit can briefly clear our identity during a full reconnect.
+    @ObservationIgnored private var joinedIdentity: String?
+    @ObservationIgnored private var remoteAudioTracks: [String: [RemoteAudioTrack]] = [:]
+    /// Choices follow the call even if LiveKit replaces its room or tracks.
+    @ObservationIgnored private var volumeGains: [String: Double] = [:]
+    @ObservationIgnored private let volumeUpdates = CallVolumeUpdates()
     /// What the person last asked of each device in this call. It outlives
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
@@ -34,12 +42,24 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// The person chose to mute in this call, whether or not the microphone
     /// is publishing yet. What the system's call screen shows as muted.
     private(set) var isMicrophoneMutedByChoice = false
-    private var remoteTrack: VideoTrack?
-    private var localTrack: VideoTrack?
+    func video(of identity: String, source: CallVideoSource) -> AnyView? {
+        guard source == .camera, let track = cameraTracks[identity] else { return nil }
+        // A remote portrait camera keeps the whole face.
+        return AnyView(SwiftUIVideoView(track, layoutMode: identity == dockCameraIdentities.local ? .fill : .fit))
+    }
 
-    /// Fitted, not filled: a portrait phone camera keeps the whole face.
-    var remoteVideo: AnyView? { remoteTrack.map { AnyView(SwiftUIVideoView($0, layoutMode: .fit)) } }
-    var localVideo: AnyView? { localTrack.map { AnyView(SwiftUIVideoView($0)) } }
+    func setVolume(_ gain: Double, of identity: String) {
+        guard let room, !identity.isEmpty, identity != joinedIdentity,
+              identity != room.localParticipant.identity?.stringValue else { return }
+        let gain = CallVolume.clamp(gain)
+        volumeGains[identity] = gain
+        for track in remoteAudioTracks[identity] ?? [] { applyVolume(gain, to: track) }
+        refreshParticipants()
+    }
+
+    private func applyVolume(_ gain: Double, to track: RemoteAudioTrack) {
+        volumeUpdates.enqueue(for: track) { track.volume = gain }
+    }
 
     /// The room of the call in progress, from the moment its connect starts.
     @ObservationIgnored private var room: Room?
@@ -50,7 +70,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard room == nil else { throw CallMediaError.alreadyConnected }
         wasEndedByServer = false
         let (changes, observer) = RoomObserver.make()
-        let room = Room(delegate: observer)
+        let room = Room(delegate: observer, roomOptions: RoomOptions(adaptiveStream: true, dynacast: true))
         // One consumer, so the room's reports are handled in the order the
         // SDK made them. It ends when the observer is released.
         Task { [weak self] in
@@ -60,6 +80,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // connect is still returning is not lost.
         self.room = room
         self.observer = observer
+        joinedIdentity = join.identity
         phase = .connecting
         // XEP-0215: an advertised list is the ICE set to use. An empty list
         // means no advertisement, and the SDK keeps the servers the SFU
@@ -81,7 +102,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         connectedSince = .now
         mediaUpSince = .now
         refreshTracks()
-        refreshParticipants()
         // Publishing is best effort and separate from joining: a missing
         // device or a denied permission leaves the user in the call,
         // receive-only, as on web and Android. It runs on its own so a
@@ -98,6 +118,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     func forgetCaptureChoices() {
         captureChoices = [:]
         if isMicrophoneMutedByChoice { isMicrophoneMutedByChoice = false }
+        volumeUpdates.removeAll()
+        for identity in volumeGains.keys {
+            for track in remoteAudioTracks[identity] ?? [] { applyVolume(1, to: track) }
+        }
+        volumeGains.removeAll()
+        refreshParticipants()
     }
 
     func setMicrophone(_ on: Bool) async {
@@ -161,11 +187,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func forgetRoom() {
         room = nil
         observer = nil
+        joinedIdentity = nil
+        volumeUpdates.removeAll()
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
         refreshTracks()
-        refreshParticipants()
     }
 
     /// Only the room still in use changes the call. `disconnect()` forgets
@@ -185,18 +212,16 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             guard changed.connectionState == .connected else { return }
             phase = .connected
             mediaUpSince = .now
-            reconcileTracks(in: changed)
-            refreshParticipants()
+            reconcileTracks(in: changed, restoringVolumes: true)
         case .tracks:
             reconcileTracks(in: changed)
-            refreshParticipants()
         case .participants:
             refreshParticipants()
         }
     }
 
-    private func reconcileTracks(in room: Room) {
-        refreshTracks()
+    private func reconcileTracks(in room: Room, restoringVolumes: Bool = false) {
+        refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
     }
@@ -240,21 +265,54 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     /// Reads the room's tracks as they are now, so the order in which the
     /// SDK reports changes cannot leave a stale picture.
-    private func refreshTracks() {
+    private func refreshTracks(restoringVolumes: Bool = false) {
         // On if any publication of the device is live, so a second one can
         // never send while the dock shows the device off.
-        let cameras = room.map { publications(of: .video, in: $0) } ?? []
-        let microphone = room.map { publications(of: .audio, in: $0).contains { !$0.isMuted } } ?? false
-        let camera = cameras.contains { !$0.isMuted }
-        // A camera that is off shows no picture rather than its last frame.
-        let preview = cameras.first { !$0.isMuted }?.track as? VideoTrack
-        let remote = room?.remoteParticipants.values.lazy
-            .filter { $0.isCameraEnabled() }
-            .compactMap(\.firstCameraVideoTrack).first
+        let preview = room.flatMap { publications(of: .video, in: $0).first(where: \.isLive)?.track as? VideoTrack }
+        let microphone = room.map { publications(of: .audio, in: $0).contains(where: \.isLive) } ?? false
+        let camera = preview != nil
+        var tracks: [String: VideoTrack] = [:]
+        var dockCameras = CallDockCameraIdentities()
+        if let preview, let local = room?.localParticipant.identity?.stringValue ?? joinedIdentity {
+            tracks[local] = preview
+            dockCameras.local = local
+        }
+        let remotes = room.map { Array($0.remoteParticipants.values) } ?? []
+        for remote in remotes {
+            // A camera that is off shows no picture rather than its last frame.
+            guard let identity = remote.identity?.stringValue, remote.isCameraEnabled(),
+                  let track = remote.firstCameraVideoTrack else { continue }
+            tracks[identity] = track
+            // Keep the dock's original choice from the room map. The roster
+            // has a different order so people don't move around while talking.
+            if dockCameras.remote == nil { dockCameras.remote = identity }
+        }
         if isMicrophoneOn != microphone { isMicrophoneOn = microphone }
         if isCameraOn != camera { isCameraOn = camera }
-        if localTrack !== preview { localTrack = preview }
-        if remoteTrack !== remote { remoteTrack = remote }
+        // A replacement can reuse a WebRTC track ID but needs a new renderer binding.
+        if cameraTracks.count != tracks.count || tracks.contains(where: { cameraTracks[$0.key] !== $0.value }) {
+            cameraTracks = tracks
+        }
+        if dockCameraIdentities != dockCameras { dockCameraIdentities = dockCameras }
+        refreshRemoteAudio(remotes, restoringVolumes: restoringVolumes)
+        refreshParticipants()
+    }
+
+    private func refreshRemoteAudio(_ remotes: [RemoteParticipant], restoringVolumes: Bool) {
+        var subscribed: [String: [RemoteAudioTrack]] = [:]
+        for remote in remotes {
+            guard let identity = remote.identity?.stringValue else { continue }
+            let tracks = remote.audioTracks.filter(\.isSubscribed).compactMap { $0.track as? RemoteAudioTrack }
+            guard !tracks.isEmpty else { continue }
+            subscribed[identity] = tracks
+            guard let gain = volumeGains[identity] else { continue }
+            let previous = remoteAudioTracks[identity] ?? []
+            // Set gain even on muted tracks so they have it when unmuted.
+            for track in tracks where restoringVolumes || !previous.contains(where: { $0 === track }) {
+                applyVolume(gain, to: track)
+            }
+        }
+        remoteAudioTracks = subscribed
     }
 
     /// Reads who is in the room, and who of them is speaking, as they are
@@ -262,8 +320,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// room has a roster: a reconnect may replace every participant.
     private func refreshParticipants() {
         guard let room, phase == .connected else {
-            if !participantIdentities.isEmpty { participantIdentities = [] }
-            if !speakingIdentities.isEmpty { speakingIdentities = [] }
+            if !participants.isEmpty { participants = [] }
+            if !activeSpeakersLoudestFirst.isEmpty { activeSpeakersLoudestFirst = [] }
             return
         }
         // Ours first, then everyone else in the order they joined, so the
@@ -277,13 +335,65 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             }
         }
         let everyone: [Participant] = [room.localParticipant] + remotes
-        let identities = everyone.compactMap { $0.identity?.stringValue }
         // Each participant's own flag, not `room.activeSpeakers`: the SDK
         // hears about speakers over two channels and keeps that list up to
         // date for only one of them.
-        let speaking = Set(everyone.filter(\.isSpeaking).compactMap { $0.identity?.stringValue })
-        if participantIdentities != identities { participantIdentities = identities }
-        if speakingIdentities != speaking { speakingIdentities = speaking }
+        let rows = everyone.compactMap { participant -> CallMediaParticipant? in
+            guard let identity = participant.identity?.stringValue else { return nil }
+            let isLocal = participant === room.localParticipant
+            return CallMediaParticipant(
+                identity: identity, isLocal: isLocal, isCameraOn: cameraTracks[identity] != nil,
+                hasMicrophoneTrack: participant.audioTracks.contains { $0.source == .microphone && $0.isLive },
+                isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : volumeGains[identity] ?? 1
+            )
+        }
+        if participants != rows { participants = rows }
+        // Levels change many times a second; only a change of who speaks,
+        // or of their order, is published.
+        let speakers = SpeakerPromotion.activeLoudestFirst(everyone.compactMap { participant in
+            participant.identity.map { ($0.stringValue, participant.isSpeaking, participant.audioLevel) }
+        })
+        if activeSpeakersLoudestFirst != speakers { activeSpeakersLoudestFirst = speakers }
+    }
+}
+
+private extension TrackPublication {
+    var isLive: Bool { isSubscribed && !isMuted }
+}
+
+/// LiveKit waits on WebRTC's signaling thread for each write. Only one batch
+/// goes to a GCD queue at a time so a slow write can't queue up a slider drag.
+@MainActor
+final class CallVolumeUpdates {
+    private let queue = DispatchQueue(label: "waddle.call-volume", qos: .userInitiated)
+    private var pending: [ObjectIdentifier: @Sendable () -> Void] = [:]
+    private var isFlushing = false
+
+    func enqueue(for track: AnyObject, apply: @escaping @Sendable () -> Void) {
+        pending[ObjectIdentifier(track)] = apply
+        guard !isFlushing else { return }
+        isFlushing = true
+        Task { await flush() }
+    }
+
+    func removeAll() {
+        pending.removeAll()
+    }
+
+    private func flush() async {
+        defer { isFlushing = false }
+        while !pending.isEmpty {
+            try? await Task.sleep(for: .milliseconds(40))
+            let batch = Array(pending.values)
+            pending.removeAll()
+            guard !batch.isEmpty else { return }
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    for apply in batch { apply() }
+                    continuation.resume()
+                }
+            }
+        }
     }
 }
 
@@ -301,7 +411,7 @@ private enum RoomChange {
     case reconnected
     /// A track was published, subscribed, muted or removed, on either side.
     case tracks
-    /// Someone joined, or the set of people speaking changed.
+    /// Someone joined, or the SDK reported who is speaking and how loudly.
     case participants
 }
 
@@ -358,6 +468,10 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
     }
 
     func room(_ room: Room, participant _: RemoteParticipant, didUnsubscribeTrack _: RemoteTrackPublication) {
+        forward(.tracks, from: room)
+    }
+
+    func room(_ room: Room, participant _: RemoteParticipant, trackPublication _: RemoteTrackPublication, didUpdateIsSubscriptionAllowed _: Bool) {
         forward(.tracks, from: room)
     }
 

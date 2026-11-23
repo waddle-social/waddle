@@ -66,11 +66,17 @@ struct CallIconToggle: View {
     }
 }
 
+struct CallDockVideo {
+    var remote: AnyView?
+    var preview: AnyView?
+
+    var hasCamera: Bool { remote != nil || preview != nil }
+}
+
 /// The remote camera in a 16:9 frame, or `placeholder` while there is
 /// none, with our own preview inset in the corner.
 struct CallVideoStage<Placeholder: View>: View {
-    let remoteVideo: AnyView?
-    let localVideo: AnyView?
+    let video: CallDockVideo
     /// What VoiceOver says for the stage.
     let label: String
     @ViewBuilder let placeholder: Placeholder
@@ -82,16 +88,16 @@ struct CallVideoStage<Placeholder: View>: View {
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
         ZStack {
             Theme.Colors.surface2
-            if let remoteVideo {
-                remoteVideo
+            if let remote = video.remote {
+                remote
             } else {
                 placeholder
             }
         }
         .overlay {
-            if let localVideo {
+            if let preview = video.preview {
                 GeometryReader { stage in
-                    localPreview(localVideo, width: stage.size.width * CallVideoMetrics.previewShare)
+                    localPreview(preview, width: stage.size.width * CallVideoMetrics.previewShare)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 }
             }

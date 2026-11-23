@@ -53,7 +53,8 @@ final class GroupCallDockSnapshotTests: XCTestCase {
             precision: 0.97,
             of: GroupCallDockView(
                 stage: stage, roomName: "design", rows: rows, elapsed: elapsed, isMicrophoneOn: isMicrophoneOn,
-                isCameraOn: isCameraOn, isHandRaised: isHandRaised, remoteVideo: remoteVideo, localVideo: localVideo,
+                isCameraOn: isCameraOn, isHandRaised: isHandRaised,
+                video: CallDockVideo(remote: remoteVideo, preview: localVideo),
                 announcesChanges: false, actions: Self.actions
             )
             .dynamicTypeSize(textSize),
