@@ -3,29 +3,66 @@ import WaddleKit
 import XCTest
 @testable import Waddle
 
-/// The LiveKit SDK against a real SFU. Skipped unless
-/// `WADDLE_LIVEKIT_TEST_URL` names one, since CI has none; see the README
-/// for the local `livekit-server --dev` recipe.
-///
-/// This is the compatibility check to repeat when either the SDK pin or the
-/// deployed SFU version changes.
+/// The media seam and its SDK compatibility. Room tests need the SFU
+/// named by `WADDLE_LIVEKIT_TEST_URL`; see the README for the local recipe.
 @MainActor
 final class LiveKitCallMediaTests: XCTestCase {
-    private var sfu: TestSFU!
-
-    override func setUp() async throws {
+    private func testSFU() throws -> TestSFU {
         let environment = ProcessInfo.processInfo.environment
         guard let url = environment["WADDLE_LIVEKIT_TEST_URL"], !url.isEmpty else {
             throw XCTSkip("WADDLE_LIVEKIT_TEST_URL is not set")
         }
-        sfu = TestSFU(
+        return TestSFU(
             url: url,
             key: environment["WADDLE_LIVEKIT_TEST_KEY"] ?? "devkey",
             secret: environment["WADDLE_LIVEKIT_TEST_SECRET"] ?? "secret"
         )
     }
 
+    func testIdleMediaHasNoRosterOrVideo() {
+        let media = LiveKitCallMediaController()
+        let identity = "alice@waddle.test/mac"
+        media.setVolume(1.5, of: identity)
+
+        XCTAssertTrue(media.participants.isEmpty)
+        XCTAssertNil(media.dockCameraIdentities.local)
+        XCTAssertNil(media.dockCameraIdentities.remote)
+        XCTAssertNil(media.video(of: identity, source: .camera))
+        XCTAssertNil(media.video(of: identity, source: .screen))
+    }
+
+    func testVolumeWritesCoalescePerTrackAndRunOffMain() async {
+        let updates = CallVolumeUpdates()
+        let first = NSObject()
+        let second = NSObject()
+        let latest = expectation(description: "latest update on the first track")
+        let other = expectation(description: "update on the other track")
+
+        updates.enqueue(for: first) { XCTFail("superseded volume was sent") }
+        updates.enqueue(for: first) {
+            XCTAssertFalse(Thread.isMainThread)
+            latest.fulfill()
+        }
+        updates.enqueue(for: second) { other.fulfill() }
+
+        await fulfillment(of: [latest, other], timeout: 2)
+    }
+
+    func testPendingVolumeWritesCanBeDiscardedWhenTheRoomCloses() async {
+        let updates = CallVolumeUpdates()
+        let oldTrack = NSObject()
+        let newTrack = NSObject()
+        let applied = expectation(description: "new room receives volume")
+
+        updates.enqueue(for: oldTrack) { XCTFail("old room received volume") }
+        updates.removeAll()
+        updates.enqueue(for: newTrack) { applied.fulfill() }
+
+        await fulfillment(of: [applied], timeout: 2)
+    }
+
     func testJoinsARoomAndLeaves() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")
         XCTAssertNil(join.grantDefect)
@@ -38,6 +75,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testThePhaseFollowsTheConnection() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         XCTAssertEqual(media.phase, .idle)
 
@@ -52,30 +90,76 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testAloneInARoomTheParticipantsAreJustUs() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         try await media.connect(
             join: sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac"),
             media: CallMedia(audio: false, video: false), iceServers: []
         )
-        XCTAssertEqual(media.participantIdentities, ["alice@waddle.test/mac"])
+        XCTAssertEqual(media.participants, [
+            CallMediaParticipant(
+                identity: "alice@waddle.test/mac", isLocal: true, isCameraOn: false,
+                hasMicrophoneTrack: false, isSpeaking: false, volume: 1
+            ),
+        ])
+        media.setVolume(0, of: "alice@waddle.test/mac")
+        XCTAssertEqual(media.participants.first?.volume, 1)
+        XCTAssertNil(media.video(of: "alice@waddle.test/mac", source: .screen))
         await media.disconnect()
-        XCTAssertEqual(media.participantIdentities, [], "a forgotten room has no participants")
+        XCTAssertTrue(media.participants.isEmpty, "a forgotten room has no participants")
     }
 
     /// The SDK reports joins and leaves through optional delegate methods,
     /// which a wrong signature would silently never receive.
-    func testSomeoneJoiningAndLeavingIsSeen() async throws {
+    func testRemotesAppearInJoinOrderAndAreRemovedWhenTheyLeave() async throws {
+        let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
         let alice = LiveKitCallMediaController()
         let bob = LiveKitCallMediaController()
+        let carol = LiveKitCallMediaController()
         let none = CallMedia(audio: false, video: false)
-        try await alice.connect(join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: none, iceServers: [])
-        try await bob.connect(join: sfu.join(room: room, identity: "bob@waddle.test/phone"), media: none, iceServers: [])
+        let own = "alice@waddle.test/mac"
+        let first = "carol@waddle.test/phone"
+        let second = "bob@waddle.test/phone"
+        try await alice.connect(join: sfu.join(room: room, identity: own), media: none, iceServers: [])
+        try await carol.connect(join: sfu.join(room: room, identity: first), media: none, iceServers: [])
+        try await bob.connect(join: sfu.join(room: room, identity: second), media: none, iceServers: [])
 
-        try await until { alice.participantIdentities == ["alice@waddle.test/mac", "bob@waddle.test/phone"] }
+        try await until { alice.participants.map(\.identity) == [own, first, second] }
+        await carol.disconnect()
+        try await until { alice.participants.map(\.identity) == [own, second] }
         await bob.disconnect()
-        try await until { alice.participantIdentities == ["alice@waddle.test/mac"] }
+        try await until { alice.participants.map(\.identity) == [own] }
         await alice.disconnect()
+    }
+
+    func testRemoteGainSurvivesRoomReplacementUntilTheCallChoicesReset() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = LiveKitCallMediaController()
+        let bob = LiveKitCallMediaController()
+        let aliceJoin = sfu.join(room: room, identity: "alice@waddle.test/mac")
+        let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/phone")
+        let none = CallMedia(audio: false, video: false)
+
+        try await bob.connect(join: bobJoin, media: none, iceServers: [])
+        try await alice.connect(join: aliceJoin, media: none, iceServers: [])
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        alice.setVolume(3, of: bobJoin.identity)
+        XCTAssertEqual(alice.participants.last?.volume, 2)
+        await alice.disconnect()
+
+        try await alice.connect(join: aliceJoin, media: none, iceServers: [])
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        XCTAssertEqual(alice.participants.last?.volume, 2)
+        await alice.disconnect()
+
+        alice.forgetCaptureChoices()
+        try await alice.connect(join: aliceJoin, media: none, iceServers: [])
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        XCTAssertEqual(alice.participants.last?.volume, 1)
+        await alice.disconnect()
+        await bob.disconnect()
     }
 
     private func until(timeout: Duration = .seconds(10), _ condition: () -> Bool) async throws {
@@ -87,6 +171,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testJoinsWithAdvertisedIceServers() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")
         // What XEP-0215 would advertise, mapped the way the call store maps it.
@@ -99,7 +184,8 @@ final class LiveKitCallMediaTests: XCTestCase {
         await media.disconnect()
     }
 
-    func testATokenTheSFUDidNotIssueCannotJoin() async {
+    func testATokenTheSFUDidNotIssueCannotJoin() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         let forged = TestSFU(url: sfu.url, key: sfu.key, secret: "not-the-secret")
             .join(room: "waddle-test-\(UUID().uuidString)", identity: "mallory@waddle.test/mac")
@@ -113,6 +199,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testTheSFUClosingTheRoomIsReportedAsAFailure() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         let room = "waddle-test-\(UUID().uuidString)"
         let dropped = expectation(description: "the media session reported its death")
@@ -128,6 +215,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testLeavingIsNotReportedAsAFailure() async throws {
+        let sfu = try testSFU()
         let media = LiveKitCallMediaController()
         var failures = 0
         media.onFailure = { failures += 1 }

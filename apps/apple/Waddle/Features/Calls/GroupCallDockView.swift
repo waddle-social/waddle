@@ -27,9 +27,7 @@ struct GroupCallDockView: View {
     var isMicrophoneOn = false
     var isCameraOn = false
     var isHandRaised = false
-    /// One remote camera; the media session picks which.
-    var remoteVideo: AnyView?
-    var localVideo: AnyView?
+    var video = CallDockVideo()
     /// Something the person should know about their own devices.
     var notice: String?
     /// Whether this dock speaks stage changes; one dock per screen does.
@@ -261,14 +259,14 @@ struct GroupCallDockView: View {
     // MARK: - Video
 
     private var showsVideoStage: Bool {
-        isAccepted && (remoteVideo != nil || localVideo != nil)
+        isAccepted && video.hasCamera
     }
 
     /// One camera from the room, or the room's mark while none is on.
     private var videoStage: some View {
         CallVideoStage(
-            remoteVideo: remoteVideo, localVideo: localVideo,
-            label: remoteVideo == nil ? "Nobody else’s camera is on" : "A camera in the call"
+            video: video,
+            label: video.remote == nil ? "Nobody else’s camera is on" : "A camera in the call"
         ) {
             roomMark(size: Theme.Size.callStageAvatar, glyph: stageMarkGlyph)
         }

@@ -24,8 +24,7 @@ struct CallDockView: View {
     var elapsed: Duration?
     var isMicrophoneOn = false
     var isCameraOn = false
-    var remoteVideo: AnyView?
-    var localVideo: AnyView?
+    var video = CallDockVideo()
     /// Something the person should know about their own devices.
     var notice: String?
     /// Whether this dock speaks stage changes; one dock per screen does.
@@ -237,14 +236,14 @@ struct CallDockView: View {
     // MARK: - Video
 
     private var showsVideoStage: Bool {
-        stage.isInSession && (remoteVideo != nil || localVideo != nil)
+        stage.isInSession && video.hasCamera
     }
 
     /// The peer's camera, or their avatar while it is off.
     private var videoStage: some View {
         CallVideoStage(
-            remoteVideo: remoteVideo, localVideo: localVideo,
-            label: remoteVideo == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"
+            video: video,
+            label: video.remote == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"
         ) {
             avatar(size: Theme.Size.callStageAvatar)
         }

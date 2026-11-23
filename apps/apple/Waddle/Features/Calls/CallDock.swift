@@ -19,6 +19,7 @@ struct CallDock: View {
         let phase = media?.phase ?? .idle
         let stage = CallStage(state: state, media: phase)
         let group = GroupCallStage(state: state, media: phase)
+        let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         ZStack {
             if let stage, let session {
                 clocked(stage, group: group, in: session)
@@ -30,8 +31,8 @@ struct CallDock: View {
             }
         }
         .huddleAnimation(.settle, value: stage == nil)
-        .onChange(of: media?.speakingIdentities ?? [], initial: true) { _, identities in
-            speaking.update(GroupCallRoster.speakers(identities))
+        .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
+            speaking.update(accounts)
         }
     }
 
@@ -65,8 +66,7 @@ struct CallDock: View {
             elapsed: elapsed,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
-            remoteVideo: media?.remoteVideo,
-            localVideo: media?.localVideo,
+            video: dockVideo,
             notice: notice,
             announcesChanges: announcesChanges,
             actions: actions(for: session.calls)
@@ -77,7 +77,7 @@ struct CallDock: View {
         let calls = session.calls
         let room = stage.room
         // The SFU's list is the truth only while its media is up.
-        let live = stage.hasMedia ? (media?.participantIdentities ?? []).compactMap(JID.init(parsing:)) : []
+        let live = stage.hasMedia ? (media?.participants ?? []).compactMap { JID(parsing: $0.identity) } : []
         return GroupCallDockView(
             stage: stage,
             roomName: session.directory.title(for: .room(room)),
@@ -90,11 +90,19 @@ struct CallDock: View {
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: calls.isHandRaised,
-            remoteVideo: media?.remoteVideo,
-            localVideo: media?.localVideo,
+            video: dockVideo,
             notice: notice,
             announcesChanges: announcesChanges,
             actions: groupActions(for: calls)
+        )
+    }
+
+    private var dockVideo: CallDockVideo {
+        guard let media else { return CallDockVideo() }
+        let cameras = media.dockCameraIdentities
+        return CallDockVideo(
+            remote: cameras.remote.flatMap { media.video(of: $0, source: .camera) },
+            preview: cameras.local.flatMap { media.video(of: $0, source: .camera) }
         )
     }
 

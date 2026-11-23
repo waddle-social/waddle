@@ -34,7 +34,7 @@ final class CallDockSnapshotTests: XCTestCase {
             precision: 0.97,
             of: CallDockView(
                 stage: stage, peerName: "Mika Lindqvist", elapsed: elapsed, isMicrophoneOn: isMicrophoneOn,
-                isCameraOn: isCameraOn, remoteVideo: remoteVideo, localVideo: localVideo, notice: notice,
+                isCameraOn: isCameraOn, video: CallDockVideo(remote: remoteVideo, preview: localVideo), notice: notice,
                 announcesChanges: false, actions: Self.actions
             )
             .dynamicTypeSize(textSize),
