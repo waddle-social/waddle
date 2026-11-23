@@ -1233,6 +1233,8 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
                 retraction_id: Some(RichMessageId::try_new("retract-1").expect("rich id")),
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: None,
             })),
             reply: None,

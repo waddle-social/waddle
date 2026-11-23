@@ -169,6 +169,17 @@ async fn validate_groupchat_rich_targets_inner(
         {
             return Err(forbidden_error("Only the original sender may correct a message.").into());
         }
+        // XEP-0424 §Tombstones: a retraction applies to the message and all of
+        // its corrections, and the archive keeps no retracted content. A
+        // correction of a retracted message would resurrect text the archive
+        // has already replaced, so it is refused.
+        if original
+            .rich
+            .as_ref()
+            .is_some_and(waddle_xmpp::mam::ArchivedRichMessage::is_tombstoned)
+        {
+            return Err(item_not_found_error("Correction target has been retracted.").into());
+        }
         verify_groupchat_occupancy_generation(
             sender_archive_view,
             &original,

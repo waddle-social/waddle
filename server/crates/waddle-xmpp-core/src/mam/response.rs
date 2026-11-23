@@ -451,6 +451,19 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
             builder = builder.append(reactions_elem);
         }
         Some(ArchivedRichPayload::Tombstone(tombstone)) => {
+            // XEP-0424 §Tombstones: the tombstone of a retracted correction
+            // keeps its `<replace/>`, which carries only the original
+            // message's id.
+            if let Some(replaces_id) = tombstone.replaces_id.as_ref() {
+                builder = builder.append(
+                    Element::builder("replace", MESSAGE_CORRECT_NS)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            replaces_id.as_str(),
+                        )
+                        .build(),
+                );
+            }
             let mut retracted = Element::builder("retracted", MESSAGE_RETRACT_NS).attr(
                 minidom::rxml::xml_ncname!("stamp").to_owned(),
                 tombstone.stamp.to_rfc3339(),
@@ -476,6 +489,14 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
                             .build(),
                     );
                 }
+            }
+            // XEP-0424 §Tombstones: copy the retraction's `<reason/>`.
+            if let Some(reason) = tombstone.reason.as_ref() {
+                retracted = retracted.append(
+                    Element::builder("reason", MESSAGE_RETRACT_NS)
+                        .append(reason.as_str())
+                        .build(),
+                );
             }
             builder = builder.append(retracted.build());
         }

@@ -201,6 +201,8 @@ fn tombstone(scope: Option<&str>) -> String {
             retraction_id: None,
             stamp: chrono::Utc::now(),
             moderation: None,
+            reason: None,
+            replaces_id: None,
             sender_scope: scope.map(|value| value.parse().expect("scope")),
         })),
         ..ArchivedRichMessage::default()

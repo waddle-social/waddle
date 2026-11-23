@@ -362,6 +362,8 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
                 retraction_id: RichMessageId::try_new("later-retraction"),
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: Some(alice.to_bare()),
             })),
             ..Default::default()

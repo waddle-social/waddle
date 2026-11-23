@@ -587,6 +587,8 @@ async fn tombstoned_alias(fixture: IngressFixture) {
             retraction_id: None,
             stamp: chrono::Utc::now(),
             moderation: None,
+            reason: None,
+            replaces_id: None,
             sender_scope: None,
         },
     )

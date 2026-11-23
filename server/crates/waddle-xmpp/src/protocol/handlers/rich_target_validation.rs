@@ -237,6 +237,13 @@ fn validate_correction(
             not_acceptable_reply(original, "Only the original sender may correct a message.");
         return HandlerOutcome::Halt(vec![send_message_error(reply)]);
     }
+    if archived.tombstoned {
+        // XEP-0424 §Tombstones: a retraction applies to a message together
+        // with all of its corrections; the archive keeps no retracted text,
+        // so a later correction must not resurrect it.
+        let reply = item_not_found_reply(original, "Correction target has been retracted.");
+        return HandlerOutcome::Halt(vec![send_message_error(reply)]);
+    }
     HandlerOutcome::Continue(Vec::new())
 }
 

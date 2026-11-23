@@ -407,6 +407,17 @@ async fn finish_archive_groupchat_message_with_effects(
     }
 }
 
+/// XEP-0424 §Tombstones: the retraction's `<reason/>`, copied into the
+/// tombstone that replaces the retracted message.
+pub(super) fn retraction_reason(message: &Message) -> Option<waddle_xmpp::mam::RichText> {
+    match extract_retraction_from_message(message) {
+        Some(RetractionKind::Request(retraction)) => retraction
+            .reason
+            .and_then(waddle_xmpp::mam::RichText::try_new),
+        _ => None,
+    }
+}
+
 pub(super) async fn plan_groupchat_retraction_tombstone(
     deps: &Deps<'_>,
     room: &BareJid,
@@ -446,6 +457,8 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
                     retraction_id: Some(retraction_id),
                     stamp: chrono::Utc::now(),
                     moderation: None,
+                    reason: retraction_reason(message),
+                    replaces_id: None,
                     sender_scope: original
                         .rich
                         .as_ref()
@@ -663,6 +676,8 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
+        reason: retraction_reason(retraction_message),
+        replaces_id: None,
         // Retain the original sender's identity for the internal
         // tombstone-retry match only; never emitted to the wire.
         sender_scope: original

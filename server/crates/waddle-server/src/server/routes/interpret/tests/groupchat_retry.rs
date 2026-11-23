@@ -215,6 +215,8 @@ async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch
                 retraction_id: None,
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: None,
             },
         )
@@ -460,6 +462,8 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
                 retraction_id: None,
                 stamp: chrono::Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: Some(sender.to_bare()),
             },
         )

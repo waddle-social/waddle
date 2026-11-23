@@ -36,6 +36,42 @@ pub(super) fn apply_tombstone(
     });
 }
 
+/// XEP-0424 §Tombstones: replace each live XEP-0308 correction of the message
+/// at `original_index` with a tombstone that keeps its `<replace/>`. A
+/// correction belongs to the original when it was archived in the same
+/// archive by the same author (exact occupant JID in a room, bare account
+/// otherwise) and its `<replace id/>` names the original's wire id or
+/// origin-id.
+pub(super) fn tombstone_corrections(
+    entries: &mut [(jid::BareJid, ArchivedMessage)],
+    original_index: usize,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) {
+    let (archive, original) = &entries[original_index];
+    let archive = archive.clone();
+    let original_id = original.id.clone();
+    let Some(scope) = waddle_xmpp_core::mam::CorrectionScope::new(
+        &original.from.to_string(),
+        original.message_type == MessageType::Groupchat,
+        original.stanza_id.as_ref().map(|id| id.id.as_str()),
+        original.origin_id.as_ref().map(|id| id.id.as_str()),
+    ) else {
+        return;
+    };
+    for (candidate_archive, candidate) in entries.iter_mut() {
+        if *candidate_archive != archive || candidate.id == original_id {
+            continue;
+        }
+        if let Some(replacement) = scope.tombstone_for(
+            &candidate.from.to_string(),
+            candidate.rich.as_ref(),
+            tombstone,
+        ) {
+            apply_tombstone(candidate, replacement);
+        }
+    }
+}
+
 pub(super) fn origin_id_tombstone_match(
     existing: &ArchivedMessage,
     incoming: &ArchivedMessage,
@@ -175,6 +211,8 @@ mod tests {
                 retraction_id: None,
                 stamp: Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: None,
             })),
             ..ArchivedRichMessage::default()
@@ -239,6 +277,8 @@ mod tests {
                 retraction_id: None,
                 stamp: Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: Some("alice@example.com".parse().expect("valid test bare JID")),
             })),
             ..ArchivedRichMessage::default()
@@ -281,6 +321,8 @@ mod tests {
                 retraction_id: None,
                 stamp: Utc::now(),
                 moderation: None,
+                reason: None,
+                replaces_id: None,
                 sender_scope: None,
             })),
             ..ArchivedRichMessage::default()

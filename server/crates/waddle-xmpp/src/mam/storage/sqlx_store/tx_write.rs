@@ -577,6 +577,8 @@ mod tests {
                     retraction_id: None,
                     stamp: Utc::now(),
                     moderation: None,
+                    reason: None,
+                    replaces_id: None,
                     sender_scope: None,
                 },
             )
@@ -716,6 +718,8 @@ mod tests {
                     retraction_id: None,
                     stamp: Utc::now(),
                     moderation: None,
+                    reason: None,
+                    replaces_id: None,
                     sender_scope: None,
                 },
             )

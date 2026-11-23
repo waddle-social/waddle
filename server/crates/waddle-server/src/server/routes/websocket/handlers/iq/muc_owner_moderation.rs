@@ -2031,6 +2031,8 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         }),
                         // Internal tombstone-retry identity only; the
                         // MAM response builders never read this field.
+                        reason: None,
+                        replaces_id: None,
                         sender_scope: original
                             .rich
                             .as_ref()

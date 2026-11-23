@@ -219,6 +219,8 @@ async fn xep_0424_retraction_retry_preserves_existing_moderation_tombstone() {
             stamp: Some(chrono::Utc::now()),
             reason: RichText::try_new("room policy violation"),
         }),
+        reason: None,
+        replaces_id: None,
         sender_scope: None,
     };
     assert!(

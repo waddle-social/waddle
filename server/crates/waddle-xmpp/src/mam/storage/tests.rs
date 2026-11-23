@@ -218,6 +218,8 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
             retraction_id: None,
             stamp: Utc::now(),
             moderation: None,
+            reason: None,
+            replaces_id: None,
             sender_scope: None,
         }
     }
@@ -287,6 +289,8 @@ async fn assert_groupchat_origin_retry_honors_tombstones(storage: &dyn MamStorag
         }
     );
     let scoped_tombstone = ArchivedTombstone {
+        reason: None,
+        replaces_id: None,
         sender_scope: Some("alice@example.com".parse().expect("valid bare JID")),
         ..tombstone()
     };
@@ -1818,6 +1822,8 @@ async fn xep_0424_tombstone_scrubs_parent_thread_id() {
         retraction_id: Some(RichMessageId::try_new("retract-1").expect("rich id")),
         stamp: Utc::now(),
         moderation: None,
+        reason: None,
+        replaces_id: None,
         sender_scope: None,
     };
     let replaced = storage
@@ -1900,6 +1906,8 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
             stamp: Some(Utc::now()),
             reason: None,
         }),
+        reason: None,
+        replaces_id: None,
         sender_scope: None,
     };
     storage
