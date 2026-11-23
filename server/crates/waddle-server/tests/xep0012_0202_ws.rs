@@ -385,7 +385,7 @@ async fn websocket_last_activity_subscribed_contact_receives_activity() {
 
 #[tokio::test]
 async fn websocket_last_activity_self_query_is_authorized() {
-    let (_server, mut alice, mut bob) = start_alice_bob().await;
+    let (_server, mut alice, bob) = start_alice_bob().await;
     alice
         .send(r#"<presence xmlns="jabber:client"/>"#)
         .await
