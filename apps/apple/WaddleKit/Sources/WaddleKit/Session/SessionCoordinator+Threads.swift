@@ -76,6 +76,7 @@ extension SessionCoordinator {
     /// read, what was known may be stale, so nothing is assumed.
     func readPinPermissionAgain(of room: BareJID) {
         guard !isStopped, directory.channel(for: room) != nil else { return }
+        let epoch = connectionEpoch
         Task { @MainActor [self] in
             let read: PinPermission?
             do {
@@ -83,7 +84,9 @@ extension SessionCoordinator {
             } catch {
                 read = nil
             }
-            guard !isStopped, let channel = directory.channel(for: room) else { return }
+            // Asked on a connection that has since dropped: the new
+            // connection's lookup read the room afresh.
+            guard !isStopped, epoch == connectionEpoch, let channel = directory.channel(for: room) else { return }
             directory.upsert(channel.withPinPermission(read))
             directoryMutations.append(.setPinPermission(room, read))
         }

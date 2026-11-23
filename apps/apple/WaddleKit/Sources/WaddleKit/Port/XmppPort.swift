@@ -62,6 +62,20 @@ public enum XmppEvent: Sendable {
     case authenticationFailed
 }
 
+extension XmppEvent {
+    /// The room a message says changed its configuration (XEP-0045
+    /// §10.2.1, status 104), or nil for any other message. Only the room
+    /// itself says so: a groupchat message from its bare address that has
+    /// nothing to show. An occupant's message with a 104 is an ordinary one.
+    public static func roomConfigurationChange(
+        from sender: JID?, isGroupchat: Bool, hasBody: Bool, statusCodes: some Sequence<UInt16>
+    ) -> BareJID? {
+        guard isGroupchat, !hasBody, statusCodes.contains(104),
+              let sender, sender.resource == nil else { return nil }
+        return sender.bare
+    }
+}
+
 /// Stream lifecycle and presence.
 public protocol ConnectionPort: AnyObject, Sendable {
     /// Every event the core emits, in order. Single consumer.

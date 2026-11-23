@@ -113,6 +113,30 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// A re-read of who may pin, asked on a connection that then dropped,
+    /// answers after the new connection's lookup: what that lookup read
+    /// stands, whatever the old read says.
+    @Test func aPinPermissionReadFromALostConnectionDoesNotOverwriteAFreshLookup() async throws {
+        let (coordinator, port) = await connected()
+        port.heldDirectoryVerbs = ["fetchRoomPinPermission"]
+        port.roomPinPermissionResult = .failure(.notConnected)
+        coordinator.handle(.roomConfigurationChanged(room))
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        try #require(port.heldDirectoryRequests.count == 1)
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "Old name", membersOnly: false, pinPermission: .anyone),
+        ])
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        port.releaseDirectoryRequests()
+        await eventually { port.roomPinPermissionReadsAnswered == 1 }
+        await Task.yield()
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        await coordinator.stop()
+    }
+
     @Test func deletionWhileAnEarlierJoinWaitsSkipsTheDeletedRoom() async throws {
         let port = FakePort()
         let concurrency = SessionCoordinator.maxConcurrentAutoJoins
