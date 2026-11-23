@@ -25,9 +25,9 @@ actions, including stuttering.
 | --- | --- |
 | `acquire` | Successful claim-store CAS. The ticket represents the exact claim fence. Its election, lease renewal, and failed CAS outcomes are outside the model. |
 | `commit` | [DurableSmStore::resume](../../crates/waddle-server/src/sm_authority/resume.rs) validates the claim and handled ordinal, advances the generation, and persists the operation receipt in one transaction. |
-| `observe`, `abandon` | The caller obtains or recovers a witness for its committed operation, or durably abandons an operation that did not commit. An old witness can remain in caller memory after takeover. |
+| `observe`, `abandon` | The caller obtains or recovers a witness for its committed operation, or durably abandons an operation that did not commit. The model uses a single observation for the original commit witness and a recovered witness. The former captures replay at commit, while receipt resolution can take a fresh snapshot. An old witness can remain in caller memory after takeover. |
 | `admitFrame`, `publish` | The witness replay precedes the hydration tail. Fenced completion exposes the retained range before publication. The model records this as one observation of successful completion, including the ordered replay plan. |
-| `deadline`, `ownerLost`, `expire` | Time can elapse while detached or hydrating. A hydration that loses ownership can become detached and eligible for terminal expiry. |
+| `deadline`, `ownerLost`, `expire` | Time can elapse while detached or hydrating. A hydration that loses ownership can become detached and eligible for terminal expiry. The expiry action represents a reaper whose own claim check succeeded. |
 
 `safety` checks that durable resume commits and publications use the current
 claim, committed generations are unique, publications advance by generation,
@@ -41,6 +41,6 @@ The model assumes a valid principal and successful atomic storage operations,
 with receipt observation allowed to lag behind commit. It uses small absolute
 ordinals and abstracts the resume deadline as a boolean. It excludes wire counter
 wraparound, XML and bytes, transport writes, live admissions after publication,
-database failure semantics, and liveness. The bound applies to the model. The
+database failure semantics, races to acquire the reaper claim, and liveness. The bound applies to the model. The
 Rust integration suite remains the implementation check, and these Quint runs
 do not drive Rust.
