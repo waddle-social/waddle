@@ -34,8 +34,10 @@ import Observation
             }
             if case .ended(let sid, _) = state { markFinished(sid: sid) }
             mediaSession?.update(state)
+            if oldValue != state { onStateChanged?(oldValue, state) }
         }
     }
+    @ObservationIgnored var onStateChanged: (@MainActor (CallState, CallState) -> Void)?
     /// Last failed wire verb; fresh calls, inbound transitions, dismissal and clear reset it.
     public private(set) var lastError: String?
     @ObservationIgnored private var lifecycle = CallLifecycleTracker()
