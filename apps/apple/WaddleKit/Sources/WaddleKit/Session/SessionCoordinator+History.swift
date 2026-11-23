@@ -5,8 +5,9 @@ extension SessionCoordinator {
     static var historyPageSize: Int { 50 }
 
     /// Called when a conversation comes on screen: marks it active, loads
-    /// the newest page once, and marks it read.
-    public func open(_ conversation: ConversationID) async {
+    /// the newest page once, and marks it read. `screen` names the screen
+    /// showing it, which passes the same value to `close`.
+    public func open(_ conversation: ConversationID, screen: ConversationScreenID = .only) async {
         // Read before the badge is cleared below. Opening the conversation
         // again finds nothing unread and keeps the divider placed before.
         let unreadAtOpen = unread.count(for: conversation)
@@ -14,7 +15,9 @@ extension SessionCoordinator {
             lastOpenedConversation = conversation
             if !unreadAnchors.isEmpty { unreadAnchors.removeAll() }
         }
+        if visibleConversation != conversation { visibleScreens.removeAll() }
         visibleConversation = conversation
+        visibleScreens.insert(screen)
         unread.setActive(isAppActive ? conversation : nil)
         inbox.markRead(conversation.jid)
         switch conversation.kind {
@@ -43,9 +46,12 @@ extension SessionCoordinator {
         unreadAnchors[conversation]
     }
 
-    /// Called when a conversation leaves the screen.
-    public func close(_ conversation: ConversationID) {
+    /// Called when a screen stops showing a conversation. The conversation
+    /// stays visible while another screen still shows it.
+    public func close(_ conversation: ConversationID, screen: ConversationScreenID = .only) {
         if visibleConversation == conversation {
+            visibleScreens.remove(screen)
+            guard visibleScreens.isEmpty else { return }
             visibleConversation = nil
         }
         unread.clearActive(ifMatches: conversation)
@@ -198,4 +204,15 @@ extension SessionCoordinator {
         guard let entries = try? await port.fetchPins(in: room) else { return }
         pins.seed(entries, in: room, fetchedAt: version)
     }
+}
+
+/// Names one screen showing a conversation, so that closing one of two
+/// screens on the same conversation does not hide it from the other.
+public struct ConversationScreenID: Hashable, Sendable {
+    private let id: UUID
+
+    public init() { id = UUID() }
+
+    /// For a place that only ever shows one screen per conversation.
+    public static let only = ConversationScreenID()
 }
