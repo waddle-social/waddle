@@ -44,6 +44,7 @@ let _namespaceRustTaskInputs = list.Concat([_rustInputs, [
 		"flake.lock",
 		"flake.nix",
 		"namespace.cue",
+		"ci/contributors/cache.cue",
 		"ci/contributors/cuenv.cue",
 		"ci/contributors/nix.cue",
 		"infrastructure/waddle.cloud/env.cue",
@@ -134,11 +135,14 @@ schema.#Project & {
 
 	let _t = tasks
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
+		wc.#NamespaceBazelCache,
 		wc.#CuenvRelease,
 		c.#OnePassword,
 		schema.#Contributor & {
@@ -619,6 +623,7 @@ schema.#Project & {
 				"scripts/test_default_publish_graph.py",
 				schema.#ModuleFiles & {paths: [
 					".github/workflows/hestia-cache-gc.yml",
+					"ci/contributors/cache.cue",
 					"ci/contributors/cuenv.cue",
 					"ci/contributors/nix.cue",
 					"scripts/integration-ci-project.py",
@@ -707,6 +712,7 @@ schema.#Project & {
 					"cuenv.lock",
 					".rules.cue",
 					".gitignore",
+					"ci/contributors/cache.cue",
 					"ci/contributors/cuenv.cue",
 					"ci/contributors/nix.cue",
 				]},

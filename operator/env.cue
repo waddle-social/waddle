@@ -25,12 +25,15 @@ schema.#Project & {
 		flake: ".."
 	}
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
 		wc.#CuenvRelease,
+		wc.#NamespaceBazelCache,
 	]
 
 	ci: provider: github: {

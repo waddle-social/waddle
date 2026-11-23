@@ -417,11 +417,11 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   h3-seed:
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     name: cache-benchmark/seed/${{ matrix.variant }}
     needs:
       - normal-ci
       - warm
-    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     outputs:
       manifest-version: ${{ steps.hestia-seed.outputs.manifest-version }}
     runs-on: ${{ matrix.runner }}
@@ -547,11 +547,11 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   h3-warm:
+    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     name: cache-benchmark/warm/${{ matrix.variant }}
     needs:
       - normal-ci
       - h3-seed
-    if: ${{ !cancelled() && needs.normal-ci.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.scope == 'all' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:

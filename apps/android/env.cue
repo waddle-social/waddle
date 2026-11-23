@@ -111,11 +111,14 @@ schema.#Project & {
 		flake: "../.."
 	}
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
+		wc.#NamespaceBazelCache,
 		_NamespaceAndroidCache,
 		_AndroidTestReports,
 		_AndroidCiMemory,

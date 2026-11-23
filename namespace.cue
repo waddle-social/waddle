@@ -1,6 +1,9 @@
 package namespace
 
-import "github.com/cuenv/cuenv/schema"
+import (
+	"github.com/cuenv/cuenv/schema"
+	wc "github.com/waddle-social/waddle/ci/contributors"
+)
 
 let _serverRustInputs = [
 	"flake.lock",
@@ -33,6 +36,7 @@ let _nativeRustEnv = {
 schema.#Project & {
 	name: "waddle-server-namespace-rust-checks"
 	runtime: {type: "nix", flake: "."}
+	cache: remote: wc.#NamespaceRemoteCache
 
 	tasks: {
 		// The no-Postgres, default-feature lane: no database is provisioned,

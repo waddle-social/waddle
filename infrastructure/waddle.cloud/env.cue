@@ -16,8 +16,10 @@ schema.#Project & {
 
 	let _t = tasks
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
-	ci: contributors: [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia, wc.#CuenvRelease, c.#OnePassword]
+	ci: contributors: [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia, wc.#NamespaceBazelCache, wc.#CuenvRelease, c.#OnePassword]
 
 	// Grafana Cloud ruler credentials for rulesSync (#1324). Resolved
 	// via 1Password on main-push CI (the OnePassword contributor +
@@ -251,6 +253,8 @@ schema.#Project & {
 					lokitool rules lint --rule-files "$(ls rules/loki/*.yaml | paste -sd, -)"
 					echo "All alert rule files lint clean."
 				"""#]
+			cache: mode: "read-write"
+			hermetic: sandbox: "auto"
 			inputs: ["rules/**", "env.cue"]
 		}
 		// Behavioural alert evidence (#2046 W1.12): promtool checks and
@@ -282,6 +286,8 @@ schema.#Project & {
 					set -euo pipefail
 					./scripts/validate-dashboards.sh
 				"""#]
+			cache: mode: "read-write"
+			hermetic: sandbox: "auto"
 			inputs: ["dashboards/**", "scripts/validate-dashboards.sh", "env.cue"]
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push

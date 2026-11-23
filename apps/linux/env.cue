@@ -35,11 +35,14 @@ schema.#Project & {
 		output: "devShells.x86_64-linux.linux"
 	}
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
+		wc.#NamespaceBazelCache,
 		wc.#CuenvRelease,
 	]
 
@@ -101,6 +104,8 @@ schema.#Project & {
 		validateData: schema.#Task & {
 			command: "bash"
 			args: ["-c", "desktop-file-validate data/social.waddle.Waddle.desktop && appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml"]
+			cache: mode: "read-write"
+			hermetic: sandbox: "auto"
 			inputs: ["data/**"]
 		}
 	}

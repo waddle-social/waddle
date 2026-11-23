@@ -1006,27 +1006,38 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
-          # cue 0.17.1 does not terminate evaluating server/: `cue vet .`
-          # takes ~4s on 0.16.1 and ran >11min/OOM on 0.17.1, which killed the
-          # renderDeployment gate and would hang the main-only
-          # publishContainerImage task. The two known v0.17 hang issues
-          # (cue-lang/cue#4421, #4422) are fixed in 0.17.1, so this is a
-          # distinct unreported regression: see #1763. Do not drop this hold
-          # because an upstream issue looks closed -- measure `cue vet .`
-          # in server/ on the candidate version first. Covers the CLI only;
-          # the cuengine crate is pinned separately in server/Cargo.lock.
-          cue = pkgs.cue.overrideAttrs (
-            finalAttrs: _prev: {
-              version = "0.16.1";
-              src = pkgs.fetchFromGitHub {
-                owner = "cue-lang";
-                repo = "cue";
-                tag = "v${finalAttrs.version}";
-                hash = "sha256-mTj3XMWByNrKjm+/MOQGLyUKIv4JJ8i6Oaphbzls84U=";
-              };
-              vendorHash = "sha256-HXRrVPjPc10Q1MVr1d9vZBWgSVqNZ5J0UgvP/hTPfcg=";
-            }
-          );
+          # cuenv 0.77.0's CUE schema declares language version v0.18.0.
+          # Verified cue v0.18.0-rc.4 evaluates `cue vet .` in server/ (~4s),
+          # resolving the 0.17.1 hang (#1763). Covers the CLI only; the cuengine
+          # crate is pinned separately in server/Cargo.lock.
+          cue = pkgs.stdenvNoCC.mkDerivation rec {
+            pname = "cue";
+            version = "0.18.0-rc.4";
+            src =
+              let
+                release =
+                  platform: sha256:
+                  pkgs.fetchurl {
+                    url = "https://github.com/cue-lang/cue/releases/download/v${version}/cue_v${version}_${platform}.tar.gz";
+                    inherit sha256;
+                  };
+              in
+              {
+                "aarch64-darwin" = release "darwin_arm64" "38db5a5fe02bca48f18d664170d4e2f655745e93711b8df30e5e37ed71f04f51";
+                "x86_64-darwin" = release "darwin_amd64" "35ba0bd4c9a2ff4ce67d3f16bb907427ab76785b2dd278f7da9c4a94321d811b";
+                "aarch64-linux" = release "linux_arm64" "3ef06173e42984e395c02f6665f6ac640767d5ce3c389f0d9ffb5f5812a3cfbd";
+                "x86_64-linux" = release "linux_amd64" "08958dff38118e7461e6bf689e329ff547f090217010f5689109fb95eacb7366";
+              }
+              .${system};
+            dontConfigure = true;
+            dontBuild = true;
+            unpackPhase = ''
+              tar -xzf "$src" cue
+            '';
+            installPhase = ''
+              install -Dm755 cue "$out/bin/cue"
+            '';
+          };
           # Bun matches the version developers run locally, so `bun install
           # --frozen-lockfile` in CI accepts lockfiles written on a laptop
           # (1.3.x and 1.4.x serialize bun.lock differently).

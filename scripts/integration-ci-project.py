@@ -150,7 +150,11 @@ def execute_pipeline(result, requested_path):
     if path.exists() or path.is_symlink():
         raise ValueError("report already exists before invocation")
     started = time.time()
-    subprocess.run(["cuenv", "ci", "--all", "--pipeline", result["pipeline"], "--path", target], check=True)
+    subprocess.run(
+        ["cuenv", "ci", "--all", "--pipeline", result["pipeline"], "--path", target],
+        check=True,
+        env={**os.environ, "CUENV_CACHE": "off"},
+    )
     finished = time.time()
     if git_head() != head or expected_context() != context:
         raise ValueError("candidate/context changed during invocation")

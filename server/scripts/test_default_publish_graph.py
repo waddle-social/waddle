@@ -234,8 +234,8 @@ class PublishGraphTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = subprocess.run(["cue", "version"], check=True, text=True, capture_output=True)
-        if "CUE language version v0.16.1" not in version.stdout.splitlines():
-            raise RuntimeError("the publish graph requires CUE 0.16.1")
+        if "CUE language version v0.18.0" not in version.stdout.splitlines():
+            raise RuntimeError("the publish graph requires CUE 0.18.0")
         cls.workflow = cue_export(WORKFLOW)
         cls.tasks = cue_export("./server", "-e", "tasks")
         cls.helper_script = (ROOT / "server/scripts/check-ci-helper-contracts.sh").read_text()
