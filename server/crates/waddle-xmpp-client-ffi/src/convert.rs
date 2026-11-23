@@ -456,6 +456,7 @@ fn presence_to_ffi(pres: InboundPresence) -> WaddlePresence {
         muc_role: pres.muc_role.map(muc_role_to_ffi),
         muc_jid: pres.muc_jid,
         muc_status_codes: pres.muc_status.iter().map(|status| status.code()).collect(),
+        muc_destroyed: pres.muc_destroyed,
         vcard_avatar: pres.vcard_avatar,
         idle_since: pres.idle_since.map(|since| since.to_rfc3339()),
         error_condition: pres.error.as_ref().map(|err| err.condition.clone()),
@@ -2300,6 +2301,46 @@ mod tests {
         );
         assert_eq!(ffi.error_type, Some(WaddleStanzaErrorType::Auth));
         assert_eq!(ffi.error_text.as_deref(), Some("Members only"));
+    }
+
+    #[test]
+    fn room_destruction_survives_presence_to_ffi() {
+        // XEP-0045 §10.9 Example 205: one unavailable presence per occupant
+        // whose `muc#user` payload carries `<destroy/>` and no status code.
+        let stanza: Element = "<presence xmlns='jabber:client' type='unavailable' \
+                                from='heath@chat.shakespeare.lit/firstwitch' \
+                                to='crone1@shakespeare.lit/desktop'>\
+            <x xmlns='http://jabber.org/protocol/muc#user'>\
+              <item affiliation='none' role='none'/>\
+              <destroy jid='coven@chat.shakespeare.lit'><reason>Macbeth doth come.</reason></destroy>\
+            </x>\
+        </presence>"
+            .parse()
+            .expect("fixture parses");
+        let Some(MessagingEvent::Presence(pres)) = messaging::parse(&stanza) else {
+            panic!("expected Presence variant");
+        };
+        let ffi = presence_to_ffi(*pres);
+        assert_eq!(ffi.presence_type, "unavailable");
+        assert!(ffi.muc_destroyed);
+        assert!(ffi.muc_status_codes.is_empty());
+    }
+
+    #[test]
+    fn ordinary_room_leave_is_not_a_destruction_across_ffi() {
+        let stanza: Element = "<presence xmlns='jabber:client' type='unavailable' \
+                                from='room@muc.waddle.test/alice'>\
+            <x xmlns='http://jabber.org/protocol/muc#user'>\
+              <item affiliation='member' role='none'/>\
+              <status code='110'/>\
+            </x>\
+        </presence>"
+            .parse()
+            .expect("fixture parses");
+        let Some(MessagingEvent::Presence(pres)) = messaging::parse(&stanza) else {
+            panic!("expected Presence variant");
+        };
+        assert!(!presence_to_ffi(*pres).muc_destroyed);
     }
 
     #[test]

@@ -645,6 +645,11 @@ pub struct WaddlePresence {
     /// XEP-0045 `<status code='…'/>` markers from the `muc#user`
     /// payload. `110` identifies the recipient's own presence.
     pub muc_status_codes: Vec<u16>,
+    /// XEP-0045 §10.9: the `muc#user` payload carries `<destroy/>`, so
+    /// the room's owner deleted it and this unavailable presence removes
+    /// the recipient. Joining the room again would create it anew.
+    #[uniffi(default = false)]
+    pub muc_destroyed: bool,
     /// XEP-0153 vCard avatar hash from `<x xmlns='vcard-temp:x:update'>`.
     pub vcard_avatar: Option<String>,
     /// XEP-0319 last-interaction instant (RFC 3339) from
