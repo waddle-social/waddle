@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import WaddleKit
@@ -99,5 +100,59 @@ import Testing
     func splitLeavesBothPanesRoom(percent: Double, expected: Double) {
         #expect(CallSurface.defaultSplitPercent == 50)
         #expect(CallSurface.clampSplitPercent(percent) == expected)
+    }
+
+    // MARK: - Who draws the call
+
+    @Test func theShellDockYieldsToAStage() {
+        for surface in [CallSurface.split, .expanded, .fullscreen] {
+            #expect(surface.showsStage)
+            #expect(surface.dockContent(isInSession: true, isInSheet: false) == .hidden)
+        }
+        for surface in [CallSurface.dock, .sidebarCard] {
+            #expect(!surface.showsStage)
+            #expect(surface.dockContent(isInSession: true, isInSheet: false) == .call)
+            #expect(surface.dockContent(isInSession: false, isInSheet: false) == .call)
+        }
+    }
+
+    @Test(arguments: [CallSurface.dock, .sidebarCard, .split, .expanded, .fullscreen])
+    func aSheetKeepsTheControlsButLeavesVideoToTheSurfaceBehindIt(surface: CallSurface) {
+        #expect(surface.dockContent(isInSession: true, isInSheet: true) == .controls)
+        // A ring must still be seen and answered over a sheet.
+        #expect(surface.dockContent(isInSession: false, isInSheet: true) == .call)
+    }
+
+    @Test func theStageStandsBesideAConversationThatKeepsItsWidth() {
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 880, height: 700)) == .beside(width: 400))
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 1400, height: 700)) == .beside(width: 400))
+    }
+
+    @Test func theStageStacksAboveAConversationItWouldSqueeze() {
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 879, height: 700)) == .above(height: 350))
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 500, height: 0)) == .above(height: 0))
+    }
+
+    @Test func onlyAnEstablishedCallHasAConversationToStandBeside() {
+        let join = CallJoin(url: "wss://sfu.waddle.test", room: "r", identity: "ada@waddle.test/mac", token: "t")
+        let active = CallState.active(ActiveCall(peer: Self.peer, sid: "c1", media: Self.media, join: join))
+        let inGroup = CallState.inGroup(GroupCall(room: Self.room, sid: "g1", media: Self.media, join: join, nick: "ada"))
+        #expect(active.sessionConversation == .direct(Self.peer.bare))
+        #expect(inGroup.sessionConversation == .room(Self.room))
+        let others: [CallState] = [
+            .idle, .incoming(IncomingCall(from: Self.peer, sid: "c1", media: Self.media)),
+            .outgoing(OutgoingCall(to: Self.peer.bare, sid: "c1", media: Self.media)),
+            .joiningGroup(GroupCallAttempt(room: Self.room, sid: "g1", media: Self.media, nick: "ada")),
+            .ended(sid: "c1", reason: .timeout),
+        ]
+        for state in others {
+            #expect(state.sessionConversation == nil)
+            #expect(CallSurface.placement(of: state, open: .direct(Self.peer.bare), platform: .regularWidth) == .dock)
+        }
+        #expect(CallSurface.placement(of: active, open: .direct(Self.peer.bare), platform: .regularWidth) == .split)
+        #expect(CallSurface.placement(of: active, open: .room(Self.room), platform: .regularWidth) == .sidebarCard)
+        #expect(CallSurface.placement(of: active, open: nil, platform: .regularWidth) == .sidebarCard)
+        #expect(CallSurface.placement(of: inGroup, open: .room(Self.room), platform: .regularWidth) == .split)
+        #expect(CallSurface.placement(of: inGroup, open: .room(Self.room), platform: .phone) == .dock)
     }
 }

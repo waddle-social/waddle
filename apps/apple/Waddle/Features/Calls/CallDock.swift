@@ -4,14 +4,21 @@ import WaddleKit
 /// The signed-in session's call dock: shows the call slot through
 /// `CallDockView`, or `GroupCallDockView` for a room's call, runs the
 /// in-call clock, and answers through the store. Absent while the slot is
-/// idle.
+/// idle, and while the call has a stage of its own beside its conversation
+/// (`CallSurface`): one surface draws a call.
 struct CallDock: View {
     /// Absent where a presentation was given no session.
     @Environment(SessionCoordinator.self) private var session: SessionCoordinator?
+    @Environment(NavigationModel.self) private var navigation: NavigationModel?
     @Environment(\.callMediaControls) private var media
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Off for the docks inside sheets, so a stage change is spoken once.
-    var announcesChanges = true
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
+    /// The dock a sheet carries. It stays quiet, so a stage change is spoken
+    /// once, and it leaves the video of a call in session to the surface
+    /// behind the sheet.
+    var isInSheet = false
     @State private var speaking = SpeakingHold()
 
     var body: some View {
@@ -19,10 +26,13 @@ struct CallDock: View {
         let phase = media?.phase ?? .idle
         let stage = CallStage(state: state, media: phase)
         let group = GroupCallStage(state: state, media: phase)
+        let content = CallSurface.placement(of: state, open: navigation?.selection, platform: platform)
+            .dockContent(isInSession: state.sessionConversation != nil, isInSheet: isInSheet)
+        let shown = content == .hidden ? nil : stage
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         ZStack {
-            if let stage, let session {
-                clocked(stage, group: group, in: session)
+            if let shown, let session {
+                clocked(shown, group: group, showsVideo: content == .call, in: session)
                     .frame(maxWidth: CallDockView.maxWidth)
                     .padding(.horizontal, Theme.Spacing.m)
                     .padding(.vertical, Theme.Spacing.s)
@@ -30,71 +40,76 @@ struct CallDock: View {
                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             }
         }
-        .huddleAnimation(.settle, value: stage == nil)
+        .huddleAnimation(.settle, value: shown == nil)
         .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
             speaking.update(accounts)
         }
     }
 
+    /// A stage needs the room of a split view; a phone keeps every call in the dock.
+    private var platform: CallSurface.Platform {
+        #if os(iOS)
+        sizeClass == .compact ? .phone : .regularWidth
+        #else
+        .regularWidth
+        #endif
+    }
+
     @ViewBuilder
-    private func clocked(_ stage: CallStage, group: GroupCallStage?, in session: SessionCoordinator) -> some View {
+    private func clocked(_ stage: CallStage, group: GroupCallStage?, showsVideo: Bool, in session: SessionCoordinator) -> some View {
+        let video = showsVideo ? dockVideo : CallDockVideo()
         // The media session keeps the start time, so every dock on screen
         // shows the same clock.
         if stage.isInSession, let connectedAt = media?.connectedSince {
             TimelineView(.periodic(from: connectedAt, by: 1)) { context in
-                dock(stage, group: group, elapsed: .seconds(context.date.timeIntervalSince(connectedAt)), in: session)
+                dock(stage, group: group, elapsed: .seconds(context.date.timeIntervalSince(connectedAt)), video: video, in: session)
             }
         } else {
-            dock(stage, group: group, elapsed: nil, in: session)
+            dock(stage, group: group, elapsed: nil, video: video, in: session)
         }
     }
 
     @ViewBuilder
-    private func dock(_ stage: CallStage, group: GroupCallStage?, elapsed: Duration?, in session: SessionCoordinator) -> some View {
+    private func dock(
+        _ stage: CallStage, group: GroupCallStage?, elapsed: Duration?, video: CallDockVideo, in session: SessionCoordinator
+    ) -> some View {
+        let commands = CallCommands(calls: session.calls, media: media)
         if let group {
-            groupDock(group, elapsed: elapsed, in: session)
+            GroupCallDockView(
+                stage: group,
+                roomName: session.directory.title(for: .room(group.room)),
+                roomSymbol: session.directory.channel(for: group.room).map(ChannelSymbol.name(for:)) ?? "number",
+                rows: session.callRoster(of: group, media: media, speaking: speaking.shown),
+                elapsed: elapsed,
+                isMicrophoneOn: media?.isMicrophoneOn ?? false,
+                isCameraOn: media?.isCameraOn ?? false,
+                isHandRaised: session.calls.isHandRaised,
+                video: video,
+                notice: media?.deviceNotice,
+                announcesChanges: !isInSheet,
+                actions: GroupCallDockActions(
+                    leave: commands.hangUp, toggleMicrophone: commands.toggleMicrophone,
+                    toggleCamera: commands.toggleCamera, toggleHand: commands.toggleHand
+                )
+            )
         } else {
-            directDock(stage, elapsed: elapsed, in: session)
+            CallDockView(
+                stage: stage,
+                peerName: stage.peer.map { ConversationHeaderText.make(for: .direct($0), session: session).name } ?? "",
+                peerJID: stage.peer,
+                elapsed: elapsed,
+                isMicrophoneOn: media?.isMicrophoneOn ?? false,
+                isCameraOn: media?.isCameraOn ?? false,
+                video: video,
+                notice: media?.deviceNotice,
+                announcesChanges: !isInSheet,
+                actions: CallDockActions(
+                    accept: commands.accept, decline: commands.decline, hangUp: commands.hangUp,
+                    toggleMicrophone: commands.toggleMicrophone, toggleCamera: commands.toggleCamera,
+                    dismiss: commands.dismiss
+                )
+            )
         }
-    }
-
-    private func directDock(_ stage: CallStage, elapsed: Duration?, in session: SessionCoordinator) -> some View {
-        CallDockView(
-            stage: stage,
-            peerName: stage.peer.map { ConversationHeaderText.make(for: .direct($0), session: session).name } ?? "",
-            peerJID: stage.peer,
-            elapsed: elapsed,
-            isMicrophoneOn: media?.isMicrophoneOn ?? false,
-            isCameraOn: media?.isCameraOn ?? false,
-            video: dockVideo,
-            notice: notice,
-            announcesChanges: announcesChanges,
-            actions: actions(for: session.calls)
-        )
-    }
-
-    private func groupDock(_ stage: GroupCallStage, elapsed: Duration?, in session: SessionCoordinator) -> some View {
-        let calls = session.calls
-        let room = stage.room
-        // The SFU's list is the truth only while its media is up.
-        let live = stage.hasMedia ? (media?.participants ?? []).compactMap { JID(parsing: $0.identity) } : []
-        return GroupCallDockView(
-            stage: stage,
-            roomName: session.directory.title(for: .room(room)),
-            roomSymbol: session.directory.channel(for: room).map(ChannelSymbol.name(for:)) ?? "number",
-            rows: GroupCallRoster.rows(
-                presence: calls.groupPresence.participants[room] ?? [], live: live, speaking: speaking.shown,
-                own: session.account.jid
-            ),
-            elapsed: elapsed,
-            isMicrophoneOn: media?.isMicrophoneOn ?? false,
-            isCameraOn: media?.isCameraOn ?? false,
-            isHandRaised: calls.isHandRaised,
-            video: dockVideo,
-            notice: notice,
-            announcesChanges: announcesChanges,
-            actions: groupActions(for: calls)
-        )
     }
 
     private var dockVideo: CallDockVideo {
@@ -105,75 +120,6 @@ struct CallDock: View {
             preview: cameras.local.flatMap { media.video(of: $0, source: .camera) }
         )
     }
-
-    private var notice: String? {
-        guard let media else { return nil }
-        switch (media.isMicrophoneBlocked, media.isCameraBlocked) {
-        case (true, true): return "Waddle is not allowed to use the microphone or camera. Change that in Settings."
-        case (true, false): return "Waddle is not allowed to use the microphone. Change that in Settings."
-        case (false, true): return "Waddle is not allowed to use the camera. Change that in Settings."
-        case (false, false): return nil
-        }
-    }
-
-    /// Each control acts only on the call it was drawn for: a slot that has
-    /// since moved to another call ignores a tap meant for the last one.
-    private static func onThisCall(_ calls: CallStore) -> (@escaping @MainActor () async -> Void) -> @MainActor () -> Void {
-        let sid = calls.state.sid
-        return { action in
-            {
-                guard calls.state.sid == sid else { return }
-                Task {
-                    guard calls.state.sid == sid else { return }
-                    await action()
-                }
-            }
-        }
-    }
-
-    private func actions(for calls: CallStore) -> CallDockActions {
-        let onThisCall = Self.onThisCall(calls)
-        return CallDockActions(
-            accept: onThisCall { _ = await calls.acceptIncoming() },
-            decline: onThisCall { _ = await calls.declineIncoming() },
-            hangUp: onThisCall { await calls.hangUp() },
-            toggleMicrophone: onThisCall(toggleMicrophone(on: calls)),
-            toggleCamera: onThisCall(toggleCamera(on: calls)),
-            dismiss: onThisCall { calls.dismiss() }
-        )
-    }
-
-    private func groupActions(for calls: CallStore) -> GroupCallDockActions {
-        let onThisCall = Self.onThisCall(calls)
-        return GroupCallDockActions(
-            leave: onThisCall { await calls.hangUp() },
-            toggleMicrophone: onThisCall(toggleMicrophone(on: calls)),
-            toggleCamera: onThisCall(toggleCamera(on: calls)),
-            toggleHand: onThisCall {
-                guard case .inGroup = calls.state else { return }
-                _ = await calls.setHandRaised(!calls.isHandRaised)
-            }
-        )
-    }
-
-    /// A device choice belongs to a session in progress; a tap that lands
-    /// as the call ends must not become the next call's choice.
-    private func toggleMicrophone(on calls: CallStore) -> @MainActor () async -> Void {
-        let media = media
-        return {
-            guard let media, calls.state.isEstablished else { return }
-            await media.setMicrophone(!media.isMicrophoneOn)
-        }
-    }
-
-    /// As `toggleMicrophone(on:)`.
-    private func toggleCamera(on calls: CallStore) -> @MainActor () async -> Void {
-        let media = media
-        return {
-            guard let media, calls.state.isEstablished else { return }
-            await media.setCamera(!media.isCameraOn)
-        }
-    }
 }
 
 extension View {
@@ -181,7 +127,7 @@ extension View {
     /// call that arrives while it is open is still seen and can be answered.
     func carryingCallDock() -> some View {
         VStack(spacing: 0) {
-            CallDock(announcesChanges: false)
+            CallDock(isInSheet: true)
             self
         }
     }

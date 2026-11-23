@@ -21,10 +21,11 @@ final class SampleSession {
     let port = FakePort()
     let coordinator: SessionCoordinator
     let navigation = NavigationModel()
+    let callStage = CallStageModel()
     let app = AppState()
 
-    init() {
-        coordinator = SessionCoordinator(account: Self.ana, port: port)
+    init(account: AccountIdentity = SampleSession.ana) {
+        coordinator = SessionCoordinator(account: account, port: port)
         coordinator.status.connection = .online
 
         coordinator.directory.apply(Topology(
@@ -169,5 +170,6 @@ final class SampleSession {
             .environment(app)
             .environment(coordinator)
             .environment(navigation)
+            .environment(callStage)
     }
 }

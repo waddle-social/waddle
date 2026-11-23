@@ -208,4 +208,7 @@ extension CGSize {
     /// A wide Mac window, where the conversation pane is wider than any
     /// sensible line length.
     static let wideDesktop = CGSize(width: 1680, height: 720)
+    /// The window of the Penpot Web frames, wide enough for a call's stage
+    /// beside its conversation.
+    static let callDesktop = CGSize(width: 1440, height: 900)
 }

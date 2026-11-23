@@ -16,6 +16,13 @@ enum Theme {
         static let press = Colors.fg.opacity(0.10)
     }
 
+    /// Glass over a picture (web `material.media` and its `plate`): the
+    /// picture decides the ground, so both appearances share one value.
+    enum Material {
+        static let media = Color(night: 0xB8070C12, daylight: 0xB8070C12)
+        static let mediaFg = Color(night: 0xFFF3F5F7, daylight: 0xFFF3F5F7)
+    }
+
     /// Text styles, applied with `.huddleText(_:)`.
     typealias Typography = WaddleTokens.TextStyles
 

@@ -1,0 +1,80 @@
+import SwiftUI
+import WaddleKit
+
+/// What a call surface asks of the session, bound to the call it was drawn
+/// for: a slot that has since moved to another call ignores a tap meant for
+/// the last one. The dock and the stage act through the same commands.
+@MainActor
+struct CallCommands {
+    private let calls: CallStore
+    private let media: (any CallMediaControls)?
+    private let sid: String?
+
+    init(calls: CallStore, media: (any CallMediaControls)?) {
+        self.calls = calls
+        self.media = media
+        sid = calls.state.sid
+    }
+
+    var accept: @MainActor () -> Void { onThisCall { [calls] in _ = await calls.acceptIncoming() } }
+    var decline: @MainActor () -> Void { onThisCall { [calls] in _ = await calls.declineIncoming() } }
+    var hangUp: @MainActor () -> Void { onThisCall { [calls] in await calls.hangUp() } }
+    var dismiss: @MainActor () -> Void { onThisCall { [calls] in calls.dismiss() } }
+
+    /// A device choice belongs to a session in progress; a tap that lands
+    /// as the call ends must not become the next call's choice.
+    var toggleMicrophone: @MainActor () -> Void {
+        onThisCall { [calls, media] in
+            guard let media, calls.state.isEstablished else { return }
+            await media.setMicrophone(!media.isMicrophoneOn)
+        }
+    }
+
+    /// As `toggleMicrophone`.
+    var toggleCamera: @MainActor () -> Void {
+        onThisCall { [calls, media] in
+            guard let media, calls.state.isEstablished else { return }
+            await media.setCamera(!media.isCameraOn)
+        }
+    }
+
+    var toggleHand: @MainActor () -> Void {
+        onThisCall { [calls] in
+            guard case .inGroup = calls.state else { return }
+            _ = await calls.setHandRaised(!calls.isHandRaised)
+        }
+    }
+
+    private func onThisCall(_ action: @escaping @MainActor () async -> Void) -> @MainActor () -> Void {
+        { [calls, sid] in
+            guard calls.state.sid == sid else { return }
+            Task {
+                guard calls.state.sid == sid else { return }
+                await action()
+            }
+        }
+    }
+}
+
+extension CallMediaControls {
+    /// What to tell the person when Waddle may not use a device their call needs.
+    var deviceNotice: String? {
+        switch (isMicrophoneBlocked, isCameraBlocked) {
+        case (true, true): "Waddle is not allowed to use the microphone or camera. Change that in Settings."
+        case (true, false): "Waddle is not allowed to use the microphone. Change that in Settings."
+        case (false, true): "Waddle is not allowed to use the camera. Change that in Settings."
+        case (false, false): nil
+        }
+    }
+}
+
+extension SessionCoordinator {
+    /// Who a room's call surface lists (`GroupCallRoster`). The SFU's list is
+    /// the truth only while its media is up; until then the room's presence is.
+    func callRoster(of stage: GroupCallStage, media: (any CallMediaControls)?, speaking: Set<BareJID>) -> [GroupCallRosterRow] {
+        let live = stage.hasMedia ? (media?.participants ?? []).compactMap { JID(parsing: $0.identity) } : []
+        return GroupCallRoster.rows(
+            presence: calls.groupPresence.participants[stage.room] ?? [], live: live, speaking: speaking, own: account.jid
+        )
+    }
+}

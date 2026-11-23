@@ -716,6 +716,8 @@ final class ActiveSession {
     let navigation = NavigationModel()
     /// The media of this session's call; the call dock reads and drives it.
     let callMedia: LiveKitCallMediaController
+    /// What the person chose on the stage of this session's call.
+    let callStage = CallStageModel()
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
