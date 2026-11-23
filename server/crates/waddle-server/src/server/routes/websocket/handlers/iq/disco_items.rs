@@ -706,6 +706,26 @@ pub(super) async fn handle_disco_items_iq(
             if query.node.is_none() {
                 if let Ok(target_bare) = target.parse::<BareJid>() {
                     if target_bare.node().is_some() {
+                        // XEP-0030 Security Considerations: an account that
+                        // does not exist and one whose presence the asker may
+                        // not see are both `<service-unavailable/>`.
+                        if target_bare.domain().as_str() == domain
+                            && !super::disco_info::requester_may_discover_account(
+                                state,
+                                &target_bare,
+                                phase.bound_jid(),
+                            )
+                            .await
+                        {
+                            return vec![build_iq_error_xml_typed(
+                                id,
+                                response_from,
+                                response_to,
+                                super::service_unavailable_iq_error(
+                                    "Service unavailable at this address.",
+                                ),
+                            )];
+                        }
                         let items = match state
                             .deps
                             .protocol

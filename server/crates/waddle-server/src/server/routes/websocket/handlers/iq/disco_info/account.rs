@@ -1,8 +1,29 @@
+use super::super::service_unavailable_iq_error;
 use super::{
-    build_disco_info_response, build_pep_identity, internal_server_error_iq_error,
-    item_not_found_iq_error, pep_features, warn, BareJid, ConnectionPhase, DiscoInfoRequest,
-    DiscoInfoResponse, Feature, Identity, WebSocketState,
+    build_disco_info_response, build_pep_identity, pep_features, BareJid, ConnectionPhase,
+    DiscoInfoRequest, DiscoInfoResponse, Feature, Identity, WebSocketState,
 };
+use crate::server::routes::websocket::s2s_accounts::{account_exists, shares_presence_with};
+
+/// Whether `requester` may discover the account `target`: the account itself,
+/// or an entity holding a presence subscription of type `from` or `both` to
+/// it (RFC 6121 §8; XEP-0030 Security Considerations). A nonexistent account
+/// and an unauthorized requester are not told apart: both are `false`, and
+/// the caller answers both with the same `<service-unavailable/>`.
+pub(in crate::server::routes::websocket::handlers::iq) async fn requester_may_discover_account(
+    state: &WebSocketState,
+    target: &BareJid,
+    requester: Option<&jid::FullJid>,
+) -> bool {
+    let Some(requester) = requester else {
+        return false;
+    };
+    let requester = requester.to_bare();
+    if requester == *target {
+        return true;
+    }
+    shares_presence_with(state, target, &requester).await && account_exists(state, target).await
+}
 
 pub(super) async fn handle_account_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -36,48 +57,23 @@ pub(super) async fn handle_account_disco_info<'a>(
         return None;
     }
 
-    let Some(localpart) = target_bare.node() else {
+    if !requester_may_discover_account(state, &target_bare, Some(bound_jid)).await {
         return Some(DiscoInfoResponse::error(
             req.id,
             req.response_from,
             req.response_to,
-            item_not_found_iq_error("Requested item not found."),
+            service_unavailable_iq_error("Service unavailable at this address."),
         ));
-    };
-
-    match crate::auth::local_account_exists(
-        state.deps.app_state.db_pool.global_actor(),
-        localpart.as_str(),
-        req.domain,
-    )
-    .await
-    {
-        Ok(true) => {
-            let identities = vec![build_pep_identity()];
-            let mut features = vec![Feature::disco_info()];
-            features.extend(pep_features().into_iter().filter(|feature| {
-                !matches!(
-                    feature.0.as_str(),
-                    "urn:xmpp:mam:2" | "urn:xmpp:mam:2#extended"
-                )
-            }));
-            let response = build_disco_info_response(req.request_iq, &identities, &features, None);
-            Some(DiscoInfoResponse::iq(response))
-        }
-        Ok(false) => Some(DiscoInfoResponse::error(
-            req.id,
-            req.response_from,
-            req.response_to,
-            item_not_found_iq_error("Requested item not found."),
-        )),
-        Err(error) => {
-            warn!(target = %target_bare, error = %error, "Failed to resolve PEP disco target");
-            Some(DiscoInfoResponse::error(
-                req.id,
-                req.response_from,
-                req.response_to,
-                internal_server_error_iq_error("Internal server error."),
-            ))
-        }
     }
+
+    let identities = vec![build_pep_identity()];
+    let mut features = vec![Feature::disco_info()];
+    features.extend(pep_features().into_iter().filter(|feature| {
+        !matches!(
+            feature.0.as_str(),
+            "urn:xmpp:mam:2" | "urn:xmpp:mam:2#extended"
+        )
+    }));
+    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
+    Some(DiscoInfoResponse::iq(response))
 }

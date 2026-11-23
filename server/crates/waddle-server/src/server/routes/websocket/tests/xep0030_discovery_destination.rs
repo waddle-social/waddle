@@ -183,12 +183,7 @@ async fn local_server_and_bare_accounts_keep_their_discovery_handlers() {
     seed_local_account(&state, "bob").await;
     let (mut conn, _rx) = connection(&state).await;
     for kind in [Discovery::Info, Discovery::Items] {
-        for target in [
-            None,
-            Some(DOMAIN),
-            Some("alice@example.com"),
-            Some("bob@example.com"),
-        ] {
+        for target in [None, Some(DOMAIN), Some("alice@example.com")] {
             let replies =
                 dispatch(&state, &mut conn, request(kind, target, None, Some(ORIGIN))).await;
             let [reply] = replies.as_slice() else {
@@ -200,24 +195,22 @@ async fn local_server_and_bare_accounts_keep_their_discovery_handlers() {
     let replies = dispatch(
         &state,
         &mut conn,
-        request(Discovery::Info, Some("bob@example.com"), None, None),
-    )
-    .await;
-    let query = result_query(&replies[0], Discovery::Info);
-    assert!(query
-        .children()
-        .any(|child| child.name() == "identity" && child.attr("category") == Some("pubsub")));
-    assert!(!query
-        .children()
-        .any(|child| child.name() == "identity" && child.attr("category") == Some("server")));
-    let replies = dispatch(
-        &state,
-        &mut conn,
         request(Discovery::Info, Some("missing@example.com"), None, None),
     )
     .await;
     assert!(
-        matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::ItemNotFound)
+        matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::ServiceUnavailable)
+    );
+    // XEP-0030 Security Considerations: an existing account whose presence
+    // the asker may not see is answered exactly like a missing one.
+    let replies = dispatch(
+        &state,
+        &mut conn,
+        request(Discovery::Info, Some("bob@example.com"), None, None),
+    )
+    .await;
+    assert!(
+        matches!(replies.as_slice(), [Iq::Error { error, .. }] if error.defined_condition == DefinedCondition::ServiceUnavailable)
     );
 }
 

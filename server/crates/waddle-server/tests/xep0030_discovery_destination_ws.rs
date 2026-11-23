@@ -173,6 +173,19 @@ fn item_not_found_from(reply: &Iq, canonical: &str) {
     assert_eq!(error.defined_condition, DefinedCondition::ItemNotFound);
 }
 
+/// The service-unavailable error `reply` must come from `canonical`.
+fn service_unavailable_from(reply: &Iq, canonical: &str) {
+    assert_eq!(reply.from().map(|jid| jid.as_str()), Some(canonical));
+    let Iq::Error { error, .. } = reply else {
+        panic!("{canonical} must be denied: {reply:?}")
+    };
+    assert_eq!(error.type_, ErrorType::Cancel);
+    assert_eq!(
+        error.defined_condition,
+        DefinedCondition::ServiceUnavailable
+    );
+}
+
 // RFC 7622 §3.2: a trailing label separator does not change the entity. A
 // disco#info request to a local account, the MUC service or a room written
 // with one is answered by that entity, from its canonical address, and never
@@ -200,21 +213,12 @@ async fn a_trailing_domain_dot_is_answered_by_the_addressed_local_entity() {
     )));
     assert!(identities(query).contains(&(Some("server"), Some("im"), Some("Personal Archive"))));
 
-    // Another existing account answers as a PEP service.
+    // An account whose presence the asker may not see, and one that does not
+    // exist, are both service-unavailable (XEP-0030 Security Considerations).
     let reply = round_trip(&mut origin, info_query("peer@localhost.", "dot-peer")).await;
-    let query = info_result_from(&reply, "peer@localhost");
-    assert_eq!(
-        identities(query),
-        vec![(
-            Some("pubsub"),
-            Some("pep"),
-            Some("Personal Eventing Protocol")
-        )]
-    );
-
-    // An account that does not exist is reported missing, not described.
+    service_unavailable_from(&reply, "peer@localhost");
     let reply = round_trip(&mut origin, info_query("bob@localhost.", "dot-missing")).await;
-    item_not_found_from(&reply, "bob@localhost");
+    service_unavailable_from(&reply, "bob@localhost");
 
     // The MUC service describes itself.
     let reply = round_trip(&mut origin, info_query("muc.localhost.", "dot-muc")).await;
