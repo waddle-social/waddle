@@ -133,6 +133,9 @@ final class FakePort: XmppPort {
     var sharedStatusLookups: [BareJID] = []
     /// What a strict lookup of the account's own activity answers.
     var ownActivity: Result<UserActivity?, PortError> = .success(nil)
+    var ownActivityLookupCount = 0
+    let ownActivityFetches = HeldCalls()
+    let activityWrites = HeldCalls()
     /// Every activity and tune offered for publishing; nil is a retraction.
     var publishedActivities: [UserActivity?] = []
     var publishedTunes: [UserTune?] = []
@@ -434,16 +437,25 @@ final class FakePort: XmppPort {
         await ownProfileDetailsFetches.wait()
         return try answer.get()
     }
-    func fetchOwnActivity() async throws -> UserActivity? { try ownActivity.get() }
+    func fetchOwnActivity() async throws -> UserActivity? {
+        ownActivityLookupCount += 1
+        let answer = ownActivity
+        await ownActivityFetches.wait()
+        return try answer.get()
+    }
     func publishMood(_ mood: UserMood) async throws {}
     func retractMood() async throws {}
     func publishActivity(_ activity: UserActivity) async throws {
         publishedActivities.append(activity)
+        await activityWrites.wait()
         try sharedStatusPublishResult.get()
+        ownActivity = .success(activity)
     }
     func retractActivity() async throws {
         publishedActivities.append(nil)
+        await activityWrites.wait()
         try sharedStatusPublishResult.get()
+        ownActivity = .success(nil)
     }
     func publishTune(_ tune: UserTune) async throws {
         publishedTunes.append(tune)

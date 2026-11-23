@@ -194,6 +194,13 @@ public final class SessionCoordinator {
     /// What the current stream was last told; nil on a fresh stream.
     @ObservationIgnored var sentPresence: SentPresence?
     @ObservationIgnored var profileEdits = ProfileEdits()
+    @ObservationIgnored var callTeardownTimeout: Duration = .seconds(3)
+    @ObservationIgnored var callActivityRetryDelay: Duration = .seconds(15)
+    @ObservationIgnored var callActivityRetryTask: Task<Void, Never>?
+    @ObservationIgnored var ownedCallActivity: CallActivity.Publication?
+    @ObservationIgnored var activityWriteTail: Task<Void, Error>?
+    /// Keeps a write left waiting at sign-out from changing a later session.
+    @ObservationIgnored var activityWriteGeneration = 0
 
     /// `connectBudget`: how long an attempt may take to reach the ready
     /// state before it counts as failed (the core reports connect failures
@@ -246,6 +253,12 @@ public final class SessionCoordinator {
         timelines.onArchiveTrimmed = { [weak self] conversation, cursor in
             self?.archiveTrimmed(conversation, cursor: cursor)
         }
+        if handlesCalls {
+            calls.onStateChanged = { [weak self] previous, current in
+                guard previous.isEstablished || current.isEstablished else { return }
+                self?.scheduleCallActivity()
+            }
+        }
     }
 
     // MARK: - Lifecycle
@@ -272,6 +285,7 @@ public final class SessionCoordinator {
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
         isStopped = true
+        cancelCallActivityRetry()
         roomManagementGeneration += 1
         callLifecycleOutbox?.stop()
         reconnectTask?.cancel()
@@ -292,6 +306,7 @@ public final class SessionCoordinator {
         contactsLoad = .idle
         isCommunityOwner = false
         await stopCalls()
+        await finishCallActivity()
         await port.disconnect()
         eventTask?.cancel()
         eventTask = nil
@@ -337,6 +352,7 @@ public final class SessionCoordinator {
     func resetStaleConnection() async {
         guard !isStopped, status.connection == .online, !isConnectResetting else { return }
         isConnectResetting = true
+        cancelCallActivityRetry()
         callLifecycleOutbox?.setOnline(false)
         foregroundProbeTask?.cancel()
         foregroundProbeTask = nil
@@ -503,6 +519,7 @@ public final class SessionCoordinator {
             reconnectTask = nil
             status.connection = .online
             callLifecycleOutbox?.setOnline(true)
+            if handlesCalls { scheduleCallActivity() }
             // Avatars may have changed while we were away; rows on screen
             // ask again.
             avatars.markAllStale()
@@ -512,6 +529,7 @@ public final class SessionCoordinator {
             readyTask = Task { [weak self] in await self?.sessionReady() }
         case .disconnected:
             callLifecycleOutbox?.setOnline(false)
+            cancelCallActivityRetry()
             // Like Android, the call slot survives stream loss and reconnects;
             // call sends can fail while offline, without new recovery semantics.
             // Every disconnect creates a fresh FFI driver; its old
@@ -581,6 +599,7 @@ public final class SessionCoordinator {
             readPinPermissionAgain(of: room)
         case .authenticationFailed:
             callLifecycleOutbox?.stop()
+            cancelCallActivityRetry()
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil

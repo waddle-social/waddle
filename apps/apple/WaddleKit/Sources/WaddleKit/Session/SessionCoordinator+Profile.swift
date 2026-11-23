@@ -1,8 +1,7 @@
 import Foundation
 
-/// How many times each part of the profile has been set from this device.
-/// A lookup that began before an edit holds an older value for that part,
-/// and must not put it back.
+/// The version of each part of the profile. A lookup that began before an
+/// edit or a call activity update may hold an older value for that part.
 struct ProfileEdits: Equatable {
     var mood = 0
     var activity = 0
@@ -59,15 +58,37 @@ extension SessionCoordinator {
     /// call's to publish, and once published it could not be changed here.
     public func setActivity(_ activity: UserActivity?) async throws {
         guard activity?.showsACall != true else { throw PortError.invalidRequest }
-        if let published = try await port.fetchOwnActivity(), published.showsACall {
-            status.activity = published
-            throw PortError.rejected
-        }
+        guard !isStopped else { throw PortError.notConnected }
+        let generation = activityWriteGeneration
+        try await enqueueActivityWrite { session in
+            guard !session.isStopped, generation == session.activityWriteGeneration else {
+                throw PortError.notConnected
+            }
+            let published = try await session.port.fetchOwnActivity()
+            guard !session.isStopped, generation == session.activityWriteGeneration else {
+                throw PortError.notConnected
+            }
+            if let published, published.showsACall {
+                session.recordOwnActivity(published)
+                throw PortError.rejected
+            }
+            try await session.writeOwnActivity(activity)
+        }.value
+    }
+
+    func writeOwnActivity(_ activity: UserActivity?) async throws {
+        let generation = activityWriteGeneration
         if let activity {
             try await port.publishActivity(activity)
         } else {
             try await port.retractActivity()
         }
+        // A write can finish after sign-out has moved on.
+        guard !Task.isCancelled, generation == activityWriteGeneration else { return }
+        recordOwnActivity(activity)
+    }
+
+    func recordOwnActivity(_ activity: UserActivity?) {
         status.activity = activity
         profileEdits.activity += 1
     }
