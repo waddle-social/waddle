@@ -87,6 +87,25 @@ struct LeaveRoomTests {
         #expect(coordinator.directory.leftRooms.map(\.roomJID) == [room])
     }
 
+    /// Two lookups on one connection can answer out of order.
+    @Test func anOlderLookupAnsweredLastDoesNotReplaceANewerOne() async {
+        let (coordinator, port) = online()
+        port.holdsTopology = true
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: room, name: "old name")])
+        let older = Task { await coordinator.refreshDirectory(joiningOnlyNewRooms: true) }
+        while port.topologyRequests < 1 { await Task.yield() }
+        port.topology = Topology(spaces: [], channels: [Channel(roomJID: room, name: "new name")])
+        let newer = Task { await coordinator.refreshDirectory(joiningOnlyNewRooms: true) }
+        while port.topologyRequests < 2 { await Task.yield() }
+
+        port.releaseTopology(at: 1)
+        #expect(await newer.value != nil)
+        port.releaseTopology(at: 0)
+        #expect(await older.value == nil)
+
+        #expect(coordinator.directory.channel(for: room)?.name == "new name")
+    }
+
     @Test func unreadCountsOfALeftRoomAreIgnored() async throws {
         let (coordinator, _) = online()
         try await coordinator.leaveRoom(room)

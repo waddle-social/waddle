@@ -27,8 +27,8 @@ extension SessionCoordinator {
     /// already in alone: joining again makes the server send everyone in
     /// each of them once more.
     ///
-    /// Returns what the lookup found, or nil when it failed or a newer
-    /// connection made it stale.
+    /// Returns what the lookup found, or nil when it failed, or when a
+    /// newer connection or a newer lookup already applied made it stale.
     @discardableResult
     func refreshDirectory(joiningOnlyNewRooms: Bool = false) async -> DirectoryLookup? {
         let mutationStart = directoryMutations.count
@@ -46,12 +46,17 @@ extension SessionCoordinator {
         // Neither must a look asked for elsewhere, whose task a reconnect
         // does not cancel.
         guard !Task.isCancelled, epoch == connectionEpoch else { return nil }
+        // Lookups answer in any order. One that began before a lookup
+        // already applied read an older directory, and that newer lookup
+        // has joined the rooms.
+        guard lookupNumber > newestLookupApplied else { return nil }
         var lookup: DirectoryLookup?
         let leftBefore = directory.leftRooms.map(\.roomJID)
         if case let .success(topology) = result {
             lookup = DirectoryLookup(
                 rooms: Set(topology.channels.map(\.roomJID)), readOwnBookmarks: topology.ownBookmarksLoaded)
             directory.apply(topology)
+            newestLookupApplied = lookupNumber
             // A room that outlived its space is listed again.
             roomsOfDeletedSpaces.subtract(topology.channels.map(\.roomJID))
             unfenceRoomsMadeAgain(listedBy: topology, inLookup: lookupNumber)
