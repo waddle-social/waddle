@@ -65,8 +65,65 @@ import Testing
         #expect((try? port.ownActivity.get()) == video)
     }
 
-    @Test func aFailedLookupPreventsBothPublishingAndCleanup() async {
+    @Test func hangupRestoresThePriorActivityWhenThePublishReplyIsLost() async {
         let (session, port) = makeSession()
+        port.ownActivity = .success(prior)
+        port.activityWrites.isHolding = true
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        await eventually { port.activityWrites.count == 1 }
+
+        port.ownActivity = .success(audio)
+        port.sharedStatusPublishResult = .failure(.timeout)
+        port.ownActivityFetches.isHolding = true
+        await session.calls.hangUp()
+        port.activityWrites.isHolding = false
+        port.activityWrites.release()
+
+        await eventually(timeout: 1) { port.ownActivityFetches.count == 1 }
+        #expect(port.ownActivityFetches.count == 1)
+        port.sharedStatusPublishResult = .success(())
+        port.ownActivityFetches.isHolding = false
+        port.ownActivityFetches.release()
+        await eventually(timeout: 1) { session.status.activity == prior }
+        #expect(port.publishedActivities == [audio, prior])
+        #expect((try? port.ownActivity.get()) == prior)
+        await session.stop()
+    }
+
+    @Test(arguments: [false, true]) func anUnconfirmedPublishIsCheckedWhileTheCallContinues(didLand: Bool) async {
+        let (session, port) = makeSession()
+        session.callActivityRetryDelay = .milliseconds(20)
+        let replacement = UserActivity(general: "relaxing", specific: "reading")
+        port.ownActivity = .success(prior)
+        port.activityWrites.isHolding = true
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        await eventually { port.activityWrites.count == 1 }
+
+        port.ownActivity = .success(didLand ? audio : replacement)
+        port.sharedStatusPublishResult = .failure(.timeout)
+        port.ownActivityFetches.isHolding = true
+        port.activityWrites.isHolding = false
+        port.activityWrites.release()
+
+        await eventually(timeout: 1) { port.ownActivityFetches.count == 1 }
+        #expect(port.ownActivityFetches.count == 1)
+        port.sharedStatusPublishResult = .success(())
+        port.ownActivityFetches.isHolding = false
+        port.ownActivityFetches.release()
+        await eventually(timeout: 1) { session.status.activity == audio }
+        #expect(session.status.activity == audio)
+        #expect(port.publishedActivities == (didLand ? [audio] : [audio, audio]))
+
+        await session.calls.hangUp()
+        let restored = didLand ? prior : replacement
+        await eventually(timeout: 1) { session.status.activity == restored }
+        #expect((try? port.ownActivity.get()) == restored)
+        await session.stop()
+    }
+
+    @Test func aFailedLookupPreventsPublishingACallMark() async {
+        let (session, port) = makeSession()
+        session.callActivityRetryDelay = .seconds(60)
         port.ownActivity = .failure(.timeout)
         await establishDirectCall(in: session, port: port, media: callAudio)
         await eventually { port.ownActivityLookupCount == 1 }
@@ -77,6 +134,80 @@ import Testing
         await session.stop()
         #expect(port.ownActivityLookupCount == 1)
         #expect(port.publishedActivities.isEmpty)
+    }
+
+    @Test func aFailedRetractionIsRetriedWhileOnline() async {
+        let (session, port) = makeSession()
+        session.callActivityRetryDelay = .milliseconds(20)
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        await eventually { session.status.activity == audio }
+        port.sharedStatusPublishResult = .failure(.timeout)
+        await session.calls.hangUp()
+
+        await eventually(timeout: 1) { port.publishedActivities.count >= 3 }
+        #expect(port.publishedActivities.starts(with: [audio, nil, nil]))
+        #expect((try? port.ownActivity.get()) == audio)
+
+        port.sharedStatusPublishResult = .success(())
+        await eventually(timeout: 1) { session.status.activity == nil }
+        #expect(session.status.activity == nil)
+        #expect((try? port.ownActivity.get()) == nil)
+        await session.stop()
+    }
+
+    @Test(arguments: [false, true]) func aFailedCleanupLookupLeavesTheMarkAlone(signingOut: Bool) async {
+        let (session, port) = makeSession()
+        session.callActivityRetryDelay = signingOut ? .seconds(60) : .milliseconds(20)
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        await eventually { session.status.activity == audio }
+        port.ownActivity = .failure(.timeout)
+        port.ownActivityFetches.isHolding = true
+        await session.calls.hangUp()
+
+        await eventually { port.ownActivityFetches.count == 1 }
+        #expect(port.ownActivityLookupCount == 2)
+        #expect(port.publishedActivities == [audio])
+        if !signingOut { port.ownActivity = .success(audio) }
+        port.ownActivityFetches.isHolding = false
+        port.ownActivityFetches.release()
+
+        if signingOut {
+            await session.signOut()
+            #expect(port.ownActivityLookupCount == 3)
+            #expect(port.publishedActivities == [audio])
+            #expect(port.disconnectCount == 1)
+        } else {
+            await eventually(timeout: 1) { session.status.activity == nil }
+            #expect(port.publishedActivities == [audio, nil])
+            #expect(session.status.activity == nil)
+            await session.stop()
+        }
+    }
+
+    @Test func failedCleanupWaitsForReconnectWhileOffline() async throws {
+        let (session, port) = makeSession()
+        session.callActivityRetryDelay = .milliseconds(20)
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        await eventually { session.status.activity == audio }
+        port.ownActivity = .failure(.timeout)
+        port.ownActivityFetches.isHolding = true
+        await session.calls.hangUp()
+        await eventually { port.ownActivityFetches.count == 1 }
+
+        port.emit(.disconnected)
+        await eventually { session.connection != .online }
+        #expect(session.connection != .online)
+        port.ownActivity = .success(audio)
+        port.ownActivityFetches.isHolding = false
+        port.ownActivityFetches.release()
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(port.ownActivityLookupCount == 2)
+        #expect(port.publishedActivities == [audio])
+
+        port.emit(.connected)
+        await eventually { session.status.activity == nil }
+        #expect(port.publishedActivities == [audio, nil])
+        await session.stop()
     }
 
     @Test(arguments: [false, true]) func signOutWaitsForCleanupBeforeClosingTheStream(hasPrior: Bool) async {
@@ -97,6 +228,31 @@ import Testing
 
         #expect(port.disconnectCount == 1)
         #expect(session.status.activity == previous)
+    }
+
+    @Test(arguments: [false, true]) func signOutDisconnectsWhileActivityWorkIsHeld(holdPublish: Bool) async {
+        let (session, port) = makeSession()
+        session.callTeardownTimeout = .milliseconds(50)
+        port.activityWrites.isHolding = holdPublish
+        await establishDirectCall(in: session, port: port, media: callAudio)
+        if holdPublish {
+            await eventually { port.activityWrites.count == 1 }
+        } else {
+            await eventually { session.status.activity == audio }
+            port.ownActivityFetches.isHolding = true
+        }
+
+        let signingOut = Task { await session.signOut() }
+        await eventually(timeout: 1) { session.connection == .signedOut }
+        #expect(session.connection == .signedOut)
+        #expect(port.disconnectCount == 1)
+        #expect(port.activityWrites.count + port.ownActivityFetches.count == 1)
+
+        port.activityWrites.isHolding = false
+        port.activityWrites.release()
+        port.ownActivityFetches.isHolding = false
+        port.ownActivityFetches.release()
+        await signingOut.value
     }
 
     @Test(arguments: [false, true]) func aReplacementDuringTheCallIsPreserved(isCallMark: Bool) async {

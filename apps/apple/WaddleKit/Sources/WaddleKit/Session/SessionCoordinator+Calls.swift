@@ -1,28 +1,32 @@
 extension SessionCoordinator {
-    /// A transport verb may ignore cancellation, so teardown races an
-    /// independent deadline instead of awaiting a cancelled child task.
     func stopCalls() async {
         if calls.state != .idle {
-            let (completed, continuation) = AsyncStream<Void>.makeStream()
-            let teardown = Task { [calls] in
-                await calls.hangUp()
-                continuation.yield(())
-                continuation.finish()
-            }
-            let deadline = Task {
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
-                continuation.yield(())
-                continuation.finish()
-            }
-            var iterator = completed.makeAsyncIterator()
-            _ = await iterator.next()
-            teardown.cancel()
-            deadline.cancel()
-            continuation.finish()
+            await waitForCallTeardown { [calls] in await calls.hangUp() }
         }
         // Fence suspended sends before disconnect can suspend too; a late
         // terminate must never send a finish on the next signed-in session.
         calls.clear()
+    }
+
+    /// A transport request may ignore cancellation. Race it against a
+    /// deadline so sign-out can continue even if the request is still waiting.
+    func waitForCallTeardown(_ work: @escaping @MainActor () async -> Void) async {
+        let (completed, continuation) = AsyncStream<Void>.makeStream()
+        let teardown = Task {
+            await work()
+            continuation.yield(())
+            continuation.finish()
+        }
+        let deadline = Task { [callTeardownTimeout] in
+            do { try await Task.sleep(for: callTeardownTimeout) } catch { return }
+            continuation.yield(())
+            continuation.finish()
+        }
+        var iterator = completed.makeAsyncIterator()
+        _ = await iterator.next()
+        teardown.cancel()
+        deadline.cancel()
+        continuation.finish()
     }
 }
 

@@ -59,10 +59,15 @@ extension SessionCoordinator {
     public func setActivity(_ activity: UserActivity?) async throws {
         guard activity?.showsACall != true else { throw PortError.invalidRequest }
         guard !isStopped else { throw PortError.notConnected }
+        let generation = activityWriteGeneration
         try await enqueueActivityWrite { session in
-            guard !session.isStopped else { throw PortError.notConnected }
+            guard !session.isStopped, generation == session.activityWriteGeneration else {
+                throw PortError.notConnected
+            }
             let published = try await session.port.fetchOwnActivity()
-            guard !session.isStopped else { throw PortError.notConnected }
+            guard !session.isStopped, generation == session.activityWriteGeneration else {
+                throw PortError.notConnected
+            }
             if let published, published.showsACall {
                 session.recordOwnActivity(published)
                 throw PortError.rejected
@@ -72,11 +77,14 @@ extension SessionCoordinator {
     }
 
     func writeOwnActivity(_ activity: UserActivity?) async throws {
+        let generation = activityWriteGeneration
         if let activity {
             try await port.publishActivity(activity)
         } else {
             try await port.retractActivity()
         }
+        // A write can finish after sign-out has moved on.
+        guard !Task.isCancelled, generation == activityWriteGeneration else { return }
         recordOwnActivity(activity)
     }
 

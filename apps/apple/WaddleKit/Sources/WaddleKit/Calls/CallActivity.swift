@@ -3,6 +3,8 @@ enum CallActivity {
     struct Publication: Equatable {
         let mark: UserActivity
         let previous: UserActivity?
+        /// A lost reply leaves us needing to check whether the mark landed.
+        var isConfirmed = true
     }
 
     enum Change: Equatable {
@@ -23,14 +25,16 @@ enum CallActivity {
     }
 
     static func change(desired: UserActivity?, published: UserActivity?, owned: Publication?) -> Change {
-        if let owned {
-            // Another device may have replaced our last write while the call ran.
-            guard published == owned.mark else { return .forget }
+        if let owned, published == owned.mark {
             guard let desired else { return .write(owned.previous, keeping: nil) }
             guard desired != owned.mark else { return .keep }
             return .write(desired, keeping: Publication(mark: desired, previous: owned.previous))
         }
-        guard let desired, published?.showsACall != true else { return .keep }
+        // Leave another device's edit alone if it replaced a confirmed mark.
+        if owned?.isConfirmed == true { return .forget }
+        guard let desired, published?.showsACall != true else {
+            return owned == nil ? .keep : .forget
+        }
         return .write(desired, keeping: Publication(mark: desired, previous: published))
     }
 }
