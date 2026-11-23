@@ -117,6 +117,8 @@ private struct ConversationContent: View {
                     .environment(navigation)
             }
             .task(id: conversation) {
+                // A screen that went before this ran has already closed.
+                guard !Task.isCancelled else { return }
                 await session.open(conversation, screen: screenID)
             }
             .onChange(of: navigation.focusRequest, initial: true) { _, request in

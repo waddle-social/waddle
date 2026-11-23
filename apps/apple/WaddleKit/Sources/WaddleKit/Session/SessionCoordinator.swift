@@ -149,8 +149,9 @@ public final class SessionCoordinator {
     @ObservationIgnored var lookupsBeforeDestruction: [BareJID: Int] = [:]
     /// Directory lookups begun this session.
     @ObservationIgnored var lookupsBegun = 0
-    /// The number of the newest lookup whose answer the directory holds.
-    @ObservationIgnored var newestLookupApplied = 0
+    /// The newest lookup whose answer the directory holds: its number
+    /// and what it found.
+    @ObservationIgnored var newestLookupApplied: (number: Int, found: DirectoryLookup)?
     /// Rooms whose delete got no clear answer (timed out, cut off). They
     /// may be gone, so they are not joined again this session.
     @ObservationIgnored var unconfirmedDeletions: Set<BareJID> = []

@@ -7,7 +7,7 @@ extension SessionCoordinator {
     /// Called when a conversation comes on screen: marks it active, loads
     /// the newest page once, and marks it read. `screen` names the screen
     /// showing it, which passes the same value to `close`.
-    public func open(_ conversation: ConversationID, screen: ConversationScreenID = .only) async {
+    public func open(_ conversation: ConversationID, screen: ConversationScreenID) async {
         // Read before the badge is cleared below. Opening the conversation
         // again finds nothing unread and keeps the divider placed before.
         let unreadAtOpen = unread.count(for: conversation)
@@ -48,7 +48,7 @@ extension SessionCoordinator {
 
     /// Called when a screen stops showing a conversation. The conversation
     /// stays visible while another screen still shows it.
-    public func close(_ conversation: ConversationID, screen: ConversationScreenID = .only) {
+    public func close(_ conversation: ConversationID, screen: ConversationScreenID) {
         if visibleConversation == conversation {
             visibleScreens.remove(screen)
             guard visibleScreens.isEmpty else { return }
@@ -212,7 +212,4 @@ public struct ConversationScreenID: Hashable, Sendable {
     private let id: UUID
 
     public init() { id = UUID() }
-
-    /// For a place that only ever shows one screen per conversation.
-    public static let only = ConversationScreenID()
 }

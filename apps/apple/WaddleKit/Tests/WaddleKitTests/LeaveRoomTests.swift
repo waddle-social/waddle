@@ -99,9 +99,10 @@ struct LeaveRoomTests {
         while port.topologyRequests < 2 { await Task.yield() }
 
         port.releaseTopology(at: 1)
-        #expect(await newer.value != nil)
+        let found = await newer.value
+        #expect(found != nil)
         port.releaseTopology(at: 0)
-        #expect(await older.value == nil)
+        #expect(await older.value == found)
 
         #expect(coordinator.directory.channel(for: room)?.name == "new name")
     }
