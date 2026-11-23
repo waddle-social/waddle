@@ -12,7 +12,7 @@ extension SessionCoordinator {
         try await managing(room) { generation in
             try await port.updateRoomSettings(patch, of: room)
             guard isCurrent(generation) else { return }
-            updateChannel(room, name: patch.name, summary: patch.summary)
+            updateChannel(room, name: patch.name, summary: patch.summary, pinPermission: patch.pinPermission)
         }
     }
 
@@ -282,9 +282,12 @@ extension SessionCoordinator {
         silenceLeftRooms()
     }
 
-    private func updateChannel(_ room: BareJID, name: String?, summary: String? = nil) {
+    private func updateChannel(
+        _ room: BareJID, name: String?, summary: String? = nil, pinPermission: PinPermission? = nil
+    ) {
         guard let channel = directory.channel(for: room) else { return }
-        upsertChannel(channel.with(name: name ?? channel.name, summary: summary ?? channel.summary))
+        upsertChannel(channel.with(
+            name: name ?? channel.name, summary: summary ?? channel.summary, pinPermission: pinPermission))
     }
 }
 

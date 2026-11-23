@@ -155,4 +155,54 @@ struct MessageActionsTests {
             #expect(coordinator.pinAccess(in: roomConversation) == expected)
         }
     }
+
+    private func joined(
+        as affiliation: RoomAffiliation, where permission: PinPermission?
+    ) -> SessionCoordinator {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", pinPermission: permission),
+        ]))
+        _ = coordinator.presence.apply(WirePresence(
+            from: room.with(resource: "alice")!, kind: .available,
+            occupant: .init(affiliation: affiliation, role: .participant, realJID: jid("alice@waddle.test"), statusCodes: [110])))
+        return coordinator
+    }
+
+    /// #2606: the room's disco#info says who may pin, so a member knows
+    /// what web's `currentUserCanPin` knows: anyone in the room where
+    /// anyone may pin, only owners and admins where only they may.
+    @Test(arguments: [
+        (PinPermission.anyone, RoomAffiliation.member, PinAccess.allowed),
+        (.anyone, .none, .allowed),
+        (.adminsOnly, .member, .denied),
+        (.adminsOnly, .owner, .allowed),
+        (.adminsOnly, .admin, .allowed),
+    ])
+    func theRoomsPinPermissionDecidesWhetherAMemberMayPin(
+        permission: PinPermission, affiliation: RoomAffiliation, expected: PinAccess
+    ) {
+        #expect(joined(as: affiliation, where: permission).pinAccess(in: roomConversation) == expected)
+    }
+
+    @Test func aMemberWhoseRoomSaysNothingOfPinsMightPin() {
+        #expect(joined(as: .member, where: nil).pinAccess(in: roomConversation) == .unknown)
+    }
+
+    @Test func aRoomThatLetsAnyonePinStillWaitsForTheJoin() {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", pinPermission: .anyone),
+        ]))
+        #expect(coordinator.pinAccess(in: roomConversation) == .unknown)
+    }
+
+    @Test func aMemberSeesPinOnTheToolbarWhereAnyoneMayPin() throws {
+        let item = try #require(timeline().item(withID: "root"))
+        let pinning = joined(as: .member, where: .anyone).pinAccess(in: roomConversation)
+        #expect(MessageActions.toolbar(for: item, in: context(pinning: pinning), isBeingEdited: false, maxButtons: 20)
+            .contains(.pin))
+        let strict = joined(as: .member, where: .adminsOnly).pinAccess(in: roomConversation)
+        #expect(!MessageActions.available(for: item, in: context(pinning: strict)).contains(.pin))
+    }
 }

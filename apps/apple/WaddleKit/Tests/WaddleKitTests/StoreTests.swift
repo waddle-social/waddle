@@ -124,6 +124,17 @@ struct StoreTests {
         #expect(presence.apply(left) == .occupant(room: room))
     }
 
+    /// A look that could not read a room's disco#info says nothing of who
+    /// may pin there; what was known stands. A look that could, decides.
+    @Test func aRoomsPinPermissionOutlivesALookThatCouldNotReadIt() {
+        let directory = DirectoryStore()
+        directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general", pinPermission: .anyone)]))
+        directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
+        #expect(directory.channel(for: room)?.pinPermission == .anyone)
+        directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general", pinPermission: .adminsOnly)]))
+        #expect(directory.channel(for: room)?.pinPermission == .adminsOnly)
+    }
+
     @Test func presenceFlagsBotOccupantByHat() {
         let presence = PresenceStore(isRoom: { $0 == room })
         let vip = Hat(uri: "urn:waddle:hats:vip", title: "VIP")
