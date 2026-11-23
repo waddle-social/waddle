@@ -25,6 +25,7 @@ final class LiveKitCallMediaTests: XCTestCase {
         media.setVolume(1.5, of: identity)
 
         XCTAssertTrue(media.participants.isEmpty)
+        XCTAssertTrue(media.activeSpeakersLoudestFirst.isEmpty)
         XCTAssertNil(media.dockCameraIdentities.local)
         XCTAssertNil(media.dockCameraIdentities.remote)
         XCTAssertNil(media.video(of: identity, source: .camera))

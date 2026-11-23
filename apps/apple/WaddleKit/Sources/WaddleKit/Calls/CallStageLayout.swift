@@ -59,6 +59,12 @@ public struct CallStagePresentation: Equatable, Sendable {
     private struct ScreenKey: Hashable, Sendable {
         let tileID: CallStageTile.ID
         let publicationID: String?
+
+        init?(_ tile: CallStageTile) {
+            guard tile.source == .screen, !tile.isSelf, tile.hasVideo else { return nil }
+            tileID = tile.id
+            publicationID = tile.screenPublicationID
+        }
     }
 
     public init(viewMode: ViewMode = .gallery, pinnedTileID: CallStageTile.ID? = nil, isSelfViewHidden: Bool = false) {
@@ -67,21 +73,30 @@ public struct CallStagePresentation: Equatable, Sendable {
         self.isSelfViewHidden = isSelfViewHidden
     }
 
-    /// Remember arrival order so a redraw or reordered roster cannot change
-    /// which ongoing share is featured. A new arrival takes the stage first.
-    fileprivate mutating func newestRemoteScreen(in tiles: [CallStageTile]) -> CallStageTile? {
-        var active: [ScreenKey: CallStageTile] = [:]
-        var seen = Set(seenRemoteScreens)
-        var firstNew: CallStageTile?
-        for tile in tiles where tile.source == .screen && !tile.isSelf && tile.hasVideo {
-            let key = ScreenKey(tileID: tile.id, publicationID: tile.screenPublicationID)
-            active[key] = tile
-            if seen.insert(key).inserted {
-                seenRemoteScreens.append(key)
-                if firstNew == nil { firstNew = tile }
-            }
+    /// Record share arrivals and clear a pin when its tile leaves or self-view hides it.
+    /// Call with the full roster when tiles or self-view change. Skip when the roster
+    /// is unavailable, such as during a reconnect, so a temporary gap keeps the pin.
+    public mutating func reconcile(with tiles: [CallStageTile]) {
+        if let pinnedTileID, !tiles.contains(where: { $0.id == pinnedTileID && shows($0) }) {
+            self.pinnedTileID = nil
         }
-        return firstNew ?? seenRemoteScreens.reversed().lazy.compactMap { active[$0] }.first
+        var seen = Set(seenRemoteScreens)
+        for tile in tiles {
+            guard let key = ScreenKey(tile), seen.insert(key).inserted else { continue }
+            seenRemoteScreens.append(key)
+        }
+    }
+
+    fileprivate func shows(_ tile: CallStageTile) -> Bool {
+        !isSelfViewHidden || !tile.isSelfCamera
+    }
+
+    fileprivate func newestRemoteScreen(in tiles: [CallStageTile]) -> CallStageTile? {
+        var active: [ScreenKey: CallStageTile] = [:]
+        for tile in tiles {
+            if let key = ScreenKey(tile) { active[key] = tile }
+        }
+        return seenRemoteScreens.reversed().lazy.compactMap { active[$0] }.first
     }
 }
 
@@ -89,16 +104,15 @@ public enum CallStageLayout: Equatable, Sendable {
     case grid(columns: Int, rows: Int, tiles: [CallStageTile], hiddenCount: Int)
     case spotlight(main: CallStageTile, strip: [CallStageTile])
 
-    /// Reconcile the pin and share history with the current visible tiles.
+    /// Lay out the available tiles using the pin and recorded share order.
     /// The cell cap applies to the gallery; the spotlight strip scrolls.
     public static func make(
-        tiles: [CallStageTile], presentation: inout CallStagePresentation,
+        tiles: [CallStageTile], presentation: CallStagePresentation,
         promoted: String? = nil, size: CGSize, maxTiles: Int = .max
     ) -> Self {
-        let selfView = presentation.isSelfViewHidden ? [] : tiles.filter(\.isSelfCamera)
+        let selfView = tiles.filter { $0.isSelfCamera && presentation.shows($0) }
         let ordered = selfView + tiles.filter { !$0.isSelfCamera }
         let pinned = ordered.first { $0.id == presentation.pinnedTileID }
-        presentation.pinnedTileID = pinned?.id
         let main = presentation.newestRemoteScreen(in: ordered)
             ?? pinned
             ?? (presentation.viewMode == .speaker ? speakerTile(in: ordered, promoted: promoted) : nil)

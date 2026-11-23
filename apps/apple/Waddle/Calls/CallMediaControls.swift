@@ -19,7 +19,7 @@ struct CallDockCameraIdentities: Equatable {
     var remote: String?
 }
 
-/// What the call dock reads from, and asks of, the media session.
+/// What call views read from, and ask of, the media session.
 @MainActor
 protocol CallMediaControls: AnyObject, Observable {
     var phase: CallMediaPhase { get }
@@ -36,6 +36,8 @@ protocol CallMediaControls: AnyObject, Observable {
     var isCameraBlocked: Bool { get }
     /// Ours first, then join order. Empty until connected and during reconnects.
     var participants: [CallMediaParticipant] { get }
+    /// For speaker promotion. Updates only when the active identities or their order change.
+    var activeSpeakersLoudestFirst: [String] { get }
     /// The dock keeps its camera selection even when the roster is unavailable.
     var dockCameraIdentities: CallDockCameraIdentities { get }
     /// A camera is available only while its track is subscribed and unmuted.

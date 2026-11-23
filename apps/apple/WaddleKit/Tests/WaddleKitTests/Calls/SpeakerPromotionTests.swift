@@ -7,6 +7,18 @@ import Testing
     private static let carol = "carol@waddle.test/web"
     private static let dave = "dave@waddle.test/web"
 
+    @Test func activeSpeakersAreRankedByLevelWithStableTies() {
+        let local = "alice@waddle.test/mac"
+        let active = SpeakerPromotion.activeLoudestFirst([
+            (local, true, 0.4),
+            (Self.bob, false, 1),
+            (Self.carol, true, 0.8),
+            (Self.dave, true, 0.8),
+        ])
+        #expect(active == [Self.carol, Self.dave, local])
+        #expect(SpeakerPromotion.advance(nil, activeLoudestFirst: active) == Self.carol)
+    }
+
     @Test(arguments: [
         (nil, [bob], bob),
         (bob, [carol, bob], bob),

@@ -21,8 +21,10 @@ public enum CallSurface: Equatable, Sendable {
     }
 
     /// An established call can take over only its own conversation.
-    public static func placement(stage: CallStage, conversationIsOpen: Bool, platform: Platform, size: Size) -> Self {
-        guard platform == .regularWidth, stage.isInSession else { return .dock }
+    public static func placement(
+        isInSession: Bool, conversationIsOpen: Bool, platform: Platform, size: Size
+    ) -> Self {
+        guard platform == .regularWidth, isInSession else { return .dock }
         guard conversationIsOpen else { return .sidebarCard }
         switch size {
         case .split: return .split

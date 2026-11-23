@@ -16,13 +16,24 @@ import Testing
         .inCall(peer: peer.bare, media: media),
         .reconnecting(peer: peer.bare, media: media),
     ]
+    private static let room = BareJID(parsing: "lounge@rooms.waddle.test")!
+    private static let dockRoomStages: [GroupCallStage] = [
+        .joining(room: room, media: media),
+    ]
+    private static let sessionRoomStages: [GroupCallStage] = [
+        .connecting(room: room, media: media),
+        .inCall(room: room, media: media),
+        .reconnecting(room: room, media: media),
+    ]
 
     @Test(arguments: [CallSurface.Size.split, .expanded, .immersive])
     func phoneCallsAlwaysUseTheDock(size: CallSurface.Size) {
-        for stage in Self.dockStages + Self.sessionStages {
+        let sessions = (Self.dockStages + Self.sessionStages).map(\.isInSession)
+            + (Self.dockRoomStages + Self.sessionRoomStages).map(\.isInSession)
+        for isInSession in sessions {
             for isOpen in [true, false] {
                 #expect(CallSurface.placement(
-                    stage: stage, conversationIsOpen: isOpen, platform: .phone, size: size
+                    isInSession: isInSession, conversationIsOpen: isOpen, platform: .phone, size: size
                 ) == .dock)
             }
         }
@@ -30,10 +41,11 @@ import Testing
 
     @Test(arguments: [CallSurface.Size.split, .expanded, .immersive])
     func onlySessionsCanLeaveTheDockOnRegularWidth(size: CallSurface.Size) {
-        for stage in Self.dockStages {
+        let sessions = Self.dockStages.map(\.isInSession) + Self.dockRoomStages.map(\.isInSession)
+        for isInSession in sessions {
             for isOpen in [true, false] {
                 #expect(CallSurface.placement(
-                    stage: stage, conversationIsOpen: isOpen, platform: .regularWidth, size: size
+                    isInSession: isInSession, conversationIsOpen: isOpen, platform: .regularWidth, size: size
                 ) == .dock)
             }
         }
@@ -45,11 +57,14 @@ import Testing
         (.immersive, .fullscreen),
     ])
     func regularWidthSessionsFollowTheConversation(size: CallSurface.Size, surface: CallSurface) {
-        for stage in Self.sessionStages {
-            #expect(CallSurface.placement(stage: stage, conversationIsOpen: true, platform: .regularWidth, size: size)
-                == surface)
-            #expect(CallSurface.placement(stage: stage, conversationIsOpen: false, platform: .regularWidth, size: size)
-                == .sidebarCard)
+        let sessions = Self.sessionStages.map(\.isInSession) + Self.sessionRoomStages.map(\.isInSession)
+        for isInSession in sessions {
+            #expect(CallSurface.placement(
+                isInSession: isInSession, conversationIsOpen: true, platform: .regularWidth, size: size
+            ) == surface)
+            #expect(CallSurface.placement(
+                isInSession: isInSession, conversationIsOpen: false, platform: .regularWidth, size: size
+            ) == .sidebarCard)
         }
     }
 

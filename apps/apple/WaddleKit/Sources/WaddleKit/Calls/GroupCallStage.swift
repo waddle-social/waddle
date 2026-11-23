@@ -46,6 +46,14 @@ public extension GroupCallStage {
         }
     }
 
+    /// The mixer has accepted the call, so it can have a stage while media connects.
+    var isInSession: Bool {
+        switch self {
+        case .connecting, .inCall, .reconnecting: true
+        case .joining: false
+        }
+    }
+
     /// The room's media has connected, even if it is reconnecting now: the
     /// SFU's participants are known and the devices can be switched.
     var hasMedia: Bool {

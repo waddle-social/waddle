@@ -26,6 +26,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var isMicrophoneBlocked = false
     private(set) var isCameraBlocked = false
     private(set) var participants: [CallMediaParticipant] = []
+    private(set) var activeSpeakersLoudestFirst: [String] = []
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
     /// LiveKit can briefly clear our identity during a full reconnect.
@@ -320,6 +321,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func refreshParticipants() {
         guard let room, phase == .connected else {
             if !participants.isEmpty { participants = [] }
+            if !activeSpeakersLoudestFirst.isEmpty { activeSpeakersLoudestFirst = [] }
             return
         }
         // Ours first, then everyone else in the order they joined, so the
@@ -346,6 +348,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             )
         }
         if participants != rows { participants = rows }
+        // Levels change many times a second; only a change of who speaks,
+        // or of their order, is published.
+        let speakers = SpeakerPromotion.activeLoudestFirst(everyone.compactMap { participant in
+            participant.identity.map { ($0.stringValue, participant.isSpeaking, participant.audioLevel) }
+        })
+        if activeSpeakersLoudestFirst != speakers { activeSpeakersLoudestFirst = speakers }
     }
 }
 
@@ -403,7 +411,7 @@ private enum RoomChange {
     case reconnected
     /// A track was published, subscribed, muted or removed, on either side.
     case tracks
-    /// Someone joined, or the set of people speaking changed.
+    /// Someone joined, or the SDK reported who is speaking and how loudly.
     case participants
 }
 
