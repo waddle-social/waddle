@@ -99,6 +99,100 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
+    - name: Setup Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        : "${GITHUB_ENV:?GITHUB_ENV is required}"
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        if [ "$(uname -s)" != "Linux" ]; then
+          printf 'CUENV_REMOTE_CACHE=\nCUENV_REMOTE_CACHE_UPLOAD=false\n' >> "$GITHUB_ENV"
+          exit 0
+        fi
+        python3 - "$GITHUB_ENV" <<'PY'
+        import json, os, re, shutil, subprocess, sys
+        from pathlib import Path
+
+        github_env = Path(sys.argv[1])
+        trusted = (
+            os.environ.get("GITHUB_EVENT_NAME") == "push"
+            and os.environ.get("GITHUB_REF") == "refs/heads/main"
+        )
+        runner_temp = os.environ["RUNNER_TEMP"]
+        values = {
+            "CUENV_REMOTE_CACHE_UPLOAD": "true" if trusted else "false",
+            "CUENV_CACHE_DIR": os.path.join(
+                runner_temp, "cuenv-cache", "trusted" if trusted else "untrusted"
+            ),
+        }
+
+        def parse_bazelrc(path: Path) -> bool:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            endpoint = ""
+            parsed = {}
+            for raw_line in text.splitlines():
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if m := re.search(r"--remote_cache=(\S+)", line):
+                    endpoint = m.group(1)
+                if m := re.search(r"--tls_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CA_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_key=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_KEY"] = m.group(1)
+                if m := re.search(r"--credential_helper=[^=\s]+=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = m.group(1)
+            if not endpoint:
+                return False
+            values["CUENV_REMOTE_CACHE"] = endpoint
+            values.update(parsed)
+            return True
+
+        configured = False
+        for candidate in (os.environ.get("BAZELRC", ""), "/etc/bazel.bazelrc"):
+            if candidate:
+                p = Path(candidate)
+                if p.is_file():
+                    configured = parse_bazelrc(p)
+                    if configured:
+                        break
+
+        if not configured and shutil.which("nsc"):
+            try:
+                proc = subprocess.run(
+                    ["nsc", "cache", "bazel", "setup", "--disable_build_events", "-o", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=True,
+                )
+                data = json.loads(proc.stdout)
+                endpoint = (data.get("endpoint") or "").strip()
+                if endpoint:
+                    values["CUENV_REMOTE_CACHE"] = endpoint
+                    if data.get("server_ca_cert"):
+                        values["CUENV_REMOTE_CACHE_CA_CERT"] = data["server_ca_cert"]
+                    if data.get("client_cert") and data.get("client_key"):
+                        values["CUENV_REMOTE_CACHE_CLIENT_CERT"] = data["client_cert"]
+                        values["CUENV_REMOTE_CACHE_CLIENT_KEY"] = data["client_key"]
+                    if data.get("credential_helper_domains"):
+                        helper = shutil.which("bazel-credential-nsc")
+                        if helper:
+                            values["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = helper
+                    configured = True
+            except Exception:
+                pass
+
+        if not configured:
+            values["CUENV_REMOTE_CACHE"] = ""
+
+        with github_env.open("a", encoding="utf-8") as handle:
+            for k, v in values.items():
+                if "\n" in v or "\r" in v:
+                    raise SystemExit(f"Invalid newline in {k}")
+                handle.write(f"{k}={v}\n")
+        PY
     - name: nixXmppUnitTests
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-unit-tests
       working-directory: server
@@ -132,6 +226,100 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
+    - name: Setup Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        : "${GITHUB_ENV:?GITHUB_ENV is required}"
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        if [ "$(uname -s)" != "Linux" ]; then
+          printf 'CUENV_REMOTE_CACHE=\nCUENV_REMOTE_CACHE_UPLOAD=false\n' >> "$GITHUB_ENV"
+          exit 0
+        fi
+        python3 - "$GITHUB_ENV" <<'PY'
+        import json, os, re, shutil, subprocess, sys
+        from pathlib import Path
+
+        github_env = Path(sys.argv[1])
+        trusted = (
+            os.environ.get("GITHUB_EVENT_NAME") == "push"
+            and os.environ.get("GITHUB_REF") == "refs/heads/main"
+        )
+        runner_temp = os.environ["RUNNER_TEMP"]
+        values = {
+            "CUENV_REMOTE_CACHE_UPLOAD": "true" if trusted else "false",
+            "CUENV_CACHE_DIR": os.path.join(
+                runner_temp, "cuenv-cache", "trusted" if trusted else "untrusted"
+            ),
+        }
+
+        def parse_bazelrc(path: Path) -> bool:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            endpoint = ""
+            parsed = {}
+            for raw_line in text.splitlines():
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if m := re.search(r"--remote_cache=(\S+)", line):
+                    endpoint = m.group(1)
+                if m := re.search(r"--tls_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CA_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_key=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_KEY"] = m.group(1)
+                if m := re.search(r"--credential_helper=[^=\s]+=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = m.group(1)
+            if not endpoint:
+                return False
+            values["CUENV_REMOTE_CACHE"] = endpoint
+            values.update(parsed)
+            return True
+
+        configured = False
+        for candidate in (os.environ.get("BAZELRC", ""), "/etc/bazel.bazelrc"):
+            if candidate:
+                p = Path(candidate)
+                if p.is_file():
+                    configured = parse_bazelrc(p)
+                    if configured:
+                        break
+
+        if not configured and shutil.which("nsc"):
+            try:
+                proc = subprocess.run(
+                    ["nsc", "cache", "bazel", "setup", "--disable_build_events", "-o", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=True,
+                )
+                data = json.loads(proc.stdout)
+                endpoint = (data.get("endpoint") or "").strip()
+                if endpoint:
+                    values["CUENV_REMOTE_CACHE"] = endpoint
+                    if data.get("server_ca_cert"):
+                        values["CUENV_REMOTE_CACHE_CA_CERT"] = data["server_ca_cert"]
+                    if data.get("client_cert") and data.get("client_key"):
+                        values["CUENV_REMOTE_CACHE_CLIENT_CERT"] = data["client_cert"]
+                        values["CUENV_REMOTE_CACHE_CLIENT_KEY"] = data["client_key"]
+                    if data.get("credential_helper_domains"):
+                        helper = shutil.which("bazel-credential-nsc")
+                        if helper:
+                            values["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = helper
+                    configured = True
+            except Exception:
+                pass
+
+        if not configured:
+            values["CUENV_REMOTE_CACHE"] = ""
+
+        with github_env.open("a", encoding="utf-8") as handle:
+            for k, v in values.items():
+                if "\n" in v or "\r" in v:
+                    raise SystemExit(f"Invalid newline in {k}")
+                handle.write(f"{k}={v}\n")
+        PY
     - name: nixXmppXepIntegration
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-xep-integration
       working-directory: server

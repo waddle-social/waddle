@@ -64,11 +64,14 @@ schema.#Project & {
 		flake: ".."
 	}
 
+	cache: remote: wc.#NamespaceRemoteCache
+
 	ci: providers: ["github"]
 	ci: contributors: [
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
+		wc.#NamespaceBazelCache,
 		wc.#CuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
@@ -191,6 +194,8 @@ schema.#Project & {
 		tokensCheck: schema.#Task & {
 			command: "bun"
 			args: ["../scripts/generate-design-tokens.mjs", "--check"]
+			cache: mode: "read-write"
+			hermetic: sandbox: "auto"
 			inputs: [
 				schema.#ModuleFiles & {paths: [
 					"scripts/generate-design-tokens.mjs",
@@ -207,6 +212,8 @@ schema.#Project & {
 		tokensTest: schema.#Task & {
 			command: "bun"
 			args: ["test", "../scripts/design-tokens"]
+			cache: mode: "read-write"
+			hermetic: sandbox: "auto"
 			inputs: [
 				schema.#ModuleFiles & {paths: ["scripts/design-tokens/**"]},
 			]

@@ -112,11 +112,105 @@ jobs:
         drain-timeout: '900'
         upstream-cache-filter: 'true'
         version: v2.0.0
+    - name: Setup Namespace Bazel Remote Cache
+      run: |-
+        set -euo pipefail
+        : "${GITHUB_ENV:?GITHUB_ENV is required}"
+        : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+        if [ "$(uname -s)" != "Linux" ]; then
+          printf 'CUENV_REMOTE_CACHE=\nCUENV_REMOTE_CACHE_UPLOAD=false\n' >> "$GITHUB_ENV"
+          exit 0
+        fi
+        python3 - "$GITHUB_ENV" <<'PY'
+        import json, os, re, shutil, subprocess, sys
+        from pathlib import Path
+
+        github_env = Path(sys.argv[1])
+        trusted = (
+            os.environ.get("GITHUB_EVENT_NAME") == "push"
+            and os.environ.get("GITHUB_REF") == "refs/heads/main"
+        )
+        runner_temp = os.environ["RUNNER_TEMP"]
+        values = {
+            "CUENV_REMOTE_CACHE_UPLOAD": "true" if trusted else "false",
+            "CUENV_CACHE_DIR": os.path.join(
+                runner_temp, "cuenv-cache", "trusted" if trusted else "untrusted"
+            ),
+        }
+
+        def parse_bazelrc(path: Path) -> bool:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            endpoint = ""
+            parsed = {}
+            for raw_line in text.splitlines():
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if m := re.search(r"--remote_cache=(\S+)", line):
+                    endpoint = m.group(1)
+                if m := re.search(r"--tls_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CA_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_certificate=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_CERT"] = m.group(1)
+                if m := re.search(r"--tls_client_key=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CLIENT_KEY"] = m.group(1)
+                if m := re.search(r"--credential_helper=[^=\s]+=(\S+)", line):
+                    parsed["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = m.group(1)
+            if not endpoint:
+                return False
+            values["CUENV_REMOTE_CACHE"] = endpoint
+            values.update(parsed)
+            return True
+
+        configured = False
+        for candidate in (os.environ.get("BAZELRC", ""), "/etc/bazel.bazelrc"):
+            if candidate:
+                p = Path(candidate)
+                if p.is_file():
+                    configured = parse_bazelrc(p)
+                    if configured:
+                        break
+
+        if not configured and shutil.which("nsc"):
+            try:
+                proc = subprocess.run(
+                    ["nsc", "cache", "bazel", "setup", "--disable_build_events", "-o", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=True,
+                )
+                data = json.loads(proc.stdout)
+                endpoint = (data.get("endpoint") or "").strip()
+                if endpoint:
+                    values["CUENV_REMOTE_CACHE"] = endpoint
+                    if data.get("server_ca_cert"):
+                        values["CUENV_REMOTE_CACHE_CA_CERT"] = data["server_ca_cert"]
+                    if data.get("client_cert") and data.get("client_key"):
+                        values["CUENV_REMOTE_CACHE_CLIENT_CERT"] = data["client_cert"]
+                        values["CUENV_REMOTE_CACHE_CLIENT_KEY"] = data["client_key"]
+                    if data.get("credential_helper_domains"):
+                        helper = shutil.which("bazel-credential-nsc")
+                        if helper:
+                            values["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = helper
+                    configured = True
+            except Exception:
+                pass
+
+        if not configured:
+            values["CUENV_REMOTE_CACHE"] = ""
+
+        with github_env.open("a", encoding="utf-8") as handle:
+            for k, v in values.items():
+                if "\n" in v or "\r" in v:
+                    raise SystemExit(f"Invalid newline in {k}")
+                handle.write(f"{k}={v}\n")
+        PY
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.76.1"
-        if [ "$cuenv_version" != "0.76.1" ]; then
+        cuenv_version="0.77.0"
+        if [ "$cuenv_version" != "0.77.0" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -124,15 +218,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160"
+            cuenv_sha256="bdb3413abdea0c5617ed5a9ec3c10c5813dd6a3b8233305e81c53d76d5236647"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4"
+            cuenv_sha256="fde68bff3e2adc383d25bc64530b0c72b53fab32181da97af99dbed52e7a6814"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102"
+            cuenv_sha256="d7a35a14778316c65ff725bd3c1bd776ea1610b09f02cc20badc588110899085"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -152,7 +246,7 @@ jobs:
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.76.1" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.77.0" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi

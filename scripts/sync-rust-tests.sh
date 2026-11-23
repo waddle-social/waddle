@@ -13,10 +13,10 @@ workflow="$repo_root/.github/workflows/waddle-server-rusttests.yml"
 generated="$(mktemp)"
 trap 'rm -f "$generated"' EXIT
 
-# The workflow is evaluated through server/env.cue, which cue 0.17.x cannot
-# evaluate (#1763; see the cue hold in flake.nix). Refuse any other version
-# rather than failing with an unrelated-looking evaluation error.
-required_cue=v0.16.1
+# The workflow is evaluated through server/env.cue, which imports cuenv 0.77.0's
+# v0.18.0 schema (see the cue pin in flake.nix). Refuse any other language
+# version rather than failing with an unrelated-looking evaluation error.
+required_cue=v0.18.0
 # A missing cue must reach the message below, not abort under pipefail.
 cue_language="$(cue version 2>/dev/null | sed -n 's/^CUE language version //p' | head -n 1 || true)"
 if [[ "$cue_language" != "$required_cue" ]]; then

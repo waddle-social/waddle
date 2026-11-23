@@ -1,6 +1,6 @@
 module: "github.com/waddle-social/waddle"
 language: {
-	version: "v0.14.0"
+	version: "v0.18.0"
 }
 deps: {
 	"github.com/cuenv/cuenv@v0": {
