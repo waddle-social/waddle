@@ -35,8 +35,9 @@ final class InCallMarkSnapshotTests: XCTestCase {
         })
     }
 
-    /// The sidebar's one-line rows and the phone's two-line DMs rows, with
-    /// Priya in a call and Theo not.
+    /// The sidebar's one-line rows, with Priya in a call and Theo not. The
+    /// phone's two-line row draws the same avatar, and also a date whose
+    /// format follows the machine's region, so it is left out.
     func testDirectMessageRowsWithSomeoneInACall() {
         let sample = SampleSession()
         let read = ConversationAttention(unread: 0, isMention: false, isMuted: false)
@@ -49,8 +50,6 @@ final class InCallMarkSnapshotTests: XCTestCase {
         let rows = VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             CompactDirectRowLabel(direct: priya, title: "Priya", availability: .available, isInCall: true, attention: read)
             CompactDirectRowLabel(direct: theo, title: "Theo", availability: .doNotDisturb, isInCall: false, attention: read)
-            PhoneDirectRowLabel(direct: priya, title: "Priya", availability: .available, isInCall: true, attention: read)
-            PhoneDirectRowLabel(direct: theo, title: "Theo", availability: .doNotDisturb, isInCall: false, attention: read)
         }
         assertHuddleSnapshot(precision: Self.precision, of: sample.host(rows))
     }
