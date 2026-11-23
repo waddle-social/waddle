@@ -174,11 +174,17 @@ pub(crate) fn room_config_from_form(form: &RoomConfigForm) -> WaddleRoomConfig {
         pin_permission: form
             .value(FIELD_PIN_PERMISSION)
             .and_then(RoomPinPermission::from_form_value)
-            .and_then(|value| match value {
-                RoomPinPermission::AdminsOnly => Some(WaddlePinPermission::AdminsOnly),
-                RoomPinPermission::Anyone => Some(WaddlePinPermission::Anyone),
-                _ => None,
-            }),
+            .and_then(pin_permission_to_ffi),
+    }
+}
+
+/// The FFI form of a pin policy; `None` for a policy this binding does
+/// not know (`RoomPinPermission` is non-exhaustive).
+pub(crate) fn pin_permission_to_ffi(value: RoomPinPermission) -> Option<WaddlePinPermission> {
+    match value {
+        RoomPinPermission::AdminsOnly => Some(WaddlePinPermission::AdminsOnly),
+        RoomPinPermission::Anyone => Some(WaddlePinPermission::Anyone),
+        _ => None,
     }
 }
 

@@ -4,6 +4,7 @@ use jid::BareJid;
 use waddle_xmpp_core::roster::RosterItem;
 
 use crate::messaging::MucAffiliation;
+use crate::xep::xep0045_owner::{RoomPinPermission, FIELD_PIN_PERMISSION};
 use crate::xep::xep0402::BookmarkItem;
 use crate::xep::xep0492::{surface_bookmark_notify, NotifyMode};
 
@@ -54,6 +55,15 @@ impl DiscoInfoResult {
         let is_group_dm = self.has_feature(super::WADDLE_GROUP_DM_FEATURE_NS);
         let members_only = self.has_feature(crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY);
         (is_group_dm, Some(members_only))
+    }
+
+    /// Who may pin in the room, from Waddle's room metadata form (the
+    /// XEP-0128 extension the server adds to the room's disco#info). `None`
+    /// when the form or field is absent or carries an unknown value.
+    #[must_use]
+    pub fn pin_permission(&self) -> Option<RoomPinPermission> {
+        self.form_value(super::WADDLE_ROOM_METADATA_FORM_TYPE, FIELD_PIN_PERMISSION)
+            .and_then(RoomPinPermission::from_form_value)
     }
 
     /// The room's current name, from its `conference` identity (XEP-0045 §6.4).
@@ -284,6 +294,10 @@ pub struct DiscoveredChannel {
     /// Whether the room advertises XEP-0045's members-only feature. `None`
     /// means room discovery information was unavailable.
     pub members_only: Option<bool>,
+    /// Who may pin in the room, from its disco#info. Every occupant can
+    /// read it, unlike the owner-only room configuration. `None` means
+    /// room discovery information was unavailable or did not say.
+    pub pin_permission: Option<RoomPinPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

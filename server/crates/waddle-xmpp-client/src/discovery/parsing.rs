@@ -284,6 +284,7 @@ pub fn parse_space_channels_result(
                 bookmark_name: None,
                 is_group_dm: false,
                 members_only: None,
+                pin_permission: None,
             },
         )
         .collect();

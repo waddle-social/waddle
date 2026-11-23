@@ -188,6 +188,7 @@ pub(super) fn bookmark_only_channel(
         bookmark_name: bookmark.name.clone(),
         is_group_dm,
         members_only,
+        pin_permission: info.pin_permission(),
     })
 }
 

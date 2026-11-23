@@ -731,6 +731,10 @@ pub struct WaddleChannel {
     /// Whether room discovery advertised a members-only room. `None`
     /// means room discovery information was unavailable.
     pub members_only: Option<bool>,
+    /// Who may pin in the room, from its disco#info, which every
+    /// occupant can read. `None` when discovery did not say.
+    #[uniffi(default = None)]
+    pub pin_permission: Option<crate::WaddlePinPermission>,
 }
 
 #[derive(uniffi::Record, Clone)]
