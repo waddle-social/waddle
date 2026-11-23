@@ -34,6 +34,9 @@ public final class DirectoryStore {
     public private(set) var notifyModes: [ConversationID: NotifyMode] = [:]
     private var showingMessagesInPush: Set<ConversationID> = []
     public private(set) var hasLoadedTopology = false
+    /// The account's bookmarks have been read since sign-in, so `leftRooms`
+    /// says which rooms it left. Until then no room is known to be left.
+    public private(set) var knowsLeftRooms = false
 
     @ObservationIgnored private var roomJIDs: Set<BareJID> = []
 
@@ -112,6 +115,7 @@ public final class DirectoryStore {
         leftRooms = left
         roomJIDs = Set(topology.channels.map(\.roomJID)).union(leftRooms.map(\.roomJID))
         hasLoadedTopology = true
+        if topology.ownBookmarksLoaded { knowsLeftRooms = true }
     }
 
     private static func listOrder(_ first: Channel, _ second: Channel) -> Bool {
@@ -193,6 +197,7 @@ public final class DirectoryStore {
         showingMessagesInPush = []
         roomJIDs = []
         hasLoadedTopology = false
+        knowsLeftRooms = false
     }
 
     private func insertionIndex(for date: Date) -> Int {

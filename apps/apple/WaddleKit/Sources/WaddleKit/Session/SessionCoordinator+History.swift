@@ -7,6 +7,13 @@ extension SessionCoordinator {
     /// Called when a conversation comes on screen: marks it active, loads
     /// the newest page once, and marks it read.
     public func open(_ conversation: ConversationID) async {
+        // Read before the badge is cleared below. Opening the conversation
+        // again finds nothing unread and keeps the divider placed before.
+        let unreadAtOpen = unread.count(for: conversation)
+        if lastOpenedConversation != conversation {
+            lastOpenedConversation = conversation
+            if !unreadAnchors.isEmpty { unreadAnchors.removeAll() }
+        }
         visibleConversation = conversation
         unread.setActive(isAppActive ? conversation : nil)
         inbox.markRead(conversation.jid)
@@ -17,11 +24,23 @@ extension SessionCoordinator {
         if !history.state(of: conversation).hasLoadedLatest {
             await loadLatest(conversation)
         }
+        // Placed by the open that saw the messages unread, even when its own
+        // screen has gone meanwhile, unless another conversation was opened.
+        if unreadAtOpen > 0, lastOpenedConversation == conversation {
+            unreadAnchors[conversation] = TimelineUnreadAnchor.firstUnreadID(
+                in: timelines.timeline(for: conversation).feedItems, unreadCount: unreadAtOpen)
+        }
         await markDisplayedIfVisible(conversation)
         if conversation.isRoom {
             await refreshPins(in: conversation.jid)
             await refreshRoomBots(in: conversation.jid)
         }
+    }
+
+    /// The row the conversation's "New messages" divider sits above, until
+    /// another conversation is opened; nil when nothing was unread.
+    public func unreadAnchor(for conversation: ConversationID) -> String? {
+        unreadAnchors[conversation]
     }
 
     /// Called when a conversation leaves the screen.

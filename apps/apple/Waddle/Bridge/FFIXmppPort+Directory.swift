@@ -2,8 +2,10 @@ import Foundation
 import WaddleKit
 
 extension FFIXmppPort {
-    /// XEP-0045 §9.5 tiers `listMembers` merges. Outcasts are not members.
-    static let memberTiers: [WaddleMucAffiliation] = [.owner, .admin, .member]
+    /// XEP-0045 §9.5 tiers `listMembers` merges. The outcast list is read
+    /// too, so owners and admins see who is banned. The room refuses it to
+    /// everyone else, and `mergedTiers` lists the other tiers regardless.
+    static let memberTiers: [WaddleMucAffiliation] = [.owner, .admin, .member, .outcast]
 
     /// The FFI answers an empty topology on failure and when no session
     /// is live; both must keep the last known directory, so neither is
@@ -61,24 +63,31 @@ extension FFIXmppPort {
         try await mappingPortErrors { try await client.leaveGroupDm(roomJid: room.description) }
     }
 
+    func listMembers(of room: BareJID) async throws -> [RoomMember] {
+        let roomJid = room.description
+        return try await Self.mergedTiers { tier in
+            try await mappingPortErrors {
+                try await self.client.listRoomMembers(roomJid: roomJid, affiliation: tier)
+            }.compactMap(FFIInbound.roomMember)
+        }
+    }
+
     /// One query per tier; a room commonly forbids some tiers to
     /// non-admins, so this throws only when every tier failed (or at once
     /// when there is no session).
-    func listMembers(of room: BareJID) async throws -> [RoomMember] {
+    static func mergedTiers(
+        _ fetch: @escaping @Sendable (WaddleMucAffiliation) async throws -> [RoomMember]
+    ) async throws -> [RoomMember] {
         enum TierOutcome: Sendable {
             case entries([RoomMember])
             case notConnected
             case error(PortError)
         }
-        let roomJid = room.description
         let outcomes = await withTaskGroup(of: (Int, TierOutcome).self, returning: [(Int, TierOutcome)].self) { group in
-            for (index, tier) in Self.memberTiers.enumerated() {
+            for (index, tier) in memberTiers.enumerated() {
                 group.addTask {
                     do {
-                        let entries = try await mappingPortErrors {
-                            try await self.client.listRoomMembers(roomJid: roomJid, affiliation: tier)
-                        }
-                        return (index, .entries(entries.compactMap(FFIInbound.roomMember)))
+                        return (index, .entries(try await fetch(tier)))
                     } catch PortError.notConnected {
                         return (index, .notConnected)
                     } catch {

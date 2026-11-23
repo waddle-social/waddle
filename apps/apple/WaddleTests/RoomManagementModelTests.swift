@@ -182,6 +182,15 @@ final class RoomManagementModelTests: XCTestCase {
         XCTAssertFalse(model.canAdd)
     }
 
+    /// An owner reads the banned with the members; they are not in the group.
+    func testAddPeopleStillOffersSomeoneBanned() async {
+        let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo])
+
+        await model.excludeMembers { [RoomMember(jid: SampleSession.theo, nick: "Theo", affiliation: .outcast)] }
+
+        XCTAssertEqual(model.excluded, [SampleSession.jo])
+    }
+
     func testAddPeopleCarriesOnWhenTheMemberListFails() async {
         let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo])
 

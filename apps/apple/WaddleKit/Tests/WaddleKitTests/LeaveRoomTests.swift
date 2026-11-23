@@ -192,6 +192,71 @@ struct LeaveRoomTests {
         #expect(port.membershipWrites.map(\.membership) == [.left])
     }
 
+    /// Right after launch nothing says which rooms the account left until
+    /// its bookmarks are read: joining one it left would show it there.
+    @Test func aFirstLookupThatCannotReadTheBookmarksJoinsOnlyGroupChats() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directoryRetryDelays = [60]
+        let group = Channel(roomJID: bare("group@muc.waddle.test"), name: "group", isGroupDM: true)
+        port.topology = Topology(spaces: [], channels: [general, group], ownBookmarksLoaded: false)
+
+        await coordinator.refreshDirectory()
+
+        #expect(port.joined == [group.roomJID])
+        #expect(coordinator.directory.channels.map(\.roomJID) == [room])
+    }
+
+    @Test func bookmarksThatCouldNotBeReadOnTheFirstLookupAreReadAgain() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directoryRetryDelays = [0.01]
+        let random = Channel(roomJID: bare("random@muc.waddle.test"), name: "random")
+        let gone = Channel(roomJID: bare("gone@muc.waddle.test"), name: "gone", hasLeft: true)
+        port.topology = Topology(spaces: [], channels: [general, random], ownBookmarksLoaded: false)
+        await coordinator.refreshDirectory()
+        coordinator.handle(.inboxPush(inboxRow(unread: 4)))
+
+        // The account left general, and gone, which no space lists.
+        port.topology = Topology(spaces: [], channels: [general.with(hasLeft: true), random, gone])
+        await eventually { coordinator.directoryRetryTask == nil }
+
+        #expect(port.topologyRequests == 2)
+        #expect(coordinator.directory.channels.map(\.roomJID) == [random.roomJID])
+        #expect(Set(coordinator.directory.leftRooms.map(\.roomJID)) == [room, gone.roomJID])
+        #expect(port.joined == [random.roomJID])
+        #expect(coordinator.unread.count(for: roomConversation) == 0)
+    }
+
+    /// Until then no space room is joined, so the reads go on, less often.
+    @Test func theBookmarksAreReadAgainUntilTheyLoad() async throws {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directoryRetryDelays = [0.01]
+        port.topology = Topology(spaces: [], channels: [general], ownBookmarksLoaded: false)
+        await coordinator.refreshDirectory()
+
+        await eventually { port.topologyRequests >= 4 }
+        #expect(port.joined.isEmpty)
+        port.topology = Topology(spaces: [], channels: [general])
+        await eventually { coordinator.directoryRetryTask == nil }
+
+        #expect(port.joined == [room])
+    }
+
+    @Test func theBookmarksAreNotReadAgainForAnOldStream() {
+        let (coordinator, _) = online()
+        coordinator.scheduleDirectoryRetry(delays: [60])
+        #expect(coordinator.directoryRetryTask != nil)
+
+        coordinator.handle(.disconnected)
+
+        #expect(coordinator.directoryRetryTask == nil)
+    }
+
     @Test func leftRoomsKnownOnlyFromBookmarksStayLeftWhenBookmarksCannotBeRead() async throws {
         // Such a room is not in a lookup that could not read the bookmarks.
         let (coordinator, port) = online([general.with(hasLeft: true)])

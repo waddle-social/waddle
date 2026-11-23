@@ -1,7 +1,8 @@
 import Foundation
 
-/// RFC 6121 presence availability, folded to what the UI renders.
-public enum Availability: Hashable, Sendable, Comparable {
+/// RFC 6121 presence availability, folded to what the UI renders. The
+/// order of the cases means nothing: `mostAvailableRank` ranks them.
+public enum Availability: Hashable, Sendable {
     case available
     case chat
     case away
@@ -21,6 +22,21 @@ public enum Availability: Hashable, Sendable, Comparable {
     }
 
     public var isOnline: Bool { self != .offline }
+
+    /// Which of a person's devices speaks for them, lowest first (ADR-010):
+    /// a deliberate do not disturb wins over every other online state, then
+    /// available (free to chat first), away, extended away, offline. The
+    /// web follows the same order (`chat/src/presence/most-available.ts`).
+    var mostAvailableRank: Int {
+        switch self {
+        case .doNotDisturb: return 0
+        case .chat: return 1
+        case .available: return 2
+        case .away: return 3
+        case .extendedAway: return 4
+        case .offline: return 5
+        }
+    }
 
     /// The `<show/>` value to send for this availability; `nil` means plain
     /// available.

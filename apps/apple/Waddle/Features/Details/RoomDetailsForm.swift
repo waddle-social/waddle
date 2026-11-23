@@ -58,10 +58,11 @@ struct RoomDetailsForm: View {
         return MemberRoster.cards(present: present, members: nil, contacts: [:]).count
     }
 
-    /// Us, the people here and, once loaded, every member.
+    /// Us, the people here and, once loaded, every member. Not the banned,
+    /// which owners and admins load with the members.
     private func groupMembers() -> Set<BareJID> {
         let present = (session.presence.occupants[room] ?? [:]).values.compactMap(\.realJID)
-        let members = model.members?.map(\.jid) ?? []
+        let members = model.members?.filter { $0.affiliation != .outcast }.map(\.jid) ?? []
         return Set(present + members + [session.account.jid])
     }
 }

@@ -108,6 +108,11 @@ public final class SessionCoordinator {
     @ObservationIgnored var pendingInboxReads: [InboxReadKey: PendingInboxRead] = [:]
     @ObservationIgnored var inboxHydrateTask: Task<Void, Never>?
     @ObservationIgnored var inboxHydrateRetryDelays: [TimeInterval] = [2, 8]
+    /// A directory lookup that could not read the account's bookmarks is
+    /// tried again after these delays, then after the last one until it
+    /// reads them (`scheduleDirectoryRetry`).
+    @ObservationIgnored var directoryRetryTask: Task<Void, Never>?
+    @ObservationIgnored var directoryRetryDelays: [TimeInterval] = [2, 8, 30, 60]
     /// Rows whose last `<mark-read/>` the server refused, with the newest
     /// stanza id that read covered. The row is not read again automatically
     /// while the server still reports that id; a newer message retries.
@@ -116,6 +121,15 @@ public final class SessionCoordinator {
     /// there stay addressable by username in that room's sends.
     @ObservationIgnored var mentionSearches = MentionDirectorySearch()
     @ObservationIgnored var visibleConversation: ConversationID?
+    /// The conversation `open` was last called for. Screens open and close
+    /// a conversation more than once while it stays the one being read:
+    /// the split view builds its screen twice, and on a phone a thread or
+    /// its details cover it and uncover it again.
+    @ObservationIgnored var lastOpenedConversation: ConversationID?
+    /// Where the last opened conversation puts its "New messages" divider:
+    /// the first row that was unread when it was opened. Kept until another
+    /// conversation is opened, as the web does.
+    var unreadAnchors: [ConversationID: String] = [:]
     /// The room thread on screen, if any.
     @ObservationIgnored var visibleThread: ThreadKey?
     @ObservationIgnored var isAppActive = true
@@ -432,6 +446,9 @@ public final class SessionCoordinator {
         pendingInboxReads.removeAll()
         refusedInboxReads.removeAll()
         cancelInboxHydrate()
+        cancelDirectoryRetry()
+        lastOpenedConversation = nil
+        unreadAnchors.removeAll()
         threadHistory.clear()
         unreadOverview.reset()
         community.reset()
@@ -461,6 +478,7 @@ public final class SessionCoordinator {
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
             cancelInboxHydrate()
+            cancelDirectoryRetry()
             retryWhenConnectSettles = false
             connectWatchdog?.cancel()
             connectWatchdog = nil
@@ -492,6 +510,7 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = nil
             cancelInboxHydrate()
+            cancelDirectoryRetry()
             isSendReady = false
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
