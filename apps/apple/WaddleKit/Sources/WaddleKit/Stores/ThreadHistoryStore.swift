@@ -20,9 +20,7 @@ public struct ThreadHistory: Equatable, Sendable {
     public static func build(from page: ArchivePage, thread: ThreadKey, account: AccountIdentity) -> ThreadHistory {
         let scratch = TimelineStore()
         scratch.account = account
-        for message in page.messages {
-            scratch.ingest(message)
-        }
+        scratch.ingest(contentsOf: page.messages)
         let timeline = scratch.timeline(for: .room(thread.room))
         let root = timeline.item(withID: thread.threadID)
             ?? timeline.items.first { $0.isFeedVisible && $0.message.thread == thread.threadID }

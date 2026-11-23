@@ -46,6 +46,9 @@ public final class TimelineStore {
     private var parked: [ConversationID: [RankedMutation]] = [:]
     private var newestWireDate: [ConversationID: Date] = [:]
     private var insertionCounter: Int64 = 0
+    /// Conversations a batch changed, published when it ends; nil outside
+    /// a batch.
+    private var conversationsChangedInBatch: Set<ConversationID>?
 
     /// Rows a conversation keeps once live inserts start trimming.
     public var capacity: Int { maxItemsPerConversation }
@@ -72,6 +75,23 @@ public final class TimelineStore {
               let route = account.route(message)
         else { return .ignored }
         return ingest(message, route: route, receivedAt: receivedAt)
+    }
+
+    /// Ingests a batch of messages, such as an archive page, as one change:
+    /// each conversation it touches publishes once, not once per message.
+    /// Rows stay sorted throughout, so the timeline and the results are the
+    /// same as ingesting the messages one by one.
+    @discardableResult
+    public func ingest(contentsOf messages: [WireMessage], receivedAt: Date = Date()) -> [TimelineIngestResult] {
+        assert(conversationsChangedInBatch == nil, "batches do not nest")
+        conversationsChangedInBatch = []
+        let results = messages.map { ingest($0, receivedAt: receivedAt) }
+        let changed = conversationsChangedInBatch ?? []
+        conversationsChangedInBatch = nil
+        for conversation in changed {
+            publish(conversation)
+        }
+        return results
     }
 
     /// Ingests a stanza whose route is already known.
@@ -216,8 +236,9 @@ public final class TimelineStore {
             roomArchiveUID: item.roomArchiveUID
         )
         entry = drainParked(into: entry, conversation: conversation)
-        list.append(entry)
-        list.sort(by: Entry.precedes)
+        // Into place rather than append-and-sort: the list is already sorted.
+        let position = list.lastIndex { !Entry.precedes(entry, $0) }.map { $0 + 1 } ?? list.startIndex
+        list.insert(entry, at: position)
         var trimmedArchive = false
         if !entry.isArchived {
             let overflow = list.count - maxItemsPerConversation
@@ -437,6 +458,10 @@ public final class TimelineStore {
     // MARK: - Publishing
 
     private func publish(_ conversation: ConversationID) {
+        if conversationsChangedInBatch != nil {
+            conversationsChangedInBatch?.insert(conversation)
+            return
+        }
         timeline(for: conversation).publish((entries[conversation] ?? []).map(enriched))
     }
 
