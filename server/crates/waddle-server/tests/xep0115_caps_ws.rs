@@ -726,6 +726,74 @@ async fn caps_reply_with_xep0128_form_verifies_and_caches() {
     let _ = admin2.close().await;
 }
 
+// XEP-0115 §5.3 complex generation example: identities carry `xml:lang`
+// and the reply includes an XEP-0128 software-info form. The recomputed
+// ver MUST include the languages (§5.1 step 2.1) and equal the spec's
+// `q07IKJEyjvHSyhy//CH0CxmKi8w=`, so the reply is verified and cached.
+#[tokio::test]
+async fn caps_reply_with_identity_xml_lang_verifies_and_caches() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "caps-lang-1").await;
+    let admin_full_jid = admin.full_jid.clone().expect("full jid");
+
+    let node = "http://psi-im.org";
+    let ver = "q07IKJEyjvHSyhy//CH0CxmKi8w=";
+
+    admin
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("send presence with caps");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    let iq_id = extract_iq_id(&disco_query);
+
+    admin
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="result" id="{iq_id}" from="{admin_full_jid}"><query xmlns="{NS_DISCO_INFO}" node="{node}#{ver}"><identity xml:lang="en" category="client" name="Psi 0.11" type="pc"/><identity xml:lang="el" category="client" name="&#936; 0.11" type="pc"/><feature var="http://jabber.org/protocol/caps"/><feature var="http://jabber.org/protocol/disco#info"/><feature var="http://jabber.org/protocol/disco#items"/><feature var="http://jabber.org/protocol/muc"/><x xmlns="jabber:x:data" type="result"><field var="FORM_TYPE" type="hidden"><value>urn:xmpp:dataforms:softwareinfo</value></field><field var="ip_version" type="text-multi"><value>ipv4</value><value>ipv6</value></field><field var="os"><value>Mac</value></field><field var="os_version"><value>10.5.1</value></field><field var="software"><value>Psi</value></field><field var="software_version"><value>0.11</value></field></x></query></iq>"#
+        ))
+        .await
+        .expect("admin replies with xml:lang identities");
+
+    ping_anchor(&mut admin, "caps-lang-anchor-1").await;
+
+    // A second resource advertising the same ver MUST be a cache hit.
+    let mut admin2 = admin_client(&server, "caps-lang-2").await;
+    admin2
+        .send(&format!(
+            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-1" node="{node}" ver="{ver}"/></presence>"#
+        ))
+        .await
+        .expect("admin2 sends caps");
+    ping_anchor(&mut admin2, "caps-lang-anchor-2").await;
+
+    let timed = tokio::time::timeout(
+        Duration::from_millis(50),
+        admin2.recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        }),
+    )
+    .await;
+    assert!(
+        timed.is_err(),
+        "identity xml:lang MUST be preserved so the §5.3 ver verifies and \
+         caches; second advert should be a hit. Got: {timed:?}"
+    );
+
+    let _ = admin.close().await;
+    let _ = admin2.close().await;
+}
+
 // ============================================================================
 // Test 6 — caps_unsupported_hash_algorithm_skips_resolution
 // ============================================================================

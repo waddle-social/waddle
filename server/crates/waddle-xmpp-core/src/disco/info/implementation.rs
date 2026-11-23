@@ -264,7 +264,11 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
                         ))
                     })?
                     .to_string();
-                let lang = child.attr("xml:lang").map(str::to_string);
+                // `xml:lang` lives in the XML namespace; minidom's plain
+                // `attr("xml:lang")` never matches it.
+                let lang = child
+                    .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                    .map(str::to_string);
                 let name = child.attr("name").map(str::to_string);
                 let key = (
                     category.clone(),
