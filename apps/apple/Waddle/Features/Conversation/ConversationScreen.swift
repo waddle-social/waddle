@@ -92,6 +92,7 @@ private struct ConversationContent: View {
             .toolbar {
                 ConversationToolbar(
                     conversation: conversation,
+                    isCompact: !placement.usesInspector,
                     canCall: conversation.isRoom
                         ? session.canJoinGroupCall(in: conversation.jid)
                         : !session.calls.state.isLive && session.connection == .online,

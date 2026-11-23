@@ -75,10 +75,7 @@ private struct HuddleSurface<S: InsettableShape>: ViewModifier {
     }
 
     private var ground: some View {
-        let shadowColor = scheme == .dark ? Color.black : Color(red: 11 / 255, green: 14 / 255, blue: 19 / 255)
-        return elevation.shadows(scheme).reduce(AnyView(shape.fill(fill))) { view, shadow in
-            AnyView(view.shadow(color: shadowColor.opacity(shadow.opacity), radius: shadow.radius, y: shadow.y))
-        }
+        shape.fill(fill).huddleShadow(elevation)
     }
 
     /// Night's light top edge (web `shadows.edgeLight`).
@@ -95,7 +92,26 @@ private struct HuddleSurface<S: InsettableShape>: ViewModifier {
     }
 }
 
+/// The shadow of an elevation, without its border.
+private struct HuddleShadow: ViewModifier {
+    let elevation: HuddleElevation
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        let shadowColor = scheme == .dark ? Color.black : Color(red: 11 / 255, green: 14 / 255, blue: 19 / 255)
+        return elevation.shadows(scheme).reduce(AnyView(content)) { view, shadow in
+            AnyView(view.shadow(color: shadowColor.opacity(shadow.opacity), radius: shadow.radius, y: shadow.y))
+        }
+    }
+}
+
 extension View {
+    /// Casts the shadow of `elevation` and nothing else, for a surface that
+    /// draws its own border.
+    func huddleShadow(_ elevation: HuddleElevation) -> some View {
+        modifier(HuddleShadow(elevation: elevation))
+    }
+
     /// Puts this view on a Polar Huddle surface: a filled `shape` with the
     /// border, light edge and shadow of `elevation`.
     func huddleSurface<S: InsettableShape>(

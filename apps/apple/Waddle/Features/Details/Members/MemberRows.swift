@@ -80,7 +80,8 @@ private struct MemberCardLabel<Lines: View>: View {
 
 /// Affiliation and up to two hats in their colours (Android `RoleLine`):
 /// owner in gold, admin and hats in action, banned in danger, the rest
-/// muted.
+/// muted. Gold and action text are one colour, so owner, admin and hats
+/// look alike, as in the Penpot member frames: the word tells them apart.
 struct MemberRoleLine: View {
     let affiliation: RoomAffiliation
     let hats: [Hat]

@@ -23,7 +23,9 @@ let screenGoldenOSVersion = 27
 /// empty window, the way a sheet's toolbar and size are decided: on a Mac
 /// only the sheet is captured, on iOS the whole window under it. A sheet
 /// is captured without keyboard focus, so no caret blinks and a Mac draws
-/// it as an inactive window whatever else the test run has open.
+/// it as an inactive window whatever else the test run has open. The view
+/// gets the app's tint, as both shells give it, so system controls draw in
+/// the action colour rather than system blue.
 ///
 /// `precision` is the share of pixels that must match; lower it only for
 /// what moves on its own, such as a spinner.
@@ -41,6 +43,7 @@ func assertScreenSnapshot<V: View>(
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion == screenGoldenOSVersion,
         "Screen goldens are recorded on OS \(screenGoldenOSVersion)"
     )
+    let view = view.tint(Theme.Colors.action)
     for theme in SnapshotTheme.allCases {
         let image = asSheet
             ? try await renderScreen(SheetPresenter(sheet: view), theme: theme, size: size, capturesSheet: true)
