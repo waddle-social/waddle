@@ -148,9 +148,7 @@ enum UnreadOverview {
     private static func scratchTimeline(_ page: ArchivePage, conversation: ConversationID, account: AccountIdentity) -> ConversationTimeline {
         let scratch = TimelineStore()
         scratch.account = account
-        for message in page.messages {
-            scratch.ingest(message)
-        }
+        scratch.ingest(contentsOf: page.messages)
         return scratch.timeline(for: conversation)
     }
 }

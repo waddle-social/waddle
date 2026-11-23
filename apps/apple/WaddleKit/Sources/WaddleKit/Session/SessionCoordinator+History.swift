@@ -145,9 +145,7 @@ extension SessionCoordinator {
         let page = try await port.searchHistory(of: conversation, query: trimmed, max: Self.historyPageSize)
         let scratch = TimelineStore()
         scratch.account = account
-        for message in page.messages {
-            scratch.ingest(message)
-        }
+        scratch.ingest(contentsOf: page.messages)
         return scratch.timeline(for: conversation).feedItems.reversed()
     }
 
@@ -167,8 +165,7 @@ extension SessionCoordinator {
     }
 
     func ingestArchive(_ page: ArchivePage) {
-        for message in page.messages {
-            let result = timelines.ingest(message)
+        for result in timelines.ingest(contentsOf: page.messages) {
             if case let .inserted(item) = result,
                !item.conversation.isRoom,
                item.tombstone == nil {

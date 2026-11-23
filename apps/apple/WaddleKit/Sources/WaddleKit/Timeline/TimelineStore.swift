@@ -46,6 +46,9 @@ public final class TimelineStore {
     private var parked: [ConversationID: [RankedMutation]] = [:]
     private var newestWireDate: [ConversationID: Date] = [:]
     private var insertionCounter: Int64 = 0
+    /// Conversations a batch changed, sorted and published when it ends;
+    /// nil outside a batch.
+    private var batchChanged: Set<ConversationID>?
 
     /// Rows a conversation keeps once live inserts start trimming.
     public var capacity: Int { maxItemsPerConversation }
@@ -72,6 +75,25 @@ public final class TimelineStore {
               let route = account.route(message)
         else { return .ignored }
         return ingest(message, route: route, receivedAt: receivedAt)
+    }
+
+    /// Ingests an archive page as one change. Each conversation it touches
+    /// sorts and publishes once, not once per message; the timeline and
+    /// the results are the same as ingesting the messages one by one.
+    @discardableResult
+    public func ingest(contentsOf messages: [WireMessage], receivedAt: Date = Date()) -> [TimelineIngestResult] {
+        guard batchChanged == nil else {
+            return messages.map { ingest($0, receivedAt: receivedAt) }
+        }
+        batchChanged = []
+        let results = messages.map { ingest($0, receivedAt: receivedAt) }
+        let changed = batchChanged ?? []
+        batchChanged = nil
+        for conversation in changed {
+            entries[conversation]?.sort(by: Entry.precedes)
+            publish(conversation)
+        }
+        return results
     }
 
     /// Ingests a stanza whose route is already known.
@@ -198,7 +220,9 @@ public final class TimelineStore {
             }
             if let replaced = updated {
                 list[index] = drainParked(into: replaced, conversation: conversation)
-                list.sort(by: Entry.precedes)
+                if batchChanged == nil {
+                    list.sort(by: Entry.precedes)
+                }
                 entries[conversation] = list
                 publish(conversation)
             }
@@ -217,8 +241,12 @@ public final class TimelineStore {
         )
         entry = drainParked(into: entry, conversation: conversation)
         list.append(entry)
-        list.sort(by: Entry.precedes)
         var trimmedArchive = false
+        // A batch sorts once at its end; a live insert sorts now, since it
+        // trims from the oldest end.
+        if batchChanged == nil || !entry.isArchived {
+            list.sort(by: Entry.precedes)
+        }
         if !entry.isArchived {
             let overflow = list.count - maxItemsPerConversation
             if overflow > 0 {
@@ -437,6 +465,10 @@ public final class TimelineStore {
     // MARK: - Publishing
 
     private func publish(_ conversation: ConversationID) {
+        if batchChanged != nil {
+            batchChanged?.insert(conversation)
+            return
+        }
         timeline(for: conversation).publish((entries[conversation] ?? []).map(enriched))
     }
 
