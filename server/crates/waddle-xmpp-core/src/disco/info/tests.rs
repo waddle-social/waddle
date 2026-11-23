@@ -423,3 +423,27 @@ fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
         "urn:waddle:call-lifecycle:0"
     );
 }
+
+/// XEP-0115 §5.1 step 2.1: identity `xml:lang` MUST be read from the XML
+/// namespace attribute so recomputed verification strings include it.
+#[test]
+fn test_parse_disco_info_response_reads_identity_xml_lang() {
+    let query: Element = format!(
+        "<query xmlns='{DISCO_INFO_NS}'>\
+         <identity category='client' type='pc' xml:lang='en' name='Psi 0.11'/>\
+         <identity category='client' type='pc' xml:lang='el' name='&#936; 0.11'/>\
+         <identity category='client' type='pc' name='No Lang'/>\
+         <feature var='{DISCO_INFO_NS}'/></query>"
+    )
+    .parse()
+    .expect("query parses");
+
+    let response = parse_disco_info_response(&query).expect("parses");
+    let langs: Vec<Option<&str>> = response
+        .identities
+        .iter()
+        .map(|identity| identity.lang.as_deref())
+        .collect();
+    assert_eq!(langs, vec![Some("en"), Some("el"), None]);
+    assert!(!response.ill_formed);
+}
