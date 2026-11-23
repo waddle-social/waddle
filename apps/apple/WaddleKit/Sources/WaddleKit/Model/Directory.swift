@@ -49,6 +49,9 @@ public struct Channel: Hashable, Sendable, Identifiable {
     public let hasLeft: Bool
     /// Whether room discovery advertised members-only access, or nil if unknown.
     public private(set) var membersOnly: Bool?
+    /// Who may pin, from the room's disco#info, which every occupant can
+    /// read; nil if unknown.
+    public private(set) var pinPermission: PinPermission?
 
     public init(
         roomJID: BareJID,
@@ -60,7 +63,8 @@ public struct Channel: Hashable, Sendable, Identifiable {
         autojoin: Bool = true,
         isGroupDM: Bool = false,
         membersOnly: Bool? = nil,
-        hasLeft: Bool = false
+        hasLeft: Bool = false,
+        pinPermission: PinPermission? = nil
     ) {
         self.roomJID = roomJID
         self.name = name
@@ -72,27 +76,36 @@ public struct Channel: Hashable, Sendable, Identifiable {
         self.isGroupDM = isGroupDM
         self.membersOnly = membersOnly
         self.hasLeft = hasLeft
+        self.pinPermission = pinPermission
     }
 
     public var conversation: ConversationID { .room(roomJID) }
 
-    /// The same room with a different name and summary.
-    public func with(name: String, summary: String?) -> Channel {
+    /// The same room with a different name, summary and pin permission.
+    public func with(name: String, summary: String?, pinPermission: PinPermission? = nil) -> Channel {
         Channel(
             roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
-            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft)
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft,
+            pinPermission: pinPermission ?? self.pinPermission)
     }
 
     /// The same room, left or rejoined.
     public func with(hasLeft: Bool) -> Channel {
         Channel(
             roomJID: roomJID, name: name, summary: summary, kind: kind, position: position,
-            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft)
+            spaceID: spaceID, autojoin: autojoin, isGroupDM: isGroupDM, membersOnly: membersOnly, hasLeft: hasLeft,
+            pinPermission: pinPermission)
     }
 
     func withKnownMembersOnly(_ value: Bool?) -> Channel {
         var copy = self
         copy.membersOnly = value ?? membersOnly
+        return copy
+    }
+
+    func withPinPermission(_ value: PinPermission?) -> Channel {
+        var copy = self
+        copy.pinPermission = value
         return copy
     }
 }

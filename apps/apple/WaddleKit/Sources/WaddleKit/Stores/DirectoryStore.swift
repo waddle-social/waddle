@@ -101,6 +101,10 @@ public final class DirectoryStore {
             let hasLeft = topology.ownBookmarksLoaded ? channel.hasLeft : known?.hasLeft ?? false
             return channel.with(hasLeft: hasLeft)
                 .withKnownMembersOnly(channel.membersOnly ?? known?.membersOnly)
+                // Discovery could not read the room (it then knows nothing of
+                // members-only either): who may pin stays as known. A room it
+                // did read decides, even by saying nothing.
+                .withPinPermission(channel.pinPermission ?? (channel.membersOnly == nil ? known?.pinPermission : nil))
         }.sorted(by: Self.listOrder)
         groupDMs = sorted.filter(\.isGroupDM)
         channels = sorted.filter { !$0.isGroupDM && !$0.hasLeft }

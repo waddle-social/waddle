@@ -46,18 +46,8 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         .and_then(|item| item.attr("jid"))
         .map(str::to_string);
     // XEP-0045 §7.2.2 self-presence (110) and the other muc#user
-    // status codes. Unparseable / unknown codes are preserved via
-    // `MucStatus::Other` rather than dropped.
-    let muc_status = muc_x
-        .map(|x| {
-            x.children()
-                .filter(|child| child.name() == "status" && child.ns() == NS_MUC_USER)
-                .filter_map(|status| status.attr("code"))
-                .filter_map(|code| code.parse::<u16>().ok())
-                .map(MucStatus::from_code)
-                .collect()
-        })
-        .unwrap_or_default();
+    // status codes.
+    let muc_status = muc_status_codes(muc_x);
     // XEP-0045 §10.9: a destroyed room removes each occupant with one
     // unavailable presence whose `muc#user` payload carries `<destroy/>`.
     let muc_destroyed = muc_x.is_some_and(|x| x.has_child("destroy", NS_MUC_USER));
@@ -147,6 +137,21 @@ pub(super) fn parse_presence(el: &Element) -> InboundPresence {
         idle_since,
         error,
     }
+}
+
+/// The `<status code='…'/>` children of a `muc#user` payload. Unknown
+/// codes are preserved via `MucStatus::Other`; unparseable ones dropped.
+pub(in crate::messaging) fn muc_status_codes(muc_x: Option<&Element>) -> Vec<MucStatus> {
+    muc_x
+        .map(|x| {
+            x.children()
+                .filter(|child| child.name() == "status" && child.ns() == NS_MUC_USER)
+                .filter_map(|status| status.attr("code"))
+                .filter_map(|code| code.parse::<u16>().ok())
+                .map(MucStatus::from_code)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {

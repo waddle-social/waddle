@@ -46,6 +46,14 @@ extension WaddleMessage: FFIMessageFields {}
 extension WaddleArchivedMessage: FFIMessageFields {}
 
 extension FFIInbound {
+    /// The room whose message says its configuration changed (XEP-0045
+    /// §10.2.1, status 104); see `XmppEvent.roomConfigurationChange`.
+    static func roomConfigurationChange(_ message: WaddleMessage) -> BareJID? {
+        XmppEvent.roomConfigurationChange(
+            from: message.from.flatMap(JID.init(parsing:)), isGroupchat: message.isMuc,
+            hasBody: message.body != nil, statusCodes: message.mucStatusCodes)
+    }
+
     /// A live stanza, with the live-only payloads (chat state, markers,
     /// pin broadcasts, XEP-0490 sibling cursors).
     static func wireMessage(_ message: WaddleMessage) -> WireMessage? {

@@ -52,8 +52,11 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
     let from = el.attr("from").map(String::from);
     let to = el.attr("to").map(String::from);
     let message_type = el.attr("type").unwrap_or("normal").to_string();
-    let muc_pm = matches!(message_type.as_str(), "chat" | "normal")
-        && el.get_child("x", NS_MUC_USER).is_some();
+    let muc_user = el.get_child("x", NS_MUC_USER);
+    let muc_pm = matches!(message_type.as_str(), "chat" | "normal") && muc_user.is_some();
+    // XEP-0045 §10.2.1: a configuration-change notice is a groupchat
+    // message whose muc#user payload carries only a status code.
+    let muc_status = crate::messaging::presence::muc_status_codes(muc_user);
 
     let body = el.get_child("body", NS_CLIENT).map(|e| e.text());
     let subject = el.get_child("subject", NS_CLIENT).map(|e| e.text());
@@ -296,6 +299,7 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         to,
         message_type,
         muc_pm,
+        muc_status,
         id,
         stanza_id,
         stanza_ids,

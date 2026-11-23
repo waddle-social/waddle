@@ -12,7 +12,8 @@ extension SessionCoordinator {
         try await managing(room) { generation in
             try await port.updateRoomSettings(patch, of: room)
             guard isCurrent(generation) else { return }
-            updateChannel(room, name: patch.name, summary: patch.summary)
+            updateChannel(room, name: patch.name, summary: patch.summary, pinPermission: patch.pinPermission)
+            if let saved = patch.pinPermission { directoryMutations.append(.setPinPermission(room, saved)) }
         }
     }
 
@@ -282,9 +283,12 @@ extension SessionCoordinator {
         silenceLeftRooms()
     }
 
-    private func updateChannel(_ room: BareJID, name: String?, summary: String? = nil) {
+    private func updateChannel(
+        _ room: BareJID, name: String?, summary: String? = nil, pinPermission: PinPermission? = nil
+    ) {
         guard let channel = directory.channel(for: room) else { return }
-        upsertChannel(channel.with(name: name ?? channel.name, summary: summary ?? channel.summary))
+        upsertChannel(channel.with(
+            name: name ?? channel.name, summary: summary ?? channel.summary, pinPermission: pinPermission))
     }
 }
 
@@ -310,4 +314,7 @@ enum DirectoryMutation {
     case remove(BareJID)
     /// The account left or rejoined the room here.
     case setLeft(BareJID, Bool)
+    /// The owner saved who may pin here, or the room was read again after
+    /// it said its configuration changed (nil: the room could not say).
+    case setPinPermission(BareJID, PinPermission?)
 }

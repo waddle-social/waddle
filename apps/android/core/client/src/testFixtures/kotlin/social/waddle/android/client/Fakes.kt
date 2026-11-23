@@ -69,6 +69,7 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePepProfile
 import social.waddle.client.ffi.WaddlePinEntry
+import social.waddle.client.ffi.WaddlePinPermission
 import social.waddle.client.ffi.WaddlePlanningItem
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
@@ -634,6 +635,12 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
         fetchRoomConfigFailure?.let { throw it }
         return roomConfig
     }
+
+    /** Pin policy served by [roomPinPermission], as a room's disco#info says it. */
+    @Volatile
+    var roomPinPermission: WaddlePinPermission? = null
+
+    override suspend fun roomPinPermission(roomJid: String): WaddlePinPermission? = roomPinPermission
 
     /** Recorded (roomJid, patch) §10.2 config submits. */
     val submitConfigCalls = CopyOnWriteArrayList<Pair<String, WaddleRoomConfigPatch>>()

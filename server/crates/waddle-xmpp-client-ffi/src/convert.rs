@@ -870,6 +870,7 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         displayed_marker_id: msg.displayed_marker_id,
         is_muc,
         muc_user: msg.muc_pm,
+        muc_status_codes: msg.muc_status.iter().map(|status| status.code()).collect(),
         thread: msg.thread_id.or(msg.thread),
         parent_thread_id: msg.parent_thread_id,
         markup_spans: markup_spans_to_ffi(msg.markup_spans),
@@ -2301,6 +2302,18 @@ mod tests {
         );
         assert_eq!(ffi.error_type, Some(WaddleStanzaErrorType::Auth));
         assert_eq!(ffi.error_text.as_deref(), Some("Members only"));
+    }
+
+    #[test]
+    fn a_room_configuration_change_notice_survives_inbound_to_ffi() {
+        // XEP-0045 §10.2.1: status 104, a change that is not privacy-related.
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='groupchat' from='room@conf.waddle.test'>\
+               <x xmlns='http://jabber.org/protocol/muc#user'><status code='104'/></x>\
+             </message>",
+        ));
+        assert_eq!(ffi.muc_status_codes, vec![104]);
+        assert!(ffi.body.is_none());
     }
 
     #[test]

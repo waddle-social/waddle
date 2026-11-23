@@ -28,6 +28,7 @@ final class FFIEventListener: WaddleEventListener {
             signals.setConnected(false)
             return .disconnected
         case let .message(message):
+            if let room = FFIInbound.roomConfigurationChange(message) { return .roomConfigurationChanged(room) }
             return FFIInbound.wireMessage(message).map(XmppEvent.message)
         case let .presence(presence):
             return FFIInbound.wirePresence(presence).map(XmppEvent.presence)

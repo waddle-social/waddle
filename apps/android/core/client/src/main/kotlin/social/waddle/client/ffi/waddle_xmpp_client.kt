@@ -795,6 +795,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_room_pin_permission(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_room_history(
@@ -1091,6 +1093,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_room(`pt
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_avatar(`ptr`: Long,`jid`: RustBuffer.ByValue,`knownIds`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_request_upload_slot(`ptr`: Long,`serviceJid`: RustBuffer.ByValue,`filename`: RustBuffer.ByValue,`size`: Long,`contentType`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_room_pin_permission(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_dm_history(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`query`: RustBuffer.ByValue,`maxMessages`: Int,
 ): Long
@@ -1555,6 +1559,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_request_upload_slot() != 21902) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_room_pin_permission() != 20947) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_search_dm_history() != 34217) {
@@ -2726,6 +2733,14 @@ public interface WaddleClientInterface {
     suspend fun `requestAvatar`(`jid`: kotlin.String, `knownIds`: List<kotlin.String>): WaddleAvatarResult?
 
     suspend fun `requestUploadSlot`(`serviceJid`: kotlin.String, `filename`: kotlin.String, `size`: kotlin.ULong, `contentType`: kotlin.String): WaddleUploadSlot?
+
+    /**
+     * Who may pin in `room_jid`, read again from its disco#info (the room
+     * metadata form every occupant can read). For a room's XEP-0045
+     * §10.2.1 configuration-change notice. `Ok(None)`: the room did not
+     * say. `Err`: the lookup failed.
+     */
+    suspend fun `roomPinPermission`(`roomJid`: kotlin.String): WaddlePinPermission?
 
     /**
      * Full-text search of the account's personal archive, filtered to a
@@ -4907,6 +4922,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterOptionalTypeWaddleUploadSlot.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Who may pin in `room_jid`, read again from its disco#info (the room
+     * metadata form every occupant can read). For a room's XEP-0045
+     * §10.2.1 configuration-change notice. `Ok(None)`: the room did not
+     * say. `Err`: the lookup failed.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `roomPinPermission`(`roomJid`: kotlin.String) : WaddlePinPermission? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_room_pin_permission(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeWaddlePinPermission.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -9010,6 +9052,12 @@ data class WaddleChannel (
      * means room discovery information was unavailable.
      */
     var `membersOnly`: kotlin.Boolean?
+    ,
+    /**
+     * Who may pin in the room, from its disco#info, which every
+     * occupant can read. `None` when discovery did not say.
+     */
+    var `pinPermission`: WaddlePinPermission? = null
 
 ){
 
@@ -9038,6 +9086,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalTypeWaddlePinPermission.read(buf),
         )
     }
 
@@ -9053,7 +9102,8 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterBoolean.allocationSize(value.`hasLeft`) +
             FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
             FfiConverterBoolean.allocationSize(value.`isGroupDm`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`) +
+            FfiConverterOptionalTypeWaddlePinPermission.allocationSize(value.`pinPermission`)
     )
 
     override fun write(value: WaddleChannel, buf: ByteBuffer) {
@@ -9069,6 +9119,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.write(value.`bookmarkName`, buf)
             FfiConverterBoolean.write(value.`isGroupDm`, buf)
             FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
+            FfiConverterOptionalTypeWaddlePinPermission.write(value.`pinPermission`, buf)
     }
 }
 
@@ -11208,6 +11259,13 @@ data class WaddleMessage (
      */
     var `mucUser`: kotlin.Boolean
     ,
+    /**
+     * XEP-0045 `<status code='…'/>` markers of the message's `muc#user`
+     * payload: 104 is §10.2.1's notice that the room's configuration
+     * changed, so occupants read it again.
+     */
+    var `mucStatusCodes`: List<kotlin.UShort> = listOf()
+    ,
     var `thread`: kotlin.String?
     ,
     var `parentThreadId`: kotlin.String?
@@ -11368,6 +11426,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterSequenceUShort.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeWaddleMarkupSpan.read(buf),
@@ -11419,6 +11478,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.allocationSize(value.`displayedMarkerId`) +
             FfiConverterBoolean.allocationSize(value.`isMuc`) +
             FfiConverterBoolean.allocationSize(value.`mucUser`) +
+            FfiConverterSequenceUShort.allocationSize(value.`mucStatusCodes`) +
             FfiConverterOptionalString.allocationSize(value.`thread`) +
             FfiConverterOptionalString.allocationSize(value.`parentThreadId`) +
             FfiConverterSequenceTypeWaddleMarkupSpan.allocationSize(value.`markupSpans`) +
@@ -11469,6 +11529,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.write(value.`displayedMarkerId`, buf)
             FfiConverterBoolean.write(value.`isMuc`, buf)
             FfiConverterBoolean.write(value.`mucUser`, buf)
+            FfiConverterSequenceUShort.write(value.`mucStatusCodes`, buf)
             FfiConverterOptionalString.write(value.`thread`, buf)
             FfiConverterOptionalString.write(value.`parentThreadId`, buf)
             FfiConverterSequenceTypeWaddleMarkupSpan.write(value.`markupSpans`, buf)

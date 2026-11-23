@@ -1023,6 +1023,7 @@ mod bookmark_merge {
             bookmark_name: None,
             is_group_dm: false,
             members_only: None,
+            pin_permission: None,
         }
     }
 
@@ -1389,6 +1390,114 @@ mod room_discovery {
             ]
         );
     }
+    /// A room's disco#info whose Waddle room-metadata form (XEP-0128) says
+    /// who may pin; `None` leaves the field out.
+    fn room_info_with_pin_permission(value: Option<&str>) -> Element {
+        use xmpp_parsers::data_forms::{DataForm, DataFormType, Field, FieldType};
+        let fields = value
+            .map(|value| Field {
+                var: Some(crate::xep::xep0045_owner::FIELD_PIN_PERMISSION.to_string()),
+                type_: FieldType::TextSingle,
+                label: None,
+                required: false,
+                desc: None,
+                options: vec![],
+                values: vec![value.to_string()],
+                media: vec![],
+                validate: None,
+            })
+            .into_iter()
+            .collect();
+        // Shaped as the server builds it (`build_room_metadata_form`): a
+        // result form whose FORM_TYPE is a hidden field.
+        let form = DataForm::new(
+            DataFormType::Result_,
+            super::super::WADDLE_ROOM_METADATA_FORM_TYPE,
+            fields,
+        );
+        let mut info = disco_info_response(&[MUC_NS]);
+        info.get_child_mut("query", "http://jabber.org/protocol/disco#info")
+            .expect("disco#info query")
+            .append_child(form.into());
+        info
+    }
+
+    /// #2606: members learn from the room's disco#info whether they may
+    /// pin, for catalog rooms and bookmark-only rooms.
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_reads_each_rooms_pin_permission() {
+        use crate::xep::xep0045_owner::RoomPinPermission;
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                Some("muc.example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='open@muc.example.com'/>
+                        <item jid='plain@muc.example.com'/>
+                    </query>
+                </iq>"#,
+                None => {
+                    return Ok(bookmarks_response(
+                        BOOKMARKS_NS,
+                        vec![bookmark("bookmarked@muc.example.com", None, false)],
+                    ));
+                }
+                Some("open@muc.example.com") => {
+                    return Ok(room_info_with_pin_permission(Some("anyone")));
+                }
+                Some("plain@muc.example.com") => {
+                    return Ok(room_info_with_pin_permission(None));
+                }
+                Some("bookmarked@muc.example.com") => {
+                    return Ok(room_info_with_pin_permission(Some("admins-only")));
+                }
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+        let rooms: Vec<_> = topology
+            .channels
+            .iter()
+            .map(|room| (room.room_jid.as_str(), room.pin_permission))
+            .collect();
+        assert_eq!(
+            rooms,
+            [
+                ("open@muc.example.com", Some(RoomPinPermission::Anyone)),
+                ("plain@muc.example.com", None),
+                (
+                    "bookmarked@muc.example.com",
+                    Some(RoomPinPermission::AdminsOnly)
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovers_space_channel_pin_permission() {
+        let channels =
+            discover_test_space_channels(Ok(room_info_with_pin_permission(Some("anyone")))).await;
+        assert_eq!(
+            channels[0].pin_permission,
+            Some(crate::xep::xep0045_owner::RoomPinPermission::Anyone)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unknown_pin_permission_is_unknown() {
+        let channels =
+            discover_test_space_channels(Ok(room_info_with_pin_permission(Some("everyone")))).await;
+        assert_eq!(channels[0].pin_permission, None);
+    }
+
     /// A deployment with two listed rooms, whose own-bookmarks query is
     /// answered by `bookmarks`.
     async fn discover_with_bookmarks(

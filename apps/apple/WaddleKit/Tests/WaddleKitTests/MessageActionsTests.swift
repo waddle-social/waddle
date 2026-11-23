@@ -141,7 +141,8 @@ struct MessageActionsTests {
     @Test func ownersAndAdminsMayPinMembersMightDirectMessagesCannot() {
         let coordinator = SessionCoordinator(account: me, port: FakePort())
         #expect(coordinator.pinAccess(in: bobConversation) == .denied)
-        #expect(coordinator.pinAccess(in: roomConversation) == .unknown)
+        // Not in the room: web offers no Pin there either.
+        #expect(coordinator.pinAccess(in: roomConversation) == .denied)
         for (affiliation, expected) in [(RoomAffiliation.owner, PinAccess.allowed), (.admin, .allowed), (.member, .unknown)] {
             _ = coordinator.presence.apply(WirePresence(
                 from: room.with(resource: "alice")!,
@@ -154,5 +155,100 @@ struct MessageActionsTests {
             ))
             #expect(coordinator.pinAccess(in: roomConversation) == expected)
         }
+    }
+
+    private func joined(
+        as affiliation: RoomAffiliation, where permission: PinPermission?
+    ) -> SessionCoordinator {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", pinPermission: permission),
+        ]))
+        _ = coordinator.presence.apply(WirePresence(
+            from: room.with(resource: "alice")!, kind: .available,
+            occupant: .init(affiliation: affiliation, role: .participant, realJID: jid("alice@waddle.test"), statusCodes: [110])))
+        return coordinator
+    }
+
+    /// #2606: the room's disco#info says who may pin, so a member knows
+    /// what web's `currentUserCanPin` knows: anyone in the room where
+    /// anyone may pin, only owners and admins where only they may.
+    @Test(arguments: [
+        (PinPermission.anyone, RoomAffiliation.member, PinAccess.allowed),
+        (.anyone, .none, .allowed),
+        (.adminsOnly, .member, .denied),
+        (.adminsOnly, .owner, .allowed),
+        (.adminsOnly, .admin, .allowed),
+    ])
+    func theRoomsPinPermissionDecidesWhetherAMemberMayPin(
+        permission: PinPermission, affiliation: RoomAffiliation, expected: PinAccess
+    ) {
+        #expect(joined(as: affiliation, where: permission).pinAccess(in: roomConversation) == expected)
+    }
+
+    private func joinedOnline(
+        as affiliation: RoomAffiliation, where permission: PinPermission?
+    ) -> (SessionCoordinator, FakePort) {
+        let port = FakePort()
+        let coordinator = SessionCoordinator(account: me, port: port)
+        coordinator.status.connection = .online
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", pinPermission: permission),
+        ]))
+        _ = coordinator.presence.apply(WirePresence(
+            from: room.with(resource: "alice")!, kind: .available,
+            occupant: .init(affiliation: affiliation, role: .participant, realJID: jid("alice@waddle.test"), statusCodes: [110])))
+        return (coordinator, port)
+    }
+
+    /// The room says its configuration changed (XEP-0045 §10.2.1, status
+    /// 104), as when an owner lets anyone pin from another client. Who may
+    /// pin is read again from the room, without waiting for a reconnect.
+    @Test func aConfigurationChangeReadsWhoMayPinAgain() async {
+        let (coordinator, port) = joinedOnline(as: .member, where: .adminsOnly)
+        #expect(coordinator.pinAccess(in: roomConversation) == .denied)
+        port.roomPinPermissionResult = .success(.anyone)
+        coordinator.handle(.roomConfigurationChanged(room))
+        await eventually { coordinator.pinAccess(in: roomConversation) == .allowed }
+        #expect(coordinator.pinAccess(in: roomConversation) == .allowed)
+        #expect(port.roomPinPermissionRequests == [room])
+    }
+
+    /// If the room cannot be read, what was known may be out of date: Pin
+    /// is offered from the menu, where the server has the last word.
+    @Test func aConfigurationChangeThatCannotBeReadLeavesPinsUnknown() async {
+        let (coordinator, port) = joinedOnline(as: .member, where: .adminsOnly)
+        port.roomPinPermissionResult = .failure(.timeout)
+        coordinator.handle(.roomConfigurationChanged(room))
+        await eventually { coordinator.pinAccess(in: roomConversation) == .unknown }
+        #expect(coordinator.pinAccess(in: roomConversation) == .unknown)
+    }
+
+    @Test func aConfigurationChangeFromARoomNotListedReadsNothing() async {
+        let (coordinator, port) = joinedOnline(as: .member, where: .adminsOnly)
+        coordinator.handle(.roomConfigurationChanged(bare("other@muc.waddle.test")))
+        await Task.yield()
+        #expect(port.roomPinPermissionRequests.isEmpty)
+    }
+
+    @Test func aMemberWhoseRoomSaysNothingOfPinsMightPin() {
+        #expect(joined(as: .member, where: nil).pinAccess(in: roomConversation) == .unknown)
+    }
+
+    @Test func noOneMayPinInARoomTheyAreNotIn() {
+        let coordinator = SessionCoordinator(account: me, port: FakePort())
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", pinPermission: .anyone),
+        ]))
+        #expect(coordinator.pinAccess(in: roomConversation) == .denied)
+    }
+
+    @Test func aMemberSeesPinOnTheToolbarWhereAnyoneMayPin() throws {
+        let item = try #require(timeline().item(withID: "root"))
+        let pinning = joined(as: .member, where: .anyone).pinAccess(in: roomConversation)
+        #expect(MessageActions.toolbar(for: item, in: context(pinning: pinning), isBeingEdited: false, maxButtons: 20)
+            .contains(.pin))
+        let strict = joined(as: .member, where: .adminsOnly).pinAccess(in: roomConversation)
+        #expect(!MessageActions.available(for: item, in: context(pinning: strict)).contains(.pin))
     }
 }

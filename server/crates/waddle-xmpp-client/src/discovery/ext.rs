@@ -318,6 +318,7 @@ impl DiscoveryExt for ClientHandle {
                         .filter(|description| !description.trim().is_empty())
                         .map(str::to_string);
                     (channel.is_group_dm, channel.members_only) = info.room_flags();
+                    channel.pin_permission = info.pin_permission();
                 }
                 channel
             })
@@ -454,6 +455,7 @@ impl DiscoveryExt for ClientHandle {
                         let mut description = None;
                         let mut is_group_dm = false;
                         let mut members_only = None;
+                        let mut pin_permission = None;
                         if let Ok(info) = self.discover_info(&room.jid, None).await {
                             if let Some(parsed_type) = info
                                 .form_value(WADDLE_ROOM_METADATA_FORM_TYPE, "waddle#channel_type")
@@ -469,6 +471,7 @@ impl DiscoveryExt for ClientHandle {
                                 .filter(|description| !description.trim().is_empty())
                                 .map(str::to_string);
                             (is_group_dm, members_only) = info.room_flags();
+                            pin_permission = info.pin_permission();
                         }
                         let name = room
                             .name
@@ -496,6 +499,7 @@ impl DiscoveryExt for ClientHandle {
                             bookmark_name: None,
                             is_group_dm,
                             members_only,
+                            pin_permission,
                         }
                     }
                 })

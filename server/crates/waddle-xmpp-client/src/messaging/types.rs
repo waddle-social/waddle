@@ -322,6 +322,9 @@ pub struct InboundMessage {
     pub message_type: String,
     /// XEP-0045 §7.5 private-message marker. Its absence does not rule out a MUC PM.
     pub muc_pm: bool,
+    /// XEP-0045 `<status code='…'/>` markers of the message's `muc#user`
+    /// payload, such as §10.2.1's configuration-change notice (104).
+    pub muc_status: Vec<MucStatus>,
     /// Identifier used to correlate this value with its protocol or domain record.
     pub id: Option<String>,
     /// First-listed XEP-0359 `<stanza-id/>` (a stanza may carry several,
@@ -950,6 +953,10 @@ impl MucRole {
 pub enum MucStatus {
     /// 100 — the room is non-anonymous (occupants' real JIDs exposed).
     NonAnonymous,
+    /// 104 — a room configuration change that is not privacy-related,
+    /// sent in a groupchat message from the room (XEP-0045 §10.2.1), so
+    /// occupants can read the room's configuration again.
+    ConfigurationChanged,
     /// 110 — self-presence: this presence refers to the recipient. On
     /// join it is sent last and marks the end of the room roster
     /// (XEP-0045 §7.2.2).
@@ -964,6 +971,7 @@ impl MucStatus {
     pub fn from_code(code: u16) -> Self {
         match code {
             100 => Self::NonAnonymous,
+            104 => Self::ConfigurationChanged,
             110 => Self::SelfPresence,
             other => Self::Other(other),
         }
@@ -974,6 +982,7 @@ impl MucStatus {
     pub fn code(self) -> u16 {
         match self {
             Self::NonAnonymous => 100,
+            Self::ConfigurationChanged => 104,
             Self::SelfPresence => 110,
             Self::Other(code) => code,
         }

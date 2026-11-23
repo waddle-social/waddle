@@ -86,6 +86,57 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// Another device made the room admins-only, and a lookup on its way
+    /// read that. A pin permission saved here meanwhile is newer and
+    /// stands; a rename made meanwhile carries only the old one, which
+    /// must not undo the lookup's.
+    @Test(arguments: [true, false])
+    func aLookupOnItsWayKeepsASavedPinPermissionButNotAStaleOne(savesPinPermission: Bool) async throws {
+        let (coordinator, port) = await connected()
+        coordinator.directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "Old name", membersOnly: false, pinPermission: .anyone),
+        ]))
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "Old name", membersOnly: false, pinPermission: .adminsOnly),
+        ])
+        port.holdsTopology = true
+        port.emit(.disconnected)
+        port.emit(.connected)
+        await eventually { port.heldTopology.count == 1 }
+        try #require(port.heldTopology.count == 1)
+        let patch = savesPinPermission ? RoomSettingsPatch(pinPermission: .anyone) : RoomSettingsPatch(name: "Friends")
+        try await coordinator.updateRoom(room, with: patch)
+        port.holdsTopology = false
+        port.releaseTopology()
+        await coordinator.readyTask?.value
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == (savesPinPermission ? .anyone : .adminsOnly))
+        await coordinator.stop()
+    }
+
+    /// A re-read of who may pin, asked on a connection that then dropped,
+    /// answers after the new connection's lookup: what that lookup read
+    /// stands, whatever the old read says.
+    @Test func aPinPermissionReadFromALostConnectionDoesNotOverwriteAFreshLookup() async throws {
+        let (coordinator, port) = await connected()
+        port.heldDirectoryVerbs = ["fetchRoomPinPermission"]
+        port.roomPinPermissionResult = .failure(.notConnected)
+        coordinator.handle(.roomConfigurationChanged(room))
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        try #require(port.heldDirectoryRequests.count == 1)
+        port.topology = Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "Old name", membersOnly: false, pinPermission: .anyone),
+        ])
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        port.releaseDirectoryRequests()
+        await eventually { port.roomPinPermissionReadsAnswered == 1 }
+        await Task.yield()
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        await reconnect(coordinator, port)
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        await coordinator.stop()
+    }
+
     @Test func deletionWhileAnEarlierJoinWaitsSkipsTheDeletedRoom() async throws {
         let port = FakePort()
         let concurrency = SessionCoordinator.maxConcurrentAutoJoins

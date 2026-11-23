@@ -33,7 +33,18 @@ struct RoomManagementTests {
         #expect(port.roomSettingsUpdates.map(\.patch) == [patch])
         #expect(coordinator.directory.channel(for: room) == Channel(
             roomJID: room, name: "New name", summary: "", kind: .forum,
-            position: 7, spaceID: "space", autojoin: false))
+            position: 7, spaceID: "space", autojoin: false, pinPermission: .adminsOnly))
+    }
+
+    /// The owner's change is what members of the room get from its
+    /// disco#info on the next look; until then this device knows it.
+    @Test func aSavedPinPermissionIsKnownAtOnce() async throws {
+        let (coordinator, _) = online(Channel(roomJID: room, name: "general", pinPermission: .adminsOnly))
+        try await coordinator.updateRoom(room, with: RoomSettingsPatch(name: "renamed"))
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .adminsOnly)
+        try await coordinator.updateRoom(room, with: RoomSettingsPatch(pinPermission: .anyone))
+        #expect(coordinator.directory.channel(for: room)?.pinPermission == .anyone)
+        #expect(coordinator.directory.channel(for: room)?.name == "renamed")
     }
 
     @Test func emptyPatchDoesNotSendARequest() async throws {

@@ -570,6 +570,8 @@ public final class SessionCoordinator {
             presenceModePicked(elsewhere: mode)
         case let .inboxPush(entry):
             applyInbox(entry)
+        case let .roomConfigurationChanged(room):
+            readPinPermissionAgain(of: room)
         case .authenticationFailed:
             callLifecycleOutbox?.stop()
             connectionEpoch += 1

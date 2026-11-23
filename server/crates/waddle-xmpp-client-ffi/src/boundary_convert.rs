@@ -47,6 +47,9 @@ pub(crate) fn topology_to_ffi(
                 bookmark_name: channel.bookmark_name,
                 is_group_dm: channel.is_group_dm,
                 members_only: channel.members_only,
+                pin_permission: channel
+                    .pin_permission
+                    .and_then(crate::room_admin::pin_permission_to_ffi),
             })
             .collect(),
         bookmarks_loaded: topology.bookmarks_loaded,
@@ -88,5 +91,64 @@ pub(crate) fn upload_slot_to_ffi(
             .into_iter()
             .map(|(name, value)| WaddleUploadHeader { name, value })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use waddle_xmpp_client::discovery::{
+        DiscoveredChannel, DiscoveredChannelType, DiscoveredTopology, SpaceNode,
+    };
+    use waddle_xmpp_client::xep::xep0045_owner::RoomPinPermission;
+
+    use super::topology_to_ffi;
+    use crate::WaddlePinPermission;
+
+    fn channel(jid: &str, pin_permission: Option<RoomPinPermission>) -> DiscoveredChannel {
+        DiscoveredChannel {
+            id: jid.to_string(),
+            room_jid: jid.parse().expect("room jid"),
+            name: jid.to_string(),
+            description: None,
+            channel_type: DiscoveredChannelType::Text,
+            position: 0,
+            space_id: SpaceNode::try_new("standalone").expect("space node"),
+            autojoin: true,
+            user_bookmark: None,
+            bookmark_name: None,
+            is_group_dm: false,
+            members_only: None,
+            pin_permission,
+        }
+    }
+
+    /// #2606: the room's pin policy from its disco#info reaches the apps.
+    #[test]
+    fn each_rooms_pin_permission_crosses_the_ffi() {
+        let topology = topology_to_ffi(DiscoveredTopology {
+            spaces: vec![],
+            channels: vec![
+                channel("open@muc.waddle.test", Some(RoomPinPermission::Anyone)),
+                channel(
+                    "strict@muc.waddle.test",
+                    Some(RoomPinPermission::AdminsOnly),
+                ),
+                channel("unknown@muc.waddle.test", None),
+            ],
+            bookmarks_loaded: true,
+        });
+        let pins: Vec<_> = topology
+            .channels
+            .iter()
+            .map(|channel| channel.pin_permission)
+            .collect();
+        assert_eq!(
+            pins,
+            [
+                Some(WaddlePinPermission::Anyone),
+                Some(WaddlePinPermission::AdminsOnly),
+                None,
+            ]
+        );
     }
 }

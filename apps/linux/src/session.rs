@@ -1017,6 +1017,7 @@ mod tests {
             bookmark_name: None,
             is_group_dm: group_dm,
             members_only: None,
+            pin_permission: None,
         }
     }
 
@@ -1054,6 +1055,7 @@ mod tests {
             displayed_marker_id: None,
             is_muc: kind == "groupchat",
             muc_user: false,
+            muc_status_codes: Vec::new(),
             thread: None,
             parent_thread_id: None,
             markup_spans: Vec::new(),

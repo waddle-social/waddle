@@ -43,9 +43,9 @@ public enum MessageAction: Hashable, Sendable {
     public var isOwn: Bool { self == .edit || self == .delete }
 }
 
-/// Whether the account may pin in a conversation. Owners and admins always
-/// may; a member may only where the room lets anyone pin, a setting the
-/// app cannot read; a 1:1 conversation has no pins.
+/// Whether the account may pin in a conversation. Only in a room it is in:
+/// owners and admins always may, anyone else where the room lets anyone
+/// pin, which its disco#info says. A 1:1 conversation has no pins.
 public enum PinAccess: Hashable, Sendable {
     case allowed
     case unknown
