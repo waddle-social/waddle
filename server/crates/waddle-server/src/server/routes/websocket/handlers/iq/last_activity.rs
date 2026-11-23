@@ -78,18 +78,14 @@ pub(super) async fn handle_last_activity_iq(
         // XEP-0012: only entities authorized to view the user's presence may
         // learn availability or last activity; everyone else gets the same
         // answer as for an offline user (forbidden / service-unavailable).
-        let authorized = match requester_authorized(state, &target_bare, sender_jid).await {
-            Ok(authorized) => authorized,
-            Err(error) => {
-                warn!(error = %error, target = %target_bare, "Failed to check last-activity presence authorization");
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-        };
+        let requester_bare = sender_jid.to_bare();
+        let authorized = requester_bare == target_bare
+            || crate::server::routes::websocket::s2s_accounts::shares_presence_with(
+                state,
+                &target_bare,
+                &requester_bare,
+            )
+            .await;
 
         if authorized {
             if !crate::server::routes::websocket::handlers::account_reads::available_resources(
@@ -167,27 +163,4 @@ pub(super) async fn handle_last_activity_iq(
         response_to,
         service_unavailable_iq_error("Service unavailable at this address."),
     )]
-}
-
-/// Whether `requester` may view `target`'s presence: the account owner, or a
-/// contact the target has granted a presence subscription (`from` or `both`
-/// in the target's roster, RFC 6121).
-async fn requester_authorized(
-    state: &WebSocketState,
-    target: &jid::BareJid,
-    requester: &FullJid,
-) -> Result<bool, String> {
-    let requester_bare = requester.to_bare();
-    if &requester_bare == target {
-        return Ok(true);
-    }
-    let item = state
-        .deps
-        .app_state
-        .db_pool
-        .roster_storage()
-        .get_roster_item(target, &requester_bare)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(item.is_some_and(|row| matches!(row.subscription.as_str(), "from" | "both")))
 }
