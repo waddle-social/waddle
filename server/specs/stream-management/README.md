@@ -11,13 +11,13 @@ From the repository root, with Bun and Java 21 available:
 
 ```sh
 bunx @informalsystems/quint@0.34.0 test --backend=typescript server/specs/stream-management/detached_resume_test.qnt
-bunx @informalsystems/quint@0.34.0 verify server/specs/stream-management/detached_resume.qnt --invariant=safety --max-steps=12
+bunx @informalsystems/quint@0.34.0 verify server/specs/stream-management/detached_resume.qnt --invariant=safety --backend=tlc
 ```
 
 The named runs cover stale claims and witnesses, successive generations,
 receipt abandonment, acknowledgment beyond exposure, expiry, owner loss,
-and the replay tail. The bounded check explores other orderings of those
-actions, including stuttering.
+and the replay tail. TLC explores all reachable states of this finite model, including other
+orderings of those actions.
 
 ## Correspondence to Rust
 
@@ -41,6 +41,6 @@ The model assumes a valid principal and successful atomic storage operations,
 with receipt observation allowed to lag behind commit. It uses small absolute
 ordinals and abstracts the resume deadline as a boolean. It excludes wire counter
 wraparound, XML and bytes, transport writes, live admissions after publication,
-database failure semantics, races to acquire the reaper claim, and liveness. The bound applies to the model. The
+database failure semantics, races to acquire the reaper claim, and liveness. The finite bounds apply to the model. The
 Rust integration suite remains the implementation check, and these Quint runs
 do not drive Rust.
