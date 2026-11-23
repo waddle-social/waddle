@@ -61,6 +61,7 @@
 		1275898A71F4C7113C30BE55 /* MessageAuthor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8C603A3D63D07896B4E31A /* MessageAuthor.swift */; };
 		13CE69FB5B3430AADAEA0595 /* CallTonePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11B35AA012A5570BDC2F1FD5 /* CallTonePlayer.swift */; };
 		13D3EBD2038B05681C5E7703 /* ComposerCommandPresentations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 601116D6B535017B344EB136 /* ComposerCommandPresentations.swift */; };
+		14E51840376DE4DC5695CEF9 /* RoomMemberTiersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 373EEFF1E0E590563534F2BB /* RoomMemberTiersTests.swift */; };
 		150013A0BA548F34390BB59C /* SettingsAccountSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0E6E5628B78C6A1CC7ABFA3 /* SettingsAccountSection.swift */; };
 		15BD6E9E3AA7AC85B17AE416 /* ThreadHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F17DF0FE07E8A1BF34248A8 /* ThreadHeaderView.swift */; };
 		15E36EA9870717DB1C2AFD6A /* RichTextModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8BDF2333452BD5C877BE946 /* RichTextModel.swift */; };
@@ -679,6 +680,7 @@
 		EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
 		EEC166182965A5C078ADF1CF /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
 		EF16198E05B173AE961CBB3A /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
+		F073BECBDC9338FABDC3FD75 /* RoomMemberTiersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 373EEFF1E0E590563534F2BB /* RoomMemberTiersTests.swift */; };
 		F119FB09C57B373CAF809F60 /* ProfileHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A859364D0F895078570C5D3 /* ProfileHeader.swift */; };
 		F1B2AF7A6916B85F91A7413A /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */; };
 		F1DF87FDD51F3048D6878FE8 /* ComposerTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB21941A20189E780D173236 /* ComposerTextSelection.swift */; };
@@ -807,6 +809,7 @@
 		35D9C8B1EC651E89CC813604 /* StickerPackComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerPackComposer.swift; sourceTree = "<group>"; };
 		35E3C407117633F6B4AEF680 /* ProfileAboutSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileAboutSection.swift; sourceTree = "<group>"; };
 		361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMessageOrderPicker.swift; sourceTree = "<group>"; };
+		373EEFF1E0E590563534F2BB /* RoomMemberTiersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomMemberTiersTests.swift; sourceTree = "<group>"; };
 		374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectNavigationRow.swift; sourceTree = "<group>"; };
 		38D6A2D53CA28F752EF4E16C /* RichTextLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichTextLayout.swift; sourceTree = "<group>"; };
 		39A5A759619EA0A17AE98EEE /* PushNotificationRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationRoutingTests.swift; sourceTree = "<group>"; };
@@ -1423,6 +1426,7 @@
 				74D8F9F8580CF2FA58D4DC9A /* PushTokenRegistrarTests.swift */,
 				A89AC45680C19E2523AED181 /* RoomManagementModelTests.swift */,
 				CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */,
+				373EEFF1E0E590563534F2BB /* RoomMemberTiersTests.swift */,
 				4CE564FF3A2D80291A80B47B /* ShellScreenSnapshotTests.swift */,
 				9255223F1551E4C3235D6786 /* StickerMessageContentTests.swift */,
 				53CA32D29737F48D0F044608 /* StickerPictureTests.swift */,
@@ -2565,6 +2569,7 @@
 				565A0EED96CE4A544C6BA0D1 /* PushTokenRegistrarTests.swift in Sources */,
 				5BFC030BEE448D9A7EAFD93F /* RoomManagementModelTests.swift in Sources */,
 				BD924BBCA116548EEA79D0AD /* RoomManagementSnapshotTests.swift in Sources */,
+				14E51840376DE4DC5695CEF9 /* RoomMemberTiersTests.swift in Sources */,
 				16C0F0284896F85A8930CB9E /* SampleSession+Conversation.swift in Sources */,
 				7DA1F5573360ED743EC26C20 /* SampleSession+Events.swift in Sources */,
 				9AF8D8419A17B5BB11E27F19 /* SampleSession+Rooms.swift in Sources */,
@@ -2919,6 +2924,7 @@
 				D5600BA079A4415FC5884B5D /* PushTokenRegistrarTests.swift in Sources */,
 				C7F3833B3853BF873EEB03C6 /* RoomManagementModelTests.swift in Sources */,
 				3969C52801321874826F0EA8 /* RoomManagementSnapshotTests.swift in Sources */,
+				F073BECBDC9338FABDC3FD75 /* RoomMemberTiersTests.swift in Sources */,
 				AB1F7ED59A0E6E56BA1A452C /* SampleSession+Conversation.swift in Sources */,
 				A5C5002F8E6A32B541CAA220 /* SampleSession+Events.swift in Sources */,
 				93C6BD02DF2DDAE77EE96741 /* SampleSession+Rooms.swift in Sources */,
