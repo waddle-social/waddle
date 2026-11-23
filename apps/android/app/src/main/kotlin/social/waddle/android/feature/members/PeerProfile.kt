@@ -167,7 +167,7 @@ private fun affiliationColor(affiliation: WaddleMucAffiliation): Color {
     val colors = Waddle.colors
     return when (affiliation) {
         WaddleMucAffiliation.OWNER -> colors.goldText
-        WaddleMucAffiliation.ADMIN -> colors.actionText
+        WaddleMucAffiliation.ADMIN -> colors.liveText
         WaddleMucAffiliation.OUTCAST -> colors.dangerText
         WaddleMucAffiliation.MEMBER, WaddleMucAffiliation.NONE -> colors.fgMuted
     }

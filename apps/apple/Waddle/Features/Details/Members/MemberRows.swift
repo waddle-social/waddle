@@ -103,7 +103,7 @@ struct MemberRoleLine: View {
     private var tone: Color {
         switch affiliation {
         case .owner: return Theme.Colors.goldText
-        case .admin: return Theme.Colors.actionText
+        case .admin: return Theme.Colors.liveText
         case .outcast: return Theme.Colors.dangerText
         case .member, .none: return Theme.Colors.fgMuted
         }
