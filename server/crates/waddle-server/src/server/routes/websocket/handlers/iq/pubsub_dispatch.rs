@@ -418,17 +418,47 @@ pub(super) async fn handle_pubsub_iq(
                         }
                     }
                 }
-                match crate::pubsub_authz::can_subscribe(
-                    &state.deps.protocol.pubsub_storage,
-                    &target_jid,
-                    &node,
-                    &user_jid,
-                    is_pep,
-                )
-                .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
+                let decision = if is_pep {
+                    crate::pubsub_authz::pep_read_decision(
+                        &state.deps.protocol.pubsub_storage,
+                        &crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool),
+                        &target_jid,
+                        &node,
+                        &user_jid,
+                    )
+                    .await
+                } else {
+                    crate::pubsub_authz::can_subscribe(
+                        &state.deps.protocol.pubsub_storage,
+                        &target_jid,
+                        &node,
+                        &user_jid,
+                        false,
+                    )
+                    .await
+                    .map(|allowed| {
+                        if allowed {
+                            crate::pubsub_authz::ReadDecision::Allowed
+                        } else {
+                            crate::pubsub_authz::ReadDecision::Denied
+                        }
+                    })
+                };
+                match decision {
+                    Ok(crate::pubsub_authz::ReadDecision::Allowed) => {}
+                    Ok(crate::pubsub_authz::ReadDecision::PresenceSubscriptionRequired) => {
+                        return vec![iq_to_xml(build_pubsub_error(
+                            iq,
+                            PubSubError::PresenceSubscriptionRequired,
+                        ))];
+                    }
+                    Ok(crate::pubsub_authz::ReadDecision::NotInRosterGroup) => {
+                        return vec![iq_to_xml(build_pubsub_error(
+                            iq,
+                            PubSubError::NotInRosterGroup,
+                        ))];
+                    }
+                    Ok(crate::pubsub_authz::ReadDecision::Denied) => {
                         let node_meta = state
                             .deps
                             .protocol
