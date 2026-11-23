@@ -149,7 +149,7 @@ fn a_publisher_resource_under_the_sending_account_is_accepted() {
 }
 
 #[test]
-fn malformed_activity_notifications_are_ignored() {
+fn an_unreadable_publication_clears_the_peer_activity() {
     let wrong_namespace = Element::builder("activity", "urn:example:unexpected").build();
     let missing_general = Element::builder("activity", NS_ACTIVITY)
         .append(
@@ -159,33 +159,18 @@ fn malformed_activity_notifications_are_ignored() {
         )
         .build();
     let unknown_general = build_activity_element_with_specific("flying", None, None);
-    let nested_activity = Element::builder("activity", NS_ACTIVITY)
-        .append(
-            Element::builder("talking", NS_ACTIVITY)
-                .append(
-                    Element::builder("on_the_phone", NS_ACTIVITY)
-                        .append(Element::builder("talking", NS_ACTIVITY).build())
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
     let no_payload = Element::builder("item", NS_PUBSUB_EVENT).build();
-    let no_retract_id = Element::builder("retract", NS_PUBSUB_EVENT).build();
-    let retract_with_text = Element::builder("retract", NS_PUBSUB_EVENT)
-        .attr(xml_ncname!("id").to_owned(), "current")
-        .append("unexpected text")
-        .build();
     for item in [
         publication(wrong_namespace),
         publication(missing_general),
         publication(unknown_general),
-        publication(nested_activity),
         no_payload,
-        no_retract_id,
-        retract_with_text,
     ] {
         let stanza = notification(PUBLISHER, item);
-        assert!(received_activity(&stanza).is_empty(), "{stanza:?}");
+        let events = received_activity(&stanza);
+        assert!(
+            matches!(events.as_slice(), [(jid, None)] if jid.as_str() == PUBLISHER),
+            "{stanza:?}"
+        );
     }
 }

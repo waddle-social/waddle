@@ -5,7 +5,6 @@
 
 use jid::BareJid;
 use minidom::Element;
-use xmpp_parsers::pubsub::event::Item;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
@@ -148,81 +147,58 @@ fn parse_activity_event(items: &Element) -> Option<PepItem> {
     }
 }
 
-/// Parse a peer activity update with the publisher identity intact.
+/// The activity a peer's PEP service says the account has now: `Some(None)`
+/// when it has none, `None` when the stanza is not an activity notification
+/// this client may believe.
 pub(crate) fn parse_activity_notification(
     message: &Element,
     account: &BareJid,
 ) -> Option<(BareJid, Option<UserActivity>)> {
-    let items = message
-        .get_child("event", NS_PUBSUB_EVENT)?
-        .get_child("items", NS_PUBSUB_EVENT)
-        .filter(|items| items.attr("node") == Some(NS_ACTIVITY))?;
-    // XEP-0163 §4.3.1 requires the PEP service to send from the owner's bare JID.
+    let event = message.get_child("event", NS_PUBSUB_EVENT)?;
+    let about_activity = |name| {
+        event
+            .get_child(name, NS_PUBSUB_EVENT)
+            .filter(|child| child.attr("node") == Some(NS_ACTIVITY))
+    };
+    // XEP-0163 §4.3.1: a PEP service sends from the owner's bare JID, so a
+    // full JID (a device, a MUC occupant) cannot speak for an account. The
+    // server sends our own notification to our other devices too.
     let from = message.attr("from")?.parse::<BareJid>().ok()?;
     if &from == account || message.attr("type") == Some("groupchat") {
         return None;
     }
-
-    // As in the web client, the last update wins for this singleton node.
-    let activity = items
-        .children()
-        .filter_map(|item| parse_activity_notification_item(item, &from))
-        .last()?;
+    // XEP-0060 §8.4.2, §8.5.2: a deleted or purged node holds nothing.
+    if about_activity("delete")
+        .or(about_activity("purge"))
+        .is_some()
+    {
+        return Some((from, None));
+    }
+    // The node holds one item, so the last change listed is its state now.
+    let change = about_activity("items")?.children().last()?;
+    if change.is("retract", NS_PUBSUB_EVENT) {
+        return Some((from, None));
+    }
+    if !change.is("item", NS_PUBSUB_EVENT) || !published_by(change, &from) {
+        return None;
+    }
+    // A new item replaces the last one whatever it holds, so one this client
+    // cannot read still means the earlier activity is gone.
+    let activity = change
+        .get_child("activity", NS_ACTIVITY)
+        .and_then(parse_activity_payload)
+        .filter(|activity| GENERAL_ACTIVITIES.contains(&activity.activity.as_str()));
     Some((from, activity))
 }
 
-fn parse_activity_notification_item(
-    item: &Element,
-    from: &BareJid,
-) -> Option<Option<UserActivity>> {
-    if item.is("retract", NS_PUBSUB_EVENT) {
-        let id = item.attr("id")?;
-        return (!id.is_empty()
-            && item.children().next().is_none()
-            && item.texts().all(|text| text.trim().is_empty()))
-        .then_some(None);
-    }
-    let item = Item::try_from(item.clone()).ok()?;
-    if item
-        .publisher
-        .is_some_and(|publisher| publisher.to_bare() != *from)
-    {
-        return None;
-    }
-    let activity = item
-        .payload
-        .filter(|payload| payload.is("activity", NS_ACTIVITY))?;
-    if activity.texts().any(|text| !text.trim().is_empty()) {
-        return None;
-    }
-    let mut children = activity.children();
-    let Some(general) = children.next() else {
-        return Some(None);
-    };
-    let mut specifics = general.children();
-    let specific = specifics.next();
-    if general.ns() != NS_ACTIVITY
-        || !GENERAL_ACTIVITIES.contains(&general.name())
-        || general.texts().any(|text| !text.trim().is_empty())
-        || specifics.next().is_some()
-        || specific
-            .filter(|specific| specific.ns() == NS_ACTIVITY)
-            .is_some_and(|specific| {
-                let mut extensions = specific.children();
-                specific.texts().any(|text| !text.trim().is_empty())
-                    || extensions
-                        .next()
-                        .is_some_and(|child| child.ns() == NS_ACTIVITY)
-                    || extensions.next().is_some()
-            })
-        || children
-            .next()
-            .is_some_and(|text| !text.is("text", NS_ACTIVITY) || text.children().next().is_some())
-        || children.next().is_some()
-    {
-        return None;
-    }
-    parse_activity_payload(&activity).map(Some)
+/// XEP-0060 §7.1.2.1: an item may name its publisher; one that names another
+/// account is not the owner's.
+fn published_by(item: &Element, owner: &BareJid) -> bool {
+    item.attr("publisher").is_none_or(|publisher| {
+        publisher
+            .parse::<jid::Jid>()
+            .is_ok_and(|publisher| publisher.to_bare() == *owner)
+    })
 }
 
 fn parse_tune_event(items: &Element) -> Option<PepItem> {
