@@ -53,6 +53,13 @@ import "github.com/cuenv/cuenv/schema"
 			    ),
 			}
 
+			def normalize_endpoint(endpoint: str) -> str:
+			    if endpoint.startswith("grpcs://"):
+			        return "https://" + endpoint[len("grpcs://"):]
+			    if endpoint.startswith("grpc://"):
+			        return "http://" + endpoint[len("grpc://"):]
+			    return endpoint
+
 			def parse_bazelrc(path: Path) -> bool:
 			    text = path.read_text(encoding="utf-8", errors="replace")
 			    endpoint = ""
@@ -73,7 +80,8 @@ import "github.com/cuenv/cuenv/schema"
 			            parsed["CUENV_REMOTE_CACHE_CREDENTIAL_HELPER"] = m.group(1)
 			    if not endpoint:
 			        return False
-			    values["CUENV_REMOTE_CACHE"] = endpoint
+			    values["CUENV_REMOTE_CACHE"] = normalize_endpoint(endpoint)
+			    values["CUENV_REMOTE_CACHE_PROTOCOL"] = "grpc"
 			    values.update(parsed)
 			    return True
 
@@ -98,7 +106,8 @@ import "github.com/cuenv/cuenv/schema"
 			        data = json.loads(proc.stdout)
 			        endpoint = (data.get("endpoint") or "").strip()
 			        if endpoint:
-			            values["CUENV_REMOTE_CACHE"] = endpoint
+			            values["CUENV_REMOTE_CACHE"] = normalize_endpoint(endpoint)
+			            values["CUENV_REMOTE_CACHE_PROTOCOL"] = "grpc"
 			            if data.get("server_ca_cert"):
 			                values["CUENV_REMOTE_CACHE_CA_CERT"] = data["server_ca_cert"]
 			            if data.get("client_cert") and data.get("client_key"):
