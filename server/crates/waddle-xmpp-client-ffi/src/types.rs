@@ -80,6 +80,11 @@ pub struct WaddleMessage {
     /// invite/decline. Never a 1:1 DM, even when `message_type` is `chat`
     /// or `normal` and `from` is a room JID — route as room traffic.
     pub muc_user: bool,
+    /// XEP-0045 `<status code='…'/>` markers of the message's `muc#user`
+    /// payload: 104 is §10.2.1's notice that the room's configuration
+    /// changed, so occupants read it again.
+    #[uniffi(default = [])]
+    pub muc_status_codes: Vec<u16>,
     pub thread: Option<String>,
     pub parent_thread_id: Option<String>,
     /// XEP-0394 message markup spans over the body.

@@ -177,6 +177,22 @@ async fn search_room_history_returns_empty_page_when_not_connected() {
 }
 
 #[tokio::test]
+async fn room_pin_permission_reports_not_connected() {
+    let client = test_client(RecordingListener::default());
+    let result = client
+        .room_pin_permission("room@muc.waddle.test".to_string())
+        .await;
+    assert!(matches!(result, Err(WaddleError::NotConnected)));
+}
+
+#[tokio::test]
+async fn room_pin_permission_rejects_a_room_that_is_no_bare_jid() {
+    let client = test_client(RecordingListener::default());
+    let result = client.room_pin_permission("not a jid@@".to_string()).await;
+    assert!(matches!(result, Err(WaddleError::InvalidJid)));
+}
+
+#[tokio::test]
 async fn fetch_room_thread_history_reports_not_connected() {
     let client = test_client(RecordingListener::default());
 

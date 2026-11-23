@@ -1055,6 +1055,7 @@ mod tests {
             displayed_marker_id: None,
             is_muc: kind == "groupchat",
             muc_user: false,
+            muc_status_codes: Vec::new(),
             thread: None,
             parent_thread_id: None,
             markup_spans: Vec::new(),

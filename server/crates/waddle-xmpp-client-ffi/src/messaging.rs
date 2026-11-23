@@ -257,6 +257,25 @@ impl WaddleClient {
         }
     }
 
+    /// Who may pin in `room_jid`, read again from its disco#info (the room
+    /// metadata form every occupant can read). For a room's XEP-0045
+    /// §10.2.1 configuration-change notice. `Ok(None)`: the room did not
+    /// say. `Err`: the lookup failed.
+    pub async fn room_pin_permission(
+        &self,
+        room_jid: String,
+    ) -> Result<Option<crate::WaddlePinPermission>, WaddleError> {
+        let room = self.require_bare_jid(&room_jid)?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        let info = handle
+            .discover_info(room.as_str(), None)
+            .await
+            .map_err(|e| client_error_to_waddle(&e))?;
+        Ok(info
+            .pin_permission()
+            .and_then(crate::room_admin::pin_permission_to_ffi))
+    }
+
     pub async fn send_presence(
         &self,
         status: Option<String>,
