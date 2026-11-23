@@ -154,8 +154,9 @@ public final class PresenceStore {
                 occupants[room]?[nick] = nil
             }
             // A destruction is sent only to the occupant it removes, so it
-            // is our own departure even without status 110.
-            if presence.occupant?.roomDestroyed == true {
+            // is our own departure even without status 110. Only a room we
+            // know or are in can say it is gone.
+            if presence.occupant?.roomDestroyed == true, roomJIDs(room) || joinedRooms.contains(room) {
                 markLeft(room)
                 return .destroyed(room: room)
             }

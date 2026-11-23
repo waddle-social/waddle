@@ -215,6 +215,58 @@ struct RoomManagementRefreshTests {
         await coordinator.stop()
     }
 
+    /// The room says it is gone before its answer to our delete comes, and
+    /// then that answer is lost: the delete happened all the same.
+    @Test func aDeleteWhoseRoomSaysItIsGoneSucceedsWithoutItsAnswer() async throws {
+        let (coordinator, port) = await connected()
+        port.roomDestructionResult = .failure(.timeout)
+        port.heldDirectoryVerbs = ["destroyRoom"]
+        let deleting = Task { try await coordinator.deleteRoom(room) }
+        await eventually { port.heldDirectoryRequests.count == 1 }
+        coordinator.handle(.presence(destruction))
+        port.releaseDirectoryRequests()
+        try await deleting.value
+        #expect(!coordinator.directory.isRoom(room))
+        #expect(!coordinator.unconfirmedDeletions.contains(room))
+        await coordinator.stop()
+    }
+
+    /// A destruction that arrives while the session stops leaves nothing
+    /// behind for the next session, where the room may exist again.
+    @Test func aDestructionHeardWhileStoppingIsNotKept() async throws {
+        let (coordinator, _) = await connected()
+        await coordinator.stop()
+        coordinator.handle(.presence(destruction))
+        #expect(!coordinator.destroyedRooms.contains(room))
+        #expect(!coordinator.calls.sealedGroupRooms.contains(room))
+    }
+
+    /// An inbox answer the server sent before the room was deleted counts
+    /// nothing for it afterwards.
+    @Test func aDeletedRoomsInboxRowCountsNothing() async throws {
+        let (coordinator, port) = await connected()
+        port.emit(.presence(destruction))
+        await eventually { !coordinator.directory.isRoom(room) }
+        coordinator.handle(.inboxPush(InboxEntry(
+            partner: room, kind: .room, lastStanzaID: "s1", lastUpdated: 1, unread: 3, preview: nil)))
+        #expect(coordinator.unread.count(for: roomConversation) == 0)
+        await coordinator.stop()
+    }
+
+    /// Only the room service speaks for a room. A presence from someone's
+    /// own address that claims a destruction forgets nothing.
+    @Test func aDestructionClaimedByAContactForgetsNothing() async throws {
+        let (coordinator, port) = await connected()
+        let claimed = WirePresence(
+            from: jid("bob@waddle.test/phone"), kind: .unavailable,
+            occupant: .init(affiliation: RoomAffiliation.none, role: RoomRole.none, realJID: nil, statusCodes: [], roomDestroyed: true))
+        port.emit(.presence(claimed))
+        port.emit(.presence(destruction))
+        await eventually { !coordinator.directory.isRoom(room) }
+        #expect(!coordinator.destroyedRooms.contains(bob))
+        await coordinator.stop()
+    }
+
     @Test func aRetryThatSucceedsAfterAnUnansweredDeleteForgetsTheRoom() async throws {
         let (coordinator, port) = await connected()
         port.roomDestructionResult = .failure(.timeout)

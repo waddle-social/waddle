@@ -172,6 +172,9 @@ extension SessionCoordinator {
             }
             do {
                 try await request()
+            } catch where forGood && destroyedRooms.contains(room) && isCurrent(generation) {
+                // The room said it is gone (XEP-0045 §10.9) before its
+                // answer came: the delete happened, whatever became of that.
             } catch {
                 guard isCurrent(generation) else { throw error }
                 if forGood, (error as? PortError) != .rejected || unconfirmedDeletions.contains(room) {
@@ -210,6 +213,7 @@ extension SessionCoordinator {
     /// one that does not exist, so it is never joined again this session.
     /// A huddle there ends, and no huddle presence goes to the room.
     func forgetDestroyedRoom(_ room: BareJID) {
+        guard !isStopped else { return }
         destroyedRooms.insert(room)
         unconfirmedDeletions.remove(room)
         onDemandRooms.remove(room)
@@ -217,7 +221,15 @@ extension SessionCoordinator {
         directory.remove(room)
         directoryMutations.append(.remove(room))
         unread.clearRoom(room)
-        if calls.groupSlotHolds(room) { Task { await calls.hangUp() } }
+        // The huddle in this room, not whatever call holds the slot by the
+        // time the hang-up runs: the check and the hang-up's claim of the
+        // slot run with no wait between them.
+        if calls.groupSlotHolds(room), let sid = calls.state.sid {
+            Task { [calls] in
+                guard calls.groupSlotHolds(room), calls.state.sid == sid else { return }
+                await calls.hangUp()
+            }
+        }
     }
 
     /// False once the session that started an action has stopped.

@@ -767,6 +767,8 @@ public final class SessionCoordinator {
 
     func applyInbox(_ entry: InboxEntry) {
         guard let applied = inbox.apply(entry) else { return }
+        // An answer from before the room was deleted counts nothing for it.
+        if applied.kind == .room, destroyedRooms.contains(applied.partner) { return }
         if let threadID = applied.threadID {
             // Only room threads have a badge; the server also keeps thread
             // rows for direct conversations (call threads), which must not
