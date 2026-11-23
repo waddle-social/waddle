@@ -7342,6 +7342,11 @@ public struct WaddleChannel: Equatable, Hashable {
      * means room discovery information was unavailable.
      */
     public var membersOnly: Bool?
+    /**
+     * Who may pin in the room, from its disco#info, which every
+     * occupant can read. `None` when discovery did not say.
+     */
+    public var pinPermission: WaddlePinPermission?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7369,7 +7374,11 @@ public struct WaddleChannel: Equatable, Hashable {
         /**
          * Whether room discovery advertised a members-only room. `None`
          * means room discovery information was unavailable.
-         */membersOnly: Bool?) {
+         */membersOnly: Bool?,
+        /**
+         * Who may pin in the room, from its disco#info, which every
+         * occupant can read. `None` when discovery did not say.
+         */pinPermission: WaddlePinPermission? = nil) {
         self.id = id
         self.roomJid = roomJid
         self.name = name
@@ -7382,6 +7391,7 @@ public struct WaddleChannel: Equatable, Hashable {
         self.bookmarkName = bookmarkName
         self.isGroupDm = isGroupDm
         self.membersOnly = membersOnly
+        self.pinPermission = pinPermission
     }
 
 
@@ -7411,7 +7421,8 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
                 hasLeft: FfiConverterBool.read(from: &buf),
                 bookmarkName: FfiConverterOptionString.read(from: &buf),
                 isGroupDm: FfiConverterBool.read(from: &buf),
-                membersOnly: FfiConverterOptionBool.read(from: &buf)
+                membersOnly: FfiConverterOptionBool.read(from: &buf),
+                pinPermission: FfiConverterOptionTypeWaddlePinPermission.read(from: &buf)
         )
     }
 
@@ -7428,6 +7439,7 @@ public struct FfiConverterTypeWaddleChannel: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.bookmarkName, into: &buf)
         FfiConverterBool.write(value.isGroupDm, into: &buf)
         FfiConverterOptionBool.write(value.membersOnly, into: &buf)
+        FfiConverterOptionTypeWaddlePinPermission.write(value.pinPermission, into: &buf)
     }
 }
 

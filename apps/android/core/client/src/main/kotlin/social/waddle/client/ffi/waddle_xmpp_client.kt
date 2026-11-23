@@ -9010,6 +9010,12 @@ data class WaddleChannel (
      * means room discovery information was unavailable.
      */
     var `membersOnly`: kotlin.Boolean?
+    ,
+    /**
+     * Who may pin in the room, from its disco#info, which every
+     * occupant can read. `None` when discovery did not say.
+     */
+    var `pinPermission`: WaddlePinPermission? = null
 
 ){
 
@@ -9038,6 +9044,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalTypeWaddlePinPermission.read(buf),
         )
     }
 
@@ -9053,7 +9060,8 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterBoolean.allocationSize(value.`hasLeft`) +
             FfiConverterOptionalString.allocationSize(value.`bookmarkName`) +
             FfiConverterBoolean.allocationSize(value.`isGroupDm`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`)
+            FfiConverterOptionalBoolean.allocationSize(value.`membersOnly`) +
+            FfiConverterOptionalTypeWaddlePinPermission.allocationSize(value.`pinPermission`)
     )
 
     override fun write(value: WaddleChannel, buf: ByteBuffer) {
@@ -9069,6 +9077,7 @@ public object FfiConverterTypeWaddleChannel: FfiConverterRustBuffer<WaddleChanne
             FfiConverterOptionalString.write(value.`bookmarkName`, buf)
             FfiConverterBoolean.write(value.`isGroupDm`, buf)
             FfiConverterOptionalBoolean.write(value.`membersOnly`, buf)
+            FfiConverterOptionalTypeWaddlePinPermission.write(value.`pinPermission`, buf)
     }
 }
 
