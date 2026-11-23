@@ -67,6 +67,7 @@ extension SessionCoordinator {
         }
         for room in destroyedRooms { directory.remove(room) }
         silenceLeftRooms()
+        if lookup?.readOwnBookmarks == false { scheduleDirectoryRetry() }
         // After the local changes above: a rejoin made here while the
         // lookup was on its way must not be answered with a leave.
         var settingsReads: [Task<Void, Never>] = []
@@ -80,8 +81,12 @@ extension SessionCoordinator {
             settingsReads = loadNotifySettings(
                 ofRejoined: leftBefore.filter { directory.isRoom($0) && !directory.hasLeft($0) })
         }
+        // Until the account's bookmarks have been read, any space room may
+        // be one it left, and joining that would show it there again. The
+        // lookup that reads them joins those rooms. Group chats are never
+        // left this way, and rooms opened here were asked for.
         let listed = (directory.channels + directory.groupDMs)
-            .filter { $0.autojoin || $0.isGroupDM }
+            .filter { $0.isGroupDM || ($0.autojoin && directory.knowsLeftRooms) }
             .map(\.roomJID)
         var seen: Set<BareJID> = []
         let roomsToJoin = (listed + onDemandRooms.sorted(by: { $0.description < $1.description })).filter { room in
@@ -108,6 +113,34 @@ extension SessionCoordinator {
         }
         for read in settingsReads { await read.value }
         return lookup
+    }
+
+    /// Reads the directory again when a lookup could not read the
+    /// account's bookmarks: after `directoryRetryDelays` (2 s, then 8 s),
+    /// until one reads them, abandoned if the stream changes. Off the ready
+    /// pipeline, so sends are not held behind it.
+    func scheduleDirectoryRetry(delays: [TimeInterval]? = nil) {
+        guard directoryRetryTask == nil else { return }
+        let delays = delays ?? directoryRetryDelays
+        let epoch = connectionEpoch
+        directoryRetryTask = Task { [weak self] in
+            for delay in delays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                // Cancelled when the stream changes, which also frees the slot.
+                guard let self, !Task.isCancelled else { return }
+                guard epoch == self.connectionEpoch, self.connection == .online else { break }
+                if await self.refreshDirectory(joiningOnlyNewRooms: true)?.readOwnBookmarks == true { break }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.directoryRetryTask = nil
+        }
+    }
+
+    /// A new or lost stream: a retry scheduled for the old one must not
+    /// hold the slot the next session's retry needs.
+    func cancelDirectoryRetry() {
+        directoryRetryTask?.cancel()
+        directoryRetryTask = nil
     }
 
     /// Counts nothing for the rooms the account left.

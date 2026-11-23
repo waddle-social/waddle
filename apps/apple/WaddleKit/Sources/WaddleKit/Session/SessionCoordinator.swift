@@ -108,6 +108,10 @@ public final class SessionCoordinator {
     @ObservationIgnored var pendingInboxReads: [InboxReadKey: PendingInboxRead] = [:]
     @ObservationIgnored var inboxHydrateTask: Task<Void, Never>?
     @ObservationIgnored var inboxHydrateRetryDelays: [TimeInterval] = [2, 8]
+    /// A directory lookup that could not read the account's bookmarks is
+    /// tried again after these delays (`scheduleDirectoryRetry`).
+    @ObservationIgnored var directoryRetryTask: Task<Void, Never>?
+    @ObservationIgnored var directoryRetryDelays: [TimeInterval] = [2, 8]
     /// Rows whose last `<mark-read/>` the server refused, with the newest
     /// stanza id that read covered. The row is not read again automatically
     /// while the server still reports that id; a newer message retries.
@@ -432,6 +436,7 @@ public final class SessionCoordinator {
         pendingInboxReads.removeAll()
         refusedInboxReads.removeAll()
         cancelInboxHydrate()
+        cancelDirectoryRetry()
         threadHistory.clear()
         unreadOverview.reset()
         community.reset()
@@ -461,6 +466,7 @@ public final class SessionCoordinator {
             foregroundProbeTask?.cancel()
             foregroundProbeTask = nil
             cancelInboxHydrate()
+            cancelDirectoryRetry()
             retryWhenConnectSettles = false
             connectWatchdog?.cancel()
             connectWatchdog = nil
@@ -492,6 +498,7 @@ public final class SessionCoordinator {
             readyTask?.cancel()
             readyTask = nil
             cancelInboxHydrate()
+            cancelDirectoryRetry()
             isSendReady = false
             // Messages may have been missed while offline: loaded pages are
             // no longer known to be current.
