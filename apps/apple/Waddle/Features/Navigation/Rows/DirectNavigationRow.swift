@@ -14,11 +14,16 @@ struct DirectNavigationRow: View {
         let attention = ConversationAttention(session: session, conversation: direct.conversation)
         let title = session.directory.title(for: direct.conversation)
         let availability = session.presence.availability(of: direct.peer)
+        let isInCall = session.presence.isInCall(direct.peer)
         ConversationLink(conversation: direct.conversation, style: style) {
             if style == .sidebar || isCompact {
-                CompactDirectRowLabel(direct: direct, title: title, availability: availability, attention: attention)
+                CompactDirectRowLabel(
+                    direct: direct, title: title, availability: availability, isInCall: isInCall, attention: attention
+                )
             } else {
-                PhoneDirectRowLabel(direct: direct, title: title, availability: availability, attention: attention)
+                PhoneDirectRowLabel(
+                    direct: direct, title: title, availability: availability, isInCall: isInCall, attention: attention
+                )
             }
         }
         .conversationRowActions(direct.conversation, style: style)
@@ -30,11 +35,14 @@ struct CompactDirectRowLabel: View {
     let direct: DirectConversation
     let title: String
     let availability: Availability
+    let isInCall: Bool
     let attention: ConversationAttention
 
     var body: some View {
         NavigationRowLabel(title: title, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed) {
-            PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 20)
+            PeerPresenceAvatar(
+                jid: direct.peer, name: title, availability: availability, size: 20, isInCall: isInCall
+            )
         } trailing: {
             ConversationRowTrailing(attention: attention)
         }
@@ -43,7 +51,8 @@ struct CompactDirectRowLabel: View {
     }
 
     private var accessibilityText: String {
-        "\(attention.accessibilityLabel(title: title)), \(AvailabilityTitle.title(availability))"
+        ([attention.accessibilityLabel(title: title)] + AvailabilityTitle.spoken(availability, isInCall: isInCall))
+            .joined(separator: ", ")
     }
 }
 
@@ -52,11 +61,14 @@ struct PhoneDirectRowLabel: View {
     let direct: DirectConversation
     let title: String
     let availability: Availability
+    let isInCall: Bool
     let attention: ConversationAttention
 
     var body: some View {
         HStack(spacing: Theme.Spacing.m) {
-            PeerPresenceAvatar(jid: direct.peer, name: title, availability: availability, size: 40)
+            PeerPresenceAvatar(
+                jid: direct.peer, name: title, availability: availability, size: 40, isInCall: isInCall
+            )
             VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s) {
                     NavigationRowTitle(title: title, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed)
@@ -81,7 +93,8 @@ struct PhoneDirectRowLabel: View {
     }
 
     private var accessibilityText: String {
-        var parts = [attention.accessibilityLabel(title: title), AvailabilityTitle.title(availability)]
+        var parts = [attention.accessibilityLabel(title: title)]
+        parts += AvailabilityTitle.spoken(availability, isInCall: isInCall)
         if let preview = direct.preview, !preview.isEmpty {
             parts.append(preview)
         }

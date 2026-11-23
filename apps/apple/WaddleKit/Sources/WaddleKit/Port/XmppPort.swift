@@ -53,6 +53,11 @@ public enum XmppEvent: Sendable {
     /// Another device of this account picked a status or reset to
     /// automatic (ADR-010). The server does not send a device its own pick.
     case presenceModeChanged(PresenceMode)
+    /// XEP-0108 notification from someone else's PEP service: what they are
+    /// doing now, or nil when they stopped saying (the item was retracted,
+    /// the node deleted, or the item could not be read). The core drops
+    /// the account's own.
+    case activityChanged(jid: BareJID, activity: UserActivity?)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
     /// The room's configuration changed in a way that is not

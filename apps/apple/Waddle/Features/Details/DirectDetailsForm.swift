@@ -20,7 +20,10 @@ struct DirectDetailsForm: View {
                     presence: presence
                 )
             }
-            PeerSharingSection(status: shared, isOnline: presence?.availability.isOnline ?? false)
+            PeerSharingSection(
+                status: session.liveSharedStatus(of: peer, lookedUp: shared),
+                isOnline: presence?.availability.isOnline ?? false
+            )
             if let details {
                 PeerDetailsSection(details: details)
             }
@@ -151,7 +154,10 @@ struct PeerProfileSheet: View {
                         .accessibilityHint(Text("Opens your direct conversation"))
                     }
                 }
-                PeerSharingSection(status: shared, isOnline: presence.availability.isOnline)
+                PeerSharingSection(
+                    status: profile.jid.flatMap { session.liveSharedStatus(of: $0, lookedUp: shared) },
+                    isOnline: presence.availability.isOnline
+                )
                 if let details {
                     PeerDetailsSection(details: details)
                 }

@@ -55,17 +55,15 @@ struct ProfileSharingSection: View {
     }
 }
 
-extension ProfileSharingSection {
-    /// How often a call shown as in progress is checked for having ended;
-    /// also for someone else's (`peerSharedStatus`).
-    static let callCheckInterval: Duration = .seconds(10)
-}
-
 private extension ProfileSharingSection {
-    /// Nothing tells this device when another one leaves its call, so
-    /// while the row says "In a call" the activity is looked up again every
-    /// few seconds. The row, and this task with it, goes away once the
-    /// activity no longer shows a call.
+    /// How often a call shown as in progress is checked for having ended.
+    static let callCheckInterval: Duration = .seconds(10)
+
+    /// Nothing tells this device when another device of the account leaves
+    /// its call (the core drops the account's own notifications), so while
+    /// the row says "In a call" the activity is looked up again every few
+    /// seconds. The row, and this task with it, goes away once the activity
+    /// no longer shows a call.
     func watchForTheCallToEnd() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: Self.callCheckInterval)

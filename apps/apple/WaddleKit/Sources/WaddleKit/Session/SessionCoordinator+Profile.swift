@@ -157,9 +157,30 @@ extension SessionCoordinator {
     }
 
     /// What someone shares about the moment, or nil when it could not be
-    /// looked up. See `SharedStatus.shown(isOnline:)` for what to show.
+    /// looked up. Their activity is also kept with their presence: a call
+    /// that began before this stream sent no notification on it, so this
+    /// is how it is first learned. Show it with `liveSharedStatus`.
     public func sharedStatus(of jid: BareJID) async -> SharedStatus? {
-        try? await port.fetchSharedStatus(of: jid)
+        let stamp = presence.activityStamp(of: jid)
+        guard let status = try? await port.fetchSharedStatus(of: jid) else { return nil }
+        if jid != account.jid {
+            presence.activityLookedUp(status.activity, of: jid, since: stamp)
+        }
+        return status
+    }
+
+    /// What to show of someone's shared status: the mood and tune `lookedUp`
+    /// found, and the activity as their notifications keep it. Nil when
+    /// nothing is known. No notification about the account itself reaches
+    /// here, so its own is shown as looked up. See
+    /// `SharedStatus.shown(isOnline:)` for what to show of it.
+    public func liveSharedStatus(of jid: BareJID, lookedUp: SharedStatus?) -> SharedStatus? {
+        guard jid != account.jid else { return lookedUp }
+        let activity = presence.activities[jid]
+        guard lookedUp != nil || activity != nil else { return nil }
+        var live = lookedUp ?? SharedStatus()
+        live.activity = activity
+        return live
     }
 
     /// XEP-0363 slot for an attachment the platform layer then uploads.

@@ -21,11 +21,13 @@ struct PeopleListTests {
         saved: [Contact] = [],
         contacts: [BareJID: PresenceStore.ContactPresence] = [:],
         directPeers: [BareJID] = [],
+        inCall: Set<BareJID> = [],
         query: String = ""
     ) -> PeopleList {
         PeopleList.build(
             contacts: saved, presence: contacts, directPeers: directPeers, own: me.jid,
             name: { $0.description.split(separator: "@").first.map { $0.capitalized } ?? "" },
+            isInCall: inCall.contains,
             query: query
         )
     }
@@ -47,7 +49,7 @@ struct PeopleListTests {
         let people = list(saved: [Contact(jid: ada), Contact(jid: bo)], contacts: [ada: presence(.available)])
 
         #expect(people.here.map(\.jid) == [ada])
-        #expect(people.away == [Person(jid: bo, name: "Bo", availability: .offline, status: nil)])
+        #expect(people.away == [Person(jid: bo, name: "Bo", availability: .offline, status: nil, isInCall: false)])
     }
 
     @Test func aContactIsShownByTheNameSavedForThem() {
@@ -72,14 +74,22 @@ struct PeopleListTests {
         let people = list(contacts: [ada: presence(.available)], directPeers: [bo])
 
         #expect(people.here.map(\.jid) == [ada])
-        #expect(people.away == [Person(jid: bo, name: "Bo", availability: .offline, status: nil)])
+        #expect(people.away == [Person(jid: bo, name: "Bo", availability: .offline, status: nil, isInCall: false)])
     }
 
     @Test func someoneBothSeenAndMessagedIsListedOnce() {
         let people = list(contacts: [ada: presence(.chat, "Around")], directPeers: [ada])
 
-        #expect(people.here == [Person(jid: ada, name: "Ada", availability: .chat, status: "Around")])
+        #expect(people.here == [Person(jid: ada, name: "Ada", availability: .chat, status: "Around", isInCall: false)])
         #expect(people.away.isEmpty)
+    }
+
+    /// Being in a call marks someone; it does not move them in the list.
+    @Test func someoneInACallIsMarkedWhereTheyAreListed() {
+        let people = list(contacts: [ada: presence(.available), bo: presence(.doNotDisturb)], inCall: [bo])
+
+        #expect(people.here.map(\.jid) == [ada, bo])
+        #expect(people.here.map(\.isInCall) == [false, true])
     }
 
     /// The account's other devices send presence too; that is not a person

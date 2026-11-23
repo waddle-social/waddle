@@ -10,6 +10,7 @@ extension PeopleList {
             directPeers: session.directory.directConversations.map(\.peer),
             own: session.account.jid,
             name: { session.directory.title(for: .direct($0)) },
+            isInCall: session.presence.isInCall,
             query: query
         )
     }

@@ -55,8 +55,18 @@ public final class PresenceStore {
     /// room actually gave us, which may differ from the configured one
     /// (status 210).
     public private(set) var selfNicks: [BareJID: String] = [:]
+    /// Bare JID → what they last said they are doing (XEP-0108), heard on
+    /// this stream or looked up. A call's activity is forgotten when they
+    /// go offline, and everything on a new stream: a call that ended while
+    /// the stream was down sends nothing on the next one.
+    public private(set) var activities: [BareJID: UserActivity] = [:]
 
     @ObservationIgnored private var resources: [BareJID: [String: ContactPresence]] = [:]
+    /// Counts changes to `activities`, so a lookup can tell whether one
+    /// came after it began.
+    @ObservationIgnored private var activityClock = 0
+    @ObservationIgnored private var activityChangedAt: [BareJID: Int] = [:]
+    @ObservationIgnored private var activitiesClearedAt = 0
     @ObservationIgnored private let roomJIDs: @MainActor (BareJID) -> Bool
 
     /// `isRoom` tells a MUC occupant presence from a contact presence.
@@ -107,6 +117,37 @@ public final class PresenceStore {
         contacts[jid]?.availability ?? .offline
     }
 
+    /// Whether someone is in a call (ADR-010): their activity shows one and
+    /// they are online. A device that goes away without ending its call
+    /// leaves the mark on their account.
+    public func isInCall(_ jid: BareJID) -> Bool {
+        availability(of: jid).isOnline && activities[jid]?.showsACall == true
+    }
+
+    /// Where `activities` stands for `jid`, for `activityLookedUp`.
+    func activityStamp(of jid: BareJID) -> Int {
+        max(activityChangedAt[jid] ?? 0, activitiesClearedAt)
+    }
+
+    /// What a lookup that began at `stamp` read. Anything heard since is
+    /// newer and stands. A call read for someone offline is one their
+    /// device left behind, so it is not kept.
+    func activityLookedUp(_ activity: UserActivity?, of jid: BareJID, since stamp: Int) {
+        guard activityStamp(of: jid) == stamp else { return }
+        let isLeftBehind = activity?.showsACall == true && !availability(of: jid).isOnline
+        activityChanged(isLeftBehind ? nil : activity, of: jid)
+    }
+
+    /// What they are doing now, nil when they stopped saying: from their
+    /// notification, a lookup or their going offline.
+    func activityChanged(_ activity: UserActivity?, of jid: BareJID) {
+        activityClock += 1
+        activityChangedAt[jid] = activityClock
+        if activities[jid] != activity {
+            activities[jid] = activity
+        }
+    }
+
     public func markLeft(_ room: BareJID) {
         joinedRooms.remove(room)
         occupants[room] = nil
@@ -119,6 +160,10 @@ public final class PresenceStore {
         joinedRooms.removeAll()
         selfNicks.removeAll()
         resources.removeAll()
+        activities.removeAll()
+        activityClock += 1
+        activitiesClearedAt = activityClock
+        activityChangedAt.removeAll()
     }
 
     private func applyOccupant(_ presence: WirePresence, room: BareJID) -> Update {
@@ -190,6 +235,12 @@ public final class PresenceStore {
         }
         if contacts[bare] != best {
             contacts[bare] = best
+        }
+        // Offline, nobody is in a call; one their node still holds was
+        // left behind and must not show when they return (ADR-010). Also
+        // marks a lookup under way as older than this.
+        if best == nil {
+            activityChanged(activities[bare].flatMap { $0.showsACall ? nil : $0 }, of: bare)
         }
         return .contact
     }
