@@ -81,25 +81,51 @@ public extension CallSurface {
     static let stageWidth: CGFloat = 400
     /// The narrowest conversation the stage may stand beside.
     static let minimumConversationWidth: CGFloat = 480
+    /// The shortest stage worth having: its header (62), one row of tiles
+    /// at the height the grid gives a row before it adds a second (180) on
+    /// the tile area's padding (18), and one row of controls (72).
+    static let minimumStageHeight: CGFloat = 332
 
-    /// Beside the conversation while that leaves it room to read; otherwise above it, sharing the height.
-    static func splitArrangement(in pane: CGSize) -> SplitArrangement {
-        pane.width - stageWidth >= minimumConversationWidth
+    /// Beside the conversation while that leaves it room to read; otherwise
+    /// above it, sharing the height. `nil` when the pane is too short for
+    /// either: a strip of a stage is worse than the dock.
+    static func splitArrangement(in pane: CGSize) -> SplitArrangement? {
+        let arrangement: SplitArrangement = pane.width - stageWidth >= minimumConversationWidth
             ? .beside(width: stageWidth)
-            : .above(height: max(0, pane.height) * defaultSplitPercent / 100)
+            : .above(height: pane.height * defaultSplitPercent / 100)
+        let height = switch arrangement {
+        case .beside: pane.height
+        case .above(let height): height
+        }
+        return height >= minimumStageHeight ? arrangement : nil
+    }
+}
+
+public extension CallSurface.Platform {
+    /// A phone keeps every call in the dock however it is held: a large
+    /// one is regular width in landscape and still has no room for a stage.
+    /// Anything else squeezed to a compact size is treated as one.
+    init(isPhone: Bool, isCompactWidth: Bool, isCompactHeight: Bool) {
+        self = isPhone || isCompactWidth || isCompactHeight ? .phone : .regularWidth
     }
 }
 
 public extension CallSurface {
     /// Where the slot's call shows while `selection` is the open conversation.
+    ///
+    /// - Parameter pane: the pane the conversation and a stage would share,
+    ///   once it has been laid out. A call whose stage it cannot hold stays in the dock.
     static func placement(
-        of state: CallState, open selection: ConversationID?, platform: Platform, size: Size = .defaultSize
+        of state: CallState, open selection: ConversationID?, platform: Platform, pane: CGSize?,
+        size: Size = .defaultSize
     ) -> Self {
         let conversation = state.sessionConversation
-        return placement(
+        let surface = placement(
             isInSession: conversation != nil, conversationIsOpen: conversation != nil && conversation == selection,
             platform: platform, size: size
         )
+        if surface.showsStage, let pane, splitArrangement(in: pane) == nil { return .dock }
+        return surface
     }
 }
 

@@ -61,4 +61,18 @@ import Testing
         memory.speakersChanged([Self.grace.identity])
         #expect(memory.promotedSpeaker == Self.grace.identity)
     }
+
+    @Test func whatChangesNothingLeavesTheMemoryEqual() {
+        var memory = CallStageMemory()
+        memory.follow(call: "c1")
+        memory.speakersChanged([Self.linus.identity])
+        memory.tilesChanged([Self.own, Self.linus], rosterIsAvailable: true)
+        let before = memory
+
+        memory.follow(call: "c1")
+        memory.speakersChanged([Self.linus.identity, Self.grace.identity])
+        memory.speakersChanged([])
+        memory.tilesChanged([Self.own, Self.linus], rosterIsAvailable: true)
+        #expect(memory == before)
+    }
 }

@@ -717,7 +717,7 @@ final class ActiveSession {
     /// The media of this session's call; the call dock reads and drives it.
     let callMedia: LiveKitCallMediaController
     /// What the person chose on the stage of this session's call.
-    let callStage = CallStageModel()
+    let callStage: CallStageModel
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
@@ -750,5 +750,6 @@ final class ActiveSession {
         )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
         coordinator.sendsChatStates = preferences.sendsChatStates
+        callStage = CallStageModel(calls: coordinator.calls, media: callMedia)
     }
 }

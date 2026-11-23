@@ -7,6 +7,22 @@ import WaddleKit
 @MainActor @Observable
 final class CallStageModel {
     private var memory = CallStageMemory()
+    /// The pane a stage shares with its conversation, once the shell has
+    /// laid it out: the dock and the stage both place the call by it.
+    var pane: CGSize?
+    @ObservationIgnored private(set) var tileSource = CallTileSource(video: { _ in nil }, togglePin: { _ in /* no call yet */ })
+
+    /// - Parameter media: where tiles get their pictures; `nil` draws avatars only.
+    init(calls: CallStore, media: (any CallMediaControls)?) {
+        tileSource = CallTileSource(
+            video: { [weak media] tile in media?.video(of: tile.identity, source: tile.source) },
+            // A pin is for whatever call is on the stage when the tile is clicked.
+            togglePin: { [weak self, weak calls] tile in
+                guard let self, let sid = calls?.state.sid else { return }
+                update(sid) { $0.togglePin(tile) }
+            }
+        )
+    }
 
     /// The choices for call `sid`; a call nobody has touched has the defaults.
     func stage(of sid: String) -> CallStageMemory {
@@ -15,9 +31,12 @@ final class CallStageModel {
         return memory
     }
 
+    /// Writes only a change, so an update that changes nothing redraws nothing.
     func update(_ sid: String, _ change: (inout CallStageMemory) -> Void) {
-        memory.follow(call: sid)
-        change(&memory)
+        var next = memory
+        next.follow(call: sid)
+        change(&next)
+        if next != memory { memory = next }
     }
 }
 
@@ -74,14 +93,17 @@ struct CallStageHost: View {
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
-            leaves: call.isRoom,
             notice: media?.deviceNotice,
-            video: { [media] tile in media?.video(of: tile.identity, source: tile.source) },
+            tileSource: model.tileSource,
             actions: actions(for: call.sid)
         )
-        // During a reconnect nobody is live and the tiles are stand-ins.
-        .onChange(of: Roster(tiles: tiles, isSelfViewHidden: memory.presentation.isSelfViewHidden), initial: true) { _, roster in
-            model.update(call.sid) { $0.tilesChanged(roster.tiles, rosterIsAvailable: !live.isEmpty) }
+        // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.
+        .onChange(
+            of: Roster(tiles: tiles.map(\.id), isAvailable: !live.isEmpty, isSelfViewHidden: memory.presentation.isSelfViewHidden),
+            initial: true
+        ) { _, roster in
+            // During a reconnect nobody is live and the tiles are stand-ins.
+            model.update(call.sid) { $0.tilesChanged(tiles, rosterIsAvailable: roster.isAvailable) }
         }
         .onChange(of: media?.activeSpeakersLoudestFirst ?? [], initial: true) { _, speakers in
             model.update(call.sid) { $0.speakersChanged(speakers) }
@@ -101,14 +123,14 @@ struct CallStageHost: View {
             toggleHand: commands.toggleHand,
             setViewMode: { [model] mode in model.update(sid) { $0.presentation.viewMode = mode } },
             toggleSelfView: { [model] in model.update(sid) { $0.presentation.isSelfViewHidden.toggle() } },
-            togglePin: { [model] tile in model.update(sid) { $0.togglePin(tile) } },
             hangUp: commands.hangUp
         )
     }
 
     /// What the pin is reconciled against.
     private struct Roster: Equatable {
-        let tiles: [CallStageTile]
+        let tiles: [CallStageTile.ID]
+        let isAvailable: Bool
         let isSelfViewHidden: Bool
     }
 

@@ -8,8 +8,7 @@ struct CallTileArea: View {
     let tiles: [CallStageTile]
     let presentation: CallStagePresentation
     var promoted: String?
-    var video: (CallStageTile) -> AnyView? = { _ in nil }
-    let togglePin: @MainActor (CallStageTile.ID) -> Void
+    let source: CallTileSource
 
     /// The most gallery cells, the "+N more" cell included: eight people and
     /// the rest. Set by a measurement still to be done: on a Mac LiveKit
@@ -31,7 +30,8 @@ struct CallTileArea: View {
     }
 
     private func tile(_ tile: CallStageTile) -> some View {
-        CallTileView(tile: tile, isPinned: tile.id == presentation.pinnedTileID, video: video) { togglePin(tile.id) }
+        // Compared by value: a change to one tile leaves the others, and their pictures, alone.
+        CallTileView(tile: tile, isPinned: tile.id == presentation.pinnedTileID, source: source).equatable()
     }
 
     // MARK: - Gallery

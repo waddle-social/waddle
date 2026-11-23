@@ -27,11 +27,10 @@ struct CallStageView: View {
     var isCameraOn = false
     /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
     var isHandRaised: Bool?
-    /// A room's call is left, not hung up.
-    var leaves = false
     /// Something the person should know about their own devices.
     var notice: String?
-    var video: (CallStageTile) -> AnyView? = { _ in nil }
+    /// Where the tiles get their pictures and send a pin.
+    let tileSource: CallTileSource
     /// Off in a snapshot, which has nobody to speak to.
     var announcesChanges = true
     let actions: CallStageActions
@@ -48,8 +47,7 @@ struct CallStageView: View {
                     .padding(.bottom, Theme.Spacing.s)
             }
             CallTileArea(
-                tiles: tiles, presentation: presentation, promoted: promotedSpeaker, video: video,
-                togglePin: actions.togglePin
+                tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, WaddleTokens.Spacing.s1Half)
@@ -57,7 +55,7 @@ struct CallStageView: View {
             CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
-                isSelfViewHidden: presentation.isSelfViewHidden, leaves: leaves, actions: actions
+                isSelfViewHidden: presentation.isSelfViewHidden, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)

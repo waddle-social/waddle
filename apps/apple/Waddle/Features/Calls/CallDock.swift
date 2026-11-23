@@ -12,9 +12,9 @@ struct CallDock: View {
     @Environment(NavigationModel.self) private var navigation: NavigationModel?
     @Environment(\.callMediaControls) private var media
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var sizeClass
-    #endif
+    /// Absent in a sheet given no session; a dock there never yields anyway.
+    @Environment(CallStageModel.self) private var stageModel: CallStageModel?
+    @CallPlatform private var platform
     /// The dock a sheet carries. It stays quiet, so a stage change is spoken
     /// once, and it leaves the video of a call in session to the surface
     /// behind the sheet.
@@ -26,7 +26,8 @@ struct CallDock: View {
         let phase = media?.phase ?? .idle
         let stage = CallStage(state: state, media: phase)
         let group = GroupCallStage(state: state, media: phase)
-        let content = CallSurface.placement(of: state, open: navigation?.selection, platform: platform)
+        let content = CallSurface
+            .placement(of: state, open: navigation?.selection, platform: platform, pane: stageModel?.pane)
             .dockContent(isInSession: state.sessionConversation != nil, isInSheet: isInSheet)
         let shown = content == .hidden ? nil : stage
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
@@ -44,15 +45,6 @@ struct CallDock: View {
         .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
             speaking.update(accounts)
         }
-    }
-
-    /// A stage needs the room of a split view; a phone keeps every call in the dock.
-    private var platform: CallSurface.Platform {
-        #if os(iOS)
-        sizeClass == .compact ? .phone : .regularWidth
-        #else
-        .regularWidth
-        #endif
     }
 
     @ViewBuilder

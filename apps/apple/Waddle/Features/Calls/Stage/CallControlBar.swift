@@ -8,13 +8,12 @@ struct CallStageActions {
     let toggleHand: @MainActor () -> Void
     let setViewMode: @MainActor (CallStagePresentation.ViewMode) -> Void
     let toggleSelfView: @MainActor () -> Void
-    let togglePin: @MainActor (CallStageTile.ID) -> Void
     let hangUp: @MainActor () -> Void
 }
 
 /// The controls under a call's stage (web `CallControls` in the split):
 /// round glyph buttons, the gallery and speaker switch, and the red pill
-/// that ends our part of the call. When they do not fit one row the pill
+/// that ends our part of the call, "Hang up" in a room too, as on the web. When they do not fit one row the pill
 /// takes a row of its own.
 struct CallControlBar: View {
     var isMicrophoneOn = false
@@ -25,8 +24,6 @@ struct CallControlBar: View {
     var isHandRaised: Bool?
     var viewMode = CallStagePresentation.ViewMode.gallery
     var isSelfViewHidden = false
-    /// A room's call goes on without us, so it is left; a 1:1 call is hung up.
-    var leaves = false
     let actions: CallStageActions
 
     var body: some View {
@@ -124,7 +121,7 @@ struct CallControlBar: View {
 
     private var endButton: some View {
         Button(action: actions.hangUp) {
-            Label(leaves ? "Leave" : "Hang up", systemImage: "phone.down")
+            Label("Hang up", systemImage: "phone.down")
                 .huddleText(Theme.Typography.button.weight(700))
                 .foregroundStyle(Theme.Colors.dangerFg)
                 .padding(.horizontal, Theme.Spacing.l)
@@ -133,8 +130,7 @@ struct CallControlBar: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(CallControlPressStyle())
-        .accessibilityLabel(Text(leaves ? "Leave call" : "Hang up"))
-        .help(leaves ? "Leave call" : "Hang up")
+        .help("Hang up")
     }
 
     private enum Metrics {

@@ -1,54 +1,65 @@
 import SwiftUI
 import WaddleKit
 
+/// Where a stage's tiles get their pictures and send a pin. One object for
+/// the life of the session, so a tile holds on to it across redraws and is
+/// compared by its values alone.
+@MainActor
+final class CallTileSource {
+    /// A camera's picture, while there is one.
+    let video: @MainActor (CallStageTile) -> AnyView?
+    let togglePin: @MainActor (CallStageTile.ID) -> Void
+
+    init(
+        video: @escaping @MainActor (CallStageTile) -> AnyView?,
+        togglePin: @escaping @MainActor (CallStageTile.ID) -> Void
+    ) {
+        self.video = video
+        self.togglePin = togglePin
+    }
+}
+
 /// One camera on a call's stage (web `CallTile`): the picture, or the
 /// person's avatar while there is none, under a name plate. A ring in the
 /// live colour says they are speaking; a gold badge, that their hand is up.
 /// Clicking pins the tile, and again unpins it.
 ///
-/// Pure: the picture comes from `video`, which only a tile that is drawn
-/// asks for, so a camera nobody sees is never fetched.
-struct CallTileView: View {
+/// Equatable, and drawn with `.equatable()`: the stage redraws whenever
+/// anyone starts or stops speaking, and on a Mac every picture is drawn on
+/// the main thread (#2625), so a tile whose values did not change must cost nothing.
+struct CallTileView: View, Equatable {
     let tile: CallStageTile
     var isPinned = false
-    var video: (CallStageTile) -> AnyView? = { _ in nil }
-    let togglePin: @MainActor () -> Void
+    let source: CallTileSource
 
     @State private var isHovered = false
 
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.tile == rhs.tile && lhs.isPinned == rhs.isPinned && lhs.source === rhs.source
+    }
+
     var body: some View {
-        Button(action: togglePin) {
-            GeometryReader { cell in
-                ZStack {
-                    Theme.Colors.surface
-                    if tile.hasVideo, let picture = video(tile) {
-                        // The tile takes the click, wherever on the picture it lands.
-                        picture.allowsHitTesting(false)
-                    } else {
-                        avatar(size: min(Metrics.avatarShare * min(cell.size.width, cell.size.height), Metrics.avatar))
-                    }
-                }
-            }
+        // The picture stands outside the button that takes the click: a
+        // button redraws its label with it, and the picture must not be.
+        CallTilePicture(tile: tile, source: source)
+            .equatable()
             .clipShape(Metrics.shape)
             .overlay(alignment: .topLeading) {
                 if tile.isHandRaised { hand }
             }
             .overlay(alignment: .bottomLeading) { plate }
             .background { outline }
-            .contentShape(Metrics.shape)
-        }
-        .buttonStyle(CallTileButtonStyle())
-        .onHover { isHovered = $0 }
-        .huddleAnimation(.press, value: tile.isSpeaking)
-        .accessibilityElement()
-        .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin"), togglePin)
-    }
-
-    /// Only an address with a localpart is a person whose avatar can be looked up.
-    private func avatar(size: CGFloat) -> some View {
-        CallPersonAvatar(name: tile.label, jid: tile.bareJID.flatMap { $0.localpart == nil ? nil : $0 }, size: size)
+            .huddleAnimation(.press, value: tile.isSpeaking)
+            .accessibilityHidden(true)
+            .overlay {
+                Button { source.togglePin(tile.id) } label: {
+                    Color.clear.contentShape(Metrics.shape)
+                }
+                .buttonStyle(.plain)
+                .onHover { isHovered = $0 }
+                .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
+                .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin")) { source.togglePin(tile.id) }
+            }
     }
 
     /// Drawn around the tile, as the web's box shadows are, so a ring never covers the picture.
@@ -108,14 +119,37 @@ struct CallTileView: View {
     }
 }
 
-/// A tile is a picture, not a control with a pressed look: it only settles under the pointer.
-private struct CallTileButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// What fills a tile: the camera's picture, or the person's avatar while
+/// there is none. It changes only with the camera, never with a badge or
+/// the speaking ring, so a video view is left alone while its tile's ring comes and goes.
+///
+/// Only a picture that is drawn asks the source for video, so a camera nobody sees is never fetched.
+private struct CallTilePicture: View, Equatable {
+    let tile: CallStageTile
+    let source: CallTileSource
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed && !reduceMotion ? HuddleMotion.pressScale : 1)
-            .huddleAnimation(.press, value: configuration.isPressed)
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.tile.id == rhs.tile.id && lhs.tile.hasVideo == rhs.tile.hasVideo && lhs.tile.label == rhs.tile.label
+            && lhs.source === rhs.source
+    }
+
+    var body: some View {
+        GeometryReader { cell in
+            ZStack {
+                Theme.Colors.surface
+                if tile.hasVideo, let picture = source.video(tile) {
+                    // The tile takes the click, wherever on the picture it lands.
+                    picture.allowsHitTesting(false)
+                } else {
+                    let side = min(cell.size.width, cell.size.height)
+                    // Only an address with a localpart is a person whose avatar can be looked up.
+                    CallPersonAvatar(
+                        name: tile.label, jid: tile.bareJID.flatMap { $0.localpart == nil ? nil : $0 },
+                        size: min(CallTileView.Metrics.avatarShare * side, CallTileView.Metrics.avatar)
+                    )
+                }
+            }
+        }
     }
 }
 

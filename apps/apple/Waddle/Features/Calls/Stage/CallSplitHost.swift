@@ -11,17 +11,17 @@ import WaddleKit
 struct CallSplitHost<Content: View>: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
+    @Environment(CallStageModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @CallPlatform private var platform
     @ViewBuilder let content: Content
-    /// The pane's size, once it has been laid out.
-    @State private var pane: CGSize?
 
     var body: some View {
         let showsStage = CallSurface
-            .placement(of: session.calls.state, open: navigation.selection, platform: .regularWidth)
+            .placement(of: session.calls.state, open: navigation.selection, platform: platform, pane: model.pane)
             .showsStage
         // Before the first layout assume the common case, a pane with room beside.
-        let arrangement = pane.map(CallSurface.splitArrangement(in:)) ?? .beside(width: CallSurface.stageWidth)
+        let arrangement = model.pane.flatMap(CallSurface.splitArrangement(in:)) ?? .beside(width: CallSurface.stageWidth)
         content
             .padding(showsStage ? inset(for: arrangement) : EdgeInsets())
             .overlay(alignment: .topTrailing) {
@@ -31,22 +31,24 @@ struct CallSplitHost<Content: View>: View {
                 }
             }
             .huddleAnimation(.settle, value: showsStage)
-            .onGeometryChange(for: CGSize.self, of: \.size) { pane = $0 }
+            .onGeometryChange(for: CGSize.self, of: \.size) { model.pane = $0 }
     }
 
-    @ViewBuilder
+    /// One stage whichever way it stands: moving it between beside and above,
+    /// as when the inspector opens mid-call, must not rebuild its video
+    /// views or say "Call connected" again.
     private func stage(_ arrangement: CallSurface.SplitArrangement) -> some View {
-        let hairline = Theme.Colors.borderSoft
-        switch arrangement {
-        case .beside(let width):
-            CallStageHost()
-                .frame(width: width)
-                .overlay(alignment: .leading) { hairline.frame(width: WaddleTokens.BorderWidth.hair) }
-        case .above(let height):
-            CallStageHost()
-                .frame(height: height)
-                .overlay(alignment: .bottom) { hairline.frame(height: WaddleTokens.BorderWidth.hair) }
+        let hair = WaddleTokens.BorderWidth.hair
+        let (width, height): (CGFloat?, CGFloat?) = switch arrangement {
+        case .beside(let width): (width, nil)
+        case .above(let height): (nil, height)
         }
+        return CallStageHost()
+            .frame(width: width, height: height)
+            // The edge it shares with the conversation.
+            .overlay(alignment: width == nil ? .bottom : .leading) {
+                Theme.Colors.borderSoft.frame(width: width == nil ? nil : hair, height: width == nil ? hair : nil)
+            }
     }
 
     private func inset(for arrangement: CallSurface.SplitArrangement) -> EdgeInsets {

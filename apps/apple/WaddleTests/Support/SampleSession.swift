@@ -21,11 +21,13 @@ final class SampleSession {
     let port = FakePort()
     let coordinator: SessionCoordinator
     let navigation = NavigationModel()
-    let callStage = CallStageModel()
+    let callStage: CallStageModel
     let app = AppState()
 
-    init(account: AccountIdentity = SampleSession.ana) {
-        coordinator = SessionCoordinator(account: account, port: port)
+    /// - Parameter account: Ana, unless the test needs her on a named device.
+    init(account: AccountIdentity? = nil) {
+        coordinator = SessionCoordinator(account: account ?? Self.ana, port: port)
+        callStage = CallStageModel(calls: coordinator.calls, media: nil)
         coordinator.status.connection = .online
 
         coordinator.directory.apply(Topology(

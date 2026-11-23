@@ -15,10 +15,15 @@ final class CallStageSnapshotTests: XCTestCase {
     private static let noAction: @MainActor () -> Void = { /* nothing to do */ }
     private static let actions = CallStageActions(
         toggleMicrophone: noAction, toggleCamera: noAction, toggleHand: noAction, setViewMode: { _ in /* drawn only */ },
-        toggleSelfView: noAction, togglePin: { _ in /* drawn only */ }, hangUp: noAction
+        toggleSelfView: noAction, hangUp: noAction
+    )
+    /// Stands in for a camera: a flat colour where the video would be.
+    private static let cameras = CallTileSource(
+        video: { tile in AnyView(tile.isSelf ? Theme.Colors.halo : Theme.Colors.seaShallow) },
+        togglePin: { _ in /* drawn only */ }
     )
     /// The huddle column of the Penpot frames: 400 wide in a 900 tall window.
-    private static let panel = CGSize(width: CallSurface.stageWidth, height: 900)
+    private nonisolated static let panel = CGSize(width: CallSurface.stageWidth, height: 900)
 
     private static let you = CallStageTile(identity: "ada@waddle.test/mac", source: .camera, label: "You", isSelf: true)
     private static let linus = tile("linus")
@@ -35,11 +40,6 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
-    /// Stands in for a camera: a flat colour where the video would be.
-    private static func camera(_ tile: CallStageTile) -> AnyView? {
-        AnyView(tile.isSelf ? Theme.Colors.halo : Theme.Colors.seaShallow)
-    }
-
     private func assertStage(
         title: String = "#design", subtitle: String = "2 others in call", status: CallStageStatus = .inCall(since: nil),
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
@@ -52,8 +52,8 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
                 promotedSpeaker: promotedSpeaker, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
-                isHandRaised: isHandRaised, leaves: isHandRaised != nil, notice: notice, video: Self.camera,
-                announcesChanges: false, actions: Self.actions
+                isHandRaised: isHandRaised, notice: notice, tileSource: Self.cameras, announcesChanges: false,
+                actions: Self.actions
             )
             .frame(width: size.width, height: size.height),
             width: size.width + 2 * Theme.Spacing.l,
@@ -149,7 +149,7 @@ final class CallStageSnapshotTests: XCTestCase {
             precision: 0.97,
             of: CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
-                viewMode: viewMode, leaves: isHandRaised != nil, actions: Self.actions
+                viewMode: viewMode, actions: Self.actions
             )
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)

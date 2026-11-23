@@ -78,3 +78,25 @@ extension SessionCoordinator {
         )
     }
 }
+
+/// Where call surfaces are being drawn (`CallSurface.Platform`), read from
+/// the environment in one place so the dock and the stage never disagree
+/// about who has the call.
+@propertyWrapper
+struct CallPlatform: DynamicProperty {
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontal
+    @Environment(\.verticalSizeClass) private var vertical
+    #endif
+
+    @MainActor var wrappedValue: CallSurface.Platform {
+        #if os(iOS)
+        CallSurface.Platform(
+            isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+            isCompactWidth: horizontal == .compact, isCompactHeight: vertical == .compact
+        )
+        #else
+        .regularWidth
+        #endif
+    }
+}
