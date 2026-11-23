@@ -854,3 +854,143 @@ async fn a_hydrating_session_stays_a_routing_recipient_until_its_resume_complete
         .expect("list recipients")
         .is_empty());
 }
+
+/// Replays the named Quint hydration-tail trace against the durable authority.
+/// The clustered integration target covers the claim-store step separately.
+#[tokio::test]
+#[ignore = "requires the generated replayIncludesHydrationTailTest ITF trace"]
+async fn replay_quint_hydration_trace() {
+    let path = std::env::var_os("WADDLE_QUINT_RESUME_TRACE").expect("set the Quint trace path");
+    let bytes = std::fs::read(path).expect("read the Quint trace");
+    let trace: serde_json::Value = serde_json::from_slice(&bytes).expect("parse the ITF trace");
+    let states = trace["states"].as_array().expect("ITF states");
+    assert_eq!(states.len(), 7, "expected replayIncludesHydrationTailTest");
+    let initial = &states[0]["state"];
+    let committed = &states[2]["state"];
+    let observed = &states[3]["state"];
+    let admitted = &states[4]["state"];
+    let published = &states[5]["state"];
+    assert_eq!(initial["phase"]["tag"], "Detached");
+    assert_eq!(committed["phase"]["tag"], "Hydrating");
+    assert_eq!(observed["phase"]["tag"], "Hydrating");
+    assert_eq!(admitted["phase"]["tag"], "Hydrating");
+    assert_eq!(published["phase"]["tag"], "Live");
+
+    let number = |value: &serde_json::Value| {
+        value["#bigint"]
+            .as_str()
+            .expect("ITF integer")
+            .parse::<u64>()
+            .expect("nonnegative ordinal or generation")
+    };
+    let ordinals = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .expect("ITF replay list")
+            .iter()
+            .map(number)
+            .collect::<Vec<_>>()
+    };
+    let store = store("sm-quint-hydration-replay").await;
+    let enabled = enabled(&store, &binding()).await;
+    let initial_exposed = number(&initial["exposed"]);
+    let initial_appended = number(&initial["appended"]);
+    for n in 1..=initial_exposed {
+        assert_eq!(
+            admit_owned(&store, enabled.fence(), &n.to_string()).await,
+            ordinal(n)
+        );
+    }
+    store
+        .detach(enabled.fence(), None, snapshot(1), at(10))
+        .await
+        .expect("detach");
+    let admit_detached = |generation, now| AdmissionRequest {
+        authority: AdmissionAuthority::Detached {
+            session: enabled.fence().session,
+            generation,
+        },
+        claim: None,
+        now,
+    };
+    for n in initial_exposed + 1..=initial_appended {
+        let retained = store
+            .admit(
+                admit_detached(enabled.fence().generation, at(11)),
+                &frame(&n.to_string()),
+            )
+            .await
+            .expect("detached admission");
+        assert_eq!(
+            (retained.ordinal(), retained.exposure()),
+            (ordinal(n), Exposure::Retained)
+        );
+    }
+    let h = u32::try_from(number(&committed["acked"])).expect("small model count");
+    let resumed = resume(&store, &enabled, &binding(), h, at(20))
+        .await
+        .expect("resume commits");
+    // The Rust generation begins at enable; the model starts after detach.
+    assert_eq!(
+        resumed.fence().generation.value() - enabled.fence().generation.value(),
+        number(&committed["generation"])
+    );
+    // ITF maps are encoded as key/value pairs. This scenario observes one witness.
+    let witnesses = observed["witnesses"]["#map"]
+        .as_array()
+        .expect("ITF witnesses");
+    assert_eq!(witnesses.len(), 1);
+    let witness_replay = ordinals(&witnesses[0][1]["replay"]);
+    assert_eq!(
+        resumed
+            .replay()
+            .iter()
+            .map(|frame| frame.ordinal.value())
+            .collect::<Vec<_>>(),
+        witness_replay
+    );
+    for n in initial_appended + 1..=number(&admitted["appended"]) {
+        let retained = store
+            .admit(
+                admit_detached(resumed.fence().generation, at(21)),
+                &frame(&n.to_string()),
+            )
+            .await
+            .expect("hydration admission");
+        assert_eq!(
+            (retained.ordinal(), retained.exposure()),
+            (ordinal(n), Exposure::Retained)
+        );
+    }
+    let tail = store
+        .complete_resume(&resumed, None, at(22))
+        .await
+        .expect("fenced completion");
+    let replay = resumed
+        .replay()
+        .iter()
+        .chain(&tail.frames)
+        .map(|frame| frame.ordinal.value())
+        .collect::<Vec<_>>();
+    let publications = published["publications"]
+        .as_array()
+        .expect("ITF publications");
+    assert_eq!(publications.len(), 1);
+    let expected = ordinals(&publications[0]["replay"]);
+    assert_eq!(replay, expected, "authority replay differs from model");
+    let stored = store
+        .session(enabled.fence().session)
+        .await
+        .expect("read session")
+        .expect("session exists");
+    assert_eq!(stored.state, DurableSmState::Live);
+    assert_eq!(stored.window.acked().value(), number(&published["acked"]));
+    assert_eq!(
+        stored.window.appended().value(),
+        number(&published["appended"])
+    );
+    assert_eq!(
+        stored.window.exposure_ceiling().value(),
+        number(&published["exposed"])
+    );
+}

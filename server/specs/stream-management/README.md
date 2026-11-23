@@ -41,6 +41,31 @@ The model assumes a valid principal and successful atomic storage operations,
 with receipt observation allowed to lag behind commit. It uses small absolute
 ordinals and abstracts the resume deadline as a boolean. It excludes wire counter
 wraparound, XML and bytes, transport writes, live admissions after publication,
-database failure semantics, races to acquire the reaper claim, and liveness. The finite bounds apply to the model. The
-Rust integration suite remains the implementation check, and these Quint runs
-do not drive Rust.
+database failure semantics, races to acquire the reaper claim, and liveness. The finite bounds apply to the model.
+
+## Replay a trace against Rust
+
+The hydration-tail scenario exports an ITF trace that the opt-in
+[authority test](../../crates/waddle-server/tests/sm_durable_resume.rs) replays
+against the production durable store with SQLite. The test maps the modeled
+resume to a fresh binding, then compares the replay snapshot, ordered
+completion tail, and final persisted window with the exported trace.
+
+```sh
+trace_dir=$(mktemp -d)
+bunx @informalsystems/quint@0.34.0 test --backend=typescript \
+  --match=replayIncludesHydrationTailTest \
+  --out-itf="$trace_dir/{test}_{seq}.itf.json" \
+  server/specs/stream-management/detached_resume_test.qnt
+(
+  cd server
+  WADDLE_QUINT_RESUME_TRACE="$trace_dir/replayIncludesHydrationTailTest_0.itf.json" \
+    cargo test --locked -p waddle-server --test sm_durable_resume \
+    replay_quint_hydration_trace -- --ignored --exact
+)
+```
+
+The trace adapter covers this one scenario. The SQLite test uses a local
+binding, so the modeled claim acquisition has no corresponding store call.
+The native PostgreSQL suite linked above exercises real cross-node claims
+and XMPP wire behavior independently.
