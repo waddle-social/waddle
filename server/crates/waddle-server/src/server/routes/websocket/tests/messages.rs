@@ -1214,7 +1214,7 @@ async fn drive_xep0492_direct_chat_push_gate_with_state(
         // not parsed for at-mention substrings (XEP-0513 §3 requires
         // explicit `<mention/>` payloads for machine-detectable
         // mentions).
-        let mention = waddle_xmpp::xep::build_mention_element(
+        let mention = waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
         );
         message.payloads.push(mention);
@@ -1407,7 +1407,7 @@ async fn drive_xep0492_direct_chat_emission_shape_with_state(
         "hello bob".to_string(),
     );
     if is_mention {
-        let mention = waddle_xmpp::xep::build_mention_element(
+        let mention = waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
         );
         message.payloads.push(mention);
@@ -1690,7 +1690,7 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
     );
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(
+        .push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::occupant_id(occupant_id.as_str()),
         ));
 
@@ -2141,7 +2141,7 @@ async fn groupchat_channel_mention_for_foreign_room_does_not_ping_current_room()
     );
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(&mention));
+        .push(waddle_xmpp::xep::build_mention_markup(&mention));
 
     let responses =
         handle_message_for_test(state.as_ref(), &alice_jid, Some(&alice_session), message).await;
@@ -2245,7 +2245,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
         .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(
+        .push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::active_channel(),
         ));
 
@@ -2348,7 +2348,7 @@ async fn groupchat_active_channel_mention_does_not_expand_to_live_unaffiliated_o
         .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(
+        .push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::active_channel(),
         ));
 
@@ -2453,7 +2453,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .insert(xmpp_parsers::message::Lang::new(), "heads up".to_string());
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(
+        .push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::active_channel(),
         ));
 

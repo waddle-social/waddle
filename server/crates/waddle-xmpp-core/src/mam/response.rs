@@ -12,10 +12,11 @@ use super::types::{
     ArchivedRichPayload, MamResult,
 };
 use super::{
-    CLIENT_NS, DELAY_NS, FORWARD_NS, MAM_NS, MENTIONS_NS, MESSAGE_CORRECT_NS, MESSAGE_MODERATE_NS,
+    CLIENT_NS, DELAY_NS, FORWARD_NS, MAM_NS, MESSAGE_CORRECT_NS, MESSAGE_MODERATE_NS,
     MESSAGE_RETRACT_NS, MUC_USER_NS, OCCUPANT_ID_NS, REACTIONS_NS, REFERENCE_NS, REPLY_NS, RSM_NS,
     STANZA_ID_NS,
 };
+use crate::mention_markup::{mention_markup_element, MentionSpan};
 /// Build MAM result messages for each archived message.
 ///
 /// `archive_jid` is the queried archive's address (room bare JID for
@@ -341,57 +342,28 @@ fn build_typed_inner_message(archived: &ArchivedMessage, rich: &ArchivedRichMess
         }
         builder = builder.append(reference_builder.build());
     }
-    for mention in &rich.mentions {
-        let mut mention_elem = Element::builder("mention", MENTIONS_NS).build();
-        if let Some(begin) = mention.begin {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("begin").to_owned(),
-                begin.to_string(),
-            );
-        }
-        if let Some(end) = mention.end {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("end").to_owned(),
-                end.to_string(),
-            );
-        }
-        if let Some(jid) = mention.jid.as_ref() {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("jid").to_owned(),
-                jid.to_string(),
-            );
-        }
-        if let Some(occupant_id) = mention.occupant_id.as_ref() {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("occupantid").to_owned(),
-                occupant_id.as_str(),
-            );
-        }
-        if let Some(mentions) = mention.mentions.as_ref() {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("mentions").to_owned(),
-                mentions.as_str(),
-            );
-        }
-        if let Some(uri) = mention.uri.as_ref() {
-            mention_elem.set_attr(
-                minidom::rxml::Namespace::NONE,
-                minidom::rxml::xml_ncname!("uri").to_owned(),
-                uri.as_str(),
-            );
-        }
-        if mention.active {
-            mention_elem.append_child(Element::builder("active", MENTIONS_NS).build());
-        }
-        if mention.noping {
-            mention_elem.append_child(Element::builder("noping", MENTIONS_NS).build());
-        }
-        builder = builder.append(mention_elem);
+    let mention_spans: Vec<MentionSpan> = rich
+        .mentions
+        .iter()
+        .map(|mention| MentionSpan {
+            begin: mention.begin,
+            end: mention.end,
+            jid: mention.jid.clone(),
+            occupant_id: mention
+                .occupant_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            mentions: mention
+                .mentions
+                .as_ref()
+                .map(|kind| kind.as_str().to_owned()),
+            uri: mention.uri.as_ref().map(|uri| uri.as_str().to_owned()),
+            active: mention.active,
+            noping: mention.noping,
+        })
+        .collect();
+    if let Some(markup) = mention_markup_element(&mention_spans) {
+        builder = builder.append(markup);
     }
 
     match rich.payload.as_ref() {

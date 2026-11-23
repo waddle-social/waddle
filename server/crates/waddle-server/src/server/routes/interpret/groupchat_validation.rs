@@ -2,8 +2,7 @@ use super::{
     effects, extract_correction_from_message, extract_retraction_from_message, warn, ActorRef, Arc,
     BareJid, DefinedCondition, Deps, Element, ErrorType, FullJid, GetNicknameGeneration, Jid,
     MamArchivedMessage, MamStorage, Message, RetractionKind, RoomActor, StanzaError,
-    XmppMessageType, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
-    NS_REFERENCE, NS_REPLY,
+    XmppMessageType, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS, NS_REFERENCE, NS_REPLY,
 };
 
 pub(super) async fn validate_groupchat_rich_targets(
@@ -308,12 +307,7 @@ pub(super) fn has_malformed_rich_payload(message: &Message) -> bool {
                 && payload.name() == "reference"
                 && (payload.attr("type").is_none_or(str::is_empty)
                     || payload.attr("uri").is_none_or(str::is_empty)))
-            || (payload.ns() == NS_EXPLICIT_MENTIONS
-                && payload.name() == "mention"
-                && (payload.attr("jid").is_some()
-                    || (payload.attr("occupantid").is_none_or(str::is_empty)
-                        && payload.attr("mentions").is_none_or(str::is_empty))))
-    })
+    }) || waddle_xmpp::xep::has_malformed_mention_markup(message)
 }
 
 pub(super) fn remove_framework_envelopes(message: &mut Message) {

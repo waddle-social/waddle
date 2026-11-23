@@ -274,13 +274,26 @@ scenario: #Scenario & {
 				},
 				#XmlPayload & {
 					element: #XmlElement & {
-						name: "mention"
-						ns:   "urn:xmpp:mentions:0"
-						attrs: {
-							begin: "28"
-							end:   "32"
-						}
-						attrsFrom: occupantid: "bobOccupantId"
+						name: "markup"
+						ns:   "urn:xmpp:markup:0"
+						children: [
+							#XmlElement & {
+								name: "span"
+								ns:   "urn:xmpp:markup:0"
+								attrs: {
+									start: "28"
+									end:   "32"
+								}
+								children: [
+									#XmlElement & {
+										name: "mention"
+										ns:   "urn:xmpp:mentions:0"
+										attrs: type: "urn:xmpp:mentions:0#occupant"
+										attrsFrom: target: "bobOccupantId"
+									},
+								]
+							},
+						]
 					}
 				},
 			]
@@ -303,7 +316,8 @@ scenario: #Scenario & {
 				#XmlElement & {
 					name:      "mention"
 					ns:        "urn:xmpp:mentions:0"
-					attrsFrom: occupantid: "bobOccupantId"
+					attrs:     type: "urn:xmpp:mentions:0#occupant"
+					attrsFrom: target: "bobOccupantId"
 				},
 			]
 			absent: ["spoofed-room-id"]
@@ -321,7 +335,8 @@ scenario: #Scenario & {
 			elements: [#XmlElement & {
 				name:      "mention"
 				ns:        "urn:xmpp:mentions:0"
-				attrsFrom: occupantid: "bobOccupantId"
+				attrs:     type: "urn:xmpp:mentions:0#occupant"
+				attrsFrom: target: "bobOccupantId"
 			}]
 			absent: ["spoofed-room-id"]
 		},

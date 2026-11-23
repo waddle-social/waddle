@@ -7,9 +7,22 @@ use std::collections::BTreeSet;
 use xmpp_parsers::message::Message;
 
 use super::xep0372::{extract_references_from_message, Reference};
+use waddle_xmpp_core::mention_markup::{
+    markup_has_malformed_mention, markup_has_mention, mention_markup_element, mentions_from_markup,
+    strip_mentions_from_markup, MentionSpan, NS_MARKUP,
+};
 
 /// Namespace for XEP-0513 Explicit Mentions.
-pub const NS_EXPLICIT_MENTIONS: &str = "urn:xmpp:mentions:0";
+pub const NS_EXPLICIT_MENTIONS: &str = waddle_xmpp_core::mention_markup::NS_MENTIONS;
+
+/// Waddle-only mention extension namespace: the mentioned bare JID, scope
+/// URI and `noping` flag, which XEP-0513 has no representation for. It sits
+/// beside the XEP-0513 `<mention/>` inside the XEP-0394 `<span/>`.
+pub const NS_WADDLE_MENTIONS: &str = waddle_xmpp_core::mention_markup::NS_WADDLE_MENTIONS;
+
+/// XEP-0513 `type` for an individual mention targeting an XEP-0421
+/// occupant-id.
+pub const OCCUPANT_MENTION: &str = waddle_xmpp_core::mention_markup::MENTION_TYPE_OCCUPANT;
 
 /// XEP-0513 channel-wide mention URI.
 pub const CHANNEL_MENTION: &str = "urn:xmpp:mentions:0#channel";
@@ -31,7 +44,7 @@ pub const DEFAULT_MENTIONS_COUNT: u32 = 5;
 ///   - `mentions` (a URI identifying a special group, e.g.
 ///     `urn:xmpp:mentions:0#channel`).
 ///
-/// [`parse_mention_element`] is deliberately MORE permissive: it
+/// [`parse_mention_markup`] is deliberately MORE permissive: it
 /// also accepts `<mention/>` elements whose only payload is a
 /// `uri='…'` attribute or a `<active/>` / `<noping/>` child. Per
 /// §3, `uri` is documented as a SCOPE qualifier for channel
@@ -46,7 +59,7 @@ pub const DEFAULT_MENTIONS_COUNT: u32 = 5;
 /// review on PR #741).
 ///
 /// Anchor-only (`begin`/`end`-only) `<mention/>` elements are
-/// rejected by [`parse_mention_element`] outright — those don't
+/// rejected by [`parse_mention_markup`] outright — those don't
 /// reach this predicate.
 ///
 /// Empty-string `occupantid=''` and `mentions=''` are also
@@ -199,7 +212,9 @@ pub fn personal_mention_targets(
     xep0513.chain(xep0372).collect()
 }
 
-/// A single top-level `<mention/>` payload.
+/// A single mention: an XEP-0513 `<mention/>` inside an XEP-0394 `<span/>`,
+/// plus any Waddle-only data from the `urn:waddle:mentions:0` extension
+/// (`jid`, `uri`, `noping`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExplicitMention {
     pub begin: Option<u32>,
@@ -307,21 +322,55 @@ impl ExplicitMentionCarrier for Message {
     }
 }
 
-pub fn is_mention_element(elem: &Element) -> bool {
-    elem.is("mention", NS_EXPLICIT_MENTIONS)
+impl From<&ExplicitMention> for MentionSpan {
+    fn from(mention: &ExplicitMention) -> Self {
+        Self {
+            begin: mention.begin,
+            end: mention.end,
+            jid: mention.jid.clone(),
+            occupant_id: mention.occupant_id.clone(),
+            mentions: mention.mentions.clone(),
+            uri: mention.uri.clone(),
+            active: mention.active,
+            noping: mention.noping,
+        }
+    }
+}
+
+impl From<MentionSpan> for ExplicitMention {
+    fn from(span: MentionSpan) -> Self {
+        Self {
+            begin: span.begin,
+            end: span.end,
+            jid: span.jid,
+            occupant_id: span.occupant_id,
+            mentions: span.mentions,
+            uri: span.uri,
+            active: span.active,
+            noping: span.noping,
+        }
+    }
+}
+
+/// Returns `true` when `elem` is an XEP-0394 `<markup/>` element that
+/// carries at least one mention element.
+pub fn is_mention_markup(elem: &Element) -> bool {
+    markup_has_mention(elem)
 }
 
 pub fn has_explicit_mentions(msg: &Message) -> bool {
-    msg.payloads.iter().any(is_mention_element)
+    msg.payloads.iter().any(is_mention_markup)
+}
+
+/// Returns `true` when a `<markup/>` payload on `msg` carries a malformed
+/// mention (see [`markup_has_malformed_mention`]).
+pub fn has_malformed_mention_markup(msg: &Message) -> bool {
+    msg.payloads.iter().any(markup_has_malformed_mention)
 }
 
 pub fn extract_explicit_mentions(msg: &Message) -> Option<ExplicitMentions> {
-    let mentions: Vec<ExplicitMention> = msg
-        .payloads
-        .iter()
-        .filter(|elem| is_mention_element(elem))
-        .filter_map(parse_mention_element)
-        .collect();
+    let mentions: Vec<ExplicitMention> =
+        msg.payloads.iter().flat_map(parse_mention_markup).collect();
 
     if mentions.is_empty() {
         None
@@ -330,109 +379,65 @@ pub fn extract_explicit_mentions(msg: &Message) -> Option<ExplicitMentions> {
     }
 }
 
-pub fn parse_mention_element(elem: &Element) -> Option<ExplicitMention> {
-    let begin = elem.attr("begin").and_then(|value| value.parse().ok());
-    let end = elem.attr("end").and_then(|value| value.parse().ok());
-    let jid = elem.attr("jid").and_then(|value| value.parse().ok());
-    let occupant_id = elem.attr("occupantid").map(str::to_string);
-    let mentions = elem.attr("mentions").map(str::to_string);
-    let uri = elem.attr("uri").map(str::to_string);
-    let active = elem.get_child("active", NS_EXPLICIT_MENTIONS).is_some();
-    let noping = elem.get_child("noping", NS_EXPLICIT_MENTIONS).is_some();
-
-    if jid.is_none()
-        && occupant_id.is_none()
-        && mentions.is_none()
-        && uri.is_none()
-        && !active
-        && !noping
-    {
-        return None;
-    }
-
-    Some(ExplicitMention {
-        begin,
-        end,
-        jid,
-        occupant_id,
-        mentions,
-        uri,
-        active,
-        noping,
-    })
-}
-
-pub fn build_mention_element(mention: &ExplicitMention) -> Element {
-    let mut elem = Element::builder("mention", NS_EXPLICIT_MENTIONS).build();
-
-    if let Some(begin) = mention.begin {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("begin").to_owned(),
-            begin.to_string(),
-        );
-    }
-    if let Some(end) = mention.end {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("end").to_owned(),
-            end.to_string(),
-        );
-    }
-    if let Some(jid) = &mention.jid {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("jid").to_owned(),
-            jid.to_string(),
-        );
-    }
-    if let Some(occupant_id) = &mention.occupant_id {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("occupantid").to_owned(),
-            occupant_id,
-        );
-    }
-    if let Some(mentions) = &mention.mentions {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("mentions").to_owned(),
-            mentions,
-        );
-    }
-    if let Some(uri) = &mention.uri {
-        elem.set_attr(
-            minidom::rxml::Namespace::NONE,
-            minidom::rxml::xml_ncname!("uri").to_owned(),
-            uri,
-        );
-    }
-    if mention.active {
-        elem.append_child(Element::builder("active", NS_EXPLICIT_MENTIONS).build());
-    }
-    if mention.noping {
-        elem.append_child(Element::builder("noping", NS_EXPLICIT_MENTIONS).build());
-    }
-
-    elem
-}
-
-pub fn build_mentions_elements(mentions: &ExplicitMentions) -> Vec<Element> {
-    mentions
-        .mentions
-        .iter()
-        .map(build_mention_element)
+/// Decode the mentions in one `<markup/>` element. See
+/// [`mentions_from_markup`] for the span rules.
+pub fn parse_mention_markup(markup: &Element) -> Vec<ExplicitMention> {
+    mentions_from_markup(markup)
+        .into_iter()
+        .map(ExplicitMention::from)
         .collect()
+}
+
+/// Build the XEP-0394 `<span/>` carrying `mention` (XEP-0513 `<mention/>`
+/// plus, when the mention has Waddle-only data, the `urn:waddle:mentions:0`
+/// extension).
+pub fn build_mention_span(mention: &ExplicitMention) -> Element {
+    MentionSpan::from(mention).to_span_element()
+}
+
+/// Build a `<markup/>` payload carrying just `mention`.
+pub fn build_mention_markup(mention: &ExplicitMention) -> Element {
+    let mut markup = Element::builder("markup", NS_MARKUP).build();
+    markup.append_child(build_mention_span(mention));
+    markup
+}
+
+/// Build one `<markup/>` payload carrying all `mentions`, or `None` when
+/// there are none.
+pub fn build_mentions_markup(mentions: &ExplicitMentions) -> Option<Element> {
+    let spans: Vec<MentionSpan> = mentions.mentions.iter().map(MentionSpan::from).collect();
+    mention_markup_element(&spans)
+}
+
+/// Add `mention` to the message's XEP-0394 `<markup/>` payload, creating
+/// the payload when the message has none.
+pub fn add_explicit_mention(msg: &mut Message, mention: &ExplicitMention) {
+    let span = build_mention_span(mention);
+    match msg.payloads.iter_mut().find(|e| e.is("markup", NS_MARKUP)) {
+        Some(markup) => {
+            markup.append_child(span);
+        }
+        None => msg.payloads.push(build_mention_markup(mention)),
+    }
 }
 
 pub fn set_explicit_mentions(msg: &mut Message, mentions: &ExplicitMentions) {
     strip_explicit_mentions(msg);
-    msg.payloads.extend(build_mentions_elements(mentions));
+    for mention in &mentions.mentions {
+        add_explicit_mention(msg, mention);
+    }
 }
 
+/// Remove every mention from the message's markup, keeping other markup
+/// and dropping a `<markup/>` payload that is left empty.
 pub fn strip_explicit_mentions(msg: &mut Message) {
-    msg.payloads
-        .retain(|elem| elem.ns() != NS_EXPLICIT_MENTIONS);
+    msg.payloads.retain_mut(|elem| {
+        if markup_has_mention(elem) {
+            !strip_mentions_from_markup(elem)
+        } else {
+            true
+        }
+    });
 }
 
 // ── §295 / §303: Permissions Query ──────────────────────────────────
@@ -618,7 +623,7 @@ mod count_tests {
     }
 
     fn with_xep0513_mention(msg: &mut Message, mention: ExplicitMention) {
-        msg.payloads.push(build_mention_element(&mention));
+        msg.payloads.push(build_mention_markup(&mention));
     }
 
     /// XEP-0513 `<mention/>` payloads with a real targeting axis
@@ -734,8 +739,9 @@ mod count_tests {
         let mentions = extract_explicit_mentions(&msg)
             .map(|m| m.mentions)
             .unwrap_or_default();
-        // Both elements parsed (the parser accepts `Some("")`).
-        assert_eq!(mentions.len(), 2);
+        // The empty-target occupant mention parses; an empty `type` is not
+        // a XEP-0513 mention at all and is dropped by the parser.
+        assert_eq!(mentions.len(), 1);
         assert_eq!(
             mention_target_count(&mentions, &msg),
             0,
@@ -755,7 +761,7 @@ mod count_tests {
     fn mention_target_count_ignores_anchor_only_and_payload_only_mentions() {
         let mut msg = empty_message();
         // 6 anchor-less `<noping/>`-only mentions — each is a parse
-        // hit (parse_mention_element accepts the `noping` child as a
+        // hit (parse_mention_markup accepts the `noping` child as a
         // sufficient reason to construct an `ExplicitMention`) but
         // structurally targets nobody.
         for _ in 0..6 {
@@ -763,7 +769,7 @@ mod count_tests {
                 noping: true,
                 ..ExplicitMention::default()
             };
-            msg.payloads.push(build_mention_element(&noping_only));
+            msg.payloads.push(build_mention_markup(&noping_only));
         }
         let mentions = extract_explicit_mentions(&msg)
             .map(|m| m.mentions)

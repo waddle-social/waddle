@@ -220,11 +220,11 @@ async fn a_remote_occupants_message_carries_standard_payloads_and_none_of_this_d
     carried
         .payloads
         .push(Element::builder("pinned", "urn:waddle:pin:0").build());
-    carried.payloads.push(
-        Element::builder("mention", "urn:xmpp:mentions:0")
-            .attr(minidom::rxml::xml_ncname!("mentions").to_owned(), "channel")
-            .build(),
-    );
+    carried
+        .payloads
+        .push(waddle_xmpp::xep::build_mention_markup(
+            &waddle_xmpp::xep::ExplicitMention::channel(),
+        ));
     carried
         .payloads
         .push(Element::builder("store", "urn:xmpp:hints").build());
@@ -249,6 +249,7 @@ async fn a_remote_occupants_message_carries_standard_payloads_and_none_of_this_d
         received.children().all(|child| {
             !child.ns().starts_with("urn:waddle:")
                 && child.ns() != "urn:xmpp:mentions:0"
+                && child.ns() != "urn:xmpp:markup:0"
                 && child.ns() != "urn:xmpp:hints"
         }),
         "{received:?}"

@@ -822,7 +822,7 @@ mod tests {
         let mut message = Message::new(None::<Jid>);
         message
             .payloads
-            .push(waddle_xmpp::xep::build_mention_element(&mention));
+            .push(waddle_xmpp::xep::build_mention_markup(&mention));
         message
     }
 
@@ -1356,7 +1356,7 @@ mod tests {
             } else {
                 format!("user{i}@example.com").parse().expect("target jid")
             };
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(target),
             ));
         }
@@ -1412,7 +1412,7 @@ mod tests {
             } else {
                 format!("user{i}@example.com").parse().expect("target jid")
             };
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(target),
             ));
         }
@@ -1463,11 +1463,11 @@ mod tests {
         // Half XEP-0513, half XEP-0372 — together exceed threshold.
         let half = threshold / 2 + 1;
         let mut msg = Message::new(None::<Jid>);
-        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+        msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(owner.clone()),
         ));
         for i in 1..half {
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(
                     format!("user{i}@example.com").parse().expect("target"),
                 ),
@@ -1533,9 +1533,9 @@ mod tests {
         let mut owner_noping = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
         owner_noping.noping = true;
         msg.payloads
-            .push(waddle_xmpp::xep::build_mention_element(&owner_noping));
+            .push(waddle_xmpp::xep::build_mention_markup(&owner_noping));
         for i in 0..threshold {
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(
                     format!("user{i}@example.com").parse().expect("target"),
                 ),
@@ -1578,9 +1578,9 @@ mod tests {
         let mut owner_noping = waddle_xmpp::xep::ExplicitMention::jid(owner.clone());
         owner_noping.noping = true;
         msg.payloads
-            .push(waddle_xmpp::xep::build_mention_element(&owner_noping));
+            .push(waddle_xmpp::xep::build_mention_markup(&owner_noping));
         for i in 0..(threshold - 1) {
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(
                     format!("user{i}@example.com").parse().expect("target"),
                 ),
@@ -1639,9 +1639,9 @@ mod tests {
         let mut channel = waddle_xmpp::xep::ExplicitMention::channel();
         channel.uri = Some("xmpp:team@muc.example.com".to_string());
         msg.payloads
-            .push(waddle_xmpp::xep::build_mention_element(&channel));
+            .push(waddle_xmpp::xep::build_mention_markup(&channel));
         for i in 0..threshold {
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(
                     format!("user{i}@example.com").parse().expect("target"),
                 ),
@@ -1692,7 +1692,7 @@ mod tests {
 
         let mut msg = Message::new(None::<Jid>);
         for i in 0..=threshold {
-            msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+            msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
                 &waddle_xmpp::xep::ExplicitMention::jid(if i == 0 {
                     owner.clone()
                 } else {

@@ -318,14 +318,11 @@ mod tests {
         // Body-less reactions + XEP-0513 explicit mention → NOT
         // reaction-only (a body-less mention still pings).
         let mut with_mention = reaction_only.clone();
-        with_mention.payloads.push(
-            Element::builder("mention", super::super::xep0513::NS_EXPLICIT_MENTIONS)
-                .attr(
-                    minidom::rxml::xml_ncname!("jid").to_owned(),
-                    "carol@example.com",
-                )
-                .build(),
-        );
+        with_mention
+            .payloads
+            .push(super::super::xep0513::build_mention_markup(
+                &super::super::xep0513::ExplicitMention::occupant_id("occ-1"),
+            ));
         assert!(!is_reaction_only_message(&with_mention));
 
         // Pure routing/transport metadata riding the reaction does NOT
