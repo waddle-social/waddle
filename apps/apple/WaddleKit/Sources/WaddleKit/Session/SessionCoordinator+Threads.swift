@@ -56,12 +56,12 @@ extension SessionCoordinator {
     }
 
     /// Whether the account may pin messages in `conversation`, as web's
-    /// `currentUserCanPin` decides: owners and admins may; any occupant
-    /// may where the room lets anyone pin. Unknown until the room is
-    /// joined, or while its disco#info has not said.
+    /// `currentUserCanPin` decides: only in a room we are in; owners and
+    /// admins may; any occupant may where the room lets anyone pin.
+    /// Unknown while the room's disco#info has not said.
     public func pinAccess(in conversation: ConversationID) -> PinAccess {
-        guard conversation.isRoom else { return .denied }
-        guard let occupant = selfOccupant(in: conversation.jid) else { return .unknown }
+        guard conversation.isRoom, presence.joinedRooms.contains(conversation.jid),
+              let occupant = selfOccupant(in: conversation.jid) else { return .denied }
         if occupant.affiliation == .owner || occupant.affiliation == .admin { return .allowed }
         switch directory.channel(for: conversation.jid)?.pinPermission {
         case .anyone: return .allowed

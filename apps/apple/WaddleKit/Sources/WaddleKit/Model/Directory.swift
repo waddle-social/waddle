@@ -103,10 +103,9 @@ public struct Channel: Hashable, Sendable, Identifiable {
         return copy
     }
 
-    /// Keeps `value` only where this room does not say who may pin.
-    func withKnownPinPermission(_ value: PinPermission?) -> Channel {
+    func withPinPermission(_ value: PinPermission?) -> Channel {
         var copy = self
-        copy.pinPermission = pinPermission ?? value
+        copy.pinPermission = value
         return copy
     }
 }

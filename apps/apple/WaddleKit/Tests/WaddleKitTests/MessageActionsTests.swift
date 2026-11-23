@@ -141,7 +141,8 @@ struct MessageActionsTests {
     @Test func ownersAndAdminsMayPinMembersMightDirectMessagesCannot() {
         let coordinator = SessionCoordinator(account: me, port: FakePort())
         #expect(coordinator.pinAccess(in: bobConversation) == .denied)
-        #expect(coordinator.pinAccess(in: roomConversation) == .unknown)
+        // Not in the room: web offers no Pin there either.
+        #expect(coordinator.pinAccess(in: roomConversation) == .denied)
         for (affiliation, expected) in [(RoomAffiliation.owner, PinAccess.allowed), (.admin, .allowed), (.member, .unknown)] {
             _ = coordinator.presence.apply(WirePresence(
                 from: room.with(resource: "alice")!,
@@ -189,12 +190,12 @@ struct MessageActionsTests {
         #expect(joined(as: .member, where: nil).pinAccess(in: roomConversation) == .unknown)
     }
 
-    @Test func aRoomThatLetsAnyonePinStillWaitsForTheJoin() {
+    @Test func noOneMayPinInARoomTheyAreNotIn() {
         let coordinator = SessionCoordinator(account: me, port: FakePort())
         coordinator.directory.apply(Topology(spaces: [], channels: [
             Channel(roomJID: room, name: "general", pinPermission: .anyone),
         ]))
-        #expect(coordinator.pinAccess(in: roomConversation) == .unknown)
+        #expect(coordinator.pinAccess(in: roomConversation) == .denied)
     }
 
     @Test func aMemberSeesPinOnTheToolbarWhereAnyoneMayPin() throws {

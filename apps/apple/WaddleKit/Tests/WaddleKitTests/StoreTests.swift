@@ -124,15 +124,21 @@ struct StoreTests {
         #expect(presence.apply(left) == .occupant(room: room))
     }
 
-    /// A look that could not read a room's disco#info says nothing of who
-    /// may pin there; what was known stands. A look that could, decides.
+    /// A look that could not read a room's disco#info (it then knows
+    /// nothing of members-only either) says nothing of who may pin there;
+    /// what was known stands. A look that could, decides.
     @Test func aRoomsPinPermissionOutlivesALookThatCouldNotReadIt() {
         let directory = DirectoryStore()
         directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general", pinPermission: .anyone)]))
         directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general")]))
         #expect(directory.channel(for: room)?.pinPermission == .anyone)
-        directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general", pinPermission: .adminsOnly)]))
+        directory.apply(Topology(spaces: [], channels: [
+            Channel(roomJID: room, name: "general", membersOnly: false, pinPermission: .adminsOnly),
+        ]))
         #expect(directory.channel(for: room)?.pinPermission == .adminsOnly)
+        // Read, and silent on pins: nothing is known any more.
+        directory.apply(Topology(spaces: [], channels: [Channel(roomJID: room, name: "general", membersOnly: false)]))
+        #expect(directory.channel(for: room)?.pinPermission == nil)
     }
 
     @Test func presenceFlagsBotOccupantByHat() {

@@ -13,6 +13,7 @@ extension SessionCoordinator {
             try await port.updateRoomSettings(patch, of: room)
             guard isCurrent(generation) else { return }
             updateChannel(room, name: patch.name, summary: patch.summary, pinPermission: patch.pinPermission)
+            if let saved = patch.pinPermission { directoryMutations.append(.setPinPermission(room, saved)) }
         }
     }
 
@@ -313,4 +314,6 @@ enum DirectoryMutation {
     case remove(BareJID)
     /// The account left or rejoined the room here.
     case setLeft(BareJID, Bool)
+    /// The owner saved who may pin here.
+    case setPinPermission(BareJID, PinPermission)
 }

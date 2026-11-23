@@ -59,14 +59,18 @@ extension SessionCoordinator {
                 switch mutation {
                 case .upsert(let channel):
                     // Queued local edits may carry older discovery flags.
-                    // A pin permission saved here is newer than the lookup.
                     let found = directory.channel(for: channel.roomJID)
                     directory.upsert(channel.with(hasLeft: found?.hasLeft ?? channel.hasLeft)
                         .withKnownMembersOnly(found?.membersOnly)
-                        .withKnownPinPermission(found?.pinPermission))
+                        .withPinPermission(found?.pinPermission ?? channel.pinPermission))
                 case .remove(let room): directory.remove(room)
                 case let .setLeft(room, hasLeft):
                     if let found = directory.channel(for: room) { directory.upsert(found.with(hasLeft: hasLeft)) }
+                case let .setPinPermission(room, permission):
+                    // Saved here, so newer than what the lookup read.
+                    if let found = directory.channel(for: room) {
+                        directory.upsert(found.withPinPermission(permission))
+                    }
                 }
             }
         }
