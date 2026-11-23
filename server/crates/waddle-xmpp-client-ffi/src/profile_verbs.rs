@@ -27,8 +27,8 @@ use waddle_xmpp_client::error::STANZA_CONDITION_ITEM_NOT_FOUND;
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, parse_pep_activity,
-    parse_pep_mood, parse_pep_tune, UserActivity, UserMood, UserTune, NS_ACTIVITY, NS_MOOD,
-    NS_TUNE,
+    parse_pep_mood, parse_pep_tune, UserActivity, UserMood, UserTune, GENERAL_ACTIVITIES,
+    NS_ACTIVITY, NS_MOOD, NS_TUNE,
 };
 use waddle_xmpp_client::xep::xep0292::{
     build_fetch_vcard4_iq, build_publish_vcard4_iq, parse_pep_vcard4, VCard4,
@@ -310,25 +310,6 @@ pub(crate) const MOOD_KINDS: [&str; 84] = [
     "undefined",
     "weak",
     "worried",
-];
-
-/// XEP-0108 §3.1: the CLOSED registry of 12 general activity
-/// categories, mirroring the server's
-/// `GeneralActivity::from_element_name`
-/// (`waddle-xmpp/src/xep/xep0108.rs`).
-pub(crate) const GENERAL_ACTIVITIES: [&str; 12] = [
-    "doing_chores",
-    "drinking",
-    "eating",
-    "exercising",
-    "grooming",
-    "having_appointment",
-    "inactive",
-    "relaxing",
-    "talking",
-    "traveling",
-    "working",
-    "undefined",
 ];
 
 /// XEP-0107: `kind` must be one of the 84 registry mood element names —

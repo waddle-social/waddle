@@ -1,6 +1,7 @@
 // ── Data types ───────────────────────────────────────────────────────────────
 
-use crate::WaddleStatusPreference;
+use crate::{WaddleActivity, WaddleStatusPreference};
+use jid::BareJid;
 pub use jid::Jid;
 pub use waddle_xmpp_client::request::StanzaId;
 
@@ -10,6 +11,11 @@ uniffi::custom_type!(Jid, String, {
     remote,
     lower: |jid| jid.to_string(),
     try_lift: |value| Ok(Jid::new(&value)?),
+});
+uniffi::custom_type!(BareJid, String, {
+    remote,
+    lower: |jid| jid.to_string(),
+    try_lift: |value| Ok(BareJid::new(&value)?),
 });
 uniffi::custom_type!(StanzaId, String, {
     remote,
@@ -1424,6 +1430,12 @@ pub enum WaddleClientEvent {
     AuthenticationFailed { condition: WaddleSaslCondition },
     /// Human-readable diagnostic. Never carries protocol data.
     Error { description: String },
+    /// XEP-0108 activity announced by another account's PEP service.
+    /// `activity` is absent when the publisher clears or retracts it.
+    ActivityChanged {
+        jid: BareJid,
+        activity: Option<WaddleActivity>,
+    },
 }
 
 #[uniffi::export(callback_interface)]

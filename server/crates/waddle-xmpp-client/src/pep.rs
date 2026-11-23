@@ -3,6 +3,7 @@
 //! Covers XEP-0163 (PEP), XEP-0107 (User Mood), XEP-0108 (User Activity),
 //! and XEP-0118 (User Tune).
 
+use jid::BareJid;
 use minidom::Element;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -16,6 +17,21 @@ use uuid::Uuid;
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
 /// Protocol token `http://jabber.org/protocol/activity`.
 pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
+/// General activity element names defined by XEP-0108.
+pub const GENERAL_ACTIVITIES: [&str; 12] = [
+    "doing_chores",
+    "drinking",
+    "eating",
+    "exercising",
+    "grooming",
+    "having_appointment",
+    "inactive",
+    "relaxing",
+    "talking",
+    "traveling",
+    "working",
+    "undefined",
+];
 /// XEP-0163 §3 notification filter for the activity node: a roster contact
 /// receives a peer's in-call overlay (ADR-010 Phase 3) only if it advertises
 /// this in its XEP-0115 caps.
@@ -129,6 +145,60 @@ fn parse_activity_event(items: &Element) -> Option<PepItem> {
         Some(payload) => Some(PepItem::Activity(payload)),
         None => Some(PepItem::ActivityCleared),
     }
+}
+
+/// The activity a peer's PEP service says the account has now: `Some(None)`
+/// when it has none, `None` when the stanza is not an activity notification
+/// this client may believe.
+pub(crate) fn parse_activity_notification(
+    message: &Element,
+    account: &BareJid,
+) -> Option<(BareJid, Option<UserActivity>)> {
+    let event = message.get_child("event", NS_PUBSUB_EVENT)?;
+    let about_activity = |name| {
+        event
+            .get_child(name, NS_PUBSUB_EVENT)
+            .filter(|child| child.attr("node") == Some(NS_ACTIVITY))
+    };
+    // XEP-0163 §4.3.1: a PEP service sends from the owner's bare JID, so a
+    // full JID (a device, a MUC occupant) cannot speak for an account. The
+    // server sends our own notification to our other devices too.
+    let from = message.attr("from")?.parse::<BareJid>().ok()?;
+    if &from == account || message.attr("type") == Some("groupchat") {
+        return None;
+    }
+    // XEP-0060 §8.4.2, §8.5.2: a deleted or purged node holds nothing.
+    if about_activity("delete")
+        .or(about_activity("purge"))
+        .is_some()
+    {
+        return Some((from, None));
+    }
+    // The node holds one item, so the last change listed is its state now.
+    let change = about_activity("items")?.children().last()?;
+    if change.is("retract", NS_PUBSUB_EVENT) {
+        return Some((from, None));
+    }
+    if !change.is("item", NS_PUBSUB_EVENT) || !published_by(change, &from) {
+        return None;
+    }
+    // A new item replaces the last one whatever it holds, so one this client
+    // cannot read still means the earlier activity is gone.
+    let activity = change
+        .get_child("activity", NS_ACTIVITY)
+        .and_then(parse_activity_payload)
+        .filter(|activity| GENERAL_ACTIVITIES.contains(&activity.activity.as_str()));
+    Some((from, activity))
+}
+
+/// XEP-0060 §7.1.2.1: an item may name its publisher; one that names another
+/// account is not the owner's.
+fn published_by(item: &Element, owner: &BareJid) -> bool {
+    item.attr("publisher").is_none_or(|publisher| {
+        publisher
+            .parse::<jid::Jid>()
+            .is_ok_and(|publisher| publisher.to_bare() == *owner)
+    })
 }
 
 fn parse_tune_event(items: &Element) -> Option<PepItem> {

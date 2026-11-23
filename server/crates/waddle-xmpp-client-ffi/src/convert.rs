@@ -17,6 +17,7 @@ use waddle_xmpp_client::{
     MessagingEvent, SessionPhase,
 };
 
+use crate::profile_verbs::activity_from_core;
 use crate::safety_scores::safety_scores_fastening_to_ffi;
 use crate::{
     WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
@@ -96,6 +97,12 @@ pub(super) fn dispatch_event(
             listener.on_event(WaddleClientEvent::AvatarChanged {
                 jid: change.jid.into(),
                 avatar_id: change.avatar_id.map(|id| id.to_string()),
+            });
+        }
+        ClientEvent::ActivityChanged { jid, activity } => {
+            listener.on_event(WaddleClientEvent::ActivityChanged {
+                jid,
+                activity: activity.map(activity_from_core),
             });
         }
         ClientEvent::StatusPreferenceChanged(preference) => {

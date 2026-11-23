@@ -1,5 +1,6 @@
 //! Lifecycle, connection, delivery, and stream-management events exposed to hosts.
 
+use jid::BareJid;
 use minidom::Element;
 
 use crate::avatar::AvatarChanged;
@@ -9,7 +10,7 @@ use crate::bootstrap::{
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::{InboundCallEvent, MessageRejection, MessagingEvent};
-use crate::pep::PepItem;
+use crate::pep::{PepItem, UserActivity};
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
@@ -64,6 +65,13 @@ pub enum ClientEvent {
     PubsubAttachmentSummary(PubsubAttachmentSummaryUpdate),
     /// XEP-0084 metadata transition announced by a peer's PEP service.
     AvatarChanged(AvatarChanged),
+    /// XEP-0108 activity transition announced by a peer's PEP service.
+    ActivityChanged {
+        /// Bare JID of the publishing account.
+        jid: BareJid,
+        /// Published activity, or absence when cleared or retracted.
+        activity: Option<UserActivity>,
+    },
     /// ADR-010 cross-device manual status: another resource of this
     /// account published a pick to its own `urn:waddle:status-preference:0`
     /// PEP node. Emitted alongside the [`ClientEvent::Messaging`] event

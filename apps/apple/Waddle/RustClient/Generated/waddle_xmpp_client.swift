@@ -15343,6 +15343,12 @@ public enum WaddleClientEvent: Equatable, Hashable {
      */
     case error(description: String
     )
+    /**
+     * XEP-0108 activity announced by another account's PEP service.
+     * `activity` is absent when the publisher clears or retracts it.
+     */
+    case activityChanged(jid: BareJid, activity: WaddleActivity?
+    )
 
 
 
@@ -15402,6 +15408,9 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         )
 
         case 14: return .error(description: try FfiConverterString.read(from: &buf)
+        )
+
+        case 15: return .activityChanged(jid: try FfiConverterTypeBareJid.read(from: &buf), activity: try FfiConverterOptionTypeWaddleActivity.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -15481,6 +15490,12 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case let .error(description):
             writeInt(&buf, Int32(14))
             FfiConverterString.write(description, into: &buf)
+
+
+        case let .activityChanged(jid,activity):
+            writeInt(&buf, Int32(15))
+            FfiConverterTypeBareJid.write(jid, into: &buf)
+            FfiConverterOptionTypeWaddleActivity.write(activity, into: &buf)
 
         }
     }
@@ -22085,6 +22100,50 @@ fileprivate struct FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer
         return seq
     }
 }
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias BareJid = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBareJid: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BareJid {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: BareJid, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> BareJid {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: BareJid) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBareJid_lift(_ value: RustBuffer) throws -> BareJid {
+    return try FfiConverterTypeBareJid.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBareJid_lower(_ value: BareJid) -> RustBuffer {
+    return FfiConverterTypeBareJid.lower(value)
+}
+
 
 
 /**

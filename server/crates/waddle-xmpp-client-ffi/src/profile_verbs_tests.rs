@@ -21,7 +21,7 @@ use waddle_xmpp_client::messaging::NS_CLIENT;
 use waddle_xmpp_client::pep::{
     build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
     build_retract_activity_iq, build_retract_mood_iq, build_retract_tune_iq, UserActivity,
-    UserMood, NS_ACTIVITY, NS_MOOD, NS_TUNE,
+    UserMood, GENERAL_ACTIVITIES, NS_ACTIVITY, NS_MOOD, NS_TUNE,
 };
 use waddle_xmpp_client::xep::xep0292::{parse_vcard4_element, NS_VCARD4, PEP_NODE_VCARD4};
 
@@ -33,7 +33,7 @@ use crate::profile_verbs::{
     own_vcard4_from_lookup, publish_avatar_iqs, require_activity_general,
     require_activity_specific, require_mood_kind, require_pep_element_name, tune_from_core,
     tune_is_empty, tune_to_core, vcard4_from_core, vcard4_to_core, WaddleTune, WaddleVCard4,
-    GENERAL_ACTIVITIES, MOOD_KINDS,
+    MOOD_KINDS,
 };
 use crate::{WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError, WaddleEventListener};
 
