@@ -168,6 +168,8 @@ mod imp {
         pub rooms: RefCell<crate::ui::rooms::RoomsState>,
         /// The unread overview (see ui/inbox.rs).
         pub inbox: RefCell<crate::ui::inbox::InboxState>,
+        /// The community feed and stories (see ui/feed.rs).
+        pub feed: RefCell<crate::ui::feed::FeedState>,
     }
 
     #[glib::object_subclass]
@@ -195,6 +197,7 @@ mod imp {
             let window = self.obj().clone();
             window.setup_timeline();
             window.setup_inbox();
+            window.setup_feed();
             glib::spawn_future_local(async move { window.restore().await });
         }
 
@@ -318,8 +321,12 @@ impl WaddleWindow {
     }
 
     #[template_callback]
-    fn on_inbox_activated(&self) {
-        self.show_inbox();
+    fn on_inbox_activated(&self, row: &gtk::ListBoxRow) {
+        if self.is_feed_row(row) {
+            self.show_feed();
+        } else {
+            self.show_inbox();
+        }
     }
 
     #[template_callback]

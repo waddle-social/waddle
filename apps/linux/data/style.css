@@ -225,3 +225,27 @@ button.link-card:hover {
   font-size: 0.8em;
   font-weight: 700;
 }
+
+/* Feed: posts, and the stories rail above them. */
+.feed-post {
+  padding: 12px;
+}
+
+.story-ring {
+  padding: 3px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+}
+
+.story-ring.story-unseen {
+  border-color: var(--accent-bg-color);
+}
+
+.story-ring.story-seen {
+  border-color: alpha(currentColor, 0.25);
+}
+
+.story-add {
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.08);
+}

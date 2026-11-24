@@ -504,7 +504,7 @@ impl WaddleWindow {
                 .or_else(|| imp.current.borrow().clone())
                 .or_else(|| {
                     // The overview stays up across a reconnect.
-                    (!window.inbox_open())
+                    (!window.inbox_open() && !window.feed_open())
                         .then(|| imp.conversations.borrow().first().map(Conversation::key))
                         .flatten()
                 });

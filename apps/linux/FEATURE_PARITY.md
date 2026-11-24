@@ -86,8 +86,8 @@ Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` an
 
 | Feature | XEP(s) | Now | Closed by |
 | --- | --- | --- | --- |
-| Feed | | ❌ | feed and stories |
-| Stories | | ❌ | feed and stories |
+| Feed | 0472 | 🟡 | Feed in the sidebar: the community feed (`community.<domain>`), newest first, with avatars and XEP-0392 nick colors, names from profiles, links in posts opening in the browser (http and https only, no credentials in the address), server-written posts (mood, activity, profile) labelled. Compose a post with text and a link (https assumed when none is typed), or a picture: the feed entry has no media field, so a picture is uploaded as it is (not encrypted, the community reads it) and travels as the post's link, shown inline. No live updates: refresh button, and the feed is fetched again when opened after a minute. First 50 posts only, no paging. Not run against a live server |
+| Stories | 0501, 0470 | 🟡 | A rail along the top of the Feed: your own ring first, then people with unseen stories, newest first. The viewer steps through a person's stories and on through the next ones (buttons, Left and Right, or the sides of the picture), advances after 6 seconds, pauses with Space or the middle of the picture, and reacts with emoji (six quick ones or the emoji picker, up to 12; writes are sent one at a time per story so quick taps end as the last one left them). Seen stories are merged with and published to the account's private read state, only when this device adds to it. Share a story from Add Story: a picture (PNG, JPEG, GIF or WebP, up to 10 MB) with a caption, up for a day. Video stories are not played: the viewer offers to open the video in the browser. No live updates and no list of who reacted. Not run against a live server |
 | Events and calendar, RSVP | | ❌ | events |
 | Admin console (owners) | | ❌ | admin |
 | 1:1 and group voice/video, screen share | 0353, 0166, Muji | ❌ | calls |
@@ -117,7 +117,7 @@ must be.
 7. **inbox**: unread overview.
 8. **media**: GIF picker, stickers, link previews.
 9. **settings**: one preferences window.
-10. **feed and stories**, **events**, **admin**.
+10. ~~feed and stories~~ (done), **events**, **admin**.
 11. **delivery**: ack states, queue, typing, shared reconnect.
 12. **calls**.
 13. **polish**: design tokens, shortcuts, accessibility, Flatpak.

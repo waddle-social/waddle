@@ -246,7 +246,7 @@ pub struct Session {
     /// Also used by the profile verbs (`session_profile.rs`).
     pub(crate) client: Arc<WaddleClient>,
     /// For XEP-0363 uploads and fetching shared files.
-    transfers: attachments::Transfers,
+    pub(crate) transfers: attachments::Transfers,
     pub me: Me,
 }
 
