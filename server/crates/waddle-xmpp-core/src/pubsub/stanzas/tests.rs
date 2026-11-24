@@ -738,3 +738,30 @@ fn unsupported_access_model_error_shape() {
         .as_ref()
         .is_some_and(|other| other.is("unsupported-access-model", NS_PUBSUB_ERRORS)));
 }
+
+#[test]
+fn publish_options_roster_groups_precondition_compares_the_group_set() {
+    use crate::pubsub::NodeConfig;
+
+    let form = Element::builder("x", NS_XDATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .append(
+                    Element::builder("value", NS_XDATA)
+                        .append(PUBSUB_PUBLISH_OPTIONS_FORM_TYPE)
+                        .build(),
+                )
+                .build(),
+        )
+        .append(roster_groups_field(&["friends", "family"]))
+        .build();
+    let patch = super::parse_publish_options_form(&form).expect("valid publish-options");
+    let mut config = NodeConfig::pep_default();
+    assert!(!patch.met_by("urn:example:node", &config));
+    config.roster_groups_allowed = vec!["family".to_owned(), "friends".to_owned()];
+    assert!(patch.met_by("urn:example:node", &config));
+    config.roster_groups_allowed.push("work".to_owned());
+    assert!(!patch.met_by("urn:example:node", &config));
+}

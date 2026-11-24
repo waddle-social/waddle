@@ -292,6 +292,12 @@ impl NodeConfigPatch {
             && self
                 .send_last_published_item
                 .is_none_or(|v| v == config.send_last_published_item)
+            && self.roster_groups_allowed.as_ref().is_none_or(|groups| {
+                groups.len() == config.roster_groups_allowed.len()
+                    && groups
+                        .iter()
+                        .all(|group| config.roster_groups_allowed.contains(group))
+            })
     }
 
     /// Apply this patch to `base`, resolving `pubsub#max_items=max` to the
