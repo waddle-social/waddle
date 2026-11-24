@@ -199,12 +199,14 @@ button.link-card:hover {
   min-height: 0;
 }
 
-<<<<<<< HEAD
 .role-badge {
   padding: 1px 8px;
   border-radius: 999px;
   background-color: alpha(currentColor, 0.1);
-=======
+  font-size: 0.8em;
+  font-weight: 700;
+}
+
 /* Unread overview: one card per room or DM. */
 .inbox-card {
   padding: 8px;
@@ -226,7 +228,6 @@ button.link-card:hover {
   border-radius: 999px;
   border: 1px solid var(--accent-color);
   color: var(--accent-color);
->>>>>>> origin/main
   font-size: 0.8em;
   font-weight: 700;
 }
