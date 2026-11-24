@@ -112,14 +112,12 @@ pub(super) async fn roster_caps_fan_out(
     metrics
 }
 
-/// XEP-0163 §3.4 / PEP §4.2 — the account owner is among the
-/// "appropriate subscribers" of their own publishes. Mirror to every
-/// online resource of `owner` whose cached CAPS include `<node>+notify`,
-/// skipping resources already reached. The publishing resource itself
-/// is pre-seeded into `already_delivered` by the caller, so the owner's
-/// other resources receive the headline event but the originator does
-/// not see an echo of the item it just authored — matching Prosody's
-/// `mod_pep` and ejabberd's `mod_pubsub`.
+/// XEP-0163 §4 — "A service automatically sends notifications to all of
+/// the account owner's connected resources (subject to notification
+/// filtering)". Mirror to every presence-available resource of `owner`
+/// whose cached CAPS include `<node>+notify`, skipping resources already
+/// reached. The publishing resource is not excluded: it is notified like
+/// any other owner resource.
 pub(super) async fn owner_self_caps_fan_out(
     state: &WebSocketState,
     owner: &BareJid,

@@ -558,7 +558,6 @@ async fn publish_and_fan_out(
             published_item: item,
             item_id,
             publisher: Some(jid),
-            publisher_full: None,
             is_pep: true,
         },
     )

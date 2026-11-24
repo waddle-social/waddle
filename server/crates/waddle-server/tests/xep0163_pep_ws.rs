@@ -2099,31 +2099,25 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
 }
 
 // ============================================================================
-// PR #439 review issue #3 — publishing resource MUST NOT receive a self-echo
+// XEP-0163 §4 — the publishing resource is one of the owner's connected
+// resources and is notified like the others, subject to `+notify`
 // ============================================================================
-#[tokio::test]
-async fn pep_publish_does_not_echo_to_publishing_resource() {
-    let _serial = TEST_SERIAL.lock().await;
-    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
-    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
-    let mut alice = WsXmppClient::connect_and_auth(
-        &server.ws_url(),
-        DOMAIN,
-        "alice",
-        &alice_password,
-        "alice-noecho-1",
-    )
-    .await
-    .expect("alice");
-    let alice_bare = format!("alice@{DOMAIN}");
-    let alice_full = alice.full_jid.clone().expect("alice full jid");
 
-    // Alice advertises +notify on her publishing resource.
-    let publish_node = "urn:xmpp:bookmarks:1";
-    let notify_var = format!("{publish_node}+notify");
-    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
-    let caps_node = "https://alice.example/noecho";
-    let ver = caps_verification_string("client", "pc", "Alice", &features);
+/// Connect alice and advertise `features` through entity caps on her only
+/// resource, completing the server's disco#info round-trip.
+async fn connect_alice_with_caps(
+    server: &TestServer,
+    password: &str,
+    resource: &str,
+    caps_node: &str,
+    features: &[&str],
+) -> WsXmppClient {
+    let mut alice =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "alice", password, resource)
+            .await
+            .expect("alice");
+    let alice_full = alice.full_jid.clone().expect("alice full jid");
+    let ver = caps_verification_string("client", "pc", "Alice", features);
 
     alice
         .send(r#"<presence xmlns="jabber:client"/>"#)
@@ -2152,38 +2146,113 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
         ))
         .await
         .expect("alice disco reply");
-    ping_anchor(&mut alice, "pep-noecho-anchor-1").await;
+    ping_anchor(&mut alice, &format!("{resource}-anchor-1")).await;
+    alice
+}
+
+#[tokio::test]
+async fn pep_publish_notifies_publishing_resource_with_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let alice_bare = format!("alice@{DOMAIN}");
+    let publish_node = "urn:xmpp:bookmarks:1";
+    let notify_var = format!("{publish_node}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let mut alice = connect_alice_with_caps(
+        &server,
+        &alice_password,
+        "alice-self-1",
+        "https://alice.example/self",
+        &features,
+    )
+    .await;
 
     let pub_resp = iq_set_to(
         &mut alice,
-        "pep-noecho-pub",
+        "pep-self-pub",
         &alice_bare,
         &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="echo-1@muc.example.com"><conference xmlns="{publish_node}" name="Echo"/></item></publish></pubsub>"#
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="self-1@muc.example.com"><conference xmlns="{publish_node}" name="Self"/></item></publish></pubsub>"#
         ),
     )
     .await;
     assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
 
-    ping_anchor(&mut alice, "pep-noecho-anchor-2").await;
-    let event = wait_for_event_message(&mut alice, publish_node, Duration::from_millis(200)).await;
+    let event = wait_for_event_message(&mut alice, publish_node, Duration::from_secs(2))
+        .await
+        .expect("XEP-0163 §4: the publishing resource advertising +notify receives the event");
+    assert!(event.contains("self-1@muc.example.com"), "event: {event}");
     assert!(
-        event.is_none(),
-        "publishing resource MUST NOT receive its own item back as a §3.4 self-echo; got: {event:?}"
+        wait_for_event_message(&mut alice, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "the publishing resource must receive exactly one copy"
     );
 
     retract_pep_item(
         &mut alice,
         &alice_bare,
         publish_node,
-        "echo-1@muc.example.com",
+        "self-1@muc.example.com",
+    )
+    .await;
+    let retract = wait_for_event_message(&mut alice, publish_node, Duration::from_secs(2))
+        .await
+        .expect("retraction notification reaches the publishing resource");
+    assert!(retract.contains("<retract"), "retract event: {retract}");
+
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_publish_skips_publishing_resource_without_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let alice_bare = format!("alice@{DOMAIN}");
+    let publish_node = "urn:xmpp:bookmarks:1";
+    // Caps present, but no `<node>+notify`: notification filtering applies.
+    let features = ["http://jabber.org/protocol/disco#info"];
+    let mut alice = connect_alice_with_caps(
+        &server,
+        &alice_password,
+        "alice-nonotify-1",
+        "https://alice.example/nonotify",
+        &features,
+    )
+    .await;
+
+    let pub_resp = iq_set_to(
+        &mut alice,
+        "pep-nonotify-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{publish_node}"><item id="quiet-1@muc.example.com"><conference xmlns="{publish_node}" name="Quiet"/></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
+
+    ping_anchor(&mut alice, "pep-nonotify-anchor-2").await;
+    let event = wait_for_event_message(&mut alice, publish_node, Duration::from_millis(200)).await;
+    assert!(
+        event.is_none(),
+        "a publishing resource without +notify must not be notified; got: {event:?}"
+    );
+
+    retract_pep_item(
+        &mut alice,
+        &alice_bare,
+        publish_node,
+        "quiet-1@muc.example.com",
     )
     .await;
     assert!(
         wait_for_event_message(&mut alice, publish_node, Duration::from_millis(250))
             .await
             .is_none(),
-        "retract must respect the same recipient filter as publish"
+        "retract must respect the same +notify filter as publish"
     );
 
     let _ = alice.close().await;
