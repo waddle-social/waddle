@@ -139,7 +139,8 @@ fn xep_0359_sender_pass_archives_under_local_user_and_routes_to_recipient() {
 }
 
 #[test]
-fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_wire() {
+fn xep_0359_recipient_pass_writes_recipient_archive_and_stamps_outgoing_wire_with_recipient_id_only(
+) {
     // Recipient pass on bob/desk's machine. Inbound:
     // alice/web's stanza arrived via routing; bob's machine sees it
     // as InboundEvent::StanzaFromPeer with alice's `<stanza-id by='alice'/>`
@@ -151,8 +152,9 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
     //   canonical XEP-0359 stamp Bob's CanonicalizeHandler just stamped).
     // - ProjectInbox { owner: bob, peer: alice, ... }
     // - SendStanza writing to bob's wire — the final stanza MUST carry
-    //   TWO `<stanza-id/>` siblings: alice's (preserved) and bob's
-    //   (freshly stamped).
+    //   exactly one `<stanza-id/>`: bob's, freshly stamped. Alice's
+    //   sender-side stamp is dropped (XEP-0313 §4.1.1: no archive id of a
+    //   foreign archive in messages to JIDs without access to it).
     let bob_desk = full("bob@example.com/desk");
     let alice_web = full("alice@example.com/web");
     let bob = bare("bob@example.com");
@@ -190,19 +192,12 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
     assert_eq!(archive_events.len(), 1);
     let (archive_jid, archive_stamps) = &archive_events[0];
     assert_eq!(archive_jid, &bare("bob@example.com"));
-    // The archived message at the time `ArchiveHandler` emits carries
-    // BOTH stamps because Q2(a) order has CanonicalizeHandler running
-    // before ArchiveHandler — bob's stamp is added; alice's stamp
-    // (cross-archive) is preserved per XEP-0359 §5.
-    assert!(
-        archive_stamps.contains(&"alice@example.com".to_string()),
-        "alice's cross-archive stamp must be preserved on the archived message; \
-         got {archive_stamps:?}"
-    );
-    assert!(
-        archive_stamps.contains(&"bob@example.com".to_string()),
-        "bob's recipient-side stamp must be present on the archived message; \
-         got {archive_stamps:?}"
+    // The archived message carries only bob's recipient-side stamp:
+    // alice's sender-side stamp is dropped by `CanonicalizeHandler`.
+    assert_eq!(
+        archive_stamps,
+        &vec!["bob@example.com".to_string()],
+        "archived message carries only bob's stamp; got {archive_stamps:?}"
     );
 
     // 2. Inbox keyed (bob, alice) with bob's archive_ref.
@@ -232,10 +227,8 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
         "recipient-pass inbox row keys to bob's local archive ref"
     );
 
-    // 3. Final wire write — XEP-0359 §5 + XEP-0280 §4 require the
-    //    bytes Bob sees to carry BOTH stanza-ids: alice's (sender
-    //    pass, preserved as cross-archive) and bob's (recipient pass,
-    //    freshly stamped under bob's bare).
+    // 3. Final wire write — the bytes Bob sees carry only his own
+    //    stanza-id; alice's sender-side archive id is not leaked.
     let send_stanza_msgs: Vec<&Message> = events
         .iter()
         .filter_map(|e| match e {
@@ -252,18 +245,10 @@ fn xep_0359_recipient_pass_writes_recipient_archive_and_double_stamps_outgoing_w
         "recipient pass terminates with exactly one SendStanza to bob's wire"
     );
     let wire_stamps = stanza_id_bys(send_stanza_msgs[0]);
-    assert!(
-        wire_stamps.contains(&"alice@example.com".to_string()),
-        "wire bytes preserve alice's cross-archive stamp; got {wire_stamps:?}"
-    );
-    assert!(
-        wire_stamps.contains(&"bob@example.com".to_string()),
-        "wire bytes carry bob's recipient-side stamp; got {wire_stamps:?}"
-    );
     assert_eq!(
-        wire_stamps.len(),
-        2,
-        "wire bytes carry exactly two <stanza-id/> siblings; got {wire_stamps:?}"
+        wire_stamps,
+        vec!["bob@example.com".to_string()],
+        "wire bytes carry only bob's recipient-side stamp; got {wire_stamps:?}"
     );
 }
 
