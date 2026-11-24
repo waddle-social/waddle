@@ -443,6 +443,17 @@ pub fn host_spaces_for_remote_principals(
     crate::server::routes::websocket::s2s_spaces::host_spaces(state, router);
 }
 
+/// Let the state's notification outbox publish to the Push Services of other
+/// servers through `router` as startup does (XEP-0357 §5). The state's remote
+/// route must be `router`.
+#[cfg(feature = "test-support")]
+pub fn host_remote_push_services(
+    state: &Arc<WebSocketState>,
+    router: &crate::s2s::route::S2sRouter,
+) {
+    crate::server::routes::websocket::s2s_push::host_remote_push(state, router);
+}
+
 /// Start the production remote deletion worker on an S2S test router.
 #[cfg(feature = "test-support")]
 pub fn spawn_remote_space_deletion_worker(

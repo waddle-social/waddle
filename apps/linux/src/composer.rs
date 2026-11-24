@@ -8,6 +8,10 @@
 //!
 //! Positions are in characters, as `gtk::Editable` counts them.
 
+use waddle_xmpp_client_ffi::WaddleExtensionCommand;
+
+use crate::extension_commands;
+
 /// XEP-0245: a receiver matches exactly this at the start of the body.
 pub const ME_PREFIX: &str = "/me ";
 const SHRUG: &str = "¯\\_(ツ)_/¯";
@@ -61,7 +65,7 @@ impl Command {
     }
 
     /// Case-insensitive lookup by name.
-    fn named(word: &str) -> Option<Self> {
+    pub fn named(word: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|command| command.name().eq_ignore_ascii_case(word))
@@ -110,6 +114,11 @@ pub enum CommandAction {
     SetAvailability(Availability),
 }
 
+/// A built-in command goes by this word.
+pub fn is_builtin(word: &str) -> bool {
+    Command::named(word).is_some()
+}
+
 /// The action for a body that starts with a built-in command, or `None`
 /// to send the body as written (including unknown `/words`).
 pub fn command_action(body: &str) -> Option<(Command, CommandAction)> {
@@ -153,16 +162,22 @@ pub struct Suggestion {
 }
 
 /// Suggestions for the token being typed at `cursor` (in characters):
-/// commands while the first word starts with `/`, and in a room, the
-/// occupants, directory users and broadcasts an `@word` could name.
-pub fn suggestions(text: &str, cursor: usize, room: Option<RoomPeople<'_>>) -> Vec<Suggestion> {
+/// commands (the built-ins, then the server's extension commands) while
+/// the first word starts with `/`, and in a room, the occupants,
+/// directory users and broadcasts an `@word` could name.
+pub fn suggestions_with(
+    text: &str,
+    cursor: usize,
+    room: Option<RoomPeople<'_>>,
+    extensions: &[WaddleExtensionCommand],
+) -> Vec<Suggestion> {
     let before: Vec<char> = text.chars().take(cursor).collect();
     if before.len() != cursor {
         return Vec::new();
     }
     if before.first() == Some(&'/') && !before.iter().any(|c| c.is_whitespace()) {
         let query: String = before[1..].iter().collect();
-        return command_suggestions(&query.to_lowercase(), cursor);
+        return command_suggestions(&query.to_lowercase(), cursor, extensions, room.is_some());
     }
     let Some(people) = room else {
         return Vec::new();
@@ -193,8 +208,13 @@ fn mention_token(before: &[char]) -> Option<(usize, String)> {
     (starts_word && !query.chars().any(char::is_whitespace)).then_some((at, query))
 }
 
-fn command_suggestions(query: &str, cursor: usize) -> Vec<Suggestion> {
-    Command::ALL
+fn command_suggestions(
+    query: &str,
+    cursor: usize,
+    extensions: &[WaddleExtensionCommand],
+    in_room: bool,
+) -> Vec<Suggestion> {
+    let builtins = Command::ALL
         .into_iter()
         .filter(|command| command.name().starts_with(query))
         .map(|command| Suggestion {
@@ -203,8 +223,18 @@ fn command_suggestions(query: &str, cursor: usize) -> Vec<Suggestion> {
             replacement: format!("/{} ", command.name()),
             start: 0,
             end: cursor,
-        })
-        .collect()
+        });
+    let server = extension_commands::eligible(extensions, in_room)
+        .into_iter()
+        .filter(|(word, _)| word.starts_with(query))
+        .map(|(word, command)| Suggestion {
+            title: format!("/{word}"),
+            subtitle: command.name.clone(),
+            replacement: format!("/{word} "),
+            start: 0,
+            end: cursor,
+        });
+    builtins.chain(server).collect()
 }
 
 /// Matching occupants, then directory users not already listed, then
@@ -316,6 +346,10 @@ pub fn me_action(body: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    fn suggestions(text: &str, cursor: usize, room: Option<RoomPeople<'_>>) -> Vec<Suggestion> {
+        suggestions_with(text, cursor, room, &[])
+    }
+
     fn people() -> Vec<Mentionable> {
         ["bob", "Ann", "annette"]
             .into_iter()
@@ -352,6 +386,37 @@ mod tests {
         assert_eq!(titles(&suggestions("/A", 2, None)), ["/away", "/active"]);
         assert!(suggestions("/me waves", 9, None).is_empty());
         assert!(suggestions("a /me", 5, None).is_empty());
+    }
+
+    #[test]
+    fn extension_commands_follow_the_built_ins_and_respect_scope() {
+        use waddle_xmpp_client_ffi::WaddleExtensionCommandScope as Scope;
+        let command = |prefix: &str, scope| WaddleExtensionCommand {
+            service_jid: "ext.example.com".into(),
+            node: prefix.into(),
+            name: format!("Run {prefix}"),
+            scope,
+            composer_prefix: Some(prefix.into()),
+            inline_field: None,
+            composer_execute: false,
+        };
+        let commands = [
+            command("poll", Scope::Channel),
+            command("remind", Scope::Global),
+            command("away", Scope::Global),
+        ];
+        let in_room = suggestions_with("/", 1, room(&[]), &commands);
+        assert_eq!(
+            titles(&in_room)[Command::ALL.len()..],
+            ["/poll", "/remind"],
+            "a built-in shadows /away"
+        );
+        assert_eq!(in_room.last().expect("one").subtitle, "Run remind");
+        let direct = suggestions_with("/p", 2, None, &commands);
+        assert!(direct.is_empty(), "poll is for rooms");
+        let found = suggestions_with("/Re", 3, None, &commands);
+        assert_eq!(titles(&found), ["/remind"]);
+        assert_eq!(found[0].replacement, "/remind ");
     }
 
     #[test]

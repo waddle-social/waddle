@@ -1,6 +1,8 @@
 mod actions;
 mod admin;
 mod avatar;
+mod commands;
+mod composer_view;
 mod conversation;
 mod directory;
 mod identity;

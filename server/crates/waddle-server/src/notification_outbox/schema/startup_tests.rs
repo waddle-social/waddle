@@ -545,6 +545,7 @@ async fn postgres_gate_timeout_closes_detached_session_and_preserves_custody() {
     let store = NotificationOutboxStore {
         db: database,
         owner_preparation: None,
+        remote_publisher: Default::default(),
     };
     retain_unknown_work(&f).await;
     let before = snapshot(&f.db).await;

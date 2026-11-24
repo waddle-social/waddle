@@ -38,6 +38,9 @@ use super::occupancy::{
 };
 use super::placement::{PlacementBounds, Placements};
 use super::principal::RemotePrincipal;
+use super::publications::{
+    self, PublicationAnswer, PublicationAnswers, PublicationOutcome, PUBLICATION_ID_PREFIX,
+};
 use super::reach::{reach, InboundReach, LocalTarget, Refusal};
 use super::replies;
 use super::room_delivery::{AccountTraffic, InboundTraffic, Placed, RoomQueues, RoomWork};
@@ -509,6 +512,11 @@ enum Purpose {
         completion: oneshot::Sender<SpaceDeletionCompletion>,
         share: spaces::EventShare,
     },
+    /// This server's XEP-0357 `<publish/>` to a remote Push Service, sent
+    /// from the bare server domain and registered for correlation before it
+    /// is written. Nothing local waits on it: the answer goes to
+    /// [`PublicationAnswers`], and one that cannot be sent is only logged.
+    Publication { pending: PendingRequest },
 }
 
 /// The result of one outbound attempt to send a durable Space deletion notice.
@@ -733,6 +741,8 @@ struct Inner {
     /// The account side; while it is not attached, account traffic is
     /// refused in both directions (ADR-0020 D7).
     accounts: OnceLock<Arc<dyn LocalAccounts>>,
+    /// Who learns how push services answer this server's publications.
+    publications: OnceLock<Arc<dyn PublicationAnswers>>,
     /// The remote requests to local resources this replica registered.
     inbound_requests: Mutex<accounts::InboundRequests>,
     /// The places each local account's stanzas hold on the pair queues.
@@ -882,6 +892,7 @@ impl S2sRouter {
             transport: OnceLock::new(),
             local: OnceLock::new(),
             accounts: OnceLock::new(),
+            publications: OnceLock::new(),
             inbound_requests: Mutex::new(accounts::InboundRequests::default()),
             account_shares: accounts::AccountShares::default(),
             queues: Mutex::new(HashMap::new()),
@@ -1075,6 +1086,12 @@ impl S2sRouter {
     /// both directions (gate G18). `false` when one was already attached.
     pub fn attach_accounts(&self, accounts: Arc<dyn LocalAccounts>) -> bool {
         self.inner.accounts.set(accounts).is_ok()
+    }
+
+    /// Tell the router who learns how remote push services answer this
+    /// server's publications. `false` when one was already attached.
+    pub fn attach_publications(&self, answers: Arc<dyn PublicationAnswers>) -> bool {
+        self.inner.publications.set(answers).is_ok()
     }
 
     /// Requests to remote entities pending on this replica.
@@ -1364,6 +1381,7 @@ impl Inner {
             | Purpose::Notice { .. }
             | Purpose::SpaceEvent { .. }
             | Purpose::SpaceDeletion { .. }
+            | Purpose::Publication { .. }
             | Purpose::Account { .. } => None,
         };
         if self.enqueue(pair, Queued { stanza, purpose }) {
@@ -2061,6 +2079,10 @@ impl Inner {
         let Stanza::Iq(iq) = &stanza else {
             return;
         };
+        if iq.id().starts_with(PUBLICATION_ID_PREFIX) {
+            self.complete_publication(principal, &stanza, payload_namespace, usable);
+            return;
+        }
         let Some(local) = iq.to().cloned() else {
             return;
         };
@@ -2109,6 +2131,67 @@ impl Inner {
                         }
                     };
                     router.conclude(&target, &key, conclusion).await;
+                }
+                Ok(false) => tracing::debug!("dropping an uncorrelated s2s response"),
+                Err(_) => tracing::warn!("dropping an s2s response: correlation failed"),
+            }
+        });
+    }
+
+    /// Complete a publication with the answer of the push service, on
+    /// whichever replica it arrived: only the call that removes the pending
+    /// request tells [`PublicationAnswers`]. `usable` is `false` for the
+    /// error standing in for an answer this server refuses to process.
+    fn complete_publication(
+        self: &Arc<Self>,
+        principal: &RemotePrincipal,
+        stanza: &Stanza,
+        payload_namespace: Option<String>,
+        usable: bool,
+    ) {
+        let Stanza::Iq(iq) = stanza else {
+            return;
+        };
+        let (Some(local), Some(job)) = (iq.to().cloned(), publications::job_of(iq.id())) else {
+            return;
+        };
+        let outcome = match iq.as_ref() {
+            Iq::Result { .. } if usable => PublicationOutcome::Published,
+            Iq::Error { error, .. } if usable && error.type_ != ErrorType::Wait => {
+                PublicationOutcome::Refused
+            }
+            _ => PublicationOutcome::Transient,
+        };
+        let key = CorrelationKey {
+            direction: CorrelationDirection::Outbound,
+            local,
+            remote: principal.address().clone(),
+            id: iq.id().to_owned(),
+        };
+        let Some(answers) = self.publications.get().cloned() else {
+            return;
+        };
+        let Ok(permit) = Arc::clone(&self.completions).try_acquire_owned() else {
+            tracing::debug!("dropping an s2s response: too many being correlated");
+            return;
+        };
+        let service = principal.address().to_bare();
+        let router = Arc::clone(self);
+        self.tasks.spawn(async move {
+            let _permit = permit;
+            match router
+                .correlations
+                .complete(&key, payload_namespace.as_deref(), now_ms())
+                .await
+            {
+                Ok(true) => {
+                    answers
+                        .answered(PublicationAnswer {
+                            job,
+                            service,
+                            outcome,
+                        })
+                        .await;
                 }
                 Ok(false) => tracing::debug!("dropping an uncorrelated s2s response"),
                 Err(_) => tracing::warn!("dropping an s2s response: correlation failed"),
@@ -2518,6 +2601,9 @@ impl Inner {
         }
         let purpose = match outbound.stanza() {
             Stanza::Iq(iq) => match iq.as_ref() {
+                Iq::Set { payload, .. } if self.is_publication(outbound, iq, payload) => {
+                    self.publication_purpose(outbound, iq)?
+                }
                 Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
                     self.reserve_request(outbound, iq, payload, &remote)?
                 }
@@ -2564,6 +2650,45 @@ impl Inner {
             }
         };
         Ok((Pair { local, remote }, purpose))
+    }
+
+    /// Whether `iq` is this server's own XEP-0357 publication: a set from
+    /// the bare server domain, which no client can stamp as its `from`, with
+    /// a pubsub payload and a publication id.
+    fn is_publication(&self, outbound: &RemoteOutbound, iq: &Iq, payload: &Element) -> bool {
+        let sender = outbound.sender();
+        sender.node().is_none()
+            && sender.resource().is_none()
+            && *sender.domain() == *self.served.local()
+            && payload.is("pubsub", waddle_xmpp::pubsub::NS_PUBSUB)
+            && publications::job_of(iq.id()).is_some()
+    }
+
+    /// The purpose of a publication: its request is registered in the shared
+    /// correlation table when it is written, and kept in no replica's memory.
+    fn publication_purpose(
+        &self,
+        outbound: &RemoteOutbound,
+        iq: &Iq,
+    ) -> Result<Purpose, UnroutableReason> {
+        let key = CorrelationKey {
+            direction: CorrelationDirection::Outbound,
+            local: outbound.sender().clone(),
+            remote: outbound.destination().address().clone(),
+            id: iq.id().to_owned(),
+        };
+        if !key.fits() {
+            return Err(UnroutableReason::InvalidRequest);
+        }
+        Ok(Purpose::Publication {
+            pending: PendingRequest {
+                key,
+                kind: RequestKind::Set,
+                payload_namespace: waddle_xmpp::pubsub::NS_PUBSUB.to_owned(),
+                owner: self.owner.clone(),
+                expires_at_ms: now_ms().saturating_add(duration_ms(self.limits.request_ttl)),
+            },
+        })
     }
 
     /// Reserve a local resource's request to a remote entity against the
@@ -2822,6 +2947,15 @@ impl Inner {
             }
             Purpose::SpaceDeletion { completion, .. } => {
                 let _ = completion.send(SpaceDeletionCompletion::RetryBeforeStage);
+                return;
+            }
+            // Nothing local waits for a publication: a registered one is
+            // withdrawn, and the notification is not sent again.
+            Purpose::Publication { pending } => {
+                if registered {
+                    let _ = self.correlations.withdraw(&pending.key).await;
+                }
+                tracing::debug!("a push publication to a remote service was not sent");
                 return;
             }
             Purpose::Response { .. }
@@ -3617,6 +3751,7 @@ impl PairWorker {
             | Purpose::Room { .. }
             | Purpose::Departure
             | Purpose::Account { .. }
+            | Purpose::Publication { .. }
             | Purpose::Verify { .. } => {}
         }
         let mut stream = match self.stream(&transport).await {
@@ -3662,6 +3797,23 @@ impl PairWorker {
                             .mark_verification_registered(target, &pending.key);
                         true
                     }
+                    Err(CorrelationError::Duplicate) => {
+                        return self.router.answer(queued, Failure::Duplicate, false).await
+                    }
+                    Err(CorrelationError::KeyTooLong) => {
+                        return self.router.answer(queued, Failure::TooLong, false).await
+                    }
+                    Err(CorrelationError::Storage(_)) => {
+                        return self.router.answer(queued, Failure::Internal, false).await
+                    }
+                }
+            }
+            Purpose::Publication { pending } => {
+                if pending.expires_at_ms <= now {
+                    return self.router.answer(queued, Failure::Expired, false).await;
+                }
+                match self.router.correlations.register(pending, now).await {
+                    Ok(()) => true,
                     Err(CorrelationError::Duplicate) => {
                         return self.router.answer(queued, Failure::Duplicate, false).await
                     }

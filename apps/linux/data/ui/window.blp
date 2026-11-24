@@ -511,6 +511,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   }
                 }
 
+                Box format_bar {
+                  visible: false;
+                  spacing: 4;
+                  margin-start: 8;
+                  margin-end: 8;
+                  margin-top: 6;
+                }
+
                 Box composer {
                   spacing: 8;
                   margin-top: 8;
@@ -533,11 +541,50 @@ template $WaddleWindow: Adw.ApplicationWindow {
                     "composer",
                   ]
 
-                  Entry composer_entry {
+                  ToggleButton format_toggle {
+                    icon-name: "format-text-bold-symbolic";
+                    tooltip-text: _("Formatting");
+                    valign: center;
+                    toggled => $on_toggle_format() swapped;
+
+                    styles [
+                      "flat",
+                      "circular",
+                    ]
+                  }
+
+                  Overlay {
                     hexpand: true;
-                    placeholder-text: _("Write a message…");
-                    styles [ "composer-entry" ]
-                    activate => $on_send() swapped;
+
+                    ScrolledWindow {
+                      hscrollbar-policy: never;
+                      propagate-natural-height: true;
+                      max-content-height: 200;
+
+                      TextView composer_entry {
+                        wrap-mode: word_char;
+                        accepts-tab: false;
+                        top-margin: 10;
+                        bottom-margin: 10;
+                        left-margin: 4;
+                        right-margin: 4;
+
+                        styles [ "composer-entry" ]
+                      }
+                    }
+
+                    [overlay]
+                    Label composer_placeholder {
+                      label: _("Write a message…");
+                      halign: start;
+                      valign: start;
+                      margin-top: 10;
+                      margin-start: 4;
+                      can-target: false;
+                      ellipsize: end;
+
+                      styles [ "dim-label" ]
+                    }
                   }
 
                   Button {

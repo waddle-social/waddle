@@ -1868,6 +1868,7 @@ mod tests {
         let store = NotificationOutboxStore {
             db: db.clone(),
             owner_preparation: None,
+            remote_publisher: Default::default(),
         };
         let class_migrate = store
             .migrate_postgres_check_constraint_on_column(
