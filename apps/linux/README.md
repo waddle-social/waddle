@@ -16,6 +16,7 @@ The native client currently supports:
 - **Pins:** the pin button in the conversation header lists pinned messages (`urn:waddle:pin:0`) and jumps to one; pin events update the list live and pinned rows are marked. A room that does not publish a pin policy is treated as admins-only, the server default.
 - **Search:** the search button (Ctrl+F) searches the open conversation's archive (XEP-0313); a result jumps to the message, paging older history in until it is loaded.
 - **`/me` actions (XEP-0245):** shown as italic "* Name action"; quotes and notifications show the same text.
+- **Notifications:** the bell in the conversation header sets all messages, mentions only or mute for that room or DM (XEP-0492, stored on the account and shared with its other devices); muted conversations show a bell-slash in the sidebar. Without a stored mode, DMs and members-only rooms notify for every message and other rooms for mentions. Desktop notifications are one per conversation (a newer message replaces the older), have **Reply** (opens the conversation with the composer focused; GNotification has no inline reply) and **Mark as Read** actions, and are withdrawn when the conversation is read here or on another device.
 
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
@@ -56,5 +57,7 @@ The GTK navigation regression test requires a display and is excluded from ordin
 | `src/session_tools.rs`, `src/ui/message_tools.rs` | Pin, search and moderation verbs; header buttons, search bar, hover toolbar |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
+| `src/notify.rs` | Notification modes, XEP-0492 defaults and the announce decision (no GTK); tests |
+| `src/ui/notifications.rs` | Header menu, sidebar mute state and GNotification actions |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |
 | `data/` | Desktop entry, AppStream metadata, icon |

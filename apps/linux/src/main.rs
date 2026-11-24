@@ -12,6 +12,7 @@ mod judgments;
 mod jump;
 mod message_actions;
 mod message_text;
+mod notify;
 mod pins;
 mod runtime;
 mod session;

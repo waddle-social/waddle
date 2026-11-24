@@ -267,6 +267,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 }
 
                 [end]
+                MenuButton notify_button {
+                  visible: false;
+                  icon-name: "preferences-system-notifications-symbolic";
+                  tooltip-text: _("Notifications");
+                  menu-model: notify_menu;
+                }
+
+                [end]
                 Button load_earlier {
                   visible: false;
                   label: _("Load Earlier");
@@ -458,6 +466,30 @@ menu primary_menu {
     item {
       label: _("Quit");
       action: "app.quit";
+    }
+  }
+}
+
+menu notify_menu {
+  section {
+    label: _("Notify Me For");
+
+    item {
+      label: _("All Messages");
+      action: "win.notify-mode";
+      target: "always";
+    }
+
+    item {
+      label: _("Mentions Only");
+      action: "win.notify-mode";
+      target: "on-mention";
+    }
+
+    item {
+      label: _("Nothing (Mute)");
+      action: "win.notify-mode";
+      target: "never";
     }
   }
 }

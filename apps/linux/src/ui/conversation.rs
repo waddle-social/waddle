@@ -8,7 +8,7 @@
 use adw::prelude::{
     ActionExt, ActionMapExt, ActionRowExt, AdjustmentExt, ApplicationExt, BoxExt, ButtonExt, Cast,
     CastNone, EntryExt, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
-    NavigationPageExt, ObjectExt, TextureExt, ToVariant, WidgetExt,
+    NavigationPageExt, ObjectExt, TextureExt, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::gio::prelude::FileExtManual;
@@ -164,6 +164,7 @@ impl WaddleWindow {
                 window.read_current();
             }
         });
+        self.setup_notifications();
         self.setup_composer();
         self.setup_message_tools();
     }
@@ -214,6 +215,7 @@ impl WaddleWindow {
         imp.thread_roots.replace(Default::default());
         imp.thread_updates.replace(Default::default());
         imp.unread.replace(Default::default());
+        imp.notifications.borrow_mut().clear();
         imp.live_unread_keys.borrow_mut().clear();
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
@@ -426,9 +428,7 @@ impl WaddleWindow {
             .entry(conversation.clone())
             .or_default() += 1;
         self.render_conversations();
-        if kind == Kind::Direct || mentions_me {
-            self.notify(&conversation, kind, &sender, &body);
-        }
+        self.announce_arrival(&destination, mentions_me, &sender, &body);
     }
 
     fn spawn_on_connected(&self, generation: u64, connect_epoch: u64) {
@@ -440,7 +440,8 @@ impl WaddleWindow {
         session.announce(imp.availability.get());
         let window = self.clone();
         glib::MainContext::default().spawn_local(async move {
-            let (rooms, inbox) = tokio::join!(session.rooms(), session.inbox());
+            let ((rooms, members_only), inbox, (bookmarks, directs)) =
+                tokio::join!(session.rooms(), session.inbox(), session.notify_bookmarks());
             let imp = window.imp();
             if imp.generation.get() != generation
                 || imp.connect_epoch.get() != connect_epoch
@@ -466,6 +467,10 @@ impl WaddleWindow {
                 }
             }
             imp.conversations.replace(conversations);
+            imp.notifications
+                .borrow_mut()
+                .load(&bookmarks, &directs, members_only);
+            window.refresh_notify_button();
             for entry in &inbox {
                 window.apply_inbox_entry(entry, true);
             }
@@ -508,15 +513,18 @@ impl WaddleWindow {
             imp.room_list.remove(&row);
         }
         let current = imp.current.borrow().clone();
-        let unread = imp.unread.borrow();
-        for conversation in imp.conversations.borrow().iter() {
-            let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
-            let row = conversation_row(conversation, unread);
-            imp.room_list.append(&row);
-            if current.as_deref() == Some(conversation.key().as_str()) {
-                imp.room_list.select_row(Some(&row));
+        {
+            let unread = imp.unread.borrow();
+            for conversation in imp.conversations.borrow().iter() {
+                let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
+                let row = conversation_row(conversation, unread, self.is_muted(conversation));
+                imp.room_list.append(&row);
+                if current.as_deref() == Some(conversation.key().as_str()) {
+                    imp.room_list.select_row(Some(&row));
+                }
             }
         }
+        self.withdraw_read_notifications();
     }
 
     pub(super) fn conversation_at(&self, index: i32) -> Option<Conversation> {
@@ -561,6 +569,7 @@ impl WaddleWindow {
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
+        self.refresh_notify_button();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -613,7 +622,7 @@ impl WaddleWindow {
 
     /// Tell the server this conversation is read, a moment from now, once
     /// for however many messages arrive meanwhile.
-    fn queue_read(&self, jid: &str) {
+    pub(super) fn queue_read(&self, jid: &str) {
         let imp = self.imp();
         if !imp.read_pending.borrow_mut().insert(jid.to_string()) {
             return;
@@ -637,31 +646,6 @@ impl WaddleWindow {
                 }
             }
         });
-    }
-
-    fn notify(&self, jid: &str, kind: Kind, sender: &str, body: &str) {
-        let Some(app) = self.application() else {
-            return;
-        };
-        let title = match kind {
-            Kind::Direct => sender.to_string(),
-            Kind::Room => {
-                let room = self
-                    .imp()
-                    .conversations
-                    .borrow()
-                    .iter()
-                    .find(|conversation| conversation.key() == jid)
-                    .map(|conversation| conversation.name.clone())
-                    .unwrap_or_default();
-                format!("{sender} in #{room}")
-            }
-        };
-        let notification = gio::Notification::new(&title);
-        notification.set_body(Some(&crate::message_text::preview(sender, body)));
-        notification
-            .set_default_action_and_target_value("app.open-conversation", Some(&jid.to_variant()));
-        app.send_notification(Some(&notification_id(jid)), &notification);
     }
 
     fn refresh_history_controls(&self) {
@@ -995,7 +979,7 @@ fn sidebar_title(conversation: &Conversation) -> String {
 }
 
 /// A room's `#` tile or a DM's avatar, the name, and any unread count.
-fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow {
+fn conversation_row(conversation: &Conversation, unread: u32, muted: bool) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&conversation.name))
         .title_lines(1)
@@ -1036,6 +1020,13 @@ fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow 
         badge.add_css_class("numeric");
         row.add_suffix(&badge);
         row.add_css_class("unread");
+    }
+    if muted {
+        let icon = gtk::Image::from_icon_name("notifications-disabled-symbolic");
+        icon.set_valign(gtk::Align::Center);
+        icon.add_css_class("dim-label");
+        icon.set_tooltip_text(Some("Notifications are off"));
+        row.add_suffix(&icon);
     }
     row
 }
