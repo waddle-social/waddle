@@ -33,10 +33,13 @@ pub(crate) enum EncryptedFileFromJsError {
         "encrypted attachment has no sources; recipients would receive ciphertext with no decryption metadata"
     )]
     NoSources,
+    #[error("encrypted attachment requires the plaintext file size")]
+    MissingPlaintextSize,
 }
 
 pub(crate) fn encrypted_file_from_js(
     enc: WaddleEncryptedFile,
+    plaintext_size: Option<u64>,
 ) -> Result<waddle_xmpp_client::xep::encrypted_file::EncryptedFile, EncryptedFileFromJsError> {
     use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
     let cipher = Cipher::from_uri(&enc.cipher)
@@ -44,6 +47,8 @@ pub(crate) fn encrypted_file_from_js(
     if enc.sources.is_empty() {
         return Err(EncryptedFileFromJsError::NoSources);
     }
+    // XEP-0448 §2.1: the plaintext `<size/>` is REQUIRED for encrypted sends.
+    let plaintext_size = plaintext_size.ok_or(EncryptedFileFromJsError::MissingPlaintextSize)?;
     Ok(EncryptedFile {
         cipher,
         key_b64: enc.key_b64,
@@ -57,6 +62,7 @@ pub(crate) fn encrypted_file_from_js(
             })
             .collect(),
         sources: enc.sources,
+        plaintext_size,
     })
 }
 
@@ -95,6 +101,7 @@ mod encrypted_file_bridge_tests {
                 value_b64: "aGFzaA==".to_string(),
             }],
             sources: vec!["https://files.example.com/blob.enc".to_string()],
+            plaintext_size: 42,
         }
     }
 
@@ -104,7 +111,7 @@ mod encrypted_file_bridge_tests {
         let js = encrypted_file_to_js(native.clone());
         assert_eq!(js.cipher, "urn:xmpp:ciphers:aes-256-gcm-nopadding:0");
         assert_eq!(js.sources, native.sources);
-        let back = encrypted_file_from_js(js).expect("known cipher round-trips");
+        let back = encrypted_file_from_js(js, Some(42)).expect("known cipher round-trips");
         assert_eq!(back, native);
     }
 
@@ -117,7 +124,7 @@ mod encrypted_file_bridge_tests {
             hashes: Vec::new(),
             sources: vec!["https://x".to_string()],
         };
-        assert!(encrypted_file_from_js(invalid).is_err());
+        assert!(encrypted_file_from_js(invalid, Some(42)).is_err());
     }
 
     #[test]
@@ -129,7 +136,7 @@ mod encrypted_file_bridge_tests {
             hashes: Vec::new(),
             sources: Vec::new(),
         };
-        assert!(encrypted_file_from_js(invalid).is_err());
+        assert!(encrypted_file_from_js(invalid, Some(42)).is_err());
     }
 
     #[test]

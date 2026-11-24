@@ -92,6 +92,11 @@ pub struct EncryptedFile {
     pub hashes: Vec<EncryptedHash>,
     /// HTTPS URLs the ciphertext can be fetched from.
     pub sources: Vec<String>,
+    /// Size in bytes of the original plaintext file. XEP-0448 §2.1 makes the
+    /// `<size/>` metadata element REQUIRED for encrypted sends so receivers
+    /// can cut off any bytes beyond it after decryption. It is serialized
+    /// in the sibling XEP-0446 `<file/>` element, not inside `<encrypted/>`.
+    pub plaintext_size: u64,
 }
 
 /// Build the `<encrypted/>` payload element from a typed value. Returns
@@ -144,8 +149,11 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
 /// Parse an `<encrypted/>` element. Returns `None` if the element is in the
 /// wrong namespace, advertises a cipher Waddle does not implement, or is
 /// missing any of the required `<key>`, `<iv>`, or `<sources>` children.
+///
+/// `plaintext_size` is the `<size/>` of the sibling XEP-0446 `<file/>`
+/// metadata, which XEP-0448 requires for encrypted shares.
 #[must_use]
-pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
+pub fn parse_encrypted_element(elem: &Element, plaintext_size: u64) -> Option<EncryptedFile> {
     if !is_encrypted_element(elem) {
         return None;
     }
@@ -189,6 +197,7 @@ pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
         iv_b64,
         hashes,
         sources,
+        plaintext_size,
     })
 }
 
@@ -212,6 +221,7 @@ mod tests {
                 value_b64: "aGFzaA==".to_string(),
             }],
             sources: vec!["https://files.example.com/blob.enc".to_string()],
+            plaintext_size: 3_032_449,
         }
     }
 
@@ -219,7 +229,7 @@ mod tests {
     fn round_trips_through_minidom() {
         let enc = sample();
         let elem = build_encrypted_element(&enc).expect("at least one source");
-        let parsed = parse_encrypted_element(&elem).expect("round-trip parses");
+        let parsed = parse_encrypted_element(&elem, 3_032_449).expect("round-trip parses");
         assert_eq!(parsed, enc);
     }
 
@@ -231,6 +241,7 @@ mod tests {
             iv_b64: "aXY=".to_string(),
             hashes: Vec::new(),
             sources: Vec::new(),
+            plaintext_size: 0,
         };
         assert!(build_encrypted_element(&enc).is_none());
     }
@@ -245,7 +256,7 @@ mod tests {
                      </sources>\
                    </encrypted>";
         let elem: Element = xml.parse().expect("valid xml");
-        assert!(parse_encrypted_element(&elem).is_none());
+        assert!(parse_encrypted_element(&elem, 3_032_449).is_none());
     }
 
     #[test]
@@ -256,14 +267,14 @@ mod tests {
                      <sources xmlns='urn:xmpp:sfs:0'/>\
                    </encrypted>";
         let elem: Element = xml.parse().expect("valid xml");
-        assert!(parse_encrypted_element(&elem).is_none());
+        assert!(parse_encrypted_element(&elem, 3_032_449).is_none());
     }
 
     #[test]
     fn parse_rejects_wrong_namespace() {
         let xml = "<encrypted xmlns='urn:waddle:other'/>";
         let elem: Element = xml.parse().expect("valid xml");
-        assert!(parse_encrypted_element(&elem).is_none());
+        assert!(parse_encrypted_element(&elem, 3_032_449).is_none());
         assert!(!is_encrypted_element(&elem));
     }
 
@@ -290,7 +301,7 @@ mod tests {
                      </sources>\
                    </encrypted>";
         let elem: Element = xml.parse().expect("valid xml");
-        let parsed = parse_encrypted_element(&elem).expect("parses");
+        let parsed = parse_encrypted_element(&elem, 3_032_449).expect("parses");
         assert_eq!(parsed.key_b64, "a2V5");
         assert_eq!(parsed.iv_b64, "aXY=");
         assert_eq!(parsed.hashes[0].value_b64, "aGFzaA==");
@@ -308,7 +319,7 @@ mod tests {
                      </sources>\
                    </encrypted>";
         let elem: Element = xml.parse().expect("valid xml");
-        let parsed = parse_encrypted_element(&elem).expect("parses");
+        let parsed = parse_encrypted_element(&elem, 3_032_449).expect("parses");
         assert_eq!(parsed.hashes.len(), 2);
         assert_eq!(parsed.hashes[0].algo, "sha-256");
         assert_eq!(parsed.hashes[1].algo, "sha3-256");

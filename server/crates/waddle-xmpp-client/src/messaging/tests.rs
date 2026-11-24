@@ -1829,6 +1829,7 @@ fn build_outbound_message_emits_xep0448_when_encrypted() {
                     value_b64: "aGFzaA==".to_string(),
                 }],
                 sources: vec![url.to_string()],
+                plaintext_size: 2048,
             }),
         }],
         ..Default::default()
@@ -1914,6 +1915,7 @@ fn build_outbound_message_uses_file_url_as_nested_encrypted_source_fallback() {
                 iv_b64: "aXY=".to_string(),
                 hashes: Vec::new(),
                 sources: Vec::new(),
+                plaintext_size: 2048,
             }),
         }],
         ..Default::default()
@@ -1963,6 +1965,7 @@ fn build_outbound_message_uses_file_url_as_primary_nested_encrypted_source() {
                 iv_b64: "aXY=".to_string(),
                 hashes: Vec::new(),
                 sources: vec![mirror_url.to_string()],
+                plaintext_size: 2048,
             }),
         }],
         ..Default::default()
@@ -2008,6 +2011,7 @@ fn build_outbound_message_rejects_encrypted_file_without_usable_source() {
                 iv_b64: "aXY=".to_string(),
                 hashes: Vec::new(),
                 sources: vec![" \t ".to_string()],
+                plaintext_size: 2048,
             }),
         }],
         ..Default::default()
@@ -2050,6 +2054,7 @@ fn build_outbound_message_rejects_encrypted_file_without_plaintext_hash() {
                     value_b64: "aGFzaA==".to_string(),
                 }],
                 sources: vec![url.to_string()],
+                plaintext_size: 2048,
             }),
         }],
         ..Default::default()
@@ -2064,6 +2069,96 @@ fn build_outbound_message_rejects_encrypted_file_without_plaintext_hash() {
         ),
         "unexpected error: {error:?}"
     );
+}
+
+fn encrypted_shared_file_for_size_tests(size: Option<u64>, plaintext_size: u64) -> SharedFile {
+    use crate::stickers::{HashAlgo, StickerHash};
+    use crate::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
+    let url = "https://files.example.com/photo.jpg.enc";
+    SharedFile {
+        url: url.to_string(),
+        name: Some("photo.jpg".to_string()),
+        media_type: Some("image/jpeg".to_string()),
+        size,
+        width: None,
+        height: None,
+        desc: None,
+        hashes: vec![StickerHash {
+            algo: HashAlgo::Sha256,
+            value_b64: "cGxhaW4taGFzaA==".to_string(),
+        }],
+        disposition: SharedFileDisposition::Inline,
+        encrypted: Some(EncryptedFile {
+            cipher: Cipher::Aes256GcmNoPadding,
+            key_b64: "a2V5".to_string(),
+            iv_b64: "aXY=".to_string(),
+            hashes: vec![EncryptedHash {
+                algo: "sha-256".to_string(),
+                value_b64: "aGFzaA==".to_string(),
+            }],
+            sources: vec![url.to_string()],
+            plaintext_size,
+        }),
+    }
+}
+
+#[test]
+fn build_outbound_message_always_emits_size_for_encrypted_file() {
+    // XEP-0448 §2.1: "The <size/> element and one or multiple <hash/>
+    // elements are REQUIRED when sending encrypted files."
+    let options = SendMessageOptions {
+        shared_files: vec![encrypted_shared_file_for_size_tests(None, 4096)],
+        ..Default::default()
+    };
+    let (_, stanza) =
+        build_outbound_message("bob@example.com", "chat", "see attached", &options).unwrap();
+    let size = stanza
+        .get_child("file-sharing", NS_SFS)
+        .and_then(|fs| fs.get_child("file", NS_FILE_METADATA))
+        .and_then(|file| file.get_child("size", NS_FILE_METADATA))
+        .expect("<size/> inside <file/>");
+    assert_eq!(size.text(), "4096");
+}
+
+#[test]
+fn build_outbound_message_rejects_encrypted_file_with_conflicting_size() {
+    let options = SendMessageOptions {
+        shared_files: vec![encrypted_shared_file_for_size_tests(Some(1), 4096)],
+        ..Default::default()
+    };
+    let error = build_outbound_message("bob@example.com", "chat", "see attached", &options)
+        .expect_err("conflicting plaintext sizes must fail");
+    assert!(
+        matches!(
+            error,
+            ClientError::Core(CoreError::BadRequest(Some(ref text)))
+                if text == "encrypted shared file size must equal the encrypted plaintext size"
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn parse_message_ignores_encrypted_share_without_size() {
+    // An inbound encrypted share lacking the REQUIRED <size/> is malformed:
+    // the envelope is not exposed, so no ciphertext URL leaks as plaintext.
+    let options = SendMessageOptions {
+        shared_files: vec![encrypted_shared_file_for_size_tests(None, 4096)],
+        ..Default::default()
+    };
+    let (_, mut stanza) =
+        build_outbound_message("bob@example.com", "chat", "see attached", &options).unwrap();
+    let file_sharing = stanza
+        .get_child_mut("file-sharing", NS_SFS)
+        .expect("file-sharing");
+    let file = file_sharing
+        .get_child_mut("file", NS_FILE_METADATA)
+        .expect("file");
+    assert!(file.remove_child("size", NS_FILE_METADATA).is_some());
+    let MessagingEvent::Message(parsed) = parse(&stanza).expect("parses to event") else {
+        panic!("expected message event");
+    };
+    assert!(parsed.shared_files.is_empty());
 }
 
 #[test]
@@ -2234,6 +2329,7 @@ fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
                 value_b64: "h1".to_string(),
             }],
             sources: vec![url.to_string()],
+            plaintext_size: 99,
         }),
     };
     let options = SendMessageOptions {

@@ -122,7 +122,7 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
             // hard-to-debug broken attachments for recipients.
             let encrypted = file
                 .encrypted
-                .map(encrypted_file_from_js)
+                .map(|enc| encrypted_file_from_js(enc, file.size))
                 .transpose()
                 .map_err(|err| js_error(err.to_string()))?;
             // Plaintext file-level hashes (XEP-0448 requires ≥1 for
