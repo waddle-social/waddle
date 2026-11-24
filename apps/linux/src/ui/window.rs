@@ -71,6 +71,8 @@ mod imp {
         #[template_child]
         pub load_earlier: TemplateChild<gtk::Button>,
         #[template_child]
+        pub notify_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -109,6 +111,8 @@ mod imp {
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,
         pub unread: RefCell<HashMap<String, u32>>,
+        /// XEP-0492 modes and the desktop notifications on screen.
+        pub notifications: RefCell<crate::notify::Notifications>,
         /// Conversation keys whose unread count was modified by live events
         /// since the current connection's bootstrap started.
         pub live_unread_keys: RefCell<HashSet<String>>,

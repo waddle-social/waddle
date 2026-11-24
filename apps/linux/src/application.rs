@@ -92,7 +92,23 @@ impl WaddleApplication {
                 window.open_conversation(&jid);
             })
             .build();
-        self.add_action_entries([about, quit, open]);
+        let reply = gio::ActionEntry::builder("reply-conversation")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(|app: &Self, _, target| {
+                if let Some(key) = target.and_then(|target| target.get::<String>()) {
+                    app.window().reply_in_conversation(&key);
+                }
+            })
+            .build();
+        let mark_read = gio::ActionEntry::builder("mark-conversation-read")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(|app: &Self, _, target| {
+                if let Some(key) = target.and_then(|target| target.get::<String>()) {
+                    app.window().mark_conversation_read(&key);
+                }
+            })
+            .build();
+        self.add_action_entries([about, quit, open, reply, mark_read]);
         self.set_accels_for_action("app.quit", &["<Control>q"]);
     }
 

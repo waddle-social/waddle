@@ -9,6 +9,7 @@ mod attachments;
 mod auth;
 mod composer;
 mod judgments;
+mod notify;
 mod runtime;
 mod session;
 mod thread_updates;
