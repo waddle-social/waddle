@@ -1,14 +1,16 @@
 use super::{
     bad_request_iq_error, build_iq_error_xml_typed, build_iq_result_xml,
     build_search_form_response, build_search_response_with_rsm, internal_server_error_iq_error,
-    iq_to_xml, is_search_form_request, item_not_found_iq_error, list_xmpp_channels,
-    parse_search_request, warn, ChannelResult, Element, RsmRequest, RsmResponse, Searchable,
-    WebSocketState,
+    iq_to_xml, is_search_form_request, item_not_found_iq_error, parse_search_request, warn,
+    ChannelResult, Element, RsmRequest, RsmResponse, Searchable, WebSocketState,
 };
+use crate::server::xmpp_channels::list_public_xmpp_channels;
 
-/// Answer a channel search. A room an enrolled host-grant scope manages is
-/// found only by an account its canonical grants allow to view it; the
-/// catalog row describes it to nobody else.
+/// Answer a channel search (XEP-0433: "search for public group chats").
+/// Only public rooms, the rows the MUC service lists in its public
+/// disco#items, are candidates, whoever asks and whether or not they are
+/// members. Of those, a room an enrolled host-grant scope manages is found
+/// only by an account its canonical grants allow to view it.
 pub(super) async fn handle_channel_search_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
@@ -37,20 +39,24 @@ pub(super) async fn handle_channel_search_iq(
         )];
     };
     let default_limit = request.max.unwrap_or(50).clamp(1, 200);
-    let channels =
-        match list_xmpp_channels(state.deps.app_state.db_pool.global_actor().clone(), 500, 0).await
-        {
-            Ok(channels) => channels,
-            Err(error) => {
-                warn!(error = %error, "Failed to load channels for WebSocket search");
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-        };
+    let channels = match list_public_xmpp_channels(
+        state.deps.app_state.db_pool.global_actor().clone(),
+        500,
+        0,
+    )
+    .await
+    {
+        Ok(channels) => channels,
+        Err(error) => {
+            warn!(error = %error, "Failed to load channels for WebSocket search");
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                internal_server_error_iq_error("Internal server error."),
+            )];
+        }
+    };
     let channel_ids: Vec<&str> = channels.iter().map(|channel| channel.id.as_str()).collect();
     let Ok(enrolled) = state
         .deps

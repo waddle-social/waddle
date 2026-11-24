@@ -171,6 +171,38 @@ pub(crate) async fn list_xmpp_channels(
     rows.iter().map(parse_channel_record).collect()
 }
 
+/// At most `limit` catalog rows of the public rooms: those the MUC service
+/// lists in its public disco#items (`public_room`, no group conversation),
+/// in the catalog's order. Whether a room an enrolled host-grant scope
+/// manages is listed is the caller's to decide.
+pub(crate) async fn list_public_xmpp_channels(
+    actor: ActorRef<DbActor>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<XmppChannelRecord>, String> {
+    let rows = actor
+        .ask(DbQuery {
+            sql: r#"
+                SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room, federated
+                FROM channels
+                WHERE public_room = ? AND channel_type <> ?
+                ORDER BY position ASC, created_at ASC, id ASC
+                LIMIT ? OFFSET ?
+            "#
+            .to_string(),
+            params: vec![
+                true.into(),
+                waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM.into(),
+                (limit as i64).into(),
+                (offset as i64).into(),
+            ],
+        })
+        .await
+        .map_err(|e| format!("Failed to query public channels: {e}"))?;
+
+    rows.iter().map(parse_channel_record).collect()
+}
+
 /// At most `limit` catalog rows of the rooms MUC service discovery may list
 /// to accounts at other servers: public (`public_room`), open to other
 /// servers (`federated`) and no group conversation, in the catalog's order.
