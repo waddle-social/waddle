@@ -79,11 +79,7 @@ struct CallMediaNotice: View {
                 .buttonStyle(.huddle(size: .small))
                 .fixedSize()
                 .disabled(isChecking)
-                // Three notices must not read as three buttons of one name.
-                .accessibilityLabel(Text(
-                    isChecking ? "Checking the \(issue.deviceName)"
-                        : issue.kind == .screen ? "Share your screen again" : "Check the \(issue.deviceName) again"
-                ))
+                .accessibilityLabel(Text(Self.retryLabel(issue, isChecking: isChecking)))
         }
     }
 
@@ -98,6 +94,12 @@ struct CallMediaNotice: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Text("Dismiss the \(issue.deviceName) notice"))
         .help("Dismiss for this call")
+    }
+
+    /// Three notices must not read as three buttons of one name.
+    private static func retryLabel(_ issue: CallMediaIssue, isChecking: Bool) -> String {
+        if isChecking { return "Checking the \(issue.deviceName)" }
+        return issue.kind == .screen ? "Share your screen again" : "Check the \(issue.deviceName) again"
     }
 
     private static func symbol(_ kind: CallMediaIssue.Kind) -> String {

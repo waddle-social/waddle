@@ -97,21 +97,42 @@ public enum CallMediaIssues {
         public var isCameraBlocked = false
         public var isScreenBlocked = false
         public var didScreenShareFail = false
+        /// How many times each device has been tried and refused or failed
+        /// in this call, from whichever surface asked.
+        public var refusals: [CallMediaIssue.Kind: Int] = [:]
 
         public init(
             isMicrophoneBlocked: Bool = false, isCameraBlocked: Bool = false, isScreenBlocked: Bool = false,
-            didScreenShareFail: Bool = false
+            didScreenShareFail: Bool = false, refusals: [CallMediaIssue.Kind: Int] = [:]
         ) {
             self.isMicrophoneBlocked = isMicrophoneBlocked
             self.isCameraBlocked = isCameraBlocked
             self.isScreenBlocked = isScreenBlocked
             self.didScreenShareFail = didScreenShareFail
+            self.refusals = refusals
+        }
+    }
+
+    /// The notices a person has put away, each with how often its device
+    /// had been refused by then. One more refusal, from the stage, the dock
+    /// or the sidebar's card alike, is news, and the notice is back.
+    public struct Dismissals: Equatable, Sendable {
+        private var refusalsWhenDismissed: [CallMediaIssue.Kind: Int] = [:]
+
+        public init() { /* Nothing put away. */ }
+
+        public mutating func dismiss(_ kind: CallMediaIssue.Kind, in report: Report) {
+            refusalsWhenDismissed[kind] = report.refusals[kind] ?? 0
+        }
+
+        public func hides(_ kind: CallMediaIssue.Kind, in report: Report) -> Bool {
+            refusalsWhenDismissed[kind].map { $0 >= report.refusals[kind] ?? 0 } ?? false
         }
     }
 
     /// The notices to show, the microphone's first: without it nobody
     /// hears us. One the person put away for this call is left out.
-    public static func shown(for report: Report, dismissed: Set<CallMediaIssue.Kind> = []) -> [CallMediaIssue] {
+    public static func shown(for report: Report, dismissed: Dismissals = Dismissals()) -> [CallMediaIssue] {
         var issues: [CallMediaIssue] = []
         if report.isMicrophoneBlocked { issues.append(CallMediaIssue(kind: .microphone, reason: .denied)) }
         if report.isCameraBlocked { issues.append(CallMediaIssue(kind: .camera, reason: .denied)) }
@@ -120,7 +141,7 @@ public enum CallMediaIssues {
         } else if report.didScreenShareFail {
             issues.append(CallMediaIssue(kind: .screen, reason: .failed))
         }
-        return issues.filter { !dismissed.contains($0.kind) }
+        return issues.filter { !dismissed.hides($0.kind, in: report) }
     }
 
     /// One line for a surface with no room for a list, as the dock and the

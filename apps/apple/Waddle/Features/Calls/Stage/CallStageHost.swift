@@ -221,15 +221,8 @@ struct CallStageHost: View {
     private func actions(for sid: String) -> CallStageActions {
         let commands = CallCommands(calls: session.calls, media: media)
         return CallStageActions(
-            toggleMicrophone: {
-                // An attempt from the controls is news too: its notice comes back if it fails again.
-                model.update(sid) { $0.dismissedMediaIssues.remove(.microphone) }
-                commands.toggleMicrophone()
-            },
-            toggleCamera: {
-                model.update(sid) { $0.dismissedMediaIssues.remove(.camera) }
-                commands.toggleCamera()
-            },
+            toggleMicrophone: commands.toggleMicrophone,
+            toggleCamera: commands.toggleCamera,
             toggleHand: commands.toggleHand,
             setViewMode: { [model] mode in model.update(sid) { $0.presentation.viewMode = mode } },
             toggleSelfView: { [model] in model.update(sid) { $0.presentation.isSelfViewHidden.toggle() } },
@@ -238,7 +231,7 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
-            retryMediaIssue: { [media, model, session] kind in
+            retryMediaIssue: { [media, session] kind in
                 // For the call the notice is about, while it is still a call.
                 guard let media, !checkingIssues.contains(kind), session.calls.state.sid == sid,
                       session.calls.state.isEstablished else { return }
@@ -246,8 +239,6 @@ struct CallStageHost: View {
                 checkingIssues.insert(kind)
                 Task {
                     defer { checkingIssues.remove(kind) }
-                    // Tried again, it is news again: a notice put away comes back if it still holds.
-                    model.update(sid) { $0.dismissedMediaIssues.remove(kind) }
                     switch kind {
                     case .microphone: await media.setMicrophone(true)
                     case .camera: await media.setCamera(true)
@@ -260,11 +251,14 @@ struct CallStageHost: View {
                     try? await Task.sleep(for: .milliseconds(600))
                 }
             },
-            dismissMediaIssue: { [model] kind in model.update(sid) { $0.dismissedMediaIssues.insert(kind) } },
+            // Put away until its device is refused once more, whichever surface asks (`CallMediaIssues.Dismissals`).
+            dismissMediaIssue: { [model, media] kind in
+                guard let report = media?.mediaReport else { return }
+                model.update(sid) { $0.dismissedMediaIssues.dismiss(kind, in: report) }
+            },
             openSystemSettings: { kind in CallSystemSettings.open(for: kind) },
-            toggleScreenShare: { [media, session, model] in
+            toggleScreenShare: { [media, session] in
                 guard let media else { return }
-                model.update(sid) { $0.dismissedMediaIssues.remove(.screen) }
                 Task {
                     if media.isScreenShareOn || media.isScreenShareStarting {
                         await media.stopScreenShare()

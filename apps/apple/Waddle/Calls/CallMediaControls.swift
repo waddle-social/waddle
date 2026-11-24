@@ -68,6 +68,8 @@ protocol CallMediaControls: AnyObject, Observable {
     /// The latest reading of each video stream we send or receive; empty unless measuring.
     /// A stream that appeared since the last reading is measured from this one on.
     func videoSamples() async -> [CallVideoSample]
+    /// How many times each of our devices has been tried and refused or failed in this call.
+    var mediaRefusals: [CallMediaIssue.Kind: Int] { get }
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.

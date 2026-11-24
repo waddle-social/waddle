@@ -23,9 +23,33 @@ import Testing
     }
 
     @Test func aNoticePutAwayIsLeftOutAndTheOthersStay() {
-        let report = Report(isMicrophoneBlocked: true, isCameraBlocked: true)
-        #expect(CallMediaIssues.shown(for: report, dismissed: [.camera]).map(\.kind) == [.microphone])
-        #expect(CallMediaIssues.shown(for: report, dismissed: [.microphone, .camera]).isEmpty)
+        let report = Report(isMicrophoneBlocked: true, isCameraBlocked: true, refusals: [.microphone: 1, .camera: 1])
+        var dismissed = CallMediaIssues.Dismissals()
+        dismissed.dismiss(.camera, in: report)
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).map(\.kind) == [.microphone])
+        dismissed.dismiss(.microphone, in: report)
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).isEmpty)
+    }
+
+    /// Whichever surface asked: the notice knows only that the device was refused once more.
+    @Test func aDeviceRefusedAgainBringsItsNoticeBack() {
+        var report = Report(isMicrophoneBlocked: true, refusals: [.microphone: 1])
+        var dismissed = CallMediaIssues.Dismissals()
+        dismissed.dismiss(.microphone, in: report)
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).isEmpty)
+        report.refusals[.microphone] = 2
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).map(\.kind) == [.microphone])
+        // Put away again, it stays away until the next refusal.
+        dismissed.dismiss(.microphone, in: report)
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).isEmpty)
+    }
+
+    @Test func aShareThatFailsAgainAfterItsNoticeWasPutAwayIsSaidAgain() {
+        var report = Report(didScreenShareFail: true, refusals: [.screen: 1])
+        var dismissed = CallMediaIssues.Dismissals()
+        dismissed.dismiss(.screen, in: report)
+        report.refusals[.screen] = 2
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed) == [CallMediaIssue(kind: .screen, reason: .failed)])
     }
 
     @Test func theNoticeSaysWhatItMeansAndWhatCanBeDoneOnThisKindOfDevice() {
