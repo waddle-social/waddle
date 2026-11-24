@@ -427,3 +427,33 @@ async fn explicit_subscribers_honour_xep0191_blocking_on_open_nodes() {
     let r = subscribe(&mut w.bob, "sub-bob-2", BOB).await;
     assert!(r.contains("type='error'"), "blocked subscribe refused: {r}");
 }
+
+/// XEP-0163 §4 (xep-0163.xml:465) requires the open, roster and whitelist
+/// access models; the account advertises each one it supports.
+#[tokio::test]
+async fn pep_account_advertises_supported_access_models() {
+    let _serial = TEST_SERIAL.lock().await;
+    let mut w = world("roster", &["Friends"]).await;
+    let r = iq(
+        &mut w.alice,
+        "get",
+        "disco-access",
+        ALICE,
+        &format!(r#"<query xmlns="{NS_DISCO_INFO}"/>"#),
+    )
+    .await;
+    for feature in [
+        "http://jabber.org/protocol/pubsub#access-open",
+        "http://jabber.org/protocol/pubsub#access-roster",
+        "http://jabber.org/protocol/pubsub#access-whitelist",
+    ] {
+        assert!(
+            r.contains(&format!("var='{feature}'")),
+            "account disco#info must advertise {feature}: {r}"
+        );
+    }
+    assert!(
+        !r.contains("pubsub#access-authorize"),
+        "authorize is not supported and must not be advertised: {r}"
+    );
+}
