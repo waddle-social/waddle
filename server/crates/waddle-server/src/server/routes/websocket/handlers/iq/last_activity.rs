@@ -75,29 +75,43 @@ pub(super) async fn handle_last_activity_iq(
             }
         }
 
-        if !crate::server::routes::websocket::handlers::account_reads::available_resources(
-            state,
-            &target_bare,
-        )
-        .await
-        .is_empty()
-        {
-            return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
-        }
+        // XEP-0012: only entities authorized to view the user's presence may
+        // learn availability or last activity; everyone else gets the same
+        // answer as for an offline user (forbidden / service-unavailable).
+        let requester_bare = sender_jid.to_bare();
+        let authorized = requester_bare == target_bare
+            || crate::server::routes::websocket::s2s_accounts::shares_presence_with(
+                state,
+                &target_bare,
+                &requester_bare,
+            )
+            .await;
 
-        if let Some(last_activity) = state
-            .deps
-            .protocol
-            .connection_registry
-            .last_activity(&target_bare)
-        {
-            let seconds = chrono::Utc::now()
-                .signed_duration_since(last_activity.timestamp)
-                .num_seconds()
-                .max(0) as u64;
-            let response =
-                build_last_activity_response(iq, seconds, last_activity.status.as_deref());
-            return vec![iq_to_xml(response)];
+        if authorized {
+            if !crate::server::routes::websocket::handlers::account_reads::available_resources(
+                state,
+                &target_bare,
+            )
+            .await
+            .is_empty()
+            {
+                return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
+            }
+
+            if let Some(last_activity) = state
+                .deps
+                .protocol
+                .connection_registry
+                .last_activity(&target_bare)
+            {
+                let seconds = chrono::Utc::now()
+                    .signed_duration_since(last_activity.timestamp)
+                    .num_seconds()
+                    .max(0) as u64;
+                let response =
+                    build_last_activity_response(iq, seconds, last_activity.status.as_deref());
+                return vec![iq_to_xml(response)];
+            }
         }
 
         let Some(node) = target_bare.node() else {

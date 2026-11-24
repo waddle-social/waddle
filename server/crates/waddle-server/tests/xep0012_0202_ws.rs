@@ -231,3 +231,209 @@ async fn websocket_last_activity_for_offline_oidc_user_is_forbidden() {
 
     let _ = client.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// XEP-0012 presence-authorization gate: last activity is only revealed to the
+// account owner and to contacts holding a presence subscription (RFC 6121).
+// ---------------------------------------------------------------------------
+
+async fn connect_user(server: &TestServer, name: &str, password: &str) -> WsXmppClient {
+    WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        name,
+        password,
+        &format!("{name}-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("websocket connection")
+}
+
+async fn start_alice_bob() -> (TestServer, WsXmppClient, WsXmppClient) {
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let alice = connect_user(&server, "alice", &alice_password).await;
+    let bob = connect_user(&server, "bob", &bob_password).await;
+    (server, alice, bob)
+}
+
+/// Bob subscribes to alice and alice approves, so alice's roster holds bob as
+/// `from` (bob may see alice's presence).
+async fn bob_subscribes_to_alice(alice: &mut WsXmppClient, bob: &mut WsXmppClient) {
+    for (client, id) in [(&mut *alice, "alice-roster"), (&mut *bob, "bob-roster")] {
+        client
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
+            ))
+            .await
+            .expect("send roster get");
+        client
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("roster result");
+    }
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+    bob.send(r#"<presence xmlns="jabber:client" type="subscribe" to="alice@localhost"/>"#)
+        .await
+        .expect("bob subscribes");
+    alice
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("alice receives subscribe");
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="bob@localhost"/>"#)
+        .await
+        .expect("alice approves");
+    bob.recv_matching(|frame| frame.contains("type='subscribed'"))
+        .await
+        .expect("bob receives approval");
+}
+
+#[tokio::test]
+async fn websocket_last_activity_unsubscribed_requester_is_forbidden_online_and_offline() {
+    let (_server, mut alice, mut bob) = start_alice_bob().await;
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+
+    // Online target: must not reveal availability.
+    let online = last_activity_query(&mut bob, "alice@localhost", "ws-last-unsub-online")
+        .await
+        .expect("online response");
+    assert!(online.contains("type='error'"), "expected error: {online}");
+    assert!(online.contains("forbidden"), "expected forbidden: {online}");
+    assert!(
+        !online.contains("jabber:iq:last") && !online.contains("seconds="),
+        "unauthorized query must not leak last activity: {online}"
+    );
+
+    // Offline target: must not reveal logout time or status.
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client" type="unavailable"><status>secret status</status></presence>"#,
+        )
+        .await
+        .expect("alice unavailable");
+    let _ = alice.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let offline = last_activity_query(&mut bob, "alice@localhost", "ws-last-unsub-offline")
+        .await
+        .expect("offline response");
+    assert!(
+        offline.contains("forbidden"),
+        "expected forbidden: {offline}"
+    );
+    assert!(
+        !offline.contains("secret status")
+            && !offline.contains("jabber:iq:last")
+            && !offline.contains("seconds="),
+        "unauthorized query must not leak last activity: {offline}"
+    );
+
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn websocket_last_activity_subscribed_contact_receives_activity() {
+    let (_server, mut alice, mut bob) = start_alice_bob().await;
+    bob_subscribes_to_alice(&mut alice, &mut bob).await;
+
+    let online = last_activity_query(&mut bob, "alice@localhost", "ws-last-sub-online")
+        .await
+        .expect("online response");
+    assert!(
+        online.contains("type='result'"),
+        "expected result: {online}"
+    );
+    assert!(
+        online.contains("seconds='0'"),
+        "expected seconds=0: {online}"
+    );
+
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client" type="unavailable"><status>gone fishing</status></presence>"#,
+        )
+        .await
+        .expect("alice unavailable");
+    let _ = alice.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let offline = last_activity_query(&mut bob, "alice@localhost", "ws-last-sub-offline")
+        .await
+        .expect("offline response");
+    assert!(
+        offline.contains("type='result'"),
+        "expected result: {offline}"
+    );
+    assert!(offline.contains("seconds="), "expected seconds: {offline}");
+    assert!(
+        offline.contains("gone fishing"),
+        "expected last status text: {offline}"
+    );
+
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn websocket_last_activity_self_query_is_authorized() {
+    let (_server, mut alice, bob) = start_alice_bob().await;
+    alice
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("alice available");
+
+    let response = last_activity_query(&mut alice, "alice@localhost", "ws-last-self")
+        .await
+        .expect("self response");
+    assert!(
+        response.contains("type='result'"),
+        "expected result: {response}"
+    );
+    assert!(
+        response.contains("seconds="),
+        "expected seconds: {response}"
+    );
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn websocket_last_activity_blocked_requester_stays_service_unavailable() {
+    let (_server, mut alice, mut bob) = start_alice_bob().await;
+    bob_subscribes_to_alice(&mut alice, &mut bob).await;
+
+    alice
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="ws-last-block"><block xmlns="urn:xmpp:blocking"><item jid="bob@localhost"/></block></iq>"#,
+        )
+        .await
+        .expect("alice blocks bob");
+    alice
+        .recv_matching(|frame| frame.contains("ws-last-block") && frame.contains("type='result'"))
+        .await
+        .expect("block result");
+
+    let response = last_activity_query(&mut bob, "alice@localhost", "ws-last-blocked")
+        .await
+        .expect("blocked response");
+    assert!(
+        response.contains("service-unavailable"),
+        "blocked requester must keep service-unavailable: {response}"
+    );
+    assert!(
+        !response.contains("seconds="),
+        "blocked requester must not see activity: {response}"
+    );
+
+    let _ = bob.close().await;
+}
