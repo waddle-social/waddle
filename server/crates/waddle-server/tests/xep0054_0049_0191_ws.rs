@@ -1483,3 +1483,62 @@ async fn websocket_rejects_spoofed_muc_domain_presence() {
 
     let _ = client.close().await;
 }
+
+fn legacy_bookmarks(rooms: &[&str]) -> Element {
+    let mut storage = Element::builder("storage", "storage:bookmarks");
+    for room in rooms {
+        storage = storage.append(
+            Element::builder("conference", "storage:bookmarks")
+                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), *room)
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), *room)
+                .build(),
+        );
+    }
+    storage.build()
+}
+
+async fn legacy_bookmarks_set(client: &mut WsXmppClient, id: &str, rooms: &[&str]) {
+    let iq = private_storage_iq(id, "set", None, [legacy_bookmarks(rooms)]);
+    client.send(&iq).await.expect("send legacy set");
+    let response = client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("legacy set response");
+    assert!(
+        response.contains("type='result'") || response.contains("type=\"result\""),
+        "expected result, got: {response}"
+    );
+}
+
+#[tokio::test]
+async fn websocket_legacy_bookmarks_set_replaces_pep_and_legacy_views() {
+    let (_server, mut client) = setup().await;
+    let a = "a@conference.localhost";
+    let b = "b@conference.localhost";
+
+    legacy_bookmarks_set(&mut client, "bm-set-1", &[a, b]).await;
+    legacy_bookmarks_set(&mut client, "bm-set-2", &[a]).await;
+
+    let get = private_storage_iq("bm-get", "get", None, [legacy_bookmarks(&[])]);
+    client.send(&get).await.expect("send legacy get");
+    let legacy = client
+        .recv_matching(|frame| frame.contains("bm-get"))
+        .await
+        .expect("legacy get response");
+    assert!(legacy.contains(a), "A missing from legacy get: {legacy}");
+    assert!(
+        !legacy.contains(b),
+        "B must be gone from legacy get: {legacy}"
+    );
+
+    let items_iq = "<iq xmlns='jabber:client' type='get' id='bm-pep'><pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='urn:xmpp:bookmarks:1'/></pubsub></iq>";
+    client.send(items_iq).await.expect("send pep items");
+    let pep = client
+        .recv_matching(|frame| frame.contains("bm-pep"))
+        .await
+        .expect("pep items response");
+    assert!(pep.contains(a), "A missing from PEP node: {pep}");
+    assert!(!pep.contains(b), "B must be retracted from PEP node: {pep}");
+
+    let _ = client.close().await;
+}
