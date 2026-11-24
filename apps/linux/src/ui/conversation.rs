@@ -117,6 +117,7 @@ impl WaddleWindow {
                 .and_then(|child| row_parts(&child))
             {
                 super::media::bind(&parts.media, "", true);
+                super::message_media::bind_cards(&parts.cards, &[], true);
             }
         });
         imp.timeline_view
@@ -1223,6 +1224,7 @@ fn row_widget() -> gtk::Box {
         .halign(gtk::Align::Start)
         .build();
     let media = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let reactions = gtk::Box::builder().spacing(6).margin_top(2).build();
     reactions.add_css_class("reactions");
 
@@ -1231,6 +1233,7 @@ fn row_widget() -> gtk::Box {
     content.append(&body);
     content.append(&media);
     content.append(&attachments);
+    content.append(&cards);
     content.append(&reactions);
     let judgments = gtk::Box::new(gtk::Orientation::Vertical, 4);
     content.append(&judgments);
@@ -1273,6 +1276,7 @@ struct RowParts {
     body: gtk::Label,
     media: gtk::Box,
     attachments: gtk::Box,
+    cards: gtk::Box,
     reactions: gtk::Box,
     judgments: gtk::Box,
     thread: gtk::Button,
@@ -1290,7 +1294,8 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
     let body = reply.next_sibling().and_downcast::<gtk::Label>()?;
     let media = body.next_sibling().and_downcast::<gtk::Box>()?;
     let attachments = media.next_sibling().and_downcast::<gtk::Box>()?;
-    let reactions = attachments.next_sibling().and_downcast::<gtk::Box>()?;
+    let cards = attachments.next_sibling().and_downcast::<gtk::Box>()?;
+    let reactions = cards.next_sibling().and_downcast::<gtk::Box>()?;
     let judgments = reactions.next_sibling().and_downcast::<gtk::Box>()?;
     let thread = judgments.next_sibling().and_downcast::<gtk::Button>()?;
     Some(RowParts {
@@ -1309,6 +1314,7 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
         body,
         media,
         attachments,
+        cards,
         reactions,
         judgments,
         thread,
@@ -1384,6 +1390,19 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         }
     }
     super::media::bind(&parts.media, &item.body, item.retracted);
+    // Link preview cards and the sticker marker, which the timeline does
+    // not carry (see media_index.rs).
+    let extras = window
+        .upgrade()
+        .and_then(|window| super::message_media::of(&window, item));
+    let is_sticker = extras.as_ref().is_some_and(|extras| extras.sticker);
+    super::message_media::bind_cards(
+        &parts.cards,
+        extras
+            .as_ref()
+            .map_or(&[], |extras| extras.cards.as_slice()),
+        item.retracted,
+    );
     bind_reactions(window, &parts.reactions, item);
     super::message_tools::bind_toolbar(window, &parts.toolbar, widget, item);
     super::judgments::bind(&parts.judgments, item);
@@ -1413,7 +1432,9 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         parent.append(&button);
     }
     match window.upgrade() {
-        Some(window) => bind_attachments(&window, &parts.attachments, item),
+        Some(window) => {
+            bind_attachments(&window, &parts.attachments, item, extras.as_ref());
+        }
         None => parts.attachments.set_visible(false),
     }
     if item.retracted {
@@ -1422,7 +1443,8 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         body.set_visible(true);
         return;
     }
-    let mut markup = if super::media::is_media_only(&item.body) {
+    // A sticker's text is its description, for clients that draw none.
+    let mut markup = if is_sticker || super::media::is_media_only(&item.body) {
         String::new()
     } else {
         // XEP-0245 actions read "* sender action", in italics.
@@ -1483,7 +1505,12 @@ fn bind_reactions(window: &glib::WeakRef<WaddleWindow>, container: &gtk::Box, it
 const IMAGE_MAX: (i32, i32) = (400, 300);
 
 /// Images inline, other files as a button that saves them.
-fn bind_attachments(window: &WaddleWindow, container: &gtk::Box, item: &TimelineItem) {
+fn bind_attachments(
+    window: &WaddleWindow,
+    container: &gtk::Box,
+    item: &TimelineItem,
+    extras: Option<&crate::media_index::MessageMedia>,
+) {
     // Build the new widgets before dropping the old ones: the pictures on
     // screen keep their textures alive, so rebinding finds them instead of
     // fetching them again.
@@ -1492,9 +1519,13 @@ fn bind_attachments(window: &WaddleWindow, container: &gtk::Box, item: &Timeline
         .attachments
         .iter()
         .map(|attachment| {
-            if is_inline_image(attachment) && inline < images::MAX_INLINE_PER_MESSAGE {
+            if let Some(extras) = extras.filter(|extras| extras.sticker && is_image(attachment)) {
+                let widget = image_widget(window, attachment, true);
+                super::message_media::link_pack(&widget, window, item, extras);
+                widget
+            } else if is_inline_image(attachment) && inline < images::MAX_INLINE_PER_MESSAGE {
                 inline += 1;
-                image_widget(window, attachment)
+                image_widget(window, attachment, false)
             } else {
                 file_widget(window, attachment)
             }
@@ -1509,26 +1540,37 @@ fn bind_attachments(window: &WaddleWindow, container: &gtk::Box, item: &Timeline
     }
 }
 
+fn is_image(attachment: &Attachment) -> bool {
+    attachment
+        .media_type
+        .as_deref()
+        .is_some_and(|media_type| media_type.starts_with("image/"))
+}
+
 fn is_inline_image(attachment: &Attachment) -> bool {
     attachment.inline
-        && attachment
-            .media_type
-            .as_deref()
-            .is_some_and(|media_type| media_type.starts_with("image/"))
+        && is_image(attachment)
         && attachment
             .size
             .is_none_or(|size| size <= crate::attachments::MAX_UPLOAD_BYTES * 3)
 }
 
-fn image_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
+/// Largest sticker shown in a message, in pixels.
+const STICKER_MAX: (i32, i32) = (160, 160);
+
+fn image_widget(window: &WaddleWindow, attachment: &Attachment, sticker: bool) -> gtk::Widget {
     match window.image(attachment) {
         ImageState::Ready(texture) => {
-            let (width, height) = images::fit(texture.width(), texture.height(), IMAGE_MAX);
+            let max = if sticker { STICKER_MAX } else { IMAGE_MAX };
+            let (width, height) = images::fit(texture.width(), texture.height(), max);
             let picture = gtk::Picture::for_paintable(&texture);
             picture.set_content_fit(gtk::ContentFit::Contain);
             picture.set_size_request(width, height);
             picture.set_halign(gtk::Align::Start);
-            picture.add_css_class("card");
+            // A sticker is drawn on the message, not on a card.
+            if !sticker {
+                picture.add_css_class("card");
+            }
             picture.set_tooltip_text(attachment.name.as_deref());
             picture.upcast()
         }
