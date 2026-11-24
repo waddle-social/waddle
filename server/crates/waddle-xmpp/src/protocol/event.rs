@@ -203,6 +203,20 @@ pub enum CallbackResult {
     Err { stanza: Box<Stanza> },
 }
 
+/// The conversation a chat marker (XEP-0333 `displayed` / `acknowledged`)
+/// refers to, which decides how its message id is resolved against the
+/// archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerConversation {
+    /// A MUC room. The id is the MUC-assigned id (XEP-0333 §"Group Chats"),
+    /// looked up in the room archive.
+    Room(jid::BareJid),
+    /// A one-to-one chat with `peer`. The id is the `id` attribute of the
+    /// peer's message (its origin-id when the client sent one), looked up in
+    /// the marker sender's personal archive.
+    Direct(jid::BareJid),
+}
+
 /// Why an [`OutboundEvent::ProjectGroupchatInbox`] row is projected for
 /// its owner. The audience decides the unread bump and whether an
 /// XEP-0357 groupchat notification candidate may be enqueued; live

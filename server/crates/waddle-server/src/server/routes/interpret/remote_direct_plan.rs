@@ -173,6 +173,7 @@ fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &
                     | InboxProjectionMutation::GroupchatThread { .. }
                     | InboxProjectionMutation::GroupchatChannelRead { .. }
                     | InboxProjectionMutation::GroupchatThreadRead { .. }
+                    | InboxProjectionMutation::DirectRead { .. }
                     | InboxProjectionMutation::GroupchatChannelAndThread { .. } => false,
                 }
         }

@@ -8,6 +8,8 @@
 //!
 //! - **`<markable/>`**: Included in outgoing messages to request displayed markers.
 //! - **`<displayed id='...'/>`**: The message identified by `id` was displayed.
+//! - **`<acknowledged id='...'/>`**: The user acknowledged the message
+//!   identified by `id`.
 //!
 //! ## XML Format
 //!
@@ -54,6 +56,11 @@ pub enum Marker {
     Markable,
     /// The message was displayed to the user.
     Displayed(String),
+    /// The user acknowledged the message. Removed from XEP-0333 after its
+    /// earlier drafts, which gave it the same "up to this point" semantic as
+    /// `displayed`; XEP-0430 §"Unread Messages" still names it as a marker
+    /// that causes the message to be read.
+    Acknowledged(String),
 }
 
 impl Marker {
@@ -62,14 +69,25 @@ impl Marker {
         match self {
             Self::Markable => "markable",
             Self::Displayed(_) => "displayed",
+            Self::Acknowledged(_) => "acknowledged",
         }
     }
 
-    /// Returns the referenced message id, if this is a displayed marker.
+    /// Returns the referenced message id, if this marker references one.
     pub fn referenced_id(&self) -> Option<&str> {
         match self {
             Self::Markable => None,
-            Self::Displayed(id) => Some(id),
+            Self::Displayed(id) | Self::Acknowledged(id) => Some(id),
+        }
+    }
+
+    /// Returns the referenced message id when this marker causes the message
+    /// to be read (XEP-0430 §"Unread Messages": `displayed` or
+    /// `acknowledged`).
+    pub fn read_through_id(&self) -> Option<&str> {
+        match self {
+            Self::Displayed(id) | Self::Acknowledged(id) => Some(id),
+            Self::Markable => None,
         }
     }
 
@@ -81,6 +99,11 @@ impl Marker {
     /// Returns `true` if this is a `<displayed/>` marker.
     pub fn is_displayed(&self) -> bool {
         matches!(self, Self::Displayed(_))
+    }
+
+    /// Returns `true` if this is an `<acknowledged/>` marker.
+    pub fn is_acknowledged(&self) -> bool {
+        matches!(self, Self::Acknowledged(_))
     }
 }
 
@@ -125,7 +148,7 @@ fn message_has_id(msg: &Message) -> bool {
 
 /// Check if an element is a displayed marker element.
 pub fn is_marker_element(elem: &Element) -> bool {
-    elem.ns() == NS_CHAT_MARKERS && matches!(elem.name(), "markable" | "displayed")
+    elem.ns() == NS_CHAT_MARKERS && matches!(elem.name(), "markable" | "displayed" | "acknowledged")
 }
 
 /// Check if a message contains any displayed marker element.
@@ -146,7 +169,8 @@ pub fn has_markable(msg: &Message) -> bool {
 
 /// Extract the displayed marker from a message's payloads.
 ///
-/// Prefers `<displayed/>` over `<markable/>` when both are present.
+/// Prefers `<displayed/>` and `<acknowledged/>` over `<markable/>` when both
+/// are present.
 pub fn extract_marker_from_message(msg: &Message) -> Option<Marker> {
     let mut markable = false;
 
@@ -156,12 +180,16 @@ pub fn extract_marker_from_message(msg: &Message) -> Option<Marker> {
         }
         match elem.name() {
             "markable" => markable = true,
-            "displayed" => {
+            name @ ("displayed" | "acknowledged") => {
                 let id = elem.attr("id").unwrap_or("").to_owned();
                 if id.is_empty() {
                     continue;
                 }
-                return Some(Marker::Displayed(id));
+                return Some(if name == "displayed" {
+                    Marker::Displayed(id)
+                } else {
+                    Marker::Acknowledged(id)
+                });
             }
             _ => {}
         }
@@ -219,13 +247,13 @@ pub fn strip_markers(msg: &mut Message) {
     msg.payloads.retain(|e| e.ns() != NS_CHAT_MARKERS);
 }
 
-/// Check if a message is a standalone displayed marker (no body).
-/// These should be routed but not archived.
+/// Check if a message is a standalone displayed or acknowledged marker (no
+/// body). These should be routed but not archived.
 pub fn is_standalone_marker(msg: &Message) -> bool {
     msg.bodies.is_empty()
         && msg.payloads.iter().any(|e| {
             e.ns() == NS_CHAT_MARKERS
-                && e.name() == "displayed"
+                && matches!(e.name(), "displayed" | "acknowledged")
                 && e.attr("id").is_some_and(|id| !id.is_empty())
         })
 }
@@ -237,12 +265,12 @@ mod tests {
 
     #[test]
     fn test_is_marker_element() {
-        for name in ["markable", "displayed"] {
+        for name in ["markable", "displayed", "acknowledged"] {
             let elem = Element::builder(name, NS_CHAT_MARKERS).build();
             assert!(is_marker_element(&elem), "failed for {name}");
         }
 
-        for name in ["received", "acknowledged", "read"] {
+        for name in ["received", "read"] {
             let elem = Element::builder(name, NS_CHAT_MARKERS).build();
             assert!(!is_marker_element(&elem), "unexpected marker for {name}");
         }
@@ -301,6 +329,26 @@ mod tests {
         assert!(marker.is_displayed());
         assert_eq!(marker.referenced_id(), Some("msg-42"));
         assert_eq!(extract_marker_id(&msg), Some("msg-42".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_acknowledged() {
+        let xml = "<message xmlns='jabber:client' type='chat'>\
+                    <acknowledged xmlns='urn:xmpp:chat-markers:0' id='msg-7'/>\
+                    </message>";
+        let msg =
+            Message::try_from(xml.parse::<Element>().expect("valid xml")).expect("valid message");
+
+        let marker = extract_marker_from_message(&msg).expect("has marker");
+        assert_eq!(marker, Marker::Acknowledged("msg-7".to_owned()));
+        assert!(marker.is_acknowledged());
+        assert_eq!(marker.read_through_id(), Some("msg-7"));
+        assert!(is_standalone_marker(&msg));
+    }
+
+    #[test]
+    fn test_markable_does_not_read_through() {
+        assert_eq!(Marker::Markable.read_through_id(), None);
     }
 
     #[test]

@@ -34,3 +34,4 @@ pub use service::InboxEntry;
 pub use service::InboxKey;
 pub use service::InboxMessage;
 pub use service::InboxView;
+pub use service::ReadThrough;

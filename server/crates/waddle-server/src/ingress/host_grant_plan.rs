@@ -278,6 +278,7 @@ fn reduce_intent(
                     room: projected, ..
                 } => projected,
                 InboxProjectionMutation::Direct { .. }
+                | InboxProjectionMutation::DirectRead { .. }
                 | InboxProjectionMutation::DirectCallThreadAnchor { .. }
                 | InboxProjectionMutation::DirectCallThreadEnded { .. } => {
                     return Err(Unclassified)

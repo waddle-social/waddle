@@ -6,6 +6,7 @@ use super::HashMap;
 use super::{CallThreadDuration, CallThreadKind, CallThreadMedia};
 use super::{DateTime, Utc};
 use super::{Deserialize, Serialize};
+use waddle_xmpp_core::mam::ArchiveOrdinal;
 
 /// Composite key identifying one inbox conversation.
 ///
@@ -196,10 +197,27 @@ impl InboxMessage for InboxEntry {
     }
 }
 
+/// A chat-marker read cursor (XEP-0430 §"Unread Messages", XEP-0333).
+///
+/// A displayed or acknowledged marker reads the marked message and every
+/// message before it, never later ones. `ordinal` is the archive position of
+/// the marked message; `unread_cleared` is how many of the row's unread
+/// messages sit at or before it. Applying the cursor subtracts that count
+/// instead of zeroing the row, so messages archived after the marked one stay
+/// unread, including ones that arrive while the marker is being applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadThrough {
+    /// Archive position of the marked message.
+    pub ordinal: ArchiveOrdinal,
+    /// Unread messages at or before `ordinal`.
+    pub unread_cleared: u32,
+}
+
 /// In-memory inbox keyed by [`InboxKey`].
 #[derive(Debug, Clone, Default)]
 pub struct InboxView {
     pub(in crate::inbox) entries: HashMap<InboxKey, InboxEntry>,
+    pub(in crate::inbox) read_positions: HashMap<InboxKey, ArchiveOrdinal>,
 }
 
 impl InboxView {
@@ -275,8 +293,37 @@ impl InboxView {
         Some(entry.clone())
     }
 
+    /// Archive position the conversation has been read through, if any
+    /// chat marker has advanced it.
+    pub fn read_position(&self, key: &InboxKey) -> Option<ArchiveOrdinal> {
+        self.read_positions.get(key).copied()
+    }
+
+    /// Advance the read cursor of a conversation. Markers only move forward
+    /// (XEP-0333 §"Business Rules"): a cursor at or behind the stored position
+    /// changes nothing and returns `None`, as does a missing entry.
+    pub fn mark_read_through(
+        &mut self,
+        key: &InboxKey,
+        through: ReadThrough,
+    ) -> Option<InboxEntry> {
+        let entry = self.entries.get_mut(key)?;
+        if self
+            .read_positions
+            .get(key)
+            .is_some_and(|stored| *stored >= through.ordinal)
+        {
+            return None;
+        }
+        entry.unread = entry.unread.saturating_sub(through.unread_cleared);
+        self.read_positions.insert(key.clone(), through.ordinal);
+        Some(entry.clone())
+    }
+
     pub fn remove(&mut self, partner: &BareJid) -> Option<InboxEntry> {
-        self.entries.remove(&InboxKey::channel(partner.clone()))
+        let key = InboxKey::channel(partner.clone());
+        self.read_positions.remove(&key);
+        self.entries.remove(&key)
     }
 
     /// Returns a snapshot of channel-level entries sorted newest-first.

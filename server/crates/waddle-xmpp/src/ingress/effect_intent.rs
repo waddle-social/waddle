@@ -269,6 +269,10 @@ pub enum InboxProjectionMutation {
         room: BareJid,
         thread_id: ThreadId,
     },
+    /// A chat marker read through a message of a one-to-one conversation.
+    DirectRead {
+        peer: BareJid,
+    },
     GroupchatChannelAndThread {
         room: BareJid,
         thread_id: ThreadId,
@@ -313,6 +317,7 @@ impl InboxProjectionMutation {
             Self::GroupchatThreadRead { room, thread_id } => {
                 format!("groupchat_thread_read|{}|{}", room, thread_id.as_str())
             }
+            Self::DirectRead { peer } => format!("direct_read|{}", peer),
             Self::GroupchatChannelAndThread {
                 room,
                 thread_id,
@@ -1951,6 +1956,7 @@ impl IngressEffectIntent {
                     | InboxProjectionMutation::GroupchatChannelRead { room } => {
                         (room.clone(), None)
                     }
+                    InboxProjectionMutation::DirectRead { peer } => (peer.clone(), None),
                     InboxProjectionMutation::GroupchatThread { room, thread_id }
                     | InboxProjectionMutation::GroupchatThreadRead { room, thread_id }
                     | InboxProjectionMutation::GroupchatChannelAndThread {
@@ -2479,6 +2485,9 @@ enum StoredInboxProjectionMutation {
         room: BareJid,
         thread_id: String,
     },
+    DirectRead {
+        peer: BareJid,
+    },
     GroupchatChannelAndThread {
         room: BareJid,
         thread_id: String,
@@ -2523,6 +2532,7 @@ impl From<InboxProjectionMutation> for StoredInboxProjectionMutation {
             InboxProjectionMutation::GroupchatChannelRead { room } => {
                 Self::GroupchatChannelRead { room }
             }
+            InboxProjectionMutation::DirectRead { peer } => Self::DirectRead { peer },
             InboxProjectionMutation::GroupchatThreadRead { room, thread_id } => {
                 Self::GroupchatThreadRead {
                     room,
@@ -2591,6 +2601,7 @@ impl StoredInboxProjectionMutation {
             Self::GroupchatChannelRead { room } => {
                 InboxProjectionMutation::GroupchatChannelRead { room }
             }
+            Self::DirectRead { peer } => InboxProjectionMutation::DirectRead { peer },
             Self::GroupchatThreadRead { room, thread_id } => {
                 InboxProjectionMutation::GroupchatThreadRead {
                     room,
