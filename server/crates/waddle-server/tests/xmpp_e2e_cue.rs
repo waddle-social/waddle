@@ -117,7 +117,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:ietf:params:xml:ns:vcard-4.0", "XEP-0292"),
     ("urn:xmpp:push:0", "XEP-0357"),
     ("urn:xmpp:bookmarks:1#compat", "XEP-0402"),
-    ("urn:xmpp:bookmarks:1#compat-pep", "XEP-0402"),
     ("msgoffline", "XEP-0160"),
     ("http://jabber.org/protocol/muc", "XEP-0045"),
     // XEP-0045 §7.4 stable-id: reflected groupchat messages keep the

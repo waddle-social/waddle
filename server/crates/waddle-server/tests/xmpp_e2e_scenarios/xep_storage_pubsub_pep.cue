@@ -70,9 +70,9 @@ scenario: #Scenario & {
 				"http://jabber.org/protocol/pubsub#filtered-notifications",
 				"urn:xmpp:push:0",
 				"urn:xmpp:bookmarks:1#compat",
-				"urn:xmpp:bookmarks:1#compat-pep",
 			]
 			absent: [
+				"urn:xmpp:bookmarks:1#compat-pep",
 				"urn:xmpp:pep-vcard-conversion:0",
 				"http://jabber.org/protocol/pubsub#config-node-max",
 				"eu.siacs.conversations.axolotl.whitelisted",

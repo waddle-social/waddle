@@ -213,7 +213,6 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam_extended(),
         Feature::push(),
         Feature::bookmarks_compat(),
-        Feature::new("urn:xmpp:bookmarks:1#compat-pep"),
         Feature::vcard4(),
     ]
 }
@@ -297,5 +296,14 @@ mod tests {
             "http://jabber.org/protocol/pubsub#config-node-max"
         )));
         assert!(!features.contains(&Feature::new("eu.siacs.conversations.axolotl.whitelisted")));
+    }
+
+    #[test]
+    fn pep_features_do_not_advertise_xep0402_compat_pep() {
+        // XEP-0402 §Compatibility: #compat-pep promises a PEP storage:bookmarks
+        // bridge, which this server does not implement.
+        let features = pep_features();
+        assert!(!features.contains(&Feature::new("urn:xmpp:bookmarks:1#compat-pep")));
+        assert!(features.contains(&Feature::bookmarks_compat()));
     }
 }
