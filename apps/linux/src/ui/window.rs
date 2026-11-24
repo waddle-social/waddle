@@ -63,6 +63,10 @@ mod imp {
         #[template_child]
         pub inbox_list: TemplateChild<gtk::ListBox>,
         #[template_child]
+        pub admin_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub admin_page: TemplateChild<gtk::Box>,
+        #[template_child]
         pub inbox_cards: TemplateChild<gtk::Box>,
         #[template_child]
         pub inbox_mark_all: TemplateChild<gtk::Button>,
@@ -182,6 +186,8 @@ mod imp {
         pub inbox: RefCell<crate::ui::inbox::InboxState>,
         /// The call slot, its media and window (see ui/calls.rs).
         pub calls: RefCell<crate::ui::calls::CallsState>,
+        /// The owner-only admin console (see ui/admin.rs).
+        pub admin: RefCell<crate::ui::admin::AdminState>,
     }
 
     #[glib::object_subclass]
@@ -209,6 +215,7 @@ mod imp {
             let window = self.obj().clone();
             window.setup_timeline();
             window.setup_inbox();
+            window.setup_admin();
             glib::spawn_future_local(async move { window.restore().await });
         }
 
@@ -334,6 +341,11 @@ impl WaddleWindow {
     #[template_callback]
     fn on_inbox_activated(&self) {
         self.show_inbox();
+    }
+
+    #[template_callback]
+    fn on_admin_activated(&self) {
+        self.show_admin();
     }
 
     #[template_callback]
@@ -484,7 +496,7 @@ impl WaddleWindow {
         self.start_session(&account);
     }
 
-    async fn sign_out(&self) {
+    pub(super) async fn sign_out(&self) {
         let Some(account) = self.imp().account.take() else {
             return;
         };
@@ -499,6 +511,21 @@ impl WaddleWindow {
             self.toast(&error.to_string());
         }
         self.imp().stack.set_visible_child_name("server");
+    }
+
+    /// Leave the current account running no longer and enter another stored one.
+    pub(super) async fn switch_account(&self, account: StoredAccount) {
+        self.imp().account.take();
+        self.stop_session().await;
+        self.enter(account);
+    }
+
+    /// Show the sign-in steps for one more account. The current one stays
+    /// stored and is a "Switch" away in the preferences.
+    pub(super) async fn add_account(&self) {
+        self.imp().account.take();
+        self.stop_session().await;
+        self.on_back_to_server();
     }
 
     pub(super) fn toast(&self, message: &str) {

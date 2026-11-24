@@ -53,7 +53,7 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Forum rooms | | 🟡 | Created and edited with the Forum switch (`muc#roomconfig_forum`) and shown with a forum icon. Topic posts (`forum_post_kind`, `forum_title`) are parsed by the core but not exposed to the Linux UI, and there is no post-title composer (as on Apple, #2456) |
 | Inbox / unread overview (`/unread`) | 0430 | 🟡 | Inbox in the sidebar with a total badge: one card per room or DM, newest first, with unread messages and unread thread replies (room threads read with the Waddle MAM thread filter, sub-threads as their own rows), @ mention badges, Mark Read per card and Mark All Read, live updates. Opening a card or message jumps to it. Not run against a live server; DM threads are filtered locally, and mentions in unread history are only known for rooms |
 | Notify modes and mute | 0492 | 🟡 | Header bell menu sets all, mentions only or mute per room and DM, stored on the account; muted rows show an icon and notify nothing. No sidebar context menu; a mode changed on another device shows here at the next reconnect |
-| Desktop notifications with reply and mark-read actions | | 🟡 | One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |
+| Desktop notifications with reply and mark-read actions | | 🟡 | Gated by Preferences. One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |
 | @-mentions, slash commands, extension commands | 0372, 0050 | 🟡 | The composer is a multi-line text view: Enter sends, Shift+Enter breaks the line, Tab or Enter picks a suggestion, Escape closes it or cancels a reply or edit. `@` suggests occupants, XEP-0055 directory users with no presence and `@everyone`/`@here`, and typed `@label`s become XEP-0372 references (also on a correction). Extension commands are discovered over XEP-0050 when the session connects and listed with the built-ins; `/word text` fills the command's inline field and completes a single-stage form, anything else opens its XEP-0004 form in a dialog (text, list, boolean and multi-line fields, Back, Next, Cancel; secret fields are never filled). Not run against a live server. A CJK input method's Enter may send while composing (the key is handled before the input method) |
 | Nick colors | 0392 | ✅ | Author names in the shared Rust hue at HSL 55%/45%. A room participant is colored by nick, a direct message by the person's address. Initials avatars keep the four brand tints |
 
@@ -89,7 +89,7 @@ Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` an
 | Feed | | ❌ | feed and stories |
 | Stories | | ❌ | feed and stories |
 | Events and calendar, RSVP | | ❌ | events |
-| Admin console (owners) | | ❌ | admin |
+| Admin console (owners) | | 🟡 | admin: sidebar Admin (owners only): spaces (create, edit, delete), space members and roles, channels (create, edit, delete), channel affiliations, occupants and kick, user list. Not exercised against a live server. The affiliation tier filter is not surfaced, and no FFI verb grants the community owner hat. Room Details (`rooms.rs`) stays the per-room moderation surface; the console uses the owner-only `urn:waddle:admin:*` verbs |
 | 1:1 and group voice/video, screen share | 0353, 0166, Muji | 🟡 | 1:1 audio only (see Calls below): place, ring, answer, decline, hang up, busy, mute, devices, notification. Video, screen share and group (Muji) calls are not built; not run against a live server or audio device |
 
 ### Calls
@@ -103,7 +103,7 @@ Gaps: video, screen share and group (Muji, XEP-0272) calls; a ring and ringback 
 | Feature | Now | Closed by |
 | --- | --- | --- |
 | Device-flow sign-in, Secret Service storage, multi-account | ✅ | |
-| Settings screen (appearance, message order, notifications, accounts) | ❌ | settings |
+| Settings screen (appearance, message order, notifications, accounts) | 🟡 | One Preferences dialog (Ctrl+comma, main menu): Appearance (system, light, dark, applied at once), Message order (Chat or Social: newest first, composer on top, older history loads at the bottom, every message names its sender and day), Notifications (on or off; rooms mentions-only default, which a per-room mode beats and DMs ignore), Accounts (list, sign out, switch, add) and About with server info. Stored in `$XDG_CONFIG_HOME/waddle/settings.json`, no secrets. No sound switch (GNotification has none; the desktop decides) and no per-account notification overrides; Social does not put a thread's root last. Not run against a live server or on a screen |
 | Polar Huddle design tokens, Night and Daylight | 🟡 | polish |
 | Keyboard shortcuts, accessibility pass | 🟡 | Composer keys (Enter, Shift+Enter, Tab, Escape, Ctrl+B, Ctrl+I) landed with the composer; the rest is polish |
 | Push | 🚫 | Linux runs a background session for notifications; no APNs/FCM equivalent |

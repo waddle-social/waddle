@@ -139,19 +139,24 @@ private struct CallTilePicture: View, Equatable {
     }
 
     var body: some View {
-        GeometryReader { cell in
-            ZStack {
-                Theme.Colors.surface
-                if tile.hasVideo, let picture = source.video(tile) {
-                    // The tile takes the click, wherever on the picture it lands.
-                    picture.allowsHitTesting(false)
-                } else {
+        ZStack {
+            Theme.Colors.surface
+            // The source is asked outside any GeometryReader: a reader's content
+            // is rebuilt on every size pass, as when a window settles into its
+            // size, and each rebuild would fetch the picture again.
+            if tile.hasVideo, let picture = source.video(tile) {
+                // The tile takes the click, wherever on the picture it lands.
+                picture.allowsHitTesting(false)
+            } else {
+                GeometryReader { cell in
                     let side = min(cell.size.width, cell.size.height)
                     // Only an address with a localpart is a person whose avatar can be looked up.
                     CallPersonAvatar(
                         name: tile.label, jid: tile.bareJID.flatMap { $0.localpart == nil ? nil : $0 },
                         size: min(CallTileView.Metrics.avatarShare * side, CallTileView.Metrics.avatar)
                     )
+                    // A reader places its content at the top leading corner.
+                    .frame(width: cell.size.width, height: cell.size.height)
                 }
             }
         }

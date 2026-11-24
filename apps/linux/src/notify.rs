@@ -86,7 +86,7 @@ pub struct Stored {
 }
 
 /// All notification state of the signed-in window.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Notifications {
     rooms: HashMap<String, Stored>,
     directs: HashMap<String, Stored>,
@@ -94,11 +94,41 @@ pub struct Notifications {
     members_only: HashSet<String>,
     /// Conversation keys with a desktop notification on screen.
     shown: HashSet<String>,
+    /// The preference: rooms without a mode of their own notify only for
+    /// mentions (the XEP-0492 default) rather than for everything.
+    rooms_mentions_only: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            rooms: HashMap::new(),
+            directs: HashMap::new(),
+            members_only: HashSet::new(),
+            shown: HashSet::new(),
+            rooms_mentions_only: true,
+        }
+    }
 }
 
 impl Notifications {
+    /// Forget the account's state; the preference is the user's, not the
+    /// account's, and stays.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            rooms_mentions_only: self.rooms_mentions_only,
+            ..Self::default()
+        };
+    }
+
+    pub fn set_rooms_mentions_only(&mut self, only: bool) {
+        self.rooms_mentions_only = only;
+    }
+
+    /// Every shown notification, forgotten as it is returned: for turning
+    /// notifications off.
+    pub fn take_shown(&mut self) -> Vec<String> {
+        self.shown.drain().collect()
     }
 
     /// Replace everything the account stores, after a connect.
@@ -131,11 +161,14 @@ impl Notifications {
     }
 
     /// XEP-0492 section 3: chats notify for everything, and so do
-    /// members-only rooms; other rooms only for mentions.
+    /// members-only rooms; other rooms only for mentions. With the
+    /// preference off, every room notifies for everything.
     pub fn default_mode(&self, kind: Kind, jid: &str) -> NotifyMode {
         match kind {
             Kind::Direct => NotifyMode::Always,
-            Kind::Room if self.members_only.contains(jid) => NotifyMode::Always,
+            Kind::Room if self.members_only.contains(jid) || !self.rooms_mentions_only => {
+                NotifyMode::Always
+            }
             Kind::Room => NotifyMode::OnMention,
         }
     }
@@ -279,6 +312,40 @@ mod tests {
         assert!(notifications.wants(Kind::Direct, "ann@example.com", false));
         assert!(!notifications.wants(Kind::Room, "open@rooms", false));
         assert!(notifications.wants(Kind::Room, "open@rooms", true));
+    }
+
+    #[test]
+    fn the_preference_changes_only_the_default_of_rooms() {
+        let mut notifications = Notifications::default();
+        notifications.load(
+            &[room_item(
+                "quiet@rooms",
+                Some(WaddleNotifyMode::Never),
+                false,
+            )],
+            &[],
+            HashSet::new(),
+        );
+        notifications.set_rooms_mentions_only(false);
+        assert!(notifications.wants(Kind::Room, "open@rooms", false));
+        assert!(!notifications.wants(Kind::Room, "quiet@rooms", true));
+        assert!(notifications.wants(Kind::Direct, "ann@example.com", false));
+        // Signing out of an account keeps the preference.
+        notifications.clear();
+        assert!(notifications.wants(Kind::Room, "open@rooms", false));
+        notifications.set_rooms_mentions_only(true);
+        assert!(!notifications.wants(Kind::Room, "open@rooms", false));
+    }
+
+    #[test]
+    fn turning_notifications_off_takes_every_shown_one() {
+        let mut notifications = Notifications::default();
+        notifications.shown("a");
+        notifications.shown("b");
+        let mut taken = notifications.take_shown();
+        taken.sort();
+        assert_eq!(taken, ["a", "b"]);
+        assert!(notifications.take_shown().is_empty());
     }
 
     #[test]
