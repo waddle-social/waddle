@@ -1,6 +1,6 @@
 //! Typed direct-message writes deferred by ingress planning.
 use jid::BareJid;
-use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::inbox::{InboxEntry, ReadThrough};
 use waddle_xmpp::ingress::{
     InboxProjectionMutation, LinkPreviewMediaRefMutation, NotificationActivityMutation,
 };
@@ -25,6 +25,8 @@ pub enum DurableDirectEffect {
         owner: BareJid,
         channel: BareJid,
         thread: Option<ThreadId>,
+        /// Chat-marker cursor frozen at planning time.
+        through: ReadThrough,
     },
     RetractionTombstone {
         archive: BareJid,

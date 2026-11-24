@@ -2,7 +2,7 @@
 use super::{InboxRepository, IngressUowError, IngressUowTransaction, MamArchiveRepository};
 use crate::db::DatabaseDriver;
 use jid::BareJid;
-use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry, ReadThrough};
 use waddle_xmpp::ingress::{InboxProjectionMutation, MessageKey};
 use waddle_xmpp::mam::{
     correction_payload_like_pattern, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
@@ -12,24 +12,25 @@ use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 impl InboxRepository {
-    /// Mark this message's projection read once; retries return the current row.
+    /// Apply this message's chat-marker read cursor once; retries return the
+    /// current row.
     pub async fn mark_read(
         tx: &mut IngressUowTransaction<'_>,
         key: MessageKey,
         owner: &BareJid,
         channel: &BareJid,
         thread: Option<&ThreadId>,
+        through: ReadThrough,
     ) -> Result<Option<InboxEntry>, IngressUowError> {
         if Self::record_projection(tx, key, owner, channel, thread).await? {
-            Ok(
-                crate::inbox::mark_read_in_transaction(
-                    tx.transaction_mut(),
-                    owner,
-                    channel,
-                    thread,
-                )
-                .await?,
+            Ok(crate::inbox::mark_read_through_in_transaction(
+                tx.transaction_mut(),
+                owner,
+                channel,
+                thread,
+                through,
             )
+            .await?)
         } else {
             Ok(
                 crate::inbox::find_in_transaction(tx.transaction_mut(), owner, channel, thread)

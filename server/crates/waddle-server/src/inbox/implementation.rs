@@ -335,21 +335,64 @@ pub(crate) async fn upsert_in_prepared_transaction(
     Ok(decode_row(&row)?)
 }
 
-/// Mark a projection read and return its committed push payload.
-pub(crate) async fn mark_read_in_transaction(
+/// Apply a chat-marker read cursor and return the committed push payload.
+///
+/// Markers only move forward: when the stored position is at or ahead of
+/// `through.ordinal` the row is left alone and `None` is returned, as it is for
+/// a missing row.
+pub(crate) async fn mark_read_through_in_transaction(
     tx: &mut Transaction<'_>,
     owner: &BareJid,
     channel: &BareJid,
     thread: Option<&waddle_xmpp_core::mam::ThreadId>,
+    through: waddle_xmpp::inbox::ReadThrough,
 ) -> Result<Option<InboxEntry>, InboxTxError> {
-    let mut rows = tx.query(
-        &format!("UPDATE inbox_entries SET unread = 0 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? RETURNING {SELECT_COLS}"),
-        crate::db_params![owner.to_string(), channel.to_string(), thread.map(waddle_xmpp_core::mam::ThreadId::as_str).unwrap_or("").to_owned()],
-    ).await?;
+    let mut rows = tx
+        .query(
+            &mark_read_through_sql(),
+            mark_read_through_params(
+                owner,
+                channel,
+                thread.map(waddle_xmpp_core::mam::ThreadId::as_str),
+                through,
+            ),
+        )
+        .await?;
     rows.next()
         .await?
         .map(|row| decode_row(&row).map_err(Into::into))
         .transpose()
+}
+
+/// Subtracts the cleared count (saturating at zero) and advances the stored
+/// position, only when the new position is ahead of the stored one.
+fn mark_read_through_sql() -> String {
+    format!(
+        "UPDATE inbox_entries SET \
+         unread = CASE WHEN unread > ? THEN unread - ? ELSE 0 END, read_ordinal = ? \
+         WHERE user_jid = ? AND partner_jid = ? AND thread_id = ? \
+         AND (read_ordinal IS NULL OR read_ordinal < ?) \
+         RETURNING {SELECT_COLS}"
+    )
+}
+
+fn mark_read_through_params(
+    owner: &BareJid,
+    channel: &BareJid,
+    thread: Option<&str>,
+    through: waddle_xmpp::inbox::ReadThrough,
+) -> Vec<Value> {
+    let cleared = i64::from(through.unread_cleared);
+    let ordinal = through.ordinal.to_storage();
+    crate::db_params![
+        cleared,
+        cleared,
+        ordinal,
+        owner.to_string(),
+        channel.to_string(),
+        thread.unwrap_or("").to_owned(),
+        ordinal,
+    ]
 }
 
 /// Read a projection by its typed identity without changing unread state.
@@ -744,6 +787,66 @@ impl InboxStorage for DatabaseInboxStorage {
             .query(
                 &sql,
                 crate::db_params![user.to_string(), partner.to_string(), tid.to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(decode_row(&row)?))
+    }
+
+    #[instrument(skip(self, user, partner), fields(user = %user, partner = %partner))]
+    async fn read_position(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<Option<waddle_xmpp_core::mam::ArchiveOrdinal>, InboxStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT read_ordinal FROM inbox_entries \
+                 WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?",
+                crate::db_params![
+                    user.to_string(),
+                    partner.to_string(),
+                    thread_id.unwrap_or("").to_string()
+                ],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let stored: Option<i64> = row
+            .get(0)
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        stored
+            .map(|value| {
+                waddle_xmpp_core::mam::ArchiveOrdinal::from_storage(value)
+                    .map_err(|error| InboxStorageError::Other(error.to_string()))
+            })
+            .transpose()
+    }
+
+    #[instrument(skip(self, user, partner), fields(user = %user, partner = %partner))]
+    async fn mark_read_through(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+        through: waddle_xmpp::inbox::ReadThrough,
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
+        let mut rows = self
+            .query(
+                &mark_read_through_sql(),
+                mark_read_through_params(user, partner, thread_id, through),
             )
             .await?;
         let Some(row) = rows

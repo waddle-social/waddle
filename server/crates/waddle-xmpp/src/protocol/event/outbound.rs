@@ -14,7 +14,8 @@ use crate::muc::PinChangeRequest;
 use crate::Stanza;
 
 use super::{
-    CallbackId, CarbonKind, GroupchatInboxAudience, GroupchatThreadProjection, MessageRef, TimerId,
+    CallbackId, CarbonKind, GroupchatInboxAudience, GroupchatThreadProjection, MarkerConversation,
+    MessageRef, TimerId,
 };
 
 /// Every effect the state machine can cause.
@@ -361,31 +362,26 @@ pub enum OutboundEvent {
         kind: CarbonKind,
         exclude: Vec<FullJid>,
     },
-    /// XEP-0333 §3 — the sender displayed a message up to
-    /// `displayed_message_id` in a MUC room. The interpreter resolves
-    /// the message's thread via MAM and clears the matching inbox row(s)
-    /// — both the channel-level row and the thread-level row when the
-    /// displayed message belongs to a thread.
+    /// XEP-0333 chat marker (`displayed` or `acknowledged`) from the sender:
+    /// the message `marked_message_id` and every message before it is read
+    /// (XEP-0430 §"Unread Messages"), never later ones. The interpreter
+    /// resolves the message in the archive and moves the sender's inbox read
+    /// position forward through it; a marker whose message is not in the
+    /// conversation, or that is not ahead of the current position, is
+    /// ignored (XEP-0333 §"Business Rules"). For a room message that belongs
+    /// to a thread the thread-level row is advanced as well.
     ///
-    /// Emitted by the room handler chain's displayed-marker handler at
-    /// most once per dispatch — for the **sender only**, since a
-    /// displayed marker reports the sender's own read state. Reflected
-    /// markers received as recipients do NOT trigger a mark-read here:
-    /// that would cross-clear other users' inboxes.
-    ///
-    /// `room` is the MUC bare JID (where the displayed message was
-    /// archived); `owner` is the sender's bare JID (whose inbox is
-    /// being mark-read); `displayed_message_id` is the wire id
-    /// referenced by the `<displayed id='…'/>` element. The interpreter
-    /// looks it up in `MamStorage` keyed by `room` to derive the
-    /// thread.
-    MarkInboxReadFromDisplayed {
-        /// Sender's bare JID — whose inbox is being mark-read.
+    /// Emitted at most once per dispatch, for the **sender only**, since a
+    /// marker reports the sender's own read state. A reflected or delivered
+    /// marker observed as a recipient reports somebody else's read state and
+    /// must not cross-clear this owner's inbox.
+    MarkInboxReadFromMarker {
+        /// Sender's bare JID — whose inbox is being marked read.
         owner: BareJid,
-        /// Room bare JID — the MAM archive holding the displayed message.
-        room: BareJid,
-        /// Wire id from `<displayed id='…' xmlns='urn:xmpp:chat-markers:0'/>`.
-        displayed_message_id: String,
+        /// Conversation holding the marked message.
+        conversation: MarkerConversation,
+        /// Id from the marker's `id` attribute.
+        marked_message_id: String,
     },
 
     // -------------------------------------------------------------------

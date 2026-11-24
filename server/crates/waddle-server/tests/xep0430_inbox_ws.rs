@@ -13,8 +13,11 @@
 //!    and emits only the bare `<entry/>` element.
 //! 5. RSM `<max/>` pages the response and the `<fin/>` carries an RSM
 //!    `<set/>` with `first`/`last`/`count`.
-//! 6. A XEP-0333 displayed marker decrements unread state, reflected
-//!    in the next inbox query.
+//! 6. A XEP-0333 `displayed` or `acknowledged` chat marker, in a room or a
+//!    one-to-one chat, reads the marked message and the ones before it and
+//!    leaves later messages unread; markers for unknown messages or older
+//!    than the read position are ignored. Reflected in the next inbox query.
+//!    The inbox is advertised in disco#info.
 //! 7. A personal mention (XEP-0372 reference) in an open room gives a
 //!    never-joined, offline non-member an inbox row with `unread='1'`;
 //!    members-only rooms, permission-graph bans, blocked senders, the
@@ -1451,4 +1454,314 @@ async fn xep0191_block_of_room_service_or_occupant_stops_mention_row() {
         );
     }
     let _ = admin.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// XEP-0333 chat markers → XEP-0430 read position
+//
+// "A Chat Marker of 'displayed' or 'acknowledged' causes the message to be
+// read (and also causes all prior messages to be read by implication)"
+// (XEP-0430 §Unread Messages), and XEP-0333 §Business Rules: markers only
+// move forward, and a marker for a message not found in the chat is ignored.
+// ---------------------------------------------------------------------------
+
+fn marker_dm(to: &str, element: &str, id: &str) -> String {
+    format!(
+        r#"<message xmlns='{CLIENT_NS}' type='chat' to='{to}'><{element} xmlns='{NS_CHAT_MARKERS}' id='{id}'/></message>"#
+    )
+}
+
+/// The `all-unread` attribute of a fresh inbox `<fin/>`.
+async fn all_unread(client: &mut WsXmppClient, id: &str) -> String {
+    client
+        .send(&inbox_query_iq(id, None, Some(false), None))
+        .await
+        .expect("send inbox query");
+    let frames = collect_inbox_response(client, id).await;
+    parse_fin(frames.last().expect("fin"))
+        .attr("all-unread")
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Poll until the conversation row shows `unread`, then return.
+async fn wait_for_unread(client: &mut WsXmppClient, partner: &str, unread: &str) {
+    wait_for_row(client, partner, |(count, _)| count == unread).await;
+}
+
+/// Give an ignored marker time to be (wrongly) applied, then assert the row
+/// still shows `unread`.
+async fn assert_unread_stays(client: &mut WsXmppClient, partner: &str, unread: &str, why: &str) {
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let row = room_unread_and_preview(client, partner, "stays")
+        .await
+        .expect("conversation row");
+    assert_eq!(row.0, unread, "{why}");
+}
+
+/// The peer sends `count` DMs `dm-1..dm-N` to the primary user; returns the
+/// primary client's inbox row key (the peer's bare JID).
+async fn peer_sends_dms(
+    primary: &mut WsXmppClient,
+    peer: &mut WsXmppClient,
+    count: usize,
+) -> String {
+    for index in 1..=count {
+        send_dm(
+            peer,
+            primary,
+            &bare_of(PRIMARY_USER),
+            &format!("dm-{index}"),
+            &format!("body {index}"),
+        )
+        .await;
+    }
+    let partner = bare_of(PEER_USER);
+    wait_for_unread(primary, &partner, &count.to_string()).await;
+    partner
+}
+
+#[tokio::test]
+async fn xep0430_dm_displayed_marker_reads_through_the_marked_message_only() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(PEER_USER, PEER_PASSWORD)]);
+    let mut primary = primary_client(&server, "mk-dm").await;
+    let mut peer = peer_client(&server, "mk-dm-peer").await;
+    let partner = peer_sends_dms(&mut primary, &mut peer, 5).await;
+
+    primary
+        .send(&marker_dm(&partner, "displayed", "dm-2"))
+        .await
+        .expect("send marker");
+    wait_for_unread(&mut primary, &partner, "3").await;
+    assert_eq!(
+        all_unread(&mut primary, "mk-dm-fin").await,
+        "3",
+        "fin all-unread reflects the partial read"
+    );
+
+    // XEP-0333 §Business Rules: a marker older than the read position is
+    // redundant and ignored.
+    primary
+        .send(&marker_dm(&partner, "displayed", "dm-1"))
+        .await
+        .expect("send stale marker");
+    assert_unread_stays(
+        &mut primary,
+        &partner,
+        "3",
+        "a stale marker must be ignored",
+    )
+    .await;
+
+    // A marker for a message not in the chat is ignored.
+    primary
+        .send(&marker_dm(&partner, "displayed", "no-such-message"))
+        .await
+        .expect("send unknown marker");
+    assert_unread_stays(
+        &mut primary,
+        &partner,
+        "3",
+        "a marker for an unknown message must be ignored",
+    )
+    .await;
+
+    // Later markers still move forward, and never read later messages.
+    primary
+        .send(&marker_dm(&partner, "displayed", "dm-4"))
+        .await
+        .expect("send later marker");
+    wait_for_unread(&mut primary, &partner, "1").await;
+
+    let _ = primary.close().await;
+    let _ = peer.close().await;
+}
+
+#[tokio::test]
+async fn xep0430_dm_acknowledged_marker_reads_through_the_marked_message() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(PEER_USER, PEER_PASSWORD)]);
+    let mut primary = primary_client(&server, "mk-ack").await;
+    let mut peer = peer_client(&server, "mk-ack-peer").await;
+    let partner = peer_sends_dms(&mut primary, &mut peer, 3).await;
+
+    primary
+        .send(&marker_dm(&partner, "acknowledged", "dm-2"))
+        .await
+        .expect("send acknowledged marker");
+
+    wait_for_unread(&mut primary, &partner, "1").await;
+
+    let _ = primary.close().await;
+    let _ = peer.close().await;
+}
+
+#[tokio::test]
+async fn xep0333_dm_marker_resolves_the_peers_origin_id() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(PEER_USER, PEER_PASSWORD)]);
+    let mut primary = primary_client(&server, "mk-orig").await;
+    let mut peer = peer_client(&server, "mk-orig-peer").await;
+    for index in 1..=3 {
+        peer.send(&format!(
+            r#"<message xmlns='{CLIENT_NS}' type='chat' to='{}' id='wire-{index}'><body>body {index}</body><origin-id xmlns='{NS_SID}' id='origin-{index}'/></message>"#,
+            bare_of(PRIMARY_USER)
+        ))
+        .await
+        .expect("send dm with origin id");
+        primary
+            .recv_matching(|frame| frame.contains(&format!("wire-{index}")))
+            .await
+            .expect("dm delivered");
+    }
+    let partner = bare_of(PEER_USER);
+    wait_for_unread(&mut primary, &partner, "3").await;
+
+    primary
+        .send(&marker_dm(&partner, "displayed", "origin-2"))
+        .await
+        .expect("send marker by origin id");
+
+    wait_for_unread(&mut primary, &partner, "1").await;
+
+    let _ = primary.close().await;
+    let _ = peer.close().await;
+}
+
+#[tokio::test]
+async fn xep0333_dm_marker_does_not_read_the_recipients_inbox() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[(PEER_USER, PEER_PASSWORD)]);
+    let mut primary = primary_client(&server, "mk-rcpt").await;
+    let mut peer = peer_client(&server, "mk-rcpt-peer").await;
+    let partner = peer_sends_dms(&mut primary, &mut peer, 2).await;
+    // The primary user also messages the peer, so the peer has an unread row.
+    send_dm(
+        &mut primary,
+        &mut peer,
+        &bare_of(PEER_USER),
+        "back-1",
+        "hello peer",
+    )
+    .await;
+    let primary_bare = bare_of(PRIMARY_USER);
+    wait_for_unread(&mut peer, &primary_bare, "1").await;
+
+    // The primary user reading the peer's messages is the primary user's
+    // read state; the peer's inbox is untouched.
+    primary
+        .send(&marker_dm(&partner, "displayed", "dm-2"))
+        .await
+        .expect("send marker");
+    wait_for_unread(&mut primary, &partner, "0").await;
+    assert_unread_stays(
+        &mut peer,
+        &primary_bare,
+        "1",
+        "a marker delivered to the peer reports the sender's read state",
+    )
+    .await;
+
+    let _ = primary.close().await;
+    let _ = peer.close().await;
+}
+
+#[tokio::test]
+async fn xep0430_groupchat_markers_read_through_the_marked_message_only() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = mention_server();
+    let mut admin = primary_client(&server, "mk-muc").await;
+    let room = create_channel(&mut admin, "marker-room", false).await;
+    join_as(&mut admin, &room, PRIMARY_USER).await;
+    let mut peer = peer_client(&server, "mk-muc-peer").await;
+    join_as(&mut peer, &room, PEER_USER).await;
+
+    let mut stanza_ids = Vec::new();
+    for index in 1..=5 {
+        let id = format!("gc-{index}");
+        let reflection = send_groupchat(
+            &mut peer,
+            groupchat_xml(&room, &id, &format!("body {index}"), &[], None),
+            &id,
+        )
+        .await;
+        stanza_ids.push(room_stanza_id(&reflection, &room));
+    }
+    wait_for_unread(&mut admin, &room, "5").await;
+
+    let marker = |element: &str, id: &str| {
+        format!(
+            r#"<message xmlns='{CLIENT_NS}' type='groupchat' to='{room}'><{element} xmlns='{NS_CHAT_MARKERS}' id='{id}'/></message>"#
+        )
+    };
+    admin
+        .send(&marker("displayed", &stanza_ids[1]))
+        .await
+        .expect("send displayed marker");
+    wait_for_unread(&mut admin, &room, "3").await;
+
+    admin
+        .send(&marker("displayed", &stanza_ids[0]))
+        .await
+        .expect("send stale marker");
+    assert_unread_stays(&mut admin, &room, "3", "a stale marker must be ignored").await;
+
+    admin
+        .send(&marker("displayed", "not-a-stanza-id"))
+        .await
+        .expect("send unknown marker");
+    assert_unread_stays(
+        &mut admin,
+        &room,
+        "3",
+        "a marker for an unknown message must be ignored",
+    )
+    .await;
+
+    admin
+        .send(&marker("acknowledged", &stanza_ids[3]))
+        .await
+        .expect("send acknowledged marker");
+    wait_for_unread(&mut admin, &room, "1").await;
+
+    let _ = admin.close().await;
+    let _ = peer.close().await;
+}
+
+#[tokio::test]
+async fn xep0430_account_disco_info_advertises_the_inbox() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut primary = primary_client(&server, "mk-disco").await;
+
+    for (id, target) in [
+        ("disco-account", bare_of(PRIMARY_USER)),
+        ("disco-server", DOMAIN.to_string()),
+    ] {
+        primary
+            .send(&format!(
+                r#"<iq xmlns='{CLIENT_NS}' type='get' id='{id}' to='{target}'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>"#
+            ))
+            .await
+            .expect("send disco#info");
+        let response = primary
+            .recv_matching(|frame| frame.contains("<iq") && frame.contains(id))
+            .await
+            .expect("disco#info response");
+        let query = Element::from_str(&response)
+            .expect("disco#info XML")
+            .children()
+            .find(|child| child.name() == "query")
+            .cloned()
+            .expect("disco#info query");
+        assert!(
+            query
+                .children()
+                .any(|child| child.name() == "feature" && child.attr("var") == Some(NS_INBOX)),
+            "{target} disco#info must advertise {NS_INBOX}: {response}"
+        );
+    }
+
+    let _ = primary.close().await;
 }

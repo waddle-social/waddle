@@ -212,7 +212,7 @@ use carbons::send_carbons;
 use direct_archive::archive_direct;
 use direct_inbox::project_direct_inbox;
 use direct_retraction::apply_retraction_tombstone;
-use displayed_marker::mark_inbox_read_from_displayed;
+use displayed_marker::mark_inbox_read_from_marker;
 #[cfg(test)]
 use groupchat_archive::apply_groupchat_retraction_tombstone;
 use groupchat_archive::{
