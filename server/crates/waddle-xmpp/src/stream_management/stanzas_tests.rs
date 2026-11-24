@@ -169,3 +169,34 @@ fn test_sm_resume_parse() {
     assert_eq!(resume.previd, "stream-123");
     assert_eq!(resume.h, 5);
 }
+
+#[test]
+fn test_sm_stanza_parse_malformed_required_attributes() {
+    use super::stanzas::SmMalformed;
+
+    for xml in [
+        "<resume xmlns='urn:xmpp:sm:3' previd='x'/>",
+        "<resume xmlns='urn:xmpp:sm:3' previd='x' h='abc'/>",
+        "<resume xmlns='urn:xmpp:sm:3' h='1'/>",
+    ] {
+        assert!(
+            matches!(
+                SmStanza::parse(xml),
+                Some(SmStanza::Malformed(SmMalformed::Resume))
+            ),
+            "{xml}"
+        );
+    }
+    for xml in [
+        "<a xmlns='urn:xmpp:sm:3'/>",
+        "<a xmlns='urn:xmpp:sm:3' h='-1'/>",
+    ] {
+        assert!(
+            matches!(
+                SmStanza::parse(xml),
+                Some(SmStanza::Malformed(SmMalformed::Ack))
+            ),
+            "{xml}"
+        );
+    }
+}

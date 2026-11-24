@@ -229,3 +229,129 @@ async fn prebind_failure_and_nonresumable_enable_keep_their_normal_responses() {
         "non-resumable enable does not enter the resumable seam"
     );
 }
+
+const STANZA_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
+const STREAM_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-streams";
+
+/// Every text frame the server sends until it closes the connection.
+async fn frames_until_close(client: &mut WsXmppClient) -> Vec<Element> {
+    let mut frames = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.recv_raw_timeout(Duration::from_secs(5)).await {
+                Ok(Some(frame)) if frame.is_close() => return,
+                Ok(Some(frame)) => {
+                    if let Ok(text) = frame.to_text() {
+                        frames.push(text.parse().expect("server XML"));
+                    }
+                }
+                Ok(None) => return,
+                Err(error) if !error.contains("Timeout") => return,
+                Err(error) => panic!("connection did not close: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("connection closed");
+    frames
+}
+
+fn stream_error_condition(frames: &[Element]) -> String {
+    let error = frames
+        .iter()
+        .find(|frame| frame.name() == "error")
+        .expect("a stream error was sent");
+    error
+        .children()
+        .find(|child| child.ns() == STREAM_ERRORS)
+        .expect("a defined stream error condition")
+        .name()
+        .to_owned()
+}
+
+fn assert_failed(frame: &Element, condition: &str) {
+    assert!(frame.is("failed", SM_NS), "expected <failed/>: {frame:?}");
+    assert!(
+        frame.get_child(condition, STANZA_ERRORS).is_some(),
+        "expected <{condition}/> in {frame:?}"
+    );
+}
+
+/// XEP-0198 §5 requires 'previd' and 'h' on `<resume/>`; §9 says an error
+/// with regard to `<resume/>` MUST be answered with `<failed/>`. A malformed
+/// request must not leave the client waiting, and the stream stays in its
+/// pre-bind state so the client can still bind.
+#[tokio::test]
+async fn malformed_resume_is_answered_with_failed_and_the_stream_stays_usable() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let mut client = authenticate(&server).await;
+    for malformed in [
+        "<resume xmlns='urn:xmpp:sm:3' previd='some-id'/>",
+        "<resume xmlns='urn:xmpp:sm:3' previd='some-id' h='abc'/>",
+        "<resume xmlns='urn:xmpp:sm:3' previd='some-id' h='-1'/>",
+        "<resume xmlns='urn:xmpp:sm:3' previd='some-id' h=''/>",
+        "<resume xmlns='urn:xmpp:sm:3' h='0'/>",
+        "<resume xmlns='urn:xmpp:sm:3'/>",
+    ] {
+        client.send(malformed).await.expect("send");
+        let reply: Element = client
+            .recv()
+            .await
+            .unwrap_or_else(|error| panic!("no reply to {malformed}: {error}"))
+            .parse()
+            .expect("XML");
+        assert_failed(&reply, "bad-request");
+    }
+    assert_eq!(client.bind("phone").await.expect("bind"), JID);
+}
+
+/// XEP-0198 §4: "An <a/> element MUST possess an 'h' attribute." There is no
+/// `<failed/>` for an ack, so the violation closes the stream.
+#[tokio::test]
+async fn ack_without_a_valid_h_closes_the_stream() {
+    for malformed in [
+        "<a xmlns='urn:xmpp:sm:3'/>",
+        "<a xmlns='urn:xmpp:sm:3' h='abc'/>",
+    ] {
+        let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+        let mut client = authenticate(&server).await;
+        assert_eq!(client.bind("phone").await.expect("bind"), JID);
+        send_element(
+            &mut client,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "false")
+                .build(),
+        )
+        .await;
+        let enabled: Element = client.recv().await.expect("enabled").parse().expect("XML");
+        assert!(enabled.is("enabled", SM_NS));
+
+        client.send(malformed).await.expect("send");
+        let frames = frames_until_close(&mut client).await;
+        assert_eq!(stream_error_condition(&frames), "bad-format", "{malformed}");
+    }
+}
+
+/// XEP-0198 §3: "a client SHALL only make at most one attempt to enable
+/// stream management. If a server receives a second <enable/> element it
+/// SHOULD respond with a stream error, thus terminating the client
+/// connection." The spec's example answers it with `<failed/>` first.
+#[tokio::test]
+async fn second_enable_is_answered_with_failed_then_a_stream_error_and_close() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let mut client = authenticate(&server).await;
+    assert_eq!(client.bind("phone").await.expect("bind"), JID);
+    let enable = || {
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "false")
+            .build()
+    };
+    send_element(&mut client, enable()).await;
+    let enabled: Element = client.recv().await.expect("enabled").parse().expect("XML");
+    assert!(enabled.is("enabled", SM_NS));
+
+    send_element(&mut client, enable()).await;
+    let frames = frames_until_close(&mut client).await;
+    assert_failed(&frames[0], "unexpected-request");
+    assert_eq!(stream_error_condition(&frames), "policy-violation");
+}

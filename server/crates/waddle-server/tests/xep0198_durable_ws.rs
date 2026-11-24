@@ -233,6 +233,14 @@ async fn durable_enable_commits_the_session_before_enabled_and_hides_its_key() {
     assert!(failed
         .get_child("unexpected-request", "urn:ietf:params:xml:ns:xmpp-stanzas")
         .is_some());
+    // XEP-0198 §3: a second <enable/> is answered with a stream error.
+    let error = alice
+        .recv_matching_within(Duration::from_secs(10), |frame| {
+            frame.contains("policy-violation")
+        })
+        .await
+        .expect("stream error after the second enable");
+    assert!(error.contains("<error "), "{error}");
     assert_eq!(
         sessions(&fixture.pool, "alice@localhost/phone").await.len(),
         1,

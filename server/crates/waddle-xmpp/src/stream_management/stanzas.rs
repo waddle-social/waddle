@@ -342,6 +342,20 @@ pub enum SmStanza {
     Request,
     /// Acknowledgment with handled count
     Ack(SmAck),
+    /// A client-origin nonza in the SM namespace that omits or garbles a
+    /// required attribute (XEP-0198 §3 `<a/>` 'h', §5 `<resume/>` 'h' and
+    /// 'previd').
+    Malformed(SmMalformed),
+}
+
+/// The client-origin nonza kinds whose required attributes can be missing
+/// or invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmMalformed {
+    /// `<resume/>` without a 'previd', or without a numeric 'h'.
+    Resume,
+    /// `<a/>` without a numeric 'h'.
+    Ack,
 }
 
 impl SmStanza {
@@ -368,8 +382,14 @@ impl SmStanza {
         }
         match element.name() {
             "enable" => Some(SmStanza::Enable(SmEnable::from_element(&element))),
-            "resume" => SmResume::from_element(&element).map(SmStanza::Resume),
-            "a" => SmAck::from_element(&element).map(SmStanza::Ack),
+            "resume" => Some(
+                SmResume::from_element(&element)
+                    .map_or(SmStanza::Malformed(SmMalformed::Resume), SmStanza::Resume),
+            ),
+            "a" => Some(
+                SmAck::from_element(&element)
+                    .map_or(SmStanza::Malformed(SmMalformed::Ack), SmStanza::Ack),
+            ),
             "r" => Some(SmStanza::Request),
             _ => None,
         }

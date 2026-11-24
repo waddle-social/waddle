@@ -10,6 +10,7 @@ use super::{
     StreamManagementState, WebSocketState,
 };
 use super::{ResponseFrame, StreamErrorFrame};
+use waddle_xmpp::stream_management::{SmFailed, SmMalformed};
 
 pub(in crate::server::routes::websocket::stream_management) struct SmEnableClaimGuard {
     pub(in crate::server::routes::websocket::stream_management) registry:
@@ -379,6 +380,25 @@ pub(in crate::server::routes::websocket) async fn handle_sm_stanza(
         SmStanza::Resume(resume) => {
             handle_sm_resume(resume, state, ctx, finalized_resume_outcome).await
         }
+        // XEP-0198 §5: a <resume/> must carry 'previd' and 'h'. §9: an error
+        // with regard to <resume/> MUST be answered with <failed/>. The
+        // stream stays in its pre-bind state, free to bind a resource.
+        SmStanza::Malformed(SmMalformed::Resume) => vec![ResponseFrame::from(
+            SmFailed::with_condition("bad-request").to_element(),
+        )],
+        // XEP-0198 §4: an <a/> MUST possess an 'h' attribute. There is no
+        // <failed/> for <a/>, so the stream is closed with a stream error.
+        SmStanza::Malformed(SmMalformed::Ack) => {
+            *ctx.phase = ConnectionPhase::closing(ctx.phase.bound_jid().cloned());
+            vec![
+                ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                    condition: xmpp_parsers::stream_error::DefinedCondition::BadFormat,
+                    texts: Default::default(),
+                    application_specific: Vec::new(),
+                })),
+                ResponseFrame::from(websocket_stream_close_element()),
+            ]
+        }
         // Server-origin nonzas should never arrive from a client. Ignore.
         SmStanza::Enabled(_) | SmStanza::Resumed(_) | SmStanza::Failed(_) => vec![],
     }
@@ -744,11 +764,11 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
     enable: SmEnable,
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
-    phase: &ConnectionPhase,
+    phase: &mut ConnectionPhase,
     pending_commit: &mut Option<SmEnableCommit>,
     owner: SmEnableOwner<'_>,
 ) -> Vec<ResponseFrame> {
-    use waddle_xmpp::stream_management::{SmEnabled, SmFailed};
+    use waddle_xmpp::stream_management::SmEnabled;
     use waddle_xmpp::telemetry::attributes::SmEnableOutcome;
     use waddle_xmpp::telemetry::authority::record_sm_enable;
 
@@ -758,13 +778,25 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_e
             SmFailed::with_condition("unexpected-request").to_element(),
         )];
     }
-    // An enable whose durable commit outcome is unknown holds the binding:
-    // a second one could commit a second session for it.
+    // XEP-0198 §3: "a client SHALL only make at most one attempt to enable
+    // stream management. If a server receives a second <enable/> element it
+    // SHOULD respond with a stream error, thus terminating the client
+    // connection." The <failed/> element (§9, and the spec's own example)
+    // precedes the stream error. An enable that is already committed or
+    // awaiting its durable commit (whose unknown outcome holds the binding, so
+    // a second one could commit a second session for it) is the second one.
     if sm_state.enabled || pending_commit.is_some() || !owner.durable_sm.admits_enable() {
         record_sm_enable(SmEnableOutcome::Refused);
-        return vec![ResponseFrame::from(
-            SmFailed::with_condition("unexpected-request").to_element(),
-        )];
+        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+        return vec![
+            ResponseFrame::from(SmFailed::with_condition("unexpected-request").to_element()),
+            ResponseFrame::from(Element::from(xmpp_parsers::stream_error::StreamError {
+                condition: xmpp_parsers::stream_error::DefinedCondition::PolicyViolation,
+                texts: Default::default(),
+                application_specific: Vec::new(),
+            })),
+            ResponseFrame::from(websocket_stream_close_element()),
+        ];
     }
 
     let max_resume_secs = max_resume_secs_from_env();
