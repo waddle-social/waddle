@@ -59,12 +59,25 @@ struct CallCommands {
 extension CallMediaControls {
     /// What to tell the person when Waddle may not use a device their call needs.
     var deviceNotice: String? {
-        switch (isMicrophoneBlocked, isCameraBlocked) {
+        // What the call cannot do without comes first.
+        let devices: String? = switch (isMicrophoneBlocked, isCameraBlocked) {
         case (true, true): "Waddle is not allowed to use the microphone or camera. Change that in Settings."
         case (true, false): "Waddle is not allowed to use the microphone. Change that in Settings."
         case (false, true): "Waddle is not allowed to use the camera. Change that in Settings."
         case (false, false): nil
         }
+        if let devices { return devices }
+        if isScreenShareBlocked {
+            // True before the system's prompt is answered and after a refusal alike.
+            return "Waddle cannot share the screen until you allow it under Screen & System Audio Recording in System Settings and reopen Waddle."
+        }
+        return didScreenShareFail ? "That could not be shared. Try again." : nil
+    }
+
+    /// For the dock, which has no control over a share: a share goes on
+    /// while the call is away from its stage, and the person must not forget it.
+    var dockNotice: String? {
+        deviceNotice ?? (isScreenShareOn ? "You’re sharing your screen. Open the call’s conversation to stop sharing." : nil)
     }
 }
 

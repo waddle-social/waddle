@@ -104,6 +104,8 @@ struct CallStageHost: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
+    /// What can be shared, while the person is picking.
+    @State private var screenPicker: CallScreenSources?
 
     var body: some View {
         let state = session.calls.state
@@ -115,6 +117,18 @@ struct CallStageHost: View {
         }
         .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
             speaking.update(accounts)
+        }
+        // A list made for one call is not offered to the next.
+        .onChange(of: state.sid) { screenPicker = nil }
+        .sheet(isPresented: Binding(get: { screenPicker != nil }, set: { if !$0 { screenPicker = nil } })) {
+            if let sources = screenPicker {
+                CallScreenPicker(sources: sources) { source in
+                    screenPicker = nil
+                    Task { [media] in await media?.shareScreen(source) }
+                } cancel: {
+                    screenPicker = nil
+                }
+            }
         }
     }
 
@@ -165,6 +179,10 @@ struct CallStageHost: View {
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             notice: media?.deviceNotice,
+            isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
+            ownScreen: media?.isScreenShareOn == true ? CallStageTile(
+                identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
+            ) : nil,
             tileSource: model.tileSource,
             actions: actions(for: call.sid)
         )
@@ -203,6 +221,19 @@ struct CallStageHost: View {
             toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
+            toggleScreenShare: { [media, session] in
+                guard let media else { return }
+                Task {
+                    if media.isScreenShareOn || media.isScreenShareStarting {
+                        await media.stopScreenShare()
+                    } else {
+                        // Refused: the stage's notice says so and there is nothing to pick.
+                        let sources = await media.screenSources()
+                        // The list is for the call it was asked from.
+                        if session.calls.state.sid == sid { screenPicker = sources }
+                    }
+                }
+            },
             hangUp: commands.hangUp
         )
     }

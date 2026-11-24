@@ -77,4 +77,11 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
             notice: "Waddle is not allowed to use the camera. Change that in Settings.", actions: Self.actions
         ))
     }
+
+    func testWhileSharingTheScreen() {
+        assertCard(CurrentCallCard(
+            title: "#design", summary: CallCardSummary.line(status: .connected, kind: .room(count: 4)),
+            isMicrophoneOn: true, isSharingScreen: true, actions: Self.actions
+        ))
+    }
 }

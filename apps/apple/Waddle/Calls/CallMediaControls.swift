@@ -53,6 +53,21 @@ protocol CallMediaControls: AnyObject, Observable {
     func resetVolumes()
     func setMicrophone(_ on: Bool) async
     func setCamera(_ on: Bool) async
+    /// This device can share its screen into a call: a Mac.
+    var canShareScreen: Bool { get }
+    /// Our screen, or a window of ours, is being shared. Its picture is `video(of:source:)` of our own identity.
+    var isScreenShareOn: Bool { get }
+    /// A pick is on its way to being shared; asking to stop reaches it.
+    var isScreenShareStarting: Bool { get }
+    /// The person has refused Waddle the screen, so nothing can be listed or shared.
+    var isScreenShareBlocked: Bool { get }
+    /// The last pick could not be shared: its window closed, or the call would not take it.
+    var didScreenShareFail: Bool { get }
+    /// What can be shared now, asking for the screen if nobody has yet; `nil` when it is refused.
+    func screenSources() async -> CallScreenSources?
+    /// Shares `source`, in place of whatever was shared before.
+    func shareScreen(_ source: CallScreenSource) async
+    func stopScreenShare() async
 }
 
 extension EnvironmentValues {

@@ -12,6 +12,8 @@ struct CallStageActions {
     var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
+    /// Starts sharing our screen, by way of the picker, or stops it.
+    var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
     let hangUp: @MainActor () -> Void
 }
 
@@ -32,6 +34,8 @@ struct CallControlBar: View {
     /// Off while something else on screen has a use for Escape.
     var escapeStepsDown = true
     var showsParticipants = false
+    /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
+    var isSharingScreen: Bool?
     let actions: CallStageActions
 
     var body: some View {
@@ -49,6 +53,11 @@ struct CallControlBar: View {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
                 endButton
             }
+            // Narrower still, or with every button there is: sharing and the list of people go there too.
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
+                endButton
+            }
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
@@ -58,7 +67,7 @@ struct CallControlBar: View {
     private var toggles: some View { toggles(viewChoiceInMenu: false) }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool) -> some View {
+    private func toggles(viewChoiceInMenu: Bool, extrasInMenu: Bool = false) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -78,13 +87,24 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        CallControlButton(
-            title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
-            tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
-        )
-        .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        if let isSharingScreen, !extrasInMenu || isSharingScreen {
+            // A share in progress keeps its button whatever the width: stopping it must be one click away.
+            CallControlButton(
+                title: isSharingScreen ? "Stop sharing" : "Share screen", symbol: "rectangle.inset.filled.and.person.filled",
+                tone: isSharingScreen ? .chosen : .plain, action: actions.toggleScreenShare
+            )
+            .accessibilityAddTraits(isSharingScreen ? .isSelected : [])
+            .disabled(!hasMedia)
+        }
+        if !extrasInMenu {
+            CallControlButton(
+                title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
+                tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
+            )
+            .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu)
+        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu)
     }
 
     // MARK: - Split, expanded, full screen
@@ -149,8 +169,14 @@ struct CallControlBar: View {
 
     // MARK: - More
 
-    private func more(withViewChoice: Bool) -> some View {
+    private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
         Menu {
+            if withExtras {
+                if isSharingScreen == false {
+                    Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
+                }
+                Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+            }
             if withViewChoice {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
