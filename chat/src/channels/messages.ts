@@ -37,6 +37,7 @@ import {
   listQueuedRoomMessages,
 } from "@/lib/outbound-queue-store";
 import { mentionMatchesBareJid } from "@/lib/mentions";
+import { useChatStatePreference } from "@/preferences/chat-states";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { roomJidForChannelSummary } from "@/lib/channel-room";
 import { withSpan } from "@/lib/telemetry";
@@ -75,6 +76,7 @@ export function useChannelMessages(
   isChannelTimelineActive: Ref<boolean> = computed(() => true),
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
+  const { sendChatStates } = useChatStatePreference();
   // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
   // persisted across route changes). Reading via useStore keeps the composable
   // in sync with the authoritative snapshot on every mount.
@@ -543,7 +545,7 @@ export function useChannelMessages(
         return;
       }
       chatStates.resetOnSend();
-      if (result?.state === "sending" && xmppClient.value) {
+      if (result?.state === "sending" && xmppClient.value && sendChatStates.value) {
         void xmppClient.value.sendChatState(spaceId, channelId, "active").catch(() => undefined);
       }
     },

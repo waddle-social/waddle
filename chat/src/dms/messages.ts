@@ -28,6 +28,7 @@ import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import {
   listQueuedDmMessages,
 } from "@/lib/outbound-queue-store";
+import { useChatStatePreference } from "@/preferences/chat-states";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { queuedDmMessageToTimeline } from "@/dms/message-timeline-state";
 import { useDmMamPaging } from "@/dms/mam-paging";
@@ -56,6 +57,7 @@ export function useDirectMessages(
   activeConversationScope?: Readonly<Ref<DmConversationScope | null>>,
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
+  const { sendChatStates } = useChatStatePreference();
   const peerNameFromJid = (jid: string) => jidLocalpart(jid);
   const dmLoadErrorMessage = (peerJid: string, opts: { queuedOnly?: boolean } = {}) => {
     const username = peerNameFromJid(peerJid).trim();
@@ -201,7 +203,7 @@ export function useDirectMessages(
         return;
       }
       chatStates.resetOnSend();
-      if (result?.state === "sending" && xmppClient.value) {
+      if (result?.state === "sending" && xmppClient.value && sendChatStates.value) {
         void xmppClient.value.sendDmChatState(peerJid, "active", undefined, scope).catch(() => undefined);
       }
     },

@@ -7,6 +7,7 @@ import { seg, toggle } from "styled-system/recipes";
 import { feedbackClass, settingsClasses as sc, type FeedbackTone } from "@/components/chat/settings-classes";
 import { useTheme, type ThemeMode } from "@/preferences/theme";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
+import ChatStateSwitcher from "@/components/chat/ChatStateSwitcher.vue";
 import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VCardEditor from "@/components/chat/VCardEditor.vue";
@@ -628,6 +629,7 @@ async function clearTuneStatus() {
           />
         </div>
         <ReadReceiptSwitcher />
+        <ChatStateSwitcher />
       </section>
 
       <section id="about" :class="sc.card" aria-labelledby="about-title">

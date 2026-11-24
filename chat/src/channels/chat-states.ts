@@ -1,4 +1,5 @@
 import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
+import { useChatStatePreference } from "@/preferences/chat-states";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 
 // XEP-0085 chat-state notifications for the channel side. Owns:
@@ -25,6 +26,10 @@ const COMPOSING_PAUSE_MS = 3000;
 
 export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
   const { xmppClient, activeSpaceId, activeChannelId } = deps;
+
+  // XEP-0085 §5.1: users must be able to disable chat state notifications.
+  // When disabled, nothing is sent (composing, paused, or active).
+  const { sendChatStates } = useChatStatePreference();
 
   const typingUsers = ref<string[]>([]);
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -93,7 +98,7 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
     const client = xmppClient.value;
     const spaceId = activeSpaceId.value ?? "";
     const channelId = activeChannelId.value;
-    if (!client || !channelId) return;
+    if (!client || !channelId || !sendChatStates.value) return;
 
     if (lastChatState !== "composing") {
       lastChatState = "composing";
@@ -108,6 +113,7 @@ export function useChannelChatStates(deps: UseChannelChatStatesDeps) {
         activeChannelId.value !== channelId
       )
         return;
+      if (!sendChatStates.value) return;
       lastChatState = "paused";
       void client.sendChatState(spaceId, channelId, "paused", thread).catch(() => undefined);
     }, COMPOSING_PAUSE_MS);
