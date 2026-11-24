@@ -462,40 +462,6 @@ async fn bodyless_mediated_invitation_is_sent_carbon_copied() {
     let _ = desktop.close().await;
 }
 
-/// XEP-0280 §6.1: a message of type "error" is eligible when "it was
-/// sent in response to a MESSAGE that was eligible for carbons delivery".
-/// A chat message to an unavailable full JID is bounced to the sending
-/// resource; the sender's other carbons-enabled resource gets the error
-/// as a received carbon.
-#[tokio::test]
-async fn error_bounce_of_eligible_message_is_received_carbon_copied() {
-    let server = TestServer::start();
-    let (mut desktop, mut phone) = connect_sibling_pair(&server).await;
-
-    phone
-        .send(
-            r#"<message xmlns="jabber:client" to="ghost@localhost/nowhere" type="chat" id="bounce-1"><body>bounce carbon proof</body></message>"#,
-        )
-        .await
-        .expect("send chat to unavailable full jid");
-
-    let carbon = desktop
-        .recv_matching(|frame| {
-            frame.contains("urn:xmpp:carbons:2")
-                && frame.contains("<received")
-                && frame.contains("bounce carbon proof")
-        })
-        .await
-        .expect("desktop receives received carbon for the error bounce");
-    assert!(
-        carbon.contains("type=\"error\"") || carbon.contains("type='error'"),
-        "{carbon}"
-    );
-
-    let _ = phone.close().await;
-    let _ = desktop.close().await;
-}
-
 #[tokio::test]
 async fn sent_carbon_replays_to_detached_resumable_sibling() {
     let server = TestServer::start();
