@@ -1674,6 +1674,14 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
     )
     .await;
 
+    // XEP-0163 "Sending the Last Published Item": bob's newly-available
+    // resource first receives the seeded last item; it is not a duplicate of
+    // the later publish.
+    let replay = wait_for_event_message(&mut bob, publish_node, Duration::from_secs(2))
+        .await
+        .expect("newly-available +notify resource receives the last published item");
+    assert!(replay.contains(r#"id='seed'"#), "expected seed: {replay}");
+
     let pub_resp = iq_set_to(
         &mut alice,
         "pep-dedup-pub",

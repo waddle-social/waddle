@@ -19,7 +19,7 @@ use waddle_xmpp::disco::info::{parse_disco_info_response, DISCO_INFO_NS};
 use crate::server::caps_resolution::CapsVerification;
 use crate::server::routes::websocket::WebSocketState;
 
-pub(super) fn handle_caps_disco_info_result(
+pub(super) async fn handle_caps_disco_info_result(
     iq: &xmpp_parsers::iq::Iq,
     sender: &FullJid,
     state: &WebSocketState,
@@ -68,6 +68,12 @@ pub(super) fn handle_caps_disco_info_result(
         }
     };
 
+    let previous_features: std::collections::HashSet<String> = resolver
+        .key_for_resource(sender)
+        .and_then(|key| resolver.cached(&key))
+        .map(|cached| cached.features.into_iter().map(|f| f.0).collect())
+        .unwrap_or_default();
+
     match resolver.complete_pending(
         pending,
         parsed.identities,
@@ -77,6 +83,25 @@ pub(super) fn handle_caps_disco_info_result(
     ) {
         CapsVerification::Match => {
             debug!(id = %iq.id(), jid = %sender, "Cached XEP-0115 caps after hash verification");
+            // XEP-0163: interest became known after the initial presence;
+            // replay last items for nodes not already covered by the
+            // previously known caps, to a resource that is still available.
+            let still_available =
+                crate::server::routes::websocket::handlers::account_reads::available_resources(
+                    state,
+                    &sender.to_bare(),
+                )
+                .await
+                .iter()
+                .any(|(jid, _)| jid == sender);
+            if still_available {
+                crate::server::routes::websocket::handlers::pubsub_fanout::replay_last_published_items(
+                    state,
+                    sender,
+                    &previous_features,
+                )
+                .await;
+            }
         }
         CapsVerification::Mismatch => {
             warn!(
