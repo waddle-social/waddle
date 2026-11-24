@@ -40,6 +40,12 @@ pub const PEP_NODE_STICKERS: &str = "urn:xmpp:stickers:0";
 /// constants are pinned equal by a `waddle-xmpp` test.
 pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
+/// XEP-0292 §5 private contact vCard4 PEP node.
+///
+/// Mirrored as `waddle_xmpp::xep::xep0292::PEP_NODE_CONTACTS`; the two
+/// constants are pinned equal by a `waddle-xmpp` test.
+pub const PEP_NODE_CONTACTS: &str = "urn:xmpp:contacts";
+
 /// Waddle DND PEP node + namespace (issue #367).
 ///
 /// Mirrored as `waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND`
@@ -134,6 +140,7 @@ impl PepHandler {
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_STICKERS
             || node == PEP_NODE_VCARD4
+            || node == PEP_NODE_CONTACTS
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
             || node == PEP_NODE_WADDLE_JOINED_SPACES
@@ -151,6 +158,7 @@ impl PepHandler {
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
         if node == PEP_NODE_BOOKMARKS
             || node == PEP_NODE_MDS_DISPLAYED
+            || node == PEP_NODE_CONTACTS
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
             || node == PEP_NODE_WADDLE_JOINED_SPACES
