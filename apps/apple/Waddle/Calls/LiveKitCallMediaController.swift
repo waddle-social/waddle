@@ -175,6 +175,95 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if kind == .camera { await applyCameraChoice() }
     }
 
+    // MARK: - Diagnostics
+
+    /// The tracks asked to report statistics. Asking one again restarts its
+    /// timer, so each is asked once.
+    @ObservationIgnored private var measuredTracks: [ObjectIdentifier: Track] = [:]
+    @ObservationIgnored private var measuresVideo = false
+
+    func setMeasuresVideo(_ on: Bool) async {
+        measuresVideo = on
+        guard on else {
+            let tracks = Array(measuredTracks.values)
+            measuredTracks = [:]
+            for track in tracks { await track.set(reportStatistics: false) }
+            return
+        }
+        await measureNewVideoTracks()
+    }
+
+    /// Every video stream of the call now: ours first, then the others'.
+    private var videoStreams: [(key: String, label: String, source: CallVideoSource, direction: CallVideoSample.Direction, track: Track)] {
+        guard let room else { return [] }
+        let own = room.localParticipant.identity?.stringValue ?? joinedIdentity ?? ""
+        var streams: [(String, String, CallVideoSource, CallVideoSample.Direction, Track)] = []
+        for publication in room.localParticipant.localVideoTracks where !publication.isMuted {
+            guard let track = publication.track else { continue }
+            let source: CallVideoSource = publication.source == .screenShareVideo ? .screen : .camera
+            streams.append(("\(own):\(source):sent", "You", source, .sent, track))
+        }
+        func name(_ identity: String) -> String { JID(parsing: identity)?.bare.localpart ?? identity }
+        for (identity, track) in cameraTracks.sorted(by: { $0.key < $1.key }) where identity != own {
+            if let track = track as? Track { streams.append(("\(identity):camera:received", name(identity), .camera, .received, track)) }
+        }
+        for (identity, screen) in screenTracks.sorted(by: { $0.key < $1.key }) {
+            if let track = screen.track as? Track { streams.append(("\(identity):screen:received", name(identity), .screen, .received, track)) }
+        }
+        return streams.map { (key: $0.0, label: $0.1, source: $0.2, direction: $0.3, track: $0.4) }
+    }
+
+    private func measureNewVideoTracks() async {
+        for stream in videoStreams where measuredTracks[ObjectIdentifier(stream.track)] == nil {
+            measuredTracks[ObjectIdentifier(stream.track)] = stream.track
+            await stream.track.set(reportStatistics: true)
+        }
+    }
+
+    func videoSamples() -> [CallVideoSample] {
+        guard measuresVideo else { return [] }
+        // A camera turned on while someone is looking is measured from then on.
+        if videoStreams.contains(where: { measuredTracks[ObjectIdentifier($0.track)] == nil }) {
+            Task { await measureNewVideoTracks() }
+        }
+        return videoStreams.map { stream in
+            var sample = CallVideoSample(
+                key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
+            )
+            guard let statistics = stream.track.statistics else { return sample }
+            sample.codec = statistics.codec.first { $0.mimeType?.hasPrefix("video/") == true }?.mimeType
+            sample.candidateType = statistics.localIceCandidate?.candidateType?.rawValue
+            sample.transport = statistics.localIceCandidate?.protocol
+            switch stream.direction {
+            case .sent:
+                // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
+                let layers = statistics.outboundRtpStream
+                let top = layers.max { ($0.frameWidth ?? 0) * ($0.frameHeight ?? 0) < ($1.frameWidth ?? 0) * ($1.frameHeight ?? 0) }
+                sample.width = top?.frameWidth.map { Int($0) }
+                sample.height = top?.frameHeight.map { Int($0) }
+                sample.framesPerSecond = top?.framesPerSecond
+                sample.timestamp = top?.timestamp ?? 0
+                let sent = layers.compactMap(\.bytesSent)
+                sample.bytes = sent.isEmpty ? nil : sent.reduce(0, +)
+                // The far end's word on what arrived.
+                sample.lossFraction = statistics.remoteInboundRtpStream.first?.fractionLost
+                sample.roundTrip = statistics.remoteInboundRtpStream.first?.roundTripTime
+            case .received:
+                let stream = statistics.inboundRtpStream.first
+                sample.width = stream?.frameWidth.map { Int($0) }
+                sample.height = stream?.frameHeight.map { Int($0) }
+                sample.framesPerSecond = stream?.framesPerSecond
+                sample.timestamp = stream?.timestamp ?? 0
+                sample.bytes = stream?.bytesReceived
+                if let lost = stream?.packetsLost, let received = stream?.packetsReceived, Int64(received) + lost > 0 {
+                    sample.lossFraction = Double(max(lost, 0)) / Double(Int64(received) + max(lost, 0))
+                }
+                sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
+            }
+            return sample
+        }
+    }
+
     // MARK: - Audio processing
 
     func setAudioProcessing(_ processing: CallAudioProcessing) async {
@@ -594,6 +683,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         connectionSettling?.cancel()
         connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
+        measuredTracks = [:]
+        measuresVideo = false
         audioProcessingPublications = []
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.

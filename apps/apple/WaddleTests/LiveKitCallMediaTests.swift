@@ -266,6 +266,48 @@ final class LiveKitCallMediaTests: XCTestCase {
         await bob.disconnect()
     }
 
+    /// Real readings from the engine for a stream we receive: they carry a
+    /// byte count, and a timestamp the tracker reads as now.
+    func testAMeasuredStreamHasReadingsTheTrackerCanTime() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = makeController()
+        let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/web")
+        let bob = Room()
+        try await bob.connect(url: bobJoin.url, token: bobJoin.token)
+        try await alice.connect(
+            join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: CallMedia(audio: false, video: false),
+            iceServers: []
+        )
+        let screen = await LocalVideoTrack.createBufferTrack(source: .screenShareVideo)
+        let frames = Task {
+            var buffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, 640, 360, kCVPixelFormatType_32BGRA, nil, &buffer)
+            while !Task.isCancelled, let buffer {
+                (screen.capturer as? BufferCapturer)?.capture(buffer)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { frames.cancel() }
+        _ = try await bob.localParticipant.publish(videoTrack: screen)
+        try await until { alice.participants.last?.screenPublicationID != nil }
+        XCTAssertTrue(alice.videoSamples().isEmpty, "nothing is measured until someone looks")
+
+        await alice.setMeasuresVideo(true)
+        try await until(timeout: .seconds(15)) { alice.videoSamples().first?.bytes != nil }
+        let sample = try XCTUnwrap(alice.videoSamples().first)
+        XCTAssertEqual(sample.key, "\(bobJoin.identity):screen:received")
+        XCTAssertEqual(sample.label, "bob")
+        XCTAssertEqual(sample.direction, .received)
+        let taken = CallVideoStatsTracker.seconds(sample.timestamp)
+        XCTAssertEqual(taken, Date().timeIntervalSince1970, accuracy: 3600, "the engine's timestamp is read in the right unit")
+
+        await alice.setMeasuresVideo(false)
+        XCTAssertTrue(alice.videoSamples().isEmpty)
+        await alice.disconnect()
+        await bob.disconnect()
+    }
+
     func testAScreenSomeoneSharesIsTheirsToShowUntilTheyStop() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"

@@ -14,10 +14,13 @@ final class CallSettingsSnapshotTests: XCTestCase {
 
     private func assertSettings(
         _ devices: CallDevices, kinds: [CallDeviceKind] = CallDeviceKind.allCases, width: CGFloat = CallSettingsView.width,
-        audioProcessing: CallAudioProcessing = CallAudioProcessing(), height: CGFloat = 520, testName: String = #function, line: UInt = #line
+        audioProcessing: CallAudioProcessing = CallAudioProcessing(), videoStats: [CallVideoStat]? = nil,
+        height: CGFloat = 520, testName: String = #function, line: UInt = #line
     ) async throws {
         try await assertScreenSnapshot(
-            of: CallSettingsView(devices: devices, kinds: kinds, audioProcessing: audioProcessing, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }),
+            of: CallSettingsView(
+                devices: devices, kinds: kinds, audioProcessing: audioProcessing, videoStats: videoStats, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }
+            ),
             size: CGSize(width: width, height: height), testName: testName, line: line
         )
     }
@@ -39,6 +42,37 @@ final class CallSettingsSnapshotTests: XCTestCase {
             ),
             audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false), height: 560
         )
+    }
+
+    private static let devices = CallDevices(
+        microphones: CallDeviceList(devices: [builtIn]), speakers: CallDeviceList(devices: [speakers]),
+        cameras: CallDeviceList(devices: [faceTime])
+    )
+
+    /// Our camera going out and someone's screen coming in, as the tracker writes them.
+    func testVideoStatistics() async throws {
+        var tracker = CallVideoStatsTracker()
+        func readings(second: Double) -> [CallVideoSample] {
+            [
+                CallVideoSample(
+                    key: "me:camera:sent", label: "You", source: .camera, direction: .sent, width: 1280, height: 720,
+                    framesPerSecond: 30, bytes: UInt64(150_000 * second), timestamp: 1_700_000_000_000 + second * 1000,
+                    lossFraction: 0.004, roundTrip: 0.038, codec: "video/VP9", candidateType: "srflx", transport: "udp"
+                ),
+                CallVideoSample(
+                    key: "linus:screen:received", label: "linus", source: .screen, direction: .received, width: 2560,
+                    height: 1440, framesPerSecond: 14.6, bytes: UInt64(420_000 * second),
+                    timestamp: 1_700_000_000_000 + second * 1000, lossFraction: 0.021, roundTrip: 0.038,
+                    codec: "video/VP9", candidateType: "srflx", transport: "udp"
+                ),
+            ]
+        }
+        _ = tracker.update(with: readings(second: 1))
+        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 660)
+    }
+
+    func testNoVideoToMeasure() async throws {
+        try await assertSettings(Self.devices, videoStats: [], height: 600)
     }
 
     #if os(iOS)
