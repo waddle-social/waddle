@@ -232,6 +232,35 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     // event is handed over, read once per publication (below).
     let mut still_deliverable: Option<HashSet<waddle_xmpp::pubsub::SubId>> = None;
 
+    // XEP-0163 §4: "a PEP service MUST NOT send notifications to a
+    // subscriber if the user has blocked the subscriber ... by means of
+    // XEP-0016 or XEP-0191", and a subscriber that blocked the owner is
+    // owed nothing either. Loaded once; failing closed withholds every
+    // non-owner explicit subscriber rather than leak to a blocked one.
+    let owner_blocklist = if is_pep {
+        match state
+            .deps
+            .app_state
+            .db_pool
+            .blocking_storage()
+            .load_blocklist(owner)
+            .await
+        {
+            Ok(list) => Some(list),
+            Err(error) => {
+                warn!(
+                    owner = %owner,
+                    node,
+                    error = %error,
+                    "Withholding explicit PEP subscribers: owner blocklist unreadable; failing closed"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     for sub in subscribers {
         // A Space's subscriber at another server holds no resource here.
         // Its notification leaves over S2S, decided apart (below).
@@ -286,6 +315,36 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
             );
             if !allowed {
                 continue;
+            }
+        }
+
+        if is_pep && sub.subscriber.to_bare() != *owner {
+            let Some(owner_blocklist) = owner_blocklist.as_ref() else {
+                continue;
+            };
+            if owner_blocklist.contains_jid(&sub.subscriber) {
+                continue;
+            }
+            match state
+                .deps
+                .app_state
+                .db_pool
+                .blocking_storage()
+                .load_blocklist(&sub.subscriber.to_bare())
+                .await
+            {
+                Ok(list) if !list.contains_jid(&from) => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    warn!(
+                        owner = %owner,
+                        node,
+                        subscriber = %sub.subscriber,
+                        error = %error,
+                        "Withholding PEP event: subscriber blocklist unreadable; failing closed"
+                    );
+                    continue;
+                }
             }
         }
 
@@ -355,6 +414,14 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 continue;
             }
         }
+
+        let target_resources: Vec<FullJid> = match owner_blocklist.as_ref() {
+            Some(blocklist) if is_pep && sub.subscriber.to_bare() != *owner => target_resources
+                .into_iter()
+                .filter(|resource| !blocklist.contains_jid(&Jid::from(resource.clone())))
+                .collect(),
+            _ => target_resources,
+        };
 
         if target_resources.is_empty() {
             // Bare-JID subscriber fully offline (no live, no resumable),
@@ -466,6 +533,7 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         from: &from,
         event: &event,
         notify_filter: &notify_filter,
+        roster_model: (node_cfg.access_model == AccessModel::Roster).then_some(&node_cfg),
     };
     // Codex P1 review (PR #439): the §3 roster + owner-self passes
     // are XEP-0163 PEP-specific. For non-PEP publishes (generic

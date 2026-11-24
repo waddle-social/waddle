@@ -12,6 +12,9 @@ pub(super) struct CapsFanOutCtx<'a> {
     pub(super) from: &'a Jid,
     pub(super) event: &'a Message,
     pub(super) notify_filter: &'a str,
+    /// The node's config when its access model is `roster`: the §3 roster
+    /// pass then reaches only contacts in an allowed roster group.
+    pub(super) roster_model: Option<&'a waddle_xmpp::pubsub::NodeConfig>,
 }
 
 /// XEP-0163 §3 — iterate the publisher's roster from/both contacts and
@@ -66,9 +69,36 @@ pub(super) async fn roster_caps_fan_out(
         }
     };
 
+    let roster_allowed = match ctx.roster_model {
+        Some(node_cfg) => {
+            match crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool)
+                .allowed_contacts(owner, node_cfg)
+                .await
+            {
+                Ok(allowed) => Some(allowed),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        owner = %owner,
+                        notify_filter = %ctx.notify_filter,
+                        "Aborting §3 roster fan-out: failed to resolve roster groups; \
+                         failing closed"
+                    );
+                    return metrics;
+                }
+            }
+        }
+        None => None,
+    };
+
     let unblocked_by_owner: Vec<BareJid> = presence_subscribers
         .into_iter()
         .filter(|contact_bare| !owner_blocklist.contains(contact_bare))
+        .filter(|contact_bare| {
+            roster_allowed
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(contact_bare))
+        })
         .collect();
     if unblocked_by_owner.is_empty() {
         return metrics;

@@ -452,6 +452,18 @@ impl Feature {
         Self::new("http://jabber.org/protocol/pubsub#publish-only-affiliation")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#access-open`.
+    #[must_use]
+    pub fn pubsub_access_open() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#access-open")
+    }
+
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#access-roster`.
+    #[must_use]
+    pub fn pubsub_access_roster() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#access-roster")
+    }
+
     /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#access-presence`.
     #[must_use]
     pub fn pubsub_access_presence() -> Self {

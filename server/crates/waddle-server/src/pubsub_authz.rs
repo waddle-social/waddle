@@ -130,8 +130,10 @@ pub enum ReadDecision {
 /// Pure presence/roster decision for a non-owner entity.
 ///
 /// * `presence`: the entity MUST hold a presence subscription to the owner.
-/// * `roster`: no `pubsub#roster_groups_allowed` is configurable, so the
-///   allowed-group list is empty and no non-owner is in an allowed group.
+/// * `roster`: the entity MUST hold a presence subscription to the owner
+///   (roster subscription `from` or `both`) AND be filed under at least one
+///   group of `pubsub#roster_groups_allowed` (XEP-0060 §4.5.1, XEP-0163 §4).
+///   With no allowed group configured no non-owner qualifies.
 ///
 /// Other access models are not decided here and yield `Denied`.
 pub fn contact_decision(
@@ -146,7 +148,18 @@ pub fn contact_decision(
                 ReadDecision::PresenceSubscriptionRequired
             }
         }
-        AccessModel::Roster => ReadDecision::NotInRosterGroup,
+        AccessModel::Roster => {
+            if standing.is_some_and(|s| {
+                s.receives_owner_presence
+                    && s.groups
+                        .iter()
+                        .any(|group| node_cfg.roster_groups_allowed.contains(group))
+            }) {
+                ReadDecision::Allowed
+            } else {
+                ReadDecision::NotInRosterGroup
+            }
+        }
         _ => ReadDecision::Denied,
     }
 }
@@ -165,6 +178,63 @@ impl<'a> ContactDirectory<'a> {
             roster: pool.roster_storage(),
             blocking: pool.blocking_storage(),
         }
+    }
+
+    /// The owner's roster contacts [`contact_decision`] admits to the node,
+    /// for fan-out that walks the roster instead of asking per entity.
+    /// Applies the same decision as [`pep_read_decision`], so notification
+    /// recipients can never be wider than item readers.
+    pub async fn allowed_contacts(
+        &self,
+        owner: &BareJid,
+        node_cfg: &waddle_xmpp::pubsub::NodeConfig,
+    ) -> Result<std::collections::HashSet<BareJid>, XmppError> {
+        let rows = self
+            .roster
+            .get_roster(owner)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let mut allowed = std::collections::HashSet::new();
+        for row in rows {
+            let Ok(contact) = row.contact_jid.parse::<BareJid>() else {
+                continue;
+            };
+            let standing = ContactStanding {
+                receives_owner_presence: matches!(row.subscription.as_str(), "from" | "both"),
+                groups: row.groups,
+            };
+            if contact_decision(node_cfg, Some(&standing)) == ReadDecision::Allowed {
+                allowed.insert(contact);
+            }
+        }
+        Ok(allowed)
+    }
+
+    /// Whether the owner has blocked `entity`, or `entity` has blocked the
+    /// owner (XEP-0191; XEP-0163 §4: a PEP service MUST NOT notify a
+    /// subscriber the user has blocked). Fails closed: an unreadable
+    /// blocklist is an error the caller must treat as a refusal.
+    pub async fn blocked_either_way(
+        &self,
+        owner: &BareJid,
+        entity: &BareJid,
+    ) -> Result<bool, XmppError> {
+        let owner_jid = jid::Jid::from(owner.clone());
+        let entity_jid = jid::Jid::from(entity.clone());
+        let owner_list = self
+            .blocking
+            .load_blocklist(owner)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        if owner_list.contains_jid(&entity_jid) {
+            return Ok(true);
+        }
+        let entity_list = self
+            .blocking
+            .load_blocklist(entity)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        Ok(entity_list.contains_jid(&owner_jid))
     }
 
     /// `None` when the entity is not in the owner's roster or is blocked by
@@ -207,6 +277,11 @@ pub async fn pep_read_decision(
     node: &str,
     entity: &BareJid,
 ) -> Result<ReadDecision, XmppError> {
+    // A blocked entity (either direction) is served no PEP node of the
+    // owner, whatever its access model (XEP-0163 §4, XEP-0191).
+    if !derive_pep_owner(target, entity) && contacts.blocked_either_way(target, entity).await? {
+        return Ok(ReadDecision::Denied);
+    }
     if can_subscribe(storage, target, node, entity, true).await? {
         return Ok(ReadDecision::Allowed);
     }
@@ -340,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_model_refuses_every_non_owner() {
+    fn roster_model_without_allowed_groups_refuses_every_non_owner() {
         let cfg = NodeConfig {
             access_model: AccessModel::Roster,
             ..NodeConfig::pep_default()
@@ -354,6 +429,23 @@ mod tests {
             ReadDecision::NotInRosterGroup
         );
         assert_eq!(contact_decision(&cfg, None), ReadDecision::NotInRosterGroup);
+    }
+
+    #[test]
+    fn roster_model_admits_a_contact_in_an_allowed_group() {
+        let cfg = NodeConfig {
+            access_model: AccessModel::Roster,
+            roster_groups_allowed: vec!["Family".to_string()],
+            ..NodeConfig::pep_default()
+        };
+        let contact = ContactStanding {
+            receives_owner_presence: true,
+            groups: vec!["Family".to_string()],
+        };
+        assert_eq!(
+            contact_decision(&cfg, Some(&contact)),
+            ReadDecision::Allowed
+        );
     }
 
     #[tokio::test]

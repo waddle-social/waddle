@@ -27,7 +27,9 @@ use super::DatabasePubSubStorage;
 // opt-in). Version-gated drop-and-recreate carries the schema change.
 // * v8 — pubsub_nodes gains nullable node_type for XEP-0060
 //   `pubsub#type` profile metadata (XEP-0472/XEP-0501).
-pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 8;
+// * v9 — pubsub_nodes gains nullable roster_groups_allowed (JSON array)
+//   for XEP-0060 `pubsub#roster_groups_allowed`.
+pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 9;
 
 const DATA_TABLES: &[&str] = &[
     "pubsub_nodes",
@@ -429,6 +431,7 @@ impl SchemaTransaction<'_, '_> {
                     notify_delete INTEGER NOT NULL,
                     send_last_published_item TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL,
+                    roster_groups_allowed TEXT,
                     PRIMARY KEY (owner_jid, node_name)
                 )
                 "#
@@ -448,6 +451,7 @@ impl SchemaTransaction<'_, '_> {
                     notify_delete INTEGER NOT NULL,
                     send_last_published_item TEXT NOT NULL,
                     created_at_ms BIGINT NOT NULL,
+                    roster_groups_allowed TEXT,
                     PRIMARY KEY (owner_jid, node_name)
                 )
                 "#

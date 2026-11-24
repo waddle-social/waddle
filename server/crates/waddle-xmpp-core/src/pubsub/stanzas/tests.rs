@@ -611,3 +611,130 @@ fn precondition_not_met_is_conflict_with_the_pubsub_error_condition() {
     let other = error.other.expect("pubsub-specific condition");
     assert!(other.is("precondition-not-met", NS_PUBSUB_ERRORS));
 }
+
+fn roster_groups_field(groups: &[&str]) -> Element {
+    let mut field = Element::builder("field", NS_XDATA)
+        .attr(
+            minidom::rxml::xml_ncname!("var").to_owned(),
+            "pubsub#roster_groups_allowed",
+        )
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "list-multi");
+    for group in groups {
+        field = field.append(Element::builder("value", NS_XDATA).append(*group).build());
+    }
+    field.build()
+}
+
+fn configure_set_with(field: Element) -> Iq {
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n")
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(field)
+                .build(),
+        )
+        .build();
+    iq_with_payload(
+        "cfg-groups",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+    )
+}
+
+/// XEP-0060 §16.4.4: `pubsub#roster_groups_allowed` is a list-multi field,
+/// one `<value/>` per group.
+#[test]
+fn parse_configure_set_reads_every_roster_group_value() {
+    let iq = configure_set_with(roster_groups_field(&["Friends", "Family", "Friends"]));
+    match parse_pubsub_iq(&iq).expect("should parse") {
+        PubSubRequest::ConfigureNodeSet { config, .. } => {
+            assert_eq!(
+                config.roster_groups_allowed,
+                Some(vec!["Friends".to_owned(), "Family".to_owned()]),
+                "every value is kept, duplicates collapse"
+            );
+        }
+        other => panic!("Expected configure-set request, got {other:?}"),
+    }
+    // A field with no value clears the list.
+    match parse_pubsub_iq(&configure_set_with(roster_groups_field(&[]))).expect("should parse") {
+        PubSubRequest::ConfigureNodeSet { config, .. } => {
+            assert_eq!(config.roster_groups_allowed, Some(Vec::new()));
+        }
+        other => panic!("Expected configure-set request, got {other:?}"),
+    }
+}
+
+#[test]
+fn configure_form_lists_roster_groups_for_the_roster_model() {
+    let iq = iq_with_payload(
+        "cfg-get",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Get(Element::builder("query", "jabber:iq:version").build()),
+    );
+    let mut config = crate::pubsub::NodeConfig::pep_default();
+    config.access_model = crate::pubsub::AccessModel::Roster;
+    config.roster_groups_allowed = vec!["Friends".to_owned(), "Family".to_owned()];
+    let Iq::Result {
+        payload: Some(pubsub),
+        ..
+    } = build_pubsub_configure_form_result(&iq, "n", &config)
+    else {
+        panic!("expected result payload");
+    };
+    let form = pubsub
+        .get_child("configure", NS_PUBSUB_OWNER)
+        .and_then(|configure| configure.get_child("x", NS_XDATA))
+        .expect("configure data form");
+    let field = form
+        .children()
+        .find(|field| field.attr("var") == Some("pubsub#roster_groups_allowed"))
+        .expect("roster_groups_allowed field");
+    assert_eq!(field.attr("type"), Some("list-multi"));
+    let values: Vec<String> = field.children().map(Element::text).collect();
+    assert_eq!(values, ["Friends", "Family"]);
+
+    // Not offered on a node whose model cannot use it.
+    let open = crate::pubsub::NodeConfig::public();
+    let Iq::Result {
+        payload: Some(pubsub),
+        ..
+    } = build_pubsub_configure_form_result(&iq, "n", &open)
+    else {
+        panic!("expected result payload");
+    };
+    let form = pubsub
+        .get_child("configure", NS_PUBSUB_OWNER)
+        .and_then(|configure| configure.get_child("x", NS_XDATA))
+        .expect("configure data form");
+    assert!(form
+        .children()
+        .all(|field| field.attr("var") != Some("pubsub#roster_groups_allowed")));
+}
+
+/// XEP-0060 §8.1.3: unsupported access model is `not-acceptable` with the
+/// pubsub-specific `<unsupported-access-model/>`.
+#[test]
+fn unsupported_access_model_error_shape() {
+    let iq = iq_with_payload(
+        "cfg-auth",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [])),
+    );
+    let Iq::Error { error, .. } = build_pubsub_error(&iq, PubSubError::UnsupportedAccessModel)
+    else {
+        panic!("expected error iq");
+    };
+    assert_eq!(
+        error.defined_condition,
+        xmpp_parsers::stanza_error::DefinedCondition::NotAcceptable
+    );
+    assert!(error
+        .other
+        .as_ref()
+        .is_some_and(|other| other.is("unsupported-access-model", NS_PUBSUB_ERRORS)));
+}

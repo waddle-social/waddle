@@ -5,7 +5,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
-use crate::pubsub::{Affiliation, NodeConfig, SubId, Subscription, SubscriptionState};
+use crate::pubsub::{AccessModel, Affiliation, NodeConfig, SubId, Subscription, SubscriptionState};
 
 use super::{
     PubSubError, PubSubEvent, PubSubItem, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT,
@@ -140,6 +140,7 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         | PubSubError::PayloadRequired
         | PubSubError::SubscriptionIdRequired => (ErrorType::Modify, DefinedCondition::BadRequest),
         PubSubError::InvalidSubscriptionId => (ErrorType::Modify, DefinedCondition::NotAcceptable),
+        PubSubError::UnsupportedAccessModel => (ErrorType::Cancel, DefinedCondition::NotAcceptable),
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
@@ -165,6 +166,9 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
     } else if let PubSubError::NotInRosterGroup = error {
         stanza_error.other =
             Some(Element::builder("not-in-roster-group", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::UnsupportedAccessModel = error {
+        stanza_error.other =
+            Some(Element::builder("unsupported-access-model", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::ClosedNode = error {
         stanza_error.other = Some(Element::builder("closed-node", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::NotSubscribed = error {
@@ -362,6 +366,25 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         ));
     if let Some(node_type) = config.node_type {
         form_builder = form_builder.append(field("pubsub#type", node_type.as_str()));
+    }
+    // XEP-0060 §16.4.4 list-multi: one <value/> per allowed roster group.
+    // Offered for the `roster` model (or when a list is stored) so the
+    // field never appears on nodes it cannot apply to.
+    if config.access_model == AccessModel::Roster || !config.roster_groups_allowed.is_empty() {
+        let mut groups = Element::builder("field", "jabber:x:data")
+            .attr(
+                minidom::rxml::xml_ncname!("var").to_owned(),
+                "pubsub#roster_groups_allowed",
+            )
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "list-multi");
+        for group in &config.roster_groups_allowed {
+            groups = groups.append(
+                Element::builder("value", "jabber:x:data")
+                    .append(group.as_str())
+                    .build(),
+            );
+        }
+        form_builder = form_builder.append(groups.build());
     }
     let form = form_builder
         .append(field("pubsub#max_items", &config.max_items.to_string()))

@@ -525,6 +525,12 @@ pub(super) async fn handle_pubsub_admin_request(
             };
             let node_created_at_ms = existing_node.created_at.timestamp_millis();
             let config = config_patch.apply_to(existing_node.config);
+            // XEP-0163 §4 requires open, roster and whitelist; the
+            // `authorize` approval flow is not implemented, so a PEP node
+            // cannot be configured with it (XEP-0060 §8.1.3 / §3.3).
+            if is_pep && config.access_model == waddle_xmpp::pubsub::AccessModel::Authorize {
+                return vec![build_pubsub_error(iq, PubSubError::UnsupportedAccessModel)];
+            }
             let config = if is_spaces_service {
                 let access_model = config.access_model;
                 match normalize_spaces_node_config(config, config_patch.max_items.is_some()) {

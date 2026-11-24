@@ -254,6 +254,10 @@ pub enum PubSubError {
     /// `<not-in-roster-group/>`: the node's access model is `roster` and
     /// the requester is in none of the allowed roster groups.
     NotInRosterGroup,
+    /// XEP-0060 §8.1.3 / §6.5.9: `<not-acceptable/>` + pubsub-namespaced
+    /// `<unsupported-access-model/>`: the service does not support the
+    /// requested access model.
+    UnsupportedAccessModel,
     /// The node does not accept additional subscriptions.
     ClosedNode,
     /// The requested node already exists.
@@ -579,6 +583,23 @@ fn parse_node_config_fields(form: &Element, reject_unknown: bool) -> CoreResult<
     let mut config = NodeConfigPatch::default();
     for field in form.children().filter(|c| c.is("field", "jabber:x:data")) {
         let var = field.attr("var").unwrap_or("");
+        if var == "pubsub#roster_groups_allowed" {
+            // list-multi (XEP-0004 §3.3): every <value/> is one group.
+            let mut groups: Vec<String> = Vec::new();
+            for value in field.children().filter(|c| c.is("value", "jabber:x:data")) {
+                let group = value.text();
+                if group.is_empty() {
+                    return Err(CoreError::bad_request(Some(
+                        "empty pubsub#roster_groups_allowed value".to_owned(),
+                    )));
+                }
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+            }
+            config.roster_groups_allowed = Some(groups);
+            continue;
+        }
         let value = field
             .get_child("value", "jabber:x:data")
             .map(|v| v.text())

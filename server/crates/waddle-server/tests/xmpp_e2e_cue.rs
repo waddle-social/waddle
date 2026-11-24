@@ -81,6 +81,11 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
         "http://jabber.org/protocol/pubsub#access-presence",
         "XEP-0060",
     ),
+    ("http://jabber.org/protocol/pubsub#access-open", "XEP-0060"),
+    (
+        "http://jabber.org/protocol/pubsub#access-roster",
+        "XEP-0060",
+    ),
     (
         "http://jabber.org/protocol/pubsub#auto-subscribe",
         "XEP-0060",

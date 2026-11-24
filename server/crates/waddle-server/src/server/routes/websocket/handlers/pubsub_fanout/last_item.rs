@@ -237,8 +237,22 @@ async fn recipient_may_read(
         | waddle_xmpp::pubsub::AccessModel::Authorize => {
             private_node_subscriber_allowed(state, owner, node, &record.config, reader).await
         }
-        waddle_xmpp::pubsub::AccessModel::Open
-        | waddle_xmpp::pubsub::AccessModel::Presence
-        | waddle_xmpp::pubsub::AccessModel::Roster => true,
+        waddle_xmpp::pubsub::AccessModel::Open => true,
+        // The same decision as item retrieval and subscribe: a presence
+        // subscription for `presence`, an allowed roster group for
+        // `roster` (XEP-0060 §4.5.1; XEP-0163 §4).
+        waddle_xmpp::pubsub::AccessModel::Presence | waddle_xmpp::pubsub::AccessModel::Roster => {
+            matches!(
+                crate::pubsub_authz::pep_read_decision(
+                    &state.deps.protocol.pubsub_storage,
+                    &crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool),
+                    owner,
+                    node,
+                    reader,
+                )
+                .await,
+                Ok(crate::pubsub_authz::ReadDecision::Allowed)
+            )
+        }
     }
 }

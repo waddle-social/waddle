@@ -36,14 +36,59 @@ fn presence_model_admits_presence_subscriber_only() {
     );
 }
 
+fn roster_node_for(groups: &[&str]) -> NodeConfig {
+    NodeConfig {
+        roster_groups_allowed: groups.iter().map(|g| (*g).to_string()).collect(),
+        ..roster_node()
+    }
+}
+
 #[test]
-fn roster_model_refuses_non_owner_with_not_in_roster_group() {
-    // No roster groups are configurable, so the allowed-group list is
-    // empty and no non-owner is in an allowed group (XEP-0060 6.1.3.3).
+fn roster_model_without_allowed_groups_admits_no_contact() {
+    // An empty pubsub#roster_groups_allowed leaves no group a contact
+    // could be in (XEP-0060 6.1.3.3).
     let cfg = roster_node();
     assert_eq!(
         contact_decision(&cfg, Some(&standing(true, &["Family"]))),
         ReadDecision::NotInRosterGroup
     );
     assert_eq!(contact_decision(&cfg, None), ReadDecision::NotInRosterGroup);
+}
+
+#[test]
+fn roster_model_admits_presence_subscribers_in_an_allowed_group() {
+    let cfg = roster_node_for(&["Friends", "Family"]);
+    assert_eq!(
+        contact_decision(&cfg, Some(&standing(true, &["Work", "Family"]))),
+        ReadDecision::Allowed
+    );
+    assert_eq!(
+        contact_decision(&cfg, Some(&standing(true, &["Work"]))),
+        ReadDecision::NotInRosterGroup
+    );
+    assert_eq!(
+        contact_decision(&cfg, Some(&standing(true, &[]))),
+        ReadDecision::NotInRosterGroup
+    );
+}
+
+#[test]
+fn roster_model_requires_a_presence_subscription_as_well_as_the_group() {
+    // A `to`/`none` item filed under an allowed group does not receive the
+    // owner's presence, so it is not a contact the model admits.
+    let cfg = roster_node_for(&["Friends"]);
+    assert_eq!(
+        contact_decision(&cfg, Some(&standing(false, &["Friends"]))),
+        ReadDecision::NotInRosterGroup
+    );
+    assert_eq!(contact_decision(&cfg, None), ReadDecision::NotInRosterGroup);
+}
+
+#[test]
+fn group_names_match_exactly() {
+    let cfg = roster_node_for(&["Friends"]);
+    assert_eq!(
+        contact_decision(&cfg, Some(&standing(true, &["friends"]))),
+        ReadDecision::NotInRosterGroup
+    );
 }
