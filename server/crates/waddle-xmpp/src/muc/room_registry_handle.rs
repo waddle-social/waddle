@@ -362,13 +362,15 @@ impl RoomRegistry {
 
     registry_method!(
         /// Get or create a room whose initial affiliations must be committed
-        /// before the actor is exposed to any waiter.
+        /// before the actor is exposed to any waiter. `locked` creates the
+        /// room locked until its owner configures it (XEP-0045 §10.1.1).
         get_or_create_room_with_initial_affiliations(
             room_jid: BareJid,
             waddle_id: WaddleId,
             channel_id: ChannelId,
             config: RoomConfig,
-            initial_affiliations: Vec<super::durable::AffiliationEntry>
+            initial_affiliations: Vec<super::durable::AffiliationEntry>,
+            locked: bool
         ) -> RoomAcquisition,
         "get_or_create_room_with_initial_affiliations",
         GetOrCreateRoomWithInitialAffiliations {
@@ -376,7 +378,8 @@ impl RoomRegistry {
             waddle_id,
             channel_id,
             config,
-            initial_affiliations
+            initial_affiliations,
+            locked
         }
     );
 

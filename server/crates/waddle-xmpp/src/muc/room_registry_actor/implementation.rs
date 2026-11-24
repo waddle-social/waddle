@@ -116,6 +116,9 @@ pub(in crate::muc::room_registry_actor) struct RoomCreationSpec {
     pub(in crate::muc::room_registry_actor) config: RoomConfig,
     pub(in crate::muc::room_registry_actor) initial_affiliations:
         Vec<super::super::durable::AffiliationEntry>,
+    /// The room is created locked until its owner configures it
+    /// (XEP-0045 §10.1.1).
+    pub(in crate::muc::room_registry_actor) locked: bool,
     pub(in crate::muc::room_registry_actor) live_room_restore: Option<LiveRoomRestore>,
 }
 
@@ -126,6 +129,7 @@ impl PartialEq for RoomCreationSpec {
             && self.channel_id == other.channel_id
             && self.config == other.config
             && self.initial_affiliations == other.initial_affiliations
+            && self.locked == other.locked
     }
 }
 
@@ -157,6 +161,9 @@ pub(in crate::muc::room_registry_actor) struct RoomPreparationSpec {
     pub(in crate::muc::room_registry_actor) config: RoomConfig,
     pub(in crate::muc::room_registry_actor) initial_affiliations:
         Vec<super::super::durable::AffiliationEntry>,
+    /// The room is created locked until its owner configures it
+    /// (XEP-0045 §10.1.1).
+    pub(in crate::muc::room_registry_actor) locked: bool,
     pub(in crate::muc::room_registry_actor) live_room_restore: Option<LiveRoomRestore>,
 }
 
@@ -1786,6 +1793,7 @@ impl RoomRegistryActor {
             channel_id,
             config,
             initial_affiliations,
+            locked,
             live_room_restore,
         } = spec;
         // Establish the exact fence before any preparation-time durable I/O.
@@ -1796,6 +1804,9 @@ impl RoomRegistryActor {
             store.establish_claim_fence(&room_jid, claim_fence.clone());
         }
         let mut room = MucRoom::new(room_jid.clone(), waddle_id, channel_id, config);
+        if locked {
+            room.lock_for_initial_configuration();
+        }
         // Store-less (non-clustered) deployments have no durable `Create`
         // commit and no `RestoreDurableRoomState` round-trip, so the
         // creation spec's initial affiliations must seed actor memory here
@@ -2197,6 +2208,7 @@ impl RoomRegistryActor {
                     channel_id: creation_spec.channel_id.clone(),
                     config: creation_spec.config.clone(),
                     initial_affiliations: creation_spec.initial_affiliations.clone(),
+                    locked: creation_spec.locked,
                     live_room_restore: creation_spec.live_room_restore.clone(),
                 },
                 &registry_ref,
@@ -4336,6 +4348,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
             channel_id: previous.channel_id,
             config: previous.config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: live_restore,
         });
         if creation_spec.live_room_restore.is_none() {
@@ -4357,6 +4370,7 @@ impl kameo::message::Message<GetOrRestoreRoom> for RoomRegistryActor {
                     channel_id: creation_spec.channel_id.clone(),
                     config: creation_spec.config.clone(),
                     initial_affiliations: Vec::new(),
+                    locked: false,
                     live_room_restore: creation_spec.live_room_restore.clone(),
                 },
                 ctx.actor_ref(),
@@ -5233,6 +5247,7 @@ impl kameo::message::Message<ReconcileReclaimedRoom> for RoomRegistryActor {
                     channel_id: snapshot.channel_id,
                     config: snapshot.config,
                     initial_affiliations: Vec::new(),
+                    locked: false,
                     live_room_restore: None,
                 },
                 &claim_fence,
@@ -5364,6 +5379,7 @@ impl kameo::message::Message<GetOrCreateRoom> for RoomRegistryActor {
             channel_id: msg.channel_id,
             config: msg.config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: None,
         });
         match self
@@ -5446,6 +5462,7 @@ impl kameo::message::Message<GetOrCreateRoomWithLiveRoster> for RoomRegistryActo
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: Some(LiveRoomRestore {
                 room: msg.live_room_restore,
                 occupancy_revision: msg.occupancy_revision,
@@ -5534,6 +5551,10 @@ pub struct GetOrCreateRoomWithInitialAffiliations {
     pub channel_id: ChannelId,
     pub config: RoomConfig,
     pub initial_affiliations: Vec<super::super::durable::AffiliationEntry>,
+    /// Create the room locked until its owner configures it (XEP-0045
+    /// §10.1.1): set for a room its first occupant creates, never for a
+    /// room the service provisions already configured.
+    pub locked: bool,
 }
 
 impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomRegistryActor {
@@ -5556,6 +5577,7 @@ impl kameo::message::Message<GetOrCreateRoomWithInitialAffiliations> for RoomReg
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
+            locked: msg.locked,
             live_room_restore: None,
         });
         match self
@@ -5626,6 +5648,7 @@ impl kameo::message::Message<CreateInstantRoom> for RoomRegistryActor {
             channel_id,
             config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: None,
         });
 
@@ -5686,6 +5709,7 @@ impl kameo::message::Message<CreateRoom> for RoomRegistryActor {
             channel_id: msg.channel_id,
             config: msg.config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: None,
         });
         match self
@@ -5742,6 +5766,7 @@ impl kameo::message::Message<CreateRoomWithInitialAffiliations> for RoomRegistry
             channel_id: msg.channel_id.into_string(),
             config: msg.config,
             initial_affiliations: msg.initial_affiliations,
+            locked: false,
             live_room_restore: None,
         });
         match self
@@ -6803,7 +6828,7 @@ impl kameo::message::Message<ReapSealedRoom> for RoomRegistryActor {
                     .reply_timeout(SEAL_ASK_TIMEOUT)
                     .await
                 {
-                    Ok(snapshot) if !snapshot.room.config.persistent => {
+                    Ok(snapshot) if !snapshot.room.retained_when_empty() => {
                         RoomDurableMutation::Destroy {
                             completion_attempt: None,
                         }

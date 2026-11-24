@@ -9,6 +9,9 @@ use crate::admin::channels::{
     acquire_room_config_lock, acquire_room_config_lock_within,
     explicit_channel_affiliations_for_jids, ROOM_CONFIG_LOCK_WAIT,
 };
+use waddle_xmpp::muc::room_actor::UnlockRoom;
+use xmpp_parsers::data_forms::DataFormType;
+
 use crate::room_effect_outbox::RoomEffectArmSupervisor;
 use crate::room_effect_outbox::RoomEffectOutboxStore;
 
@@ -622,7 +625,44 @@ pub(super) async fn apply_muc_owner_config(
 /// stream that carried the request. A remote principal is passed no
 /// session: it holds none here, and no authorization relationship is
 /// written for it.
+///
+/// A submitted form, an empty one included, also unlocks a room its creator
+/// has not configured yet (XEP-0045 §10.1.1 steps 3 and 6, §10.1.2).
 pub(super) async fn apply_muc_owner_config_as(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    iq: &xmpp_parsers::iq::Iq,
+    session: Option<&Session>,
+    initiator: Option<&FullJid>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
+) -> Result<ResponseBatch, OwnerConfigError> {
+    let batch =
+        apply_muc_owner_config_form(state, room_jid, iq, session, initiator, evidence).await?;
+    if owner_form_type(iq) == Some(DataFormType::Submit) {
+        let room_actor = get_room_actor(state, room_jid)
+            .await
+            .ok_or_else(|| "room actor not found".to_string())?;
+        room_actor
+            .ask(UnlockRoom)
+            .await
+            .map_err(|error| format!("room unlock failed: {error:?}"))?;
+    }
+    Ok(batch)
+}
+
+/// The `type` of the `jabber:x:data` form a muc#owner `set` carries.
+pub(super) fn owner_form_type(iq: &xmpp_parsers::iq::Iq) -> Option<DataFormType> {
+    let xmpp_parsers::iq::Iq::Set { payload: query, .. } = iq else {
+        return None;
+    };
+    query
+        .get_child("x", DATA_FORMS_NS)?
+        .attr("type")?
+        .parse()
+        .ok()
+}
+
+async fn apply_muc_owner_config_form(
     state: &WebSocketState,
     room_jid: &BareJid,
     iq: &xmpp_parsers::iq::Iq,

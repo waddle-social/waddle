@@ -1694,6 +1694,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                             waddle_xmpp::muc::durable::ChannelId::new(channel_id),
                             config,
                             initial_affiliations,
+                            // XEP-0045 §10.1.1: a room its first occupant
+                            // creates is locked until that owner configures
+                            // it. A channel-backed room is provisioned
+                            // already configured and takes the other arm.
+                            true,
                         )
                         .await
                 };
@@ -2086,16 +2091,26 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 {
                     // XEP-0045 §7.2.8: bans map to <forbidden/> even in
                     // members-only rooms (#1265 item 1).
-                    let (condition, deny_reason, message) = match reason {
+                    let (condition, deny_reason, message, error_type) = match reason {
                         waddle_xmpp::muc::room_actor::JoinDenialReason::MembersOnly => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomMembersOnly,
                             "Membership required to join this room.",
+                            ErrorType::Auth,
                         ),
                         waddle_xmpp::muc::room_actor::JoinDenialReason::Banned => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomBan,
                             "You are banned from this room.",
+                            ErrorType::Auth,
+                        ),
+                        // XEP-0045 §7.2.10: a locked room does not (yet)
+                        // exist for anyone but its creator.
+                        waddle_xmpp::muc::room_actor::JoinDenialReason::Locked => (
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomLocked,
+                            "Requested item not found.",
+                            ErrorType::Cancel,
                         ),
                     };
                     return deny_join_admission(
@@ -2106,7 +2121,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                         JoinAdmissionDenial {
                             condition,
                             deny_reason,
-                            error_type: ErrorType::Auth,
+                            error_type,
                             resolver_outcome,
                             message,
                         },

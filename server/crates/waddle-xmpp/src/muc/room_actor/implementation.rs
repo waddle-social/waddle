@@ -638,7 +638,9 @@ pub struct LeaveOutcome {
     pub remaining_muji_sessions: Vec<(FullJid, Muji)>,
     pub remaining_nick_real_jid: Option<FullJid>,
     pub occupant_count: usize,
-    /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave
+    /// Mirrors [`MucRoom::retained_when_empty`]: `config.persistent`, and
+    /// false while the room is locked awaiting its owner's configuration.
+    /// Surfaced so the leave
     /// caller can decide whether to evict the room's `RoomActor` +
     /// registry entry without an extra `GetConfig` round-trip when
     /// `removed_last_session && occupant_count == 0`. Non-persistent
@@ -1038,6 +1040,9 @@ pub enum JoinDenialReason {
     Banned,
     /// The room is members-only and the user is not a member.
     MembersOnly,
+    /// The room is locked until its owner configures it (XEP-0045
+    /// §10.1.1); entry is `<item-not-found/>` (§7.2.10).
+    Locked,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -2819,6 +2824,23 @@ impl kameo::message::Message<UpdateConfig> for RoomActor {
     }
 }
 
+/// Unlock a room its creator has configured (XEP-0045 §10.1.1–§10.1.3): the
+/// owner submitted an initial configuration form or asked for an instant
+/// room. Idempotent; the lock is in-memory state of the room's incarnation.
+pub struct UnlockRoom;
+
+impl kameo::message::Message<UnlockRoom> for RoomActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: UnlockRoom,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.room.unlock();
+    }
+}
+
 /// Replace the room config only if the config revision still matches the
 /// caller's attempted update. Used for best-effort rollback without clobbering
 /// a later successful rename, including identical-name updates.
@@ -3538,7 +3560,7 @@ impl kameo::message::Message<SealIfInactive> for RoomActor {
             && match msg.guard {
                 SealGuard::Dormant => self.room.is_dormant(),
                 SealGuard::EmptyNonPersistent => {
-                    self.room.occupants.is_empty() && !self.room.config.persistent
+                    self.room.occupants.is_empty() && !self.room.retained_when_empty()
                 }
             };
         if inactive && !self.departure_receipts.is_empty() {

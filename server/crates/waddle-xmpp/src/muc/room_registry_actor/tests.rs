@@ -5202,6 +5202,7 @@ mod ownership_claims_tests {
                 ..RoomConfig::default()
             },
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: Some(LiveRoomRestore {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,

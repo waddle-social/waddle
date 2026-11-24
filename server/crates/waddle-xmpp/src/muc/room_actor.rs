@@ -169,6 +169,7 @@ pub use implementation::SealIfInactive;
 pub use implementation::SealIfInactiveOutcome;
 pub use implementation::SetSubject;
 pub use implementation::SetSubjectError;
+pub use implementation::UnlockRoom;
 pub use implementation::UnsealDestroy;
 pub use implementation::UnsealInactive;
 pub use implementation::UpdateConfig;

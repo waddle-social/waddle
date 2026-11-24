@@ -1445,7 +1445,61 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
             }
         }
 
-        if has_destroy {
+        // XEP-0045 §10.1.3: a cancelled form while the room awaits its
+        // initial configuration destroys the room. Cancelling a later
+        // configuration leaves the room as it is (§10.2).
+        let mut cancels_initial_configuration = false;
+        if super::muc_owner_config::owner_form_type(iq)
+            == Some(xmpp_parsers::data_forms::DataFormType::Cancel)
+        {
+            let locked = match get_room_actor_result(state, &room_jid).await {
+                Ok(Some(room_actor)) => match room_actor.ask(GetSnapshot).await {
+                    Ok(snapshot) => snapshot.room.is_locked(),
+                    Err(error) => {
+                        warn!(room = %room_jid, ?error, "MUC owner cancel snapshot failed");
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )]
+                        .into();
+                    }
+                },
+                Ok(None) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )]
+                    .into();
+                }
+                Err(error) => {
+                    warn!(room = %room_jid, %error, "MUC owner cancel room lookup failed");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                    .into();
+                }
+            };
+            if !locked {
+                let room_jid_string = room_jid.to_string();
+                return vec![build_iq_result_xml(
+                    id,
+                    Some(room_jid_string.as_str()),
+                    response_to,
+                    None,
+                )]
+                .into();
+            }
+            cancels_initial_configuration = true;
+        }
+
+        if has_destroy || cancels_initial_configuration {
             // XEP-0045 §10.9: parse the optional alternate venue and
             // reason out of the `<destroy/>` payload. Admission is then
             // sealed before capturing the recipient snapshot, so every

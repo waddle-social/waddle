@@ -71,6 +71,46 @@ async fn join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .expect("join responses");
 }
 
+/// Create `room` as its first occupant and unlock it with an instant-room
+/// request (XEP-0045 §10.1.2); until then only the creator may enter.
+async fn create_instant_room(client: &mut WsXmppClient, room: &str, nick: &str) {
+    join_room(client, room, nick).await;
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+            "set",
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+            "instant-room",
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+            room,
+        )
+        .append(
+            Element::builder("query", "http://jabber.org/protocol/muc#owner")
+                .append(
+                    Element::builder("x", "jabber:x:data")
+                        .attr(
+                            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+                            "submit",
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    client
+        .send(&element_to_xml(iq))
+        .await
+        .expect("send instant-room request");
+    client
+        .recv_matching(|frame| frame.contains("instant-room") && frame.contains("result"))
+        .await
+        .expect("instant-room result");
+}
+
 fn unavailable_presence_xml(to: &str) -> String {
     element_to_xml(
         Element::builder("presence", "jabber:client")
@@ -272,7 +312,7 @@ async fn xep_0045_second_nick_join_is_refused_with_not_acceptable() {
     // Admin joins first — opening the room makes admin the owner per
     // XEP-0045 §10.1.3 (instant room). Then alice and bob join as
     // participants.
-    join_room(&mut admin, &room, ADMIN).await;
+    create_instant_room(&mut admin, &room, ADMIN).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
 
@@ -375,7 +415,7 @@ async fn xep_0045_unclean_disconnect_broadcasts_leave_to_remaining_occupants() {
     let mut bob = connect(&server, BOB, &bob_pass, "drop-bob").await;
 
     let room = format!("drop-lc-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut admin, &room, ADMIN).await;
+    create_instant_room(&mut admin, &room, ADMIN).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
 
@@ -432,7 +472,7 @@ async fn xep_0045_fresh_bind_after_unclean_drop_cleans_detached_occupancy() {
         .expect("alice receives <enabled/>");
 
     let room = format!("rebind-lc-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut admin, &room, ADMIN).await;
+    create_instant_room(&mut admin, &room, ADMIN).await;
     join_room(&mut bob, &room, BOB).await;
     join_room(&mut alice, &room, ALICE).await;
 
@@ -559,7 +599,7 @@ async fn xep_0045_stable_id_advertised_and_reflected_id_preserved() {
     let mut bob = connect(&server, BOB, &bob_pass, "stable-bob").await;
 
     let room = format!("stable-id-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut admin, &room, ADMIN).await;
+    create_instant_room(&mut admin, &room, ADMIN).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
 
@@ -629,7 +669,7 @@ async fn xep_0045_same_full_jid_replacement_leave_keeps_the_wire_shape_unchanged
     let mut bob = connect(&server, BOB, &bob_pass, "replace-bob").await;
 
     let room = format!("replace-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
-    join_room(&mut admin, &room, ADMIN).await;
+    create_instant_room(&mut admin, &room, ADMIN).await;
     join_room(&mut alice_old, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
 
