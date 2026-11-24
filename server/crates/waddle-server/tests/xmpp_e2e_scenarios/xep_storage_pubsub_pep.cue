@@ -88,6 +88,9 @@ scenario: #Scenario & {
 				},
 			]
 		},
+		// XEP-0030 Security Considerations: an account is described only to
+		// itself or to an entity with a from/both presence subscription; bob has
+		// none, so the request is refused exactly as for a missing account.
 		#SendIq & {
 			actor: bobPhone
 			type:  "get"
@@ -98,33 +101,7 @@ scenario: #Scenario & {
 				ns:   "http://jabber.org/protocol/disco#info"
 			}
 		},
-		#ExpectIq & {
-			target: bobPhone
-			id:     "cue-cross-user-pep-disco"
-			type:   "result"
-			contains: [
-				"http://jabber.org/protocol/pubsub",
-				"http://jabber.org/protocol/pubsub#auto-create",
-				"http://jabber.org/protocol/pubsub#publish",
-				"http://jabber.org/protocol/pubsub#retrieve-items",
-			]
-			absent: [
-				"jabber:iq:search",
-				"urn:xmpp:mam:2",
-				"http://jabber.org/protocol/pubsub#config-node-max",
-				"eu.siacs.conversations.axolotl.whitelisted",
-			]
-			elements: [
-				#XmlElement & {
-					name: "identity"
-					ns:   "http://jabber.org/protocol/disco#info"
-					attrs: {
-						category: "pubsub"
-						type:     "pep"
-					}
-				},
-			]
-		},
+		#ExpectIq & {target: bobPhone, id: "cue-cross-user-pep-disco", type: "error", contains: ["service-unavailable"]},
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"

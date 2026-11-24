@@ -72,6 +72,12 @@ final class Preferences {
         didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
     }
 
+    /// XEP-0085 chat states (typing indicators). XEP-0085 requires the
+    /// user be able to disable them.
+    var sendsChatStates: Bool {
+        didSet { defaults.set(sendsChatStates, forKey: Keys.chatStates) }
+    }
+
     /// XEP-0333 displayed markers. Cross-device read sync (XEP-0490) is
     /// independent of this and always on.
     var sendsReadReceipts: Bool {
@@ -109,6 +115,7 @@ final class Preferences {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         appearance = defaults.string(forKey: Keys.appearance).flatMap(Appearance.init(rawValue:)) ?? .system
+        sendsChatStates = defaults.object(forKey: Keys.chatStates) as? Bool ?? true
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
         showsNotificationPreviews = defaults.object(forKey: Keys.previews) as? Bool ?? true
         receivesPush = defaults.object(forKey: Keys.push) as? Bool ?? true
@@ -118,6 +125,7 @@ final class Preferences {
 
     private enum Keys {
         static let appearance = "waddle.apple.appearance"
+        static let chatStates = "waddle.apple.chat-states"
         static let readReceipts = "waddle.apple.read-receipts"
         static let previews = "waddle.apple.notification-previews"
         static let push = "waddle.apple.receives-push"

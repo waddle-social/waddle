@@ -451,7 +451,7 @@ extension SessionCoordinator {
     /// after a quiet period.
     public func userTyped(in conversation: ConversationID) {
         noteActivity()
-        guard connection == .online else { return }
+        guard connection == .online, sendsChatStates else { return }
         if sentChatStates[conversation] != .composing {
             sentChatStates[conversation] = .composing
             let port = self.port
@@ -462,7 +462,7 @@ extension SessionCoordinator {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard !Task.isCancelled, let self else { return }
             self.typingPauseTasks[conversation] = nil
-            guard self.sentChatStates[conversation] == .composing else { return }
+            guard self.sendsChatStates, self.sentChatStates[conversation] == .composing else { return }
             self.sentChatStates[conversation] = .paused
             _ = await self.port.sendChatState(.paused, in: conversation)
         }
@@ -475,7 +475,7 @@ extension SessionCoordinator {
         typingPauseTasks[conversation] = nil
         let wasComposing = sentChatStates[conversation] == .composing
         sentChatStates[conversation] = nil
-        if notify, wasComposing, connection == .online {
+        if notify, wasComposing, sendsChatStates, connection == .online {
             let port = self.port
             Task { _ = await port.sendChatState(.active, in: conversation) }
         }
