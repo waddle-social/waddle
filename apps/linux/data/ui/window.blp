@@ -181,6 +181,13 @@ template $WaddleWindow: Adw.ApplicationWindow {
             child: Adw.ToolbarView {
               [top]
               Adw.HeaderBar {
+                [start]
+                Button {
+                  icon-name: "system-users-symbolic";
+                  tooltip-text: _("People");
+                  clicked => $on_people() swapped;
+                }
+
                 [end]
                 MenuButton {
                   icon-name: "open-menu-symbolic";
@@ -205,45 +212,58 @@ template $WaddleWindow: Adw.ApplicationWindow {
               };
 
               [bottom]
-              Box {
-                spacing: 10;
-                margin-start: 14;
-                margin-end: 14;
-                margin-top: 10;
-                margin-bottom: 10;
+              Button {
+                margin-start: 6;
+                margin-end: 6;
+                margin-top: 6;
+                margin-bottom: 6;
+                tooltip-text: _("Your Profile and Status");
+                clicked => $on_account() swapped;
 
-                Adw.Avatar account_avatar {
-                  size: 28;
-                  show-initials: true;
+                styles [
+                  "flat",
+                ]
 
-                  styles [
-                    "waddle-avatar",
-                  ]
-                }
+                child: Box {
+                  spacing: 10;
+                  margin-start: 8;
+                  margin-end: 8;
+                  margin-top: 4;
+                  margin-bottom: 4;
 
-                Box {
-                  orientation: vertical;
-                  valign: center;
-
-                  Label account_name {
-                    xalign: 0;
-                    ellipsize: end;
+                  Adw.Avatar account_avatar {
+                    size: 28;
+                    show-initials: true;
 
                     styles [
-                      "caption-heading",
+                      "waddle-avatar",
                     ]
                   }
 
-                  Label account_label {
-                    xalign: 0;
-                    ellipsize: end;
+                  Box {
+                    orientation: vertical;
+                    valign: center;
 
-                    styles [
-                      "dim-label",
-                      "caption",
-                    ]
+                    Label account_name {
+                      xalign: 0;
+                      ellipsize: end;
+
+                      styles [
+                        "caption-heading",
+                      ]
+                    }
+
+                    Label account_label {
+                      xalign: 0;
+                      ellipsize: end;
+
+                      styles [
+                        "dim-label",
+                        "caption",
+                      ]
+                    }
                   }
-                }
+                };
               }
             };
           };

@@ -86,6 +86,7 @@ impl WaddleWindow {
             };
             let widget = row_widget();
             attach_action_gestures(&widget, item, &window);
+            super::identity::attach_profile_gesture(&widget, item, &window);
             item.set_child(Some(&widget));
             item.set_activatable(false);
             item.set_selectable(false);
@@ -160,6 +161,7 @@ impl WaddleWindow {
             }
         });
         self.setup_composer();
+        self.setup_presence_input();
     }
 
     pub(super) fn start_session(&self, account: &StoredAccount) {
@@ -215,7 +217,8 @@ impl WaddleWindow {
         imp.uploading.set(false);
         imp.loading_history.replace(Default::default());
         self.cancel_compose();
-        imp.availability.set(Default::default());
+        imp.profile.reset();
+        self.refresh_account_row();
         if let Some(rows) = imp.rows.borrow().as_ref() {
             rows.remove_all();
         }
@@ -271,6 +274,7 @@ impl WaddleWindow {
                 imp.connect_epoch
                     .set(imp.connect_epoch.get().wrapping_add(1));
                 imp.connected.set(false);
+                self.presence_disconnected();
                 self.clear_membership();
                 self.schedule_reconnect(generation);
             }
@@ -292,7 +296,18 @@ impl WaddleWindow {
                 }
             }
             SessionEvent::Inbox(entry) => self.update_inbox(&entry),
-            SessionEvent::Presence(presence) => self.on_room_presence(*presence),
+            SessionEvent::Presence(presence) => {
+                if imp.profile.book.borrow_mut().apply(&presence) {
+                    self.refresh_people();
+                }
+                self.on_room_presence(*presence)
+            }
+            SessionEvent::AvatarChanged { jid, avatar_id } => {
+                self.on_avatar_changed(&jid, avatar_id.as_deref())
+            }
+            SessionEvent::StatusPreference(preference) => {
+                self.on_status_heard(crate::presence::PresenceMode::from_wire(preference))
+            }
             SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
             SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
             SessionEvent::DeliveryFailed(id) => self.set_delivery(&id, Delivery::Failed),
@@ -421,7 +436,8 @@ impl WaddleWindow {
             return;
         };
         imp.account_status.set_title("Choose a conversation");
-        session.announce(imp.availability.get());
+        self.presence_connected();
+        self.revalidate_avatars();
         let window = self.clone();
         glib::MainContext::default().spawn_local(async move {
             let (rooms, inbox) = tokio::join!(session.rooms(), session.inbox());
@@ -495,7 +511,10 @@ impl WaddleWindow {
         let unread = imp.unread.borrow();
         for conversation in imp.conversations.borrow().iter() {
             let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
-            let row = conversation_row(conversation, unread);
+            let picture = (conversation.kind == Kind::Direct)
+                .then(|| self.avatar_texture(&conversation.jid))
+                .flatten();
+            let row = conversation_row(conversation, unread, picture.as_ref());
             imp.room_list.append(&row);
             if current.as_deref() == Some(conversation.key().as_str()) {
                 imp.room_list.select_row(Some(&row));
@@ -975,7 +994,11 @@ fn sidebar_title(conversation: &Conversation) -> String {
 }
 
 /// A room's `#` tile or a DM's avatar, the name, and any unread count.
-fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow {
+fn conversation_row(
+    conversation: &Conversation,
+    unread: u32,
+    picture: Option<&gdk::Texture>,
+) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&conversation.name))
         .title_lines(1)
@@ -998,6 +1021,7 @@ fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow 
         Kind::Direct => {
             let avatar = avatar::avatar(28);
             avatar::set_name(&avatar, &conversation.name);
+            avatar.set_custom_image(picture);
             avatar.upcast()
         }
     };
@@ -1280,6 +1304,9 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     avatar::set_name(&parts.avatar, &item.sender);
     parts.gutter_time.set_label(&time);
     parts.sender.set_label(&item.sender);
+    if let Some(window) = window.upgrade() {
+        window.decorate_author(&parts.avatar, &parts.sender, item);
+    }
     parts.time.set_label(&time);
 
     match &item.reply {

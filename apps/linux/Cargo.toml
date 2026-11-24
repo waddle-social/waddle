@@ -38,6 +38,8 @@ base64 = "0.22"
 # The shared client core (ADR-0019) and the protocol facade the phones use.
 waddle-client-session = { path = "../../server/crates/waddle-client-session" }
 waddle-xmpp-client-ffi = { path = "../../server/crates/waddle-xmpp-client-ffi" }
+# XEP-0392 hues for nick colors; the same hash the web and phones use.
+waddle-xmpp-core = { path = "../../server/crates/waddle-xmpp-core" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

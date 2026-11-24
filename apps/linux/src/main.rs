@@ -7,10 +7,16 @@
 mod application;
 mod attachments;
 mod auth;
+mod avatars;
 mod composer;
 mod judgments;
+mod nick_color;
+mod people;
+mod presence;
+mod profile;
 mod runtime;
 mod session;
+mod session_profile;
 mod thread_updates;
 mod threads;
 mod ui;

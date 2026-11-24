@@ -116,6 +116,26 @@ impl Membership {
         }
     }
 
+    /// The real bare JID of the occupant `nick` in `room`, when the room
+    /// exposes it.
+    pub(super) fn real_jid(&self, room: &str, nick: &str) -> Option<String> {
+        self.occupants
+            .get(room)?
+            .get(nick)?
+            .as_ref()
+            .map(ToString::to_string)
+    }
+
+    /// Every occupant of every joined room whose real JID is known, as
+    /// bare JID and nick.
+    pub(super) fn known_occupants(&self) -> Vec<(String, String)> {
+        self.occupants
+            .values()
+            .flatten()
+            .filter_map(|(nick, real)| Some((real.as_ref()?.to_string(), nick.clone())))
+            .collect()
+    }
+
     /// Whom a message in `room` can mention: present occupants with a
     /// known real JID, other than `own_nick`, by nick.
     fn mentionable(&self, room: &str, own_nick: &str) -> Vec<Mentionable> {

@@ -28,12 +28,13 @@ use waddle_xmpp_client_ffi::{
     WaddleFallbackRange, WaddleInboxEntry, WaddleInboxMessageContent, WaddleInboxReadFilter,
     WaddleMentionDirectory, WaddleMentionTarget, WaddleMessage, WaddleMessageAudience,
     WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleSharedFile, WaddleStanzaId, WaddleStickerHash, WaddleTopology, WaddleUserSearchEntry,
+    WaddleSharedFile, WaddleStanzaId, WaddleStatusPreference, WaddleStickerHash, WaddleTopology,
+    WaddleUserSearchEntry,
 };
 
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
-use crate::composer::{Availability, Mentionable};
+use crate::composer::Mentionable;
 use crate::judgments;
 use crate::runtime;
 use crate::threads::{self, Thread};
@@ -98,6 +99,13 @@ pub enum SessionEvent {
     DeliveryAcked(String),
     DeliveryFailed(String),
     Presence(Box<WaddlePresence>),
+    /// XEP-0084 `+notify`: someone's avatar changed (none: removed).
+    AvatarChanged {
+        jid: String,
+        avatar_id: Option<String>,
+    },
+    /// Another device of the account picked a status (ADR-010).
+    StatusPreference(WaddleStatusPreference),
     Rejected {
         id: String,
         from: String,
@@ -184,6 +192,13 @@ impl WaddleEventListener for Forwarder {
                 SessionEvent::DeliveryFailed(stanza_id)
             }
             WaddleClientEvent::Presence { presence } => SessionEvent::Presence(Box::new(presence)),
+            WaddleClientEvent::AvatarChanged { jid, avatar_id } => SessionEvent::AvatarChanged {
+                jid: jid.to_string(),
+                avatar_id,
+            },
+            WaddleClientEvent::StatusPreferenceChanged { preference } => {
+                SessionEvent::StatusPreference(preference)
+            }
             WaddleClientEvent::MessageRejected {
                 stanza_id,
                 from,
@@ -209,7 +224,8 @@ impl WaddleEventListener for Forwarder {
 
 #[derive(Clone)]
 pub struct Session {
-    client: Arc<WaddleClient>,
+    /// Also used by the profile verbs (`session_profile.rs`).
+    pub(crate) client: Arc<WaddleClient>,
     /// For XEP-0363 uploads and fetching shared files.
     transfers: attachments::Transfers,
     pub me: Me,
@@ -288,15 +304,6 @@ impl Session {
                 tracing::warn!(?error, "could not mark the conversation read");
             }
         });
-    }
-
-    /// RFC 6121 presence: initial presence after connecting (without it
-    /// the server treats this resource as unavailable and does not deliver
-    /// 1:1 messages to it), and again whenever the user changes it.
-    pub fn announce(&self, availability: Availability) {
-        let client = Arc::clone(&self.client);
-        let show = availability.show().map(str::to_string);
-        runtime::spawn(async move { client.send_presence(None, show, None).await });
     }
 
     pub fn join(&self, room: &Conversation) {
