@@ -245,6 +245,20 @@ async fn run(
             return;
         }
     };
+    // The call may have ended while the room was being joined: leave
+    // before the microphone opens.
+    let mut muted = false;
+    loop {
+        match commands.try_recv() {
+            Ok(Command::Mute(choice)) => muted = choice,
+            Ok(Command::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                let _ = room.close().await;
+                return;
+            }
+            Ok(_) => {}
+            Err(mpsc::error::TryRecvError::Empty) => break,
+        }
+    }
     let track = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
     let publication = match room
         .local_participant()
@@ -265,6 +279,9 @@ async fn run(
             return;
         }
     };
+    if muted {
+        publication.mute();
+    }
     call.tell(|sid| MediaEvent::Connected { sid }).await;
     let (inputs, outputs) = devices(&audio);
     call.tell(|sid| MediaEvent::Devices {

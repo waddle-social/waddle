@@ -332,6 +332,18 @@ impl CallEngine {
         {
             return Vec::new();
         }
+        // This client carries audio only: a proposal with no audio track
+        // could never connect, so it is refused rather than rung.
+        if matches!(&event.kind, CallEventKind::Propose(media) if !media.audio)
+            && event.from.to_bare() != self.own.to_bare()
+        {
+            self.out.push(Effect::Send(Wire::Reject {
+                to: event.from.clone(),
+                sid: event.sid.clone(),
+                tie_break: false,
+            }));
+            return self.take();
+        }
         let before = self.state.clone();
         if matches!(
             event.kind,
@@ -428,7 +440,7 @@ impl CallEngine {
                     to: event.from.clone(),
                     responder: self.own.clone(),
                     sid: event.sid.clone(),
-                    media: media.bounded_by(call.media),
+                    media: media.bounded_by(call.media).bounded_by(CallMedia::AUDIO),
                 }));
             }
             CallEventKind::Finish { .. } | CallEventKind::SessionTerminate { .. } => {
@@ -722,7 +734,7 @@ impl CallEngine {
                 self.out.push(Effect::ConnectMedia {
                     sid: call.sid,
                     join: call.join,
-                    media: call.media,
+                    media: call.media.bounded_by(CallMedia::AUDIO),
                 });
             }
         } else if previous_was_active_media(&previous, &self.state) {
@@ -1314,6 +1326,58 @@ mod tests {
             }]
         );
         assert!(matches!(engine.state(), CallState::Outgoing(_)));
+    }
+
+    #[test]
+    fn a_video_call_is_answered_with_audio_only_and_one_without_audio_is_refused() {
+        let mut engine = engine();
+        engine.handle(&event(
+            "bob@example.org/phone",
+            "c1",
+            CallEventKind::Propose(CallMedia {
+                audio: true,
+                video: true,
+            }),
+        ));
+        engine.accept();
+        let effects = engine.handle(&event(
+            "bob@example.org/phone",
+            "c1",
+            CallEventKind::SessionInitiate {
+                join: join(),
+                media: CallMedia {
+                    audio: true,
+                    video: true,
+                },
+            },
+        ));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Send(Wire::SessionAccept { media, .. }) if *media == CallMedia::AUDIO
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ConnectMedia { media, .. } if *media == CallMedia::AUDIO
+        )));
+
+        let mut engine = self::engine();
+        let effects = engine.handle(&event(
+            "bob@example.org/phone",
+            "c2",
+            CallEventKind::Propose(CallMedia {
+                audio: false,
+                video: true,
+            }),
+        ));
+        assert_eq!(
+            sends(&effects),
+            vec![&Wire::Reject {
+                to: jid("bob@example.org/phone"),
+                sid: "c2".into(),
+                tie_break: false
+            }]
+        );
+        assert_eq!(engine.state(), &CallState::Idle);
     }
 
     #[test]
