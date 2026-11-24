@@ -45,10 +45,11 @@ pub(crate) async fn create_upload_slot(
     let safe_filename = sanitize_filename(filename);
     let effective_type = effective_content_type(content_type).to_string();
     let slot_id = uuid::Uuid::new_v4().to_string();
-    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+    let expires_at = chrono::Utc::now()
+        + chrono::Duration::seconds(waddle_xmpp::xep::xep0363::SLOT_VALIDITY_SECS);
     let base_url = upload_base_url(domain);
-    let put_url = format!("{}/api/upload/{}", base_url, slot_id);
-    let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+    let put_url = waddle_xmpp::xep::xep0363::slot_put_url(&base_url, &slot_id);
+    let get_url = waddle_xmpp::xep::xep0363::slot_get_url(&base_url, &slot_id, &safe_filename);
 
     global_db_actor
         .ask(DbExecute {

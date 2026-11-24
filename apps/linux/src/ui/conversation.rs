@@ -66,8 +66,6 @@ impl Layout {
     }
 }
 
-/// How long to wait for `Connected` before treating a connect as failed.
-const CONNECT_BUDGET_SECS: u32 = 20;
 /// How long to gather messages read in the open conversation before
 /// telling the server (XEP-0430 mark-read).
 const READ_DEBOUNCE_SECS: u32 = 2;
@@ -171,6 +169,7 @@ impl WaddleWindow {
         self.setup_presence_input();
         self.setup_message_tools();
         self.setup_room_tools();
+        self.setup_link();
     }
 
     pub(super) fn start_session(&self, account: &StoredAccount) {
@@ -192,7 +191,7 @@ impl WaddleWindow {
         self.clear_directory_search();
         let (session, events) = Session::start(account, transfers);
         imp.session.replace(Some(session));
-        self.watch_connect(generation);
+        self.link_begin(generation);
 
         let window = self.clone();
         glib::spawn_future_local(async move {
@@ -212,6 +211,7 @@ impl WaddleWindow {
             session.disconnect().await;
         }
         imp.connected.set(false);
+        self.link_stop();
         self.clear_membership();
         self.clear_directory_search();
         imp.conversations.replace(Vec::new());
@@ -241,37 +241,6 @@ impl WaddleWindow {
         imp.composer.set_sensitive(false);
     }
 
-    /// Retry when a connect attempt neither connects nor reports anything.
-    fn watch_connect(&self, generation: u64) {
-        let window = self.clone();
-        glib::timeout_add_seconds_local_once(CONNECT_BUDGET_SECS, move || {
-            let imp = window.imp();
-            if imp.generation.get() == generation && !imp.connected.get() {
-                window.schedule_reconnect(generation);
-            }
-        });
-    }
-
-    fn schedule_reconnect(&self, generation: u64) {
-        let imp = self.imp();
-        let attempt = imp.reconnect_attempt.get();
-        imp.reconnect_attempt.set(attempt.saturating_add(1));
-        let delay = session::reconnect_delay(attempt, glib::random_double());
-        imp.account_status.set_title("Reconnecting…");
-        imp.composer.set_sensitive(false);
-        let window = self.clone();
-        glib::timeout_add_local_once(delay, move || {
-            let imp = window.imp();
-            if imp.generation.get() != generation || imp.connected.get() {
-                return;
-            }
-            if let Some(session) = imp.session.borrow().as_ref() {
-                session.connect();
-            }
-            window.watch_connect(generation);
-        });
-    }
-
     async fn handle(&self, event: SessionEvent, generation: u64) {
         let imp = self.imp();
         match event {
@@ -279,7 +248,7 @@ impl WaddleWindow {
                 let connect_epoch = imp.connect_epoch.get().wrapping_add(1);
                 imp.connect_epoch.set(connect_epoch);
                 imp.connected.set(true);
-                imp.reconnect_attempt.set(0);
+                self.link_connected();
                 imp.live_unread_keys.borrow_mut().clear();
                 self.spawn_on_connected(generation, connect_epoch);
                 self.refresh_message_tools();
@@ -293,7 +262,7 @@ impl WaddleWindow {
                 imp.extension_commands.take();
                 self.clear_membership();
                 self.reset_message_tools();
-                self.schedule_reconnect(generation);
+                self.link_disconnected(generation);
             }
             SessionEvent::AuthenticationFailed => {
                 self.toast("Your session has expired. Sign in again.");
@@ -308,6 +277,16 @@ impl WaddleWindow {
                 else {
                     return;
                 };
+                self.on_typing_message(&message);
+                self.on_read_message(&message);
+                if let Some(origin) = &message.origin_id {
+                    self.on_own_message_seen(origin);
+                }
+                if crate::read_sync::is_receipt_only(&message)
+                    || crate::typing::is_state_only(&message)
+                {
+                    return;
+                }
                 if let Some(update) = crate::session_tools::pin_update(&message, &me) {
                     return self.on_pin_update(update);
                 }
@@ -331,8 +310,8 @@ impl WaddleWindow {
                 self.on_status_heard(crate::presence::PresenceMode::from_wire(preference))
             }
             SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
-            SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
-            SessionEvent::DeliveryFailed(id) => self.set_delivery(&id, Delivery::Failed),
+            SessionEvent::DeliveryAcked(id) => self.on_delivery_ack(&id),
+            SessionEvent::DeliveryFailed(id) => self.on_delivery_failed(&id),
         }
     }
 
@@ -497,6 +476,8 @@ impl WaddleWindow {
             }
             window.render_conversations();
             window.refresh_composer();
+            window.bootstrap_cursors(generation, connect_epoch);
+            window.flush_outbox();
 
             // Reopen what was on screen (or asked for from a notification), or
             // the first room on first connect.
@@ -594,6 +575,7 @@ impl WaddleWindow {
         imp.current.replace(Some(conversation.key()));
         imp.thread_back.set_visible(conversation.thread.is_some());
         if switching {
+            self.typing_switched();
             self.cancel_compose();
         }
         let title = sidebar_title(&conversation);
@@ -605,6 +587,7 @@ impl WaddleWindow {
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
+        self.refresh_typing_line();
         self.refresh_notify_button();
         imp.split_view.set_show_content(true);
         self.read_current();
@@ -680,6 +663,7 @@ impl WaddleWindow {
                     .cloned();
                 if let Some(conversation) = conversation {
                     session.mark_read(&conversation);
+                    window.publish_read(&conversation);
                 }
             }
         });
@@ -832,7 +816,7 @@ impl WaddleWindow {
         });
     }
 
-    fn set_delivery(&self, id: &str, delivery: Delivery) {
+    pub(super) fn set_delivery(&self, id: &str, delivery: Delivery) {
         let imp = self.imp();
         let current = imp.current.borrow().clone();
         let mut current_diffs = Vec::new();
@@ -1323,6 +1307,13 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         return;
     };
     let item = &row.item;
+    // A discarded unsent message keeps its row (rows are addressed by
+    // position) but shows nothing.
+    widget.set_visible(
+        !window
+            .upgrade()
+            .is_some_and(|window| window.is_discarded(item)),
+    );
     let Layout { header, day } = row.layout;
     parts.day.set_visible(day);
     if day {
@@ -1464,14 +1455,19 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     if pinned {
         note("· Pinned");
     }
-    match item.delivery {
-        Delivery::Sending => parts.row.add_css_class("sending"),
-        Delivery::Failed => {
-            note("· Not sent");
+    if let Some((shown, latest)) = window
+        .upgrade()
+        .and_then(|window| window.delivery_shown(item))
+    {
+        if shown.is_pending() {
+            parts.row.add_css_class("sending");
+        }
+        if shown == crate::delivery::Shown::Failed {
             body.add_css_class("error");
         }
-        Delivery::Sent | Delivery::Received => {}
-        _ => {}
+        if let Some(text) = shown.note(latest) {
+            note(text);
+        }
     }
     body.set_visible(!markup.is_empty());
     body.set_markup(&markup);

@@ -487,34 +487,21 @@ impl WaddleWindow {
         self.scroll_to_end();
 
         let window = self.clone();
-        let generation = imp.generation.get();
         glib::spawn_future_local(async move {
-            let sent = session
-                .send(
-                    &conversation.jid,
-                    conversation.kind,
-                    Draft {
-                        body,
-                        origin_id: origin.clone(),
-                        quote,
-                        thread: conversation.thread.clone(),
-                        files: Vec::new(),
-                        mentionable,
-                        markup: spans,
-                        sticker: None,
-                    },
-                )
+            let draft = Draft {
+                body,
+                origin_id: origin,
+                quote,
+                thread: conversation.thread.clone(),
+                files: Vec::new(),
+                mentionable,
+                markup: spans,
+                sticker: None,
+            };
+            // Queued on disk, written, and its row kept up to date.
+            window
+                .send_tracked(&session, &conversation, draft, now)
                 .await;
-            if window.imp().generation.get() != generation {
-                return;
-            }
-            if !sent {
-                window.imp().outbound.borrow_mut().remove(&origin);
-                window.edit_conversation(&conversation.key(), |timeline| {
-                    timeline.set_delivery(&origin, Delivery::Failed)
-                });
-                window.toast("The message could not be sent.");
-            }
         });
     }
 
@@ -686,6 +673,8 @@ impl WaddleWindow {
             MessageAction::Edit => self.edit(item),
             MessageAction::Delete => self.confirm_delete(item),
             MessageAction::Remove => self.confirm_remove(item),
+            MessageAction::Retry => self.retry_send(item),
+            MessageAction::Discard => self.discard_send(item),
         }
     }
 
