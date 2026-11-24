@@ -747,5 +747,6 @@ final class ActiveSession {
             handlesCalls: true, callMedia: callMedia
         )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
+        coordinator.sendsChatStates = preferences.sendsChatStates
     }
 }
