@@ -394,6 +394,7 @@ impl WaddleWindow {
                         thread: conversation.thread.clone(),
                         files,
                         mentionable: Vec::new(),
+                        markup: Vec::new(),
                         sticker: sticker.map(|(_, reference)| reference),
                     },
                 )

@@ -7,7 +7,7 @@
 
 use adw::prelude::{
     ActionExt, ActionMapExt, ActionRowExt, AdjustmentExt, ApplicationExt, BoxExt, ButtonExt, Cast,
-    CastNone, EntryExt, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
+    CastNone, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
     NavigationPageExt, ObjectExt, TextureExt, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
@@ -284,12 +284,14 @@ impl WaddleWindow {
                 imp.live_unread_keys.borrow_mut().clear();
                 self.spawn_on_connected(generation, connect_epoch);
                 self.refresh_message_tools();
+                self.discover_extension_commands(generation, connect_epoch);
             }
             SessionEvent::Disconnected => {
                 imp.connect_epoch
                     .set(imp.connect_epoch.get().wrapping_add(1));
                 imp.connected.set(false);
                 self.presence_disconnected();
+                imp.extension_commands.take();
                 self.clear_membership();
                 self.reset_message_tools();
                 self.schedule_reconnect(generation);
@@ -598,8 +600,8 @@ impl WaddleWindow {
         let title = sidebar_title(&conversation);
         imp.room_title.set_title(&title);
         imp.room_page.set_title(&conversation.name);
-        imp.composer_entry
-            .set_placeholder_text(Some(&format!("Message {title}")));
+        imp.composer_placeholder
+            .set_label(&format!("Message {title}"));
         self.leave_inbox();
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
@@ -1466,7 +1468,12 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         String::new()
     } else {
         // XEP-0245 actions read "* sender action", in italics.
-        crate::message_text::message_markup(&item.sender, &item.body)
+        // Bold, code and quotes from XEP-0394 spans (see markup.rs).
+        let spans = window
+            .upgrade()
+            .map(|window| super::composer_view::spans_of(&window, item))
+            .unwrap_or_default();
+        crate::message_text::styled_markup(&item.sender, &item.body, &spans)
     };
     let mut note = |text: &str| {
         if !markup.is_empty() {

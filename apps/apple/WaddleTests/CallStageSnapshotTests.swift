@@ -200,6 +200,46 @@ final class CallStageSnapshotTests: XCTestCase {
     }
     #endif
 
+    // MARK: - Connection
+
+    private func assertConnection(
+        _ quality: CallConnectionQuality, title: String = "#design", size: CGSize = CGSize(width: 760, height: 360),
+        testName: String = #function, line: UInt = #line
+    ) {
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: CallStageView(
+                title: title, subtitle: "2 others in call", status: .inCall(since: nil),
+                tiles: [Self.you, Self.linus, Self.grace], isMicrophoneOn: true, isHandRaised: false,
+                connection: quality, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+            )
+            .frame(width: size.width, height: size.height),
+            width: size.width + 2 * Theme.Spacing.l, testName: testName, line: line
+        )
+    }
+
+    func testAGoodConnectionIsTwoQuietBars() {
+        assertConnection(.good)
+    }
+
+    func testAPoorConnectionSaysSo() {
+        assertConnection(.poor)
+    }
+
+    func testALostConnectionSaysSo() {
+        assertConnection(.lost)
+    }
+
+    /// In the narrow column with a long room name: the name gives way, the warning does not.
+    func testALostConnectionInTheNarrowColumn() {
+        assertConnection(.lost, title: "#release-train-coordination-and-planning", size: Self.panel)
+    }
+
+    /// Before the first measurement: the bars are there, empty, and claim nothing.
+    func testAConnectionNotYetMeasured() {
+        assertConnection(.unknown)
+    }
+
     // MARK: - Participants
 
     private static let roster: [CallStageTile] = [

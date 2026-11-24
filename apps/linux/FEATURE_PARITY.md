@@ -39,7 +39,7 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Pinned messages, pin list | urn:waddle:pin | 🟡 | #2721: pin/unpin, header list, jump, live events, row mark. Room pin default is admins-only when unpublished; in a DM the server pin id can differ from the archive id, so the mark may not match |
 | Message actions menu parity (copy text, pin, view pack, moderator removal, hover toolbar, keyboard access) | | 🟡 | #2721: one action list for menu and toolbar, pin, copy, moderator removal, focusable rows with Menu/Shift+F10. No view pack |
 | `/me` actions | 0245 | ✅ | #2721: italic "* Name action" keeping links; quotes and notifications match |
-| Formatting (bold, italic, strike, code, quote) | 0394 | ❌ | composer |
+| Formatting (bold, italic, strike, code, quote) | 0394 | 🟡 | Formatting bar toggle (bold, italic, strikethrough, code, code block, quote; Ctrl+B and Ctrl+I) inserts markdown markers that become XEP-0394 spans on send, as on web and Apple; a correction shows the row's markup as markers and re-sends it. Received spans draw in rows (links only for web addresses; text always escaped). Spans ride in an app-side index beside the timeline, so a message that fell out of it draws plain. Not run against a live server; the bar edits replace the text, so a format step is not its own undo step |
 
 ## Conversations and rooms
 
@@ -54,7 +54,7 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Inbox / unread overview (`/unread`) | 0430 | 🟡 | Inbox in the sidebar with a total badge: one card per room or DM, newest first, with unread messages and unread thread replies (room threads read with the Waddle MAM thread filter, sub-threads as their own rows), @ mention badges, Mark Read per card and Mark All Read, live updates. Opening a card or message jumps to it. Not run against a live server; DM threads are filtered locally, and mentions in unread history are only known for rooms |
 | Notify modes and mute | 0492 | 🟡 | Header bell menu sets all, mentions only or mute per room and DM, stored on the account; muted rows show an icon and notify nothing. No sidebar context menu; a mode changed on another device shows here at the next reconnect |
 | Desktop notifications with reply and mark-read actions | | 🟡 | Gated by Preferences. One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |
-| @-mentions, slash commands, extension commands | 0372, 0050 | 🟡 | composer |
+| @-mentions, slash commands, extension commands | 0372, 0050 | 🟡 | The composer is a multi-line text view: Enter sends, Shift+Enter breaks the line, Tab or Enter picks a suggestion, Escape closes it or cancels a reply or edit. `@` suggests occupants, XEP-0055 directory users with no presence and `@everyone`/`@here`, and typed `@label`s become XEP-0372 references (also on a correction). Extension commands are discovered over XEP-0050 when the session connects and listed with the built-ins; `/word text` fills the command's inline field and completes a single-stage form, anything else opens its XEP-0004 form in a dialog (text, list, boolean and multi-line fields, Back, Next, Cancel; secret fields are never filled). Not run against a live server. A CJK input method's Enter may send while composing (the key is handled before the input method) |
 | Nick colors | 0392 | ✅ | Author names in the shared Rust hue at HSL 55%/45%. A room participant is colored by nick, a direct message by the person's address. Initials avatars keep the four brand tints |
 
 ## Presence and profile
@@ -99,7 +99,7 @@ Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` an
 | Device-flow sign-in, Secret Service storage, multi-account | ✅ | |
 | Settings screen (appearance, message order, notifications, accounts) | 🟡 | One Preferences dialog (Ctrl+comma, main menu): Appearance (system, light, dark, applied at once), Message order (Chat or Social: newest first, composer on top, older history loads at the bottom, every message names its sender and day), Notifications (on or off; rooms mentions-only default, which a per-room mode beats and DMs ignore), Accounts (list, sign out, switch, add) and About with server info. Stored in `$XDG_CONFIG_HOME/waddle/settings.json`, no secrets. No sound switch (GNotification has none; the desktop decides) and no per-account notification overrides; Social does not put a thread's root last. Not run against a live server or on a screen |
 | Polar Huddle design tokens, Night and Daylight | 🟡 | polish |
-| Keyboard shortcuts, accessibility pass | ❌ | polish |
+| Keyboard shortcuts, accessibility pass | 🟡 | Composer keys (Enter, Shift+Enter, Tab, Escape, Ctrl+B, Ctrl+I) landed with the composer; the rest is polish |
 | Push | 🚫 | Linux runs a background session for notifications; no APNs/FCM equivalent |
 | Flatpak packaging | ❌ | polish |
 

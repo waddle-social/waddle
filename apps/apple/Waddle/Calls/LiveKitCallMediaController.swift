@@ -45,6 +45,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     #endif
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
+    private(set) var connectionQuality = CallConnectionQuality.unknown
+    /// Holds back the rating of a connection that dropped (`CallConnectionRatingGate`).
+    @ObservationIgnored private var connectionRating = CallConnectionRatingGate()
+    @ObservationIgnored private var connectionSettling: Task<Void, Never>?
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
     /// The screens other people share, by who shares them.
@@ -587,6 +591,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }
+        connectionSettling?.cancel()
+        connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
         audioProcessingPublications = []
         #if os(macOS)
@@ -608,6 +614,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             wasEndedByServer = endedByServer
             onFailure?()
         case .reconnecting:
+            connectionSettling?.cancel()
+            connectionRating.reconnecting()
             phase = .reconnecting
             refreshParticipants()
         case .reconnected:
@@ -616,11 +624,24 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             phase = .connected
             mediaUpSince = .now
             reconcileTracks(in: changed, restoringVolumes: true)
+            // The SDK reports a rating only when it changes: one that is the
+            // same on the new connection is shown once that has settled.
+            connectionSettling?.cancel()
+            connectionSettling = Task { [weak self] in
+                try? await Task.sleep(for: CallConnectionRatingGate.settleTime)
+                guard !Task.isCancelled, let self, self.room === changed else { return }
+                self.connectionRating.settled()
+                self.refreshParticipants()
+            }
             // A reconnect restarts the microphone's track with the options it was made with.
             Task { await applyAudioProcessing() }
         case .tracks:
             reconcileTracks(in: changed)
         case .participants:
+            refreshParticipants()
+        case .ownConnectionRated:
+            connectionSettling?.cancel()
+            connectionRating.rated()
             refreshParticipants()
         }
     }
@@ -749,8 +770,19 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let room, phase == .connected else {
             if !participants.isEmpty { participants = [] }
             if !activeSpeakersLoudestFirst.isEmpty { activeSpeakersLoudestFirst = [] }
+            // What was measured belonged to a connection that is gone or being remade.
+            if connectionQuality != .unknown { connectionQuality = .unknown }
             return
         }
+        let rated: CallConnectionQuality = switch room.localParticipant.connectionQuality {
+        case .excellent: .excellent
+        case .good: .good
+        case .poor: .poor
+        case .lost: .lost
+        case .unknown: .unknown
+        }
+        let quality = connectionRating.shown(rated)
+        if connectionQuality != quality { connectionQuality = quality }
         // Ours first, then everyone else in the order they joined, so the
         // roster keeps its order from one report to the next.
         let remotes = room.remoteParticipants.values.sorted { lhs, rhs in
@@ -867,6 +899,8 @@ private enum RoomChange {
     case tracks
     /// Someone joined, or the SDK reported who is speaking and how loudly.
     case participants
+    /// The server rated our own connection.
+    case ownConnectionRated
 }
 
 /// Hands room events to the controller as an ordered stream. The
@@ -943,5 +977,10 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
 
     func room(_ room: Room, didUpdateSpeakingParticipants _: [Participant]) {
         forward(.participants, from: room)
+    }
+
+    func room(_ room: Room, participant: Participant, didUpdateConnectionQuality _: ConnectionQuality) {
+        // Only ours is shown.
+        if participant is LocalParticipant { forward(.ownConnectionRated, from: room) }
     }
 }
