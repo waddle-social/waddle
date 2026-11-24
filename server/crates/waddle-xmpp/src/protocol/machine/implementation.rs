@@ -283,6 +283,7 @@ impl XmppStateMachine {
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
             | ConnectionPhase::Sasl2OAuthErrorPending
+            | ConnectionPhase::Sasl1OAuthErrorPending { .. }
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {
@@ -375,6 +376,7 @@ impl XmppStateMachine {
             ConnectionPhase::Unauthenticated
             | ConnectionPhase::ScramPending { .. }
             | ConnectionPhase::Sasl2OAuthErrorPending
+            | ConnectionPhase::Sasl1OAuthErrorPending { .. }
             | ConnectionPhase::Authenticated { .. }
             | ConnectionPhase::Closing { .. } => {
                 return vec![OutboundEvent::Log {

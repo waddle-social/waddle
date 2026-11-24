@@ -60,6 +60,6 @@ pub use id_gen::{CounterIdGenerator, FixedIdGenerator, IdGenerator, UuidV4Genera
 pub use keepalive::{KeepaliveConfig, KEEPALIVE_TIMER};
 pub use machine::XmppStateMachine;
 pub use message_context::{MessageContext, MessageContextEnv};
-pub use phase::{ConnectionPhase, ScramPendingState};
+pub use phase::{ConnectionPhase, OAuthSaslFailure, ScramPendingState};
 pub use session_state::{Blocklist, CarbonsState, Locality, MucOccupancy, OccupancyEntry};
 pub use traits::{HandlerId, HandlerOutcome, IqHandler, MessageHandler, PresenceHandler};

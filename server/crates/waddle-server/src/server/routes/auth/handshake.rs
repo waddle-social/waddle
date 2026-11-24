@@ -462,6 +462,7 @@ mod tests {
             session_id: session_id.to_string(),
             redirect_uri: "waddle://auth/callback".to_string(),
             code_challenge: Some("challenge".to_string()),
+            scopes: vec![waddle_xmpp::xep::xep0493::OAuthScope::ClientNormal],
             created_at: Utc::now() - Duration::minutes(created_minutes_ago),
         }
     }

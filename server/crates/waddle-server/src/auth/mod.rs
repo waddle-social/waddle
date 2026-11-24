@@ -12,6 +12,7 @@ pub mod identity_profile;
 pub mod jid;
 pub mod native;
 pub mod oauth2;
+pub mod oauth_grants;
 pub mod oidc;
 pub mod providers;
 pub mod redirect;

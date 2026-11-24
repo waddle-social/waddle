@@ -13,40 +13,53 @@ use crate::sm_authority::{
 };
 use waddle_xmpp::auth::OAuthBearerParseError;
 use waddle_xmpp::identity::CanonicalBareJid;
+use waddle_xmpp::protocol::OAuthSaslFailure;
 use waddle_xmpp::telemetry::attributes::AuthStage;
+use waddle_xmpp::xep::xep0493::{discovery_url, OAuthBearerError, OAuthBearerStatus};
 use waddle_xmpp_core::xep0388_inline::{
     Sasl2InlineRequests, Sasl2InlineResults, SmInlineEnable, SmInlineFailed, SmInlineResumeResult,
 };
 
+/// End a failed OAUTHBEARER exchange the way RFC 7628 §3.2.2 requires: the
+/// server answers with a challenge holding a JSON error document, the client
+/// sends a dummy response, and only then does the mechanism fail. The
+/// document names the RFC 8414 discovery document in `openid-configuration`
+/// (XEP-0493), which is how a client that sent an empty token learns where
+/// to authorize.
 fn oauth_failure(
+    state: &WebSocketState,
     sasl2: bool,
-    status: &'static str,
-    sasl1_condition: &'static str,
+    status: OAuthBearerStatus,
+    failure: OAuthSaslFailure,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<Element> {
     waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
     *authenticated_session = None;
+    let discovery_url = discovery_url(&state.deps.auth_state.base_url);
+    let json = OAuthBearerError::new(status, &discovery_url).to_json_bytes();
     if sasl2 {
         use waddle_xmpp_core::xep0388::{Sasl2Challenge, Sasl2Data};
 
         *phase = ConnectionPhase::sasl2_oauth_error_pending();
-        let json = format!("{{\"status\":\"{status}\"}}");
         vec![Sasl2Challenge {
-            data: Sasl2Data::new(json.into_bytes()),
+            data: Sasl2Data::new(json),
         }
         .to_element()]
     } else {
-        vec![sasl_failure_element(sasl1_condition)]
+        *phase = ConnectionPhase::sasl1_oauth_error_pending(failure);
+        vec![Element::builder("challenge", waddle_xmpp::ns::SASL)
+            .append(BASE64_STANDARD.encode(json))
+            .build()]
     }
 }
 
-fn oauth_status_for_session_validation_error(error: &crate::auth::AuthError) -> &'static str {
+fn oauth_status_for_session_validation_error(error: &crate::auth::AuthError) -> OAuthBearerStatus {
     match error {
         crate::auth::AuthError::SessionNotFound | crate::auth::AuthError::SessionExpired => {
-            "invalid_token"
+            OAuthBearerStatus::InvalidToken
         }
-        _ => "server_error",
+        _ => OAuthBearerStatus::ServerError,
     }
 }
 
@@ -78,18 +91,29 @@ pub(super) async fn handle_sasl_oauthbearer(
     phase: &mut ConnectionPhase,
     sasl2: bool,
 ) -> Vec<Element> {
+    // Every failure of the exchange ends as RFC 7628 §3.2.2 requires.
+    macro_rules! fail {
+        ($status:expr, $failure:expr) => {
+            oauth_failure(
+                state,
+                sasl2,
+                $status,
+                $failure,
+                authenticated_session,
+                phase,
+            )
+        };
+    }
+
     debug!("SASL OAUTHBEARER auth attempt");
 
     let decoded = match BASE64_STANDARD.decode(b64_data) {
         Ok(data) => data,
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to decode base64 data");
-            return oauth_failure(
-                sasl2,
-                "invalid_request",
-                "not-authorized",
-                authenticated_session,
-                phase,
+            return fail!(
+                OAuthBearerStatus::InvalidRequest,
+                OAuthSaslFailure::NotAuthorized
             );
         }
     };
@@ -97,32 +121,23 @@ pub(super) async fn handle_sasl_oauthbearer(
     let credentials = match parse_oauthbearer(&decoded) {
         Ok(OAuthBearerResult::Credentials(credentials)) => credentials,
         Ok(OAuthBearerResult::DiscoveryRequest) => {
-            warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
-            return oauth_failure(
-                sasl2,
-                "invalid_request",
-                "not-authorized",
-                authenticated_session,
-                phase,
+            debug!("SASL OAUTHBEARER: discovery request");
+            return fail!(
+                OAuthBearerStatus::InvalidToken,
+                OAuthSaslFailure::NotAuthorized
             );
         }
         Err(OAuthBearerParseError::InvalidAuthzid) => {
-            return oauth_failure(
-                sasl2,
-                "invalid_request",
-                "invalid-authzid",
-                authenticated_session,
-                phase,
+            return fail!(
+                OAuthBearerStatus::InvalidRequest,
+                OAuthSaslFailure::InvalidAuthzid
             );
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
-            return oauth_failure(
-                sasl2,
-                "invalid_request",
-                "not-authorized",
-                authenticated_session,
-                phase,
+            return fail!(
+                OAuthBearerStatus::InvalidRequest,
+                OAuthSaslFailure::NotAuthorized
             );
         }
     };
@@ -141,12 +156,9 @@ pub(super) async fn handle_sasl_oauthbearer(
             let principal = match CanonicalBareJid::parse_exact(&session.user_jid) {
                 Ok(principal) if principal.localpart().is_some() => principal.into_bare_jid(),
                 _ => {
-                    return oauth_failure(
-                        sasl2,
-                        "server_error",
-                        "not-authorized",
-                        authenticated_session,
-                        phase,
+                    return fail!(
+                        OAuthBearerStatus::ServerError,
+                        OAuthSaslFailure::NotAuthorized
                     )
                 }
             };
@@ -160,12 +172,9 @@ pub(super) async fn handle_sasl_oauthbearer(
                             error = %e,
                             "SASL OAUTHBEARER: failed to build JID from session localpart",
                         );
-                        return oauth_failure(
-                            sasl2,
-                            "server_error",
-                            "not-authorized",
-                            authenticated_session,
-                            phase,
+                        return fail!(
+                            OAuthBearerStatus::ServerError,
+                            OAuthSaslFailure::NotAuthorized
                         );
                     }
                 };
@@ -173,22 +182,16 @@ pub(super) async fn handle_sasl_oauthbearer(
             let derived = match bare_jid_str.parse::<BareJid>() {
                 Ok(derived) => derived,
                 Err(_) => {
-                    return oauth_failure(
-                        sasl2,
-                        "server_error",
-                        "not-authorized",
-                        authenticated_session,
-                        phase,
+                    return fail!(
+                        OAuthBearerStatus::ServerError,
+                        OAuthSaslFailure::NotAuthorized
                     )
                 }
             };
             if derived != principal {
-                return oauth_failure(
-                    sasl2,
-                    "server_error",
-                    "not-authorized",
-                    authenticated_session,
-                    phase,
+                return fail!(
+                    OAuthBearerStatus::ServerError,
+                    OAuthSaslFailure::NotAuthorized
                 );
             }
             if credentials
@@ -196,24 +199,24 @@ pub(super) async fn handle_sasl_oauthbearer(
                 .as_ref()
                 .is_some_and(|authzid| authzid != &principal)
             {
-                return oauth_failure(
-                    sasl2,
-                    "invalid_request",
-                    "invalid-authzid",
-                    authenticated_session,
-                    phase,
+                return fail!(
+                    OAuthBearerStatus::InvalidRequest,
+                    OAuthSaslFailure::InvalidAuthzid
                 );
             }
             if stream_from.is_some_and(|from| from != &principal) {
                 if !sasl2 {
+                    // The stream's account hint disagrees with the token's
+                    // account: the connection ends with a plain failure,
+                    // not an error challenge that would leave it open.
+                    waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
+                    *authenticated_session = None;
                     *phase = ConnectionPhase::closing(None);
+                    return vec![sasl_failure_element("not-authorized")];
                 }
-                return oauth_failure(
-                    sasl2,
-                    "invalid_request",
-                    "not-authorized",
-                    authenticated_session,
-                    phase,
+                return fail!(
+                    OAuthBearerStatus::InvalidRequest,
+                    OAuthSaslFailure::NotAuthorized
                 );
             }
 
@@ -221,12 +224,9 @@ pub(super) async fn handle_sasl_oauthbearer(
                 Ok(jid) => jid,
                 Err(e) => {
                     warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
-                    return oauth_failure(
-                        sasl2,
-                        "server_error",
-                        "not-authorized",
-                        authenticated_session,
-                        phase,
+                    return fail!(
+                        OAuthBearerStatus::ServerError,
+                        OAuthSaslFailure::NotAuthorized
                     );
                 }
             };
@@ -239,12 +239,9 @@ pub(super) async fn handle_sasl_oauthbearer(
                 .await
                 .is_err()
             {
-                return oauth_failure(
-                    sasl2,
-                    "server_error",
-                    "not-authorized",
-                    authenticated_session,
-                    phase,
+                return fail!(
+                    OAuthBearerStatus::ServerError,
+                    OAuthSaslFailure::NotAuthorized
                 );
             }
 
@@ -264,13 +261,7 @@ pub(super) async fn handle_sasl_oauthbearer(
             let status = oauth_status_for_session_validation_error(&e);
             // Verifier errors stay out of logs and the wire response.
             warn!("SASL OAUTHBEARER session validation failed");
-            oauth_failure(
-                sasl2,
-                status,
-                "not-authorized",
-                authenticated_session,
-                phase,
-            )
+            fail!(status, OAuthSaslFailure::NotAuthorized)
         }
     }
 }
@@ -905,24 +896,24 @@ impl PendingSasl2Success {
 
 #[cfg(test)]
 mod tests {
-    use super::oauth_status_for_session_validation_error;
+    use super::{oauth_status_for_session_validation_error, OAuthBearerStatus};
     use crate::auth::AuthError;
 
     #[test]
     fn oauth_session_validation_errors_use_generic_oauth_statuses() {
         assert_eq!(
             oauth_status_for_session_validation_error(&AuthError::SessionNotFound),
-            "invalid_token"
+            OAuthBearerStatus::InvalidToken
         );
         assert_eq!(
             oauth_status_for_session_validation_error(&AuthError::SessionExpired),
-            "invalid_token"
+            OAuthBearerStatus::InvalidToken
         );
         assert_eq!(
             oauth_status_for_session_validation_error(&AuthError::DatabaseError(
                 "db unavailable".to_owned()
             )),
-            "server_error"
+            OAuthBearerStatus::ServerError
         );
     }
 }

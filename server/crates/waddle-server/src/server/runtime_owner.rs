@@ -414,6 +414,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // XEP-0012 last logout: upserted when an account becomes unavailable.
     // Retirement deletes the row as the owner.
     ("account_last_activity", READ_INSERT_UPDATE),
+    // XEP-0493 authorization grants: inserted when a client exchanges its
+    // authorization code, deleted when the account owner revokes the grant.
+    ("xmpp_oauth_grants", READ_INSERT_DELETE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),
