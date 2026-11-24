@@ -302,7 +302,7 @@ mod tests {
         // Missing-`to` is a §295 addressing error; the routing
         // predicate accepts it so the handler can return a precise
         // `<bad-request/>` rather than letting the IQ fall through
-        // to the dispatcher's generic feature-not-implemented
+        // to the dispatcher's generic service-unavailable
         // (Copilot review on PR #747).
         let iq = iq_get(mentions_payload(), None);
         assert!(is_mentions_permissions_iq(&iq, "muc.example"));

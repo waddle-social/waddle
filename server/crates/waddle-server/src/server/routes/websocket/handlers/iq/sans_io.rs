@@ -44,7 +44,7 @@ pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundE
 /// which the peer's client answers). The caller MUST treat `Some(_)`
 /// as final and NOT fall through to the unhandled-IQ branch, otherwise
 /// a successfully-forwarded call IQ is wrongly answered with
-/// `feature-not-implemented`.
+/// `service-unavailable`.
 ///
 /// Returns `None` only when no registered handler claims the
 /// namespace, so the caller can continue to the remaining (disco,

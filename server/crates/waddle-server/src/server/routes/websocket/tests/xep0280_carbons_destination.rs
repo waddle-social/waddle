@@ -356,7 +356,7 @@ async fn foreign_carbons_before_binding_is_refused_as_not_authorized() {
 }
 
 #[tokio::test]
-async fn unregistered_carbons_namespace_keeps_feature_fallback_without_mutation() {
+async fn unregistered_carbons_namespace_gets_service_unavailable_fallback_without_mutation() {
     let mut state = create_test_websocket_state().await;
     Arc::get_mut(&mut state)
         .expect("exclusive state")
@@ -370,11 +370,11 @@ async fn unregistered_carbons_namespace_keeps_feature_fallback_without_mutation(
     // consulted, registered or not.)
     let replies = dispatch(&state, &mut conn, request(None, true, true, Some(ORIGIN))).await;
     let [Iq::Error { error, .. }] = replies.as_slice() else {
-        panic!("unregistered feature fallback: {replies:?}")
+        panic!("unregistered namespace fallback: {replies:?}")
     };
     assert_eq!(
         error.defined_condition,
-        DefinedCondition::FeatureNotImplemented
+        DefinedCondition::ServiceUnavailable
     );
     assert!(
         error.by.is_none(),
