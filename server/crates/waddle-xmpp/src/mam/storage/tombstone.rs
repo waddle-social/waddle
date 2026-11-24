@@ -58,15 +58,28 @@ pub(super) fn tombstone_corrections(
     ) else {
         return;
     };
-    for (candidate_archive, candidate) in entries.iter_mut() {
-        if *candidate_archive != archive || candidate.id == original_id {
-            continue;
-        }
-        if let Some(replacement) = scope.tombstone_for(
-            &candidate.from.to_string(),
-            candidate.rich.as_ref(),
-            tombstone,
-        ) {
+    let candidates: Vec<(
+        String,
+        String,
+        Option<&waddle_xmpp_core::mam::ArchivedRichMessage>,
+    )> = entries
+        .iter()
+        .filter(|(candidate_archive, candidate)| {
+            *candidate_archive == archive && candidate.id != original_id
+        })
+        .map(|(_, candidate)| {
+            (
+                candidate.id.clone(),
+                candidate.from.to_string(),
+                candidate.rich.as_ref(),
+            )
+        })
+        .collect();
+    let replacements = scope.replacements(candidates, tombstone);
+    for (id, replacement) in replacements {
+        if let Some((_, candidate)) = entries.iter_mut().find(|(candidate_archive, candidate)| {
+            *candidate_archive == archive && candidate.id == id
+        }) {
             apply_tombstone(candidate, replacement);
         }
     }

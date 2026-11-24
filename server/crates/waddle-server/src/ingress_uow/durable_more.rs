@@ -142,7 +142,7 @@ impl MamArchiveRepository {
         ) else {
             return Ok(());
         };
-        let mut replacements = Vec::new();
+        let mut candidates = Vec::new();
         for reference in scope.reference_ids() {
             let mut rows = tx
                 .transaction_mut()
@@ -164,11 +164,15 @@ impl MamArchiveRepository {
                     .map(serde_json::from_str::<ArchivedRichMessage>)
                     .transpose()
                     .map_err(|_| IngressUowError::InvalidArchiveRichPayload)?;
-                if let Some(replacement) = scope.tombstone_for(&from, rich.as_ref(), tombstone) {
-                    replacements.push((id, replacement));
-                }
+                candidates.push((id, from, rich));
             }
         }
+        let replacements = scope.replacements(
+            candidates
+                .iter()
+                .map(|(id, from, rich)| (id.clone(), from.clone(), rich.as_ref())),
+            tombstone,
+        );
         for (id, replacement) in replacements {
             let encoded = serde_json::to_string(&ArchivedRichMessage {
                 payload: Some(ArchivedRichPayload::Tombstone(replacement)),

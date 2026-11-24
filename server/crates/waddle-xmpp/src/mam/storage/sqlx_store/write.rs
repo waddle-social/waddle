@@ -725,36 +725,21 @@ const CORRECTION_TOMBSTONE_SET: &str = "SET body = NULL, stanza_xml = NULL, thre
 /// `(room_jid, from_jid, message_type, stanza_id, origin_id)` of the retracted row.
 type CorrectionOriginRow = (String, String, String, Option<String>, Option<String>);
 
-async fn tombstone_corrections_postgres(
-    conn: &mut PgConnection,
-    schema: Option<&str>,
-    original_archive_id: &str,
-    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
-) -> Result<(), MamStorageError> {
-    let relation = super::postgres_relation(schema, "mam_messages");
-    let original: Option<CorrectionOriginRow> =
-        sqlx::query_as(&format!(
-            "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM {relation} WHERE id = $1"
-        ))
-        .bind(original_archive_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    let Some((archive, author, message_type, wire_id, origin_id)) = original else {
-        return Ok(());
-    };
-    let Some(scope) = CorrectionScope::new(
-        &author,
-        message_type == "groupchat",
-        wire_id.as_deref(),
-        origin_id.as_deref(),
-    ) else {
-        return Ok(());
-    };
-    let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, from_jid, rich_payload FROM {relation} WHERE room_jid = "
-    ));
+/// Append the candidate filter shared by both backends: rows of the original's
+/// archive, other than the original, whose payload may be a correction naming
+/// one of the original's ids. `LIKE` only prefilters; the payload is decoded
+/// and compared as typed data afterwards.
+fn push_correction_candidates<'q, DB>(
+    query: &mut QueryBuilder<'q, DB>,
+    archive: String,
+    original_archive_id: String,
+    scope: &CorrectionScope,
+) where
+    DB: sqlx::Database,
+    String: sqlx::Encode<'q, DB> + sqlx::Type<DB> + 'q,
+{
     query
-        .push_bind(archive.as_str())
+        .push_bind(archive)
         .push(" AND id <> ")
         .push_bind(original_archive_id)
         .push(" AND (");
@@ -768,14 +753,64 @@ async fn tombstone_corrections_postgres(
             .push(" ESCAPE '\\'");
     }
     query.push(") ORDER BY archive_seq ASC");
-    let rows: Vec<(String, String, Option<String>)> =
-        query.build_query_as().fetch_all(&mut *conn).await?;
-    for (id, from, rich_payload) in rows {
-        let rich = decode_rich_payload(rich_payload.as_deref())?;
-        let Some(replacement) = scope.tombstone_for(&from, rich.as_ref(), tombstone) else {
-            continue;
-        };
-        let encoded = encode_tombstone_payload(replacement)?;
+}
+
+fn correction_scope(original: CorrectionOriginRow) -> Option<(String, CorrectionScope)> {
+    let (archive, author, message_type, wire_id, origin_id) = original;
+    CorrectionScope::new(
+        &author,
+        message_type == "groupchat",
+        wire_id.as_deref(),
+        origin_id.as_deref(),
+    )
+    .map(|scope| (archive, scope))
+}
+
+/// Decode candidate rows and encode the tombstone payload for each live
+/// correction of the original, as `(row id, encoded payload)`.
+fn correction_updates(
+    scope: &CorrectionScope,
+    rows: Vec<(String, String, Option<String>)>,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<Vec<(String, String)>, MamStorageError> {
+    let decoded = rows
+        .into_iter()
+        .map(|(id, from, payload)| Ok((id, from, decode_rich_payload(payload.as_deref())?)))
+        .collect::<Result<Vec<_>, MamStorageError>>()?;
+    scope
+        .replacements(
+            decoded
+                .iter()
+                .map(|(id, from, rich)| (id.clone(), from.clone(), rich.as_ref())),
+            tombstone,
+        )
+        .into_iter()
+        .map(|(id, replacement)| Ok((id, encode_tombstone_payload(replacement)?)))
+        .collect()
+}
+
+async fn tombstone_corrections_postgres(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    original_archive_id: &str,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<(), MamStorageError> {
+    let relation = super::postgres_relation(schema, "mam_messages");
+    let original: Option<CorrectionOriginRow> = sqlx::query_as(&format!(
+        "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM {relation} WHERE id = $1"
+    ))
+    .bind(original_archive_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((archive, scope)) = original.and_then(correction_scope) else {
+        return Ok(());
+    };
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "SELECT id, from_jid, rich_payload FROM {relation} WHERE room_jid = "
+    ));
+    push_correction_candidates(&mut query, archive, original_archive_id.to_owned(), &scope);
+    let rows = query.build_query_as().fetch_all(&mut *conn).await?;
+    for (id, encoded) in correction_updates(&scope, rows, tombstone)? {
         let mut update =
             QueryBuilder::<Postgres>::new(format!("UPDATE {relation} {CORRECTION_TOMBSTONE_SET}"));
         update
@@ -793,50 +828,21 @@ async fn tombstone_corrections_sqlite(
     original_archive_id: &str,
     tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<(), MamStorageError> {
-    let original: Option<CorrectionOriginRow> =
-        sqlx::query_as(
-            "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM main.mam_messages WHERE id = ?",
-        )
-        .bind(original_archive_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    let Some((archive, author, message_type, wire_id, origin_id)) = original else {
-        return Ok(());
-    };
-    let Some(scope) = CorrectionScope::new(
-        &author,
-        message_type == "groupchat",
-        wire_id.as_deref(),
-        origin_id.as_deref(),
-    ) else {
+    let original: Option<CorrectionOriginRow> = sqlx::query_as(
+        "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM main.mam_messages WHERE id = ?",
+    )
+    .bind(original_archive_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((archive, scope)) = original.and_then(correction_scope) else {
         return Ok(());
     };
     let mut query = QueryBuilder::<Sqlite>::new(
         "SELECT id, from_jid, rich_payload FROM main.mam_messages WHERE room_jid = ",
     );
-    query
-        .push_bind(archive.as_str())
-        .push(" AND id <> ")
-        .push_bind(original_archive_id)
-        .push(" AND (");
-    for (index, id) in scope.reference_ids().iter().enumerate() {
-        if index > 0 {
-            query.push(" OR ");
-        }
-        query
-            .push("rich_payload LIKE ")
-            .push_bind(waddle_xmpp_core::mam::correction_payload_like_pattern(id))
-            .push(" ESCAPE '\\'");
-    }
-    query.push(") ORDER BY archive_seq ASC");
-    let rows: Vec<(String, String, Option<String>)> =
-        query.build_query_as().fetch_all(&mut *conn).await?;
-    for (id, from, rich_payload) in rows {
-        let rich = decode_rich_payload(rich_payload.as_deref())?;
-        let Some(replacement) = scope.tombstone_for(&from, rich.as_ref(), tombstone) else {
-            continue;
-        };
-        let encoded = encode_tombstone_payload(replacement)?;
+    push_correction_candidates(&mut query, archive, original_archive_id.to_owned(), &scope);
+    let rows = query.build_query_as().fetch_all(&mut *conn).await?;
+    for (id, encoded) in correction_updates(&scope, rows, tombstone)? {
         let mut update = QueryBuilder::<Sqlite>::new(format!(
             "UPDATE main.mam_messages {CORRECTION_TOMBSTONE_SET}"
         ));

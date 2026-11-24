@@ -443,6 +443,28 @@ impl CorrectionScope {
     }
 }
 
+impl CorrectionScope {
+    /// The tombstones to apply to a set of candidate rows given as
+    /// `(row id, from JID, decoded rich payload)`: one `(row id, tombstone)`
+    /// per live correction of the original.
+    pub fn replacements<'a, I>(
+        &self,
+        candidates: I,
+        tombstone: &ArchivedTombstone,
+    ) -> Vec<(String, ArchivedTombstone)>
+    where
+        I: IntoIterator<Item = (String, String, Option<&'a ArchivedRichMessage>)>,
+    {
+        candidates
+            .into_iter()
+            .filter_map(|(id, from, rich)| {
+                self.tombstone_for(&from, rich, tombstone)
+                    .map(|replacement| (id, replacement))
+            })
+            .collect()
+    }
+}
+
 fn bare_jid_part(jid: &str) -> &str {
     jid.split('/').next().unwrap_or(jid)
 }
