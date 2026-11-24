@@ -226,7 +226,6 @@ fn test_server_features_include_core_features() {
     assert!(!features.contains(&Feature::mam()));
     assert!(!features.contains(&Feature::mam_extended()));
     assert!(!features.contains(&Feature::fulltext_mam()));
-    assert!(!features.contains(&Feature::pep()));
     assert!(!features.contains(&Feature::avatar_metadata_notify()));
     assert!(!features.contains(&Feature::vcard4_notify()));
 }

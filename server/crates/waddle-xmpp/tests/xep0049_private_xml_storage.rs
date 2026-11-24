@@ -230,3 +230,35 @@ fn xep0049_storage_serializer_uses_xml_escaping() {
     assert_eq!(parsed.elements[0].attr("label"), Some("5 > 3 & \"quoted\""));
     assert_eq!(parsed.elements[0].text(), "Tom & <Jerry>");
 }
+
+/// XEP-0049 "Elements": "At least one child element with a proper namespace
+/// MUST be included". On the wire an unprefixed child of the query inherits
+/// `jabber:iq:private` and has no namespace of its own.
+#[test]
+fn xep0049_wire_child_inheriting_query_namespace_is_rejected() {
+    let get: Element = "<query xmlns='jabber:iq:private'><prefs/></query>"
+        .parse()
+        .expect("wire xml");
+    assert_eq!(
+        parse_private_storage_get(&get_iq(get)).expect_err("inherited ns"),
+        PrivateStorageError::MissingNamespace
+    );
+
+    let set: Element = "<query xmlns='jabber:iq:private'><prefs><a/></prefs></query>"
+        .parse()
+        .expect("wire xml");
+    assert_eq!(
+        parse_private_storage_set(&set_iq(set)).expect_err("inherited ns"),
+        PrivateStorageError::MissingNamespace
+    );
+}
+
+#[test]
+fn xep0049_wire_child_with_own_namespace_is_accepted() {
+    let set: Element =
+        "<query xmlns='jabber:iq:private'><prefs xmlns='urn:waddle:test:prefs'/></query>"
+            .parse()
+            .expect("wire xml");
+    let value = parse_private_storage_set(&set_iq(set)).expect("own namespace");
+    assert_eq!(value.key.namespace, NS_PREFS);
+}

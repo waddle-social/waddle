@@ -4,9 +4,9 @@ use super::{
     build_pubsub_publish_result, build_pubsub_success, debug, handle_community_items,
     handle_community_publish, handle_community_retract, handle_extension_route_items,
     handle_spaces_items, handle_spaces_publish, handle_spaces_retract, iq_to_xml,
-    is_pep_self_or_to, is_pubsub_iq, not_authorized_iq_error, parse_pubsub_iq, warn, BareJid,
-    ConnectionPhase, Element, IqHandlerContext, Jid, PubSubError, PubSubItemsRead, PubSubRequest,
-    Session, WebSocketState,
+    is_pep_self_or_to, is_pubsub_iq, not_authorized_iq_error, parse_pubsub_iq, stanza_to_xml, warn,
+    BareJid, ConnectionPhase, Element, IqHandlerContext, Jid, PubSubError, PubSubItemsRead,
+    PubSubRequest, Session, Stanza, WebSocketState,
 };
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
@@ -681,7 +681,11 @@ pub(super) async fn handle_pubsub_iq(
             }
 
             request => {
-                return handle_pubsub_admin_request(
+                let subscribed = match &request {
+                    PubSubRequest::Subscribe { node, jid } => Some((node.clone(), jid.clone())),
+                    _ => None,
+                };
+                let responses = handle_pubsub_admin_request(
                     iq,
                     state,
                     &target_jid,
@@ -690,10 +694,47 @@ pub(super) async fn handle_pubsub_iq(
                     authenticated_session,
                     request,
                 )
-                .await
-                .into_iter()
-                .map(iq_to_xml)
-                .collect();
+                .await;
+                let succeeded = responses
+                    .iter()
+                    .all(|response| matches!(response, xmpp_parsers::iq::Iq::Result { .. }));
+                let mut out: Vec<String> = responses.into_iter().map(iq_to_xml).collect();
+                // XEP-0060 §12.20 / XEP-0163 §4: a new subscriber is sent
+                // the last published item after the subscription result
+                // when `pubsub#send_last_published_item` asks for it.
+                if let (true, Some((node, subscriber)), Some(bound)) =
+                    (succeeded, subscribed, phase.bound_jid())
+                {
+                    let other_resource = subscriber
+                        .try_as_full()
+                        .ok()
+                        .filter(|full| *full != bound)
+                        .cloned();
+                    let recipient = match &other_resource {
+                        Some(full) => Jid::from(full.clone()),
+                        None => Jid::from(bound.clone()),
+                    };
+                    if let Some(message) = pubsub_fanout::last_item_for_new_subscription(
+                        state,
+                        &target_jid,
+                        &node,
+                        &recipient,
+                    )
+                    .await
+                    {
+                        match other_resource {
+                            None => out.push(stanza_to_xml(&Stanza::Message(message))),
+                            Some(full) => {
+                                let _ = state
+                                    .deps
+                                    .protocol
+                                    .connection_registry
+                                    .try_send_to(&full, Stanza::Message(message));
+                            }
+                        }
+                    }
+                }
+                return out;
             }
         }
     }

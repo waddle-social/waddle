@@ -25,6 +25,14 @@ impl PrivateStorageKey {
             namespace: element.ns().to_string(),
         }
     }
+
+    /// XEP-0049 "Elements": the child "with a proper namespace" must be scoped
+    /// by its own namespace. An unprefixed child of
+    /// `<query xmlns='jabber:iq:private'/>` inherits the reserved query
+    /// namespace and so has none of its own.
+    fn has_own_namespace(&self) -> bool {
+        !self.namespace.is_empty() && self.namespace != NS_PRIVATE
+    }
 }
 
 /// Typed arbitrary XML payload stored by XEP-0049.
@@ -48,7 +56,7 @@ impl PrivateStorageValue {
             .first()
             .ok_or(PrivateStorageError::MissingPayload)?;
         let key = PrivateStorageKey::from_element(first);
-        if key.namespace.is_empty() {
+        if !key.has_own_namespace() {
             return Err(PrivateStorageError::MissingNamespace);
         }
         if elements
@@ -113,7 +121,7 @@ pub fn parse_private_storage_get(iq: &Iq) -> Result<PrivateStorageKey, PrivateSt
 
     ensure_private_query(elem)?;
     let key = PrivateStorageKey::from_element(exactly_one_child(elem)?);
-    if key.namespace.is_empty() {
+    if !key.has_own_namespace() {
         return Err(PrivateStorageError::MissingNamespace);
     }
     Ok(key)

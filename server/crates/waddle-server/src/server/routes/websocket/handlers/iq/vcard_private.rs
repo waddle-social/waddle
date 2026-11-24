@@ -1,7 +1,8 @@
 use super::{
     bad_format_iq_error, bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
-    internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, not_authorized_iq_error,
-    row_value, warn, Arc, DbQueryOne, FullJid, VCardStore, Value, ValueExt, WebSocketState,
+    internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, not_acceptable_iq_error,
+    not_authorized_iq_error, row_value, service_unavailable_iq_error, warn, Arc, DbQueryOne,
+    FullJid, VCardStore, Value, ValueExt, WebSocketState,
 };
 use waddle_xmpp::xep::xep0049::{self, PrivateStorageError};
 
@@ -64,11 +65,21 @@ pub(super) async fn handle_vcard_iq(
                 payload: Some(vcard),
             },
             Ok(None) => {
+                // XEP-0054 "Viewing Another User's vCard": whether no vCard
+                // exists or the user does not exist, the server "MUST return
+                // the same error condition", `<service-unavailable/>`.
+                // `<item-not-found/>` is only for retrieving one's own vCard.
+                let own = target_jid == sender_jid.to_bare();
+                let error = if own {
+                    item_not_found_iq_error("Requested item not found.")
+                } else {
+                    service_unavailable_iq_error("Service unavailable at this address.")
+                };
                 return vec![build_iq_error_xml_typed(
                     iq.id(),
                     response_from,
                     response_to,
-                    item_not_found_iq_error("Requested item not found."),
+                    error,
                 )];
             }
             Err(error) => {
@@ -276,10 +287,10 @@ fn private_storage_request_error(
 ) -> xmpp_parsers::stanza_error::StanzaError {
     match error {
         PrivateStorageError::MissingPayload => {
-            bad_format_iq_error("Private XML query requires one child element.")
+            not_acceptable_iq_error("Private XML query requires one child element.")
         }
         PrivateStorageError::MissingNamespace => {
-            bad_format_iq_error("Private XML child element requires a namespace.")
+            not_acceptable_iq_error("Private XML child element requires a namespace.")
         }
         PrivateStorageError::MultiplePayloads => {
             bad_format_iq_error("Private XML query must not contain multiple child elements.")

@@ -7,8 +7,7 @@ use super::{
     space_details_from_node, spaces_service_bare_jid, warn, Affiliation, BareJid, CheckPermission,
     CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne, DiscoItem, FullJid, GetSnapshot,
     IqHandlerContext, Jid, Object, ObjectType, Permission, Relation, RoomArchiveAccess, RsmRequest,
-    RsmResponse, Subject, SubjectType, WebSocketState, NODE_COMMANDS, PEP_NODE_AVATAR_DATA,
-    PEP_NODE_AVATAR_METADATA,
+    RsmResponse, Subject, SubjectType, WebSocketState, NODE_COMMANDS,
 };
 use crate::permissions::host_grant::{
     HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomBinding, RoomGate,
@@ -789,6 +788,11 @@ pub(super) async fn handle_disco_items_iq(
                                 ),
                             )];
                         }
+                        // XEP-0163 §"Node Discovery": the account owner's
+                        // server MUST check the access model of each node
+                        // and return as items only those the requester is
+                        // allowed to read.
+                        let requester = phase.bound_jid().map(|jid| jid.to_bare());
                         let items = match state
                             .deps
                             .protocol
@@ -796,13 +800,34 @@ pub(super) async fn handle_disco_items_iq(
                             .list_nodes(&target_bare)
                             .await
                         {
-                            Ok(nodes) => nodes
-                                .into_iter()
-                                .filter(|node| {
-                                    node == PEP_NODE_AVATAR_DATA || node == PEP_NODE_AVATAR_METADATA
-                                })
-                                .map(|node| DiscoItem::pubsub_node(&target_bare.to_string(), &node))
-                                .collect::<Vec<_>>(),
+                            Ok(nodes) => {
+                                let contacts = crate::pubsub_authz::ContactDirectory::new(
+                                    &state.deps.app_state.db_pool,
+                                );
+                                let mut readable = Vec::new();
+                                if let Some(requester) = requester {
+                                    for node in nodes {
+                                        let decision = crate::pubsub_authz::pep_read_decision(
+                                            &state.deps.protocol.pubsub_storage,
+                                            &contacts,
+                                            &target_bare,
+                                            &node,
+                                            &requester,
+                                        )
+                                        .await;
+                                        if matches!(
+                                            decision,
+                                            Ok(crate::pubsub_authz::ReadDecision::Allowed)
+                                        ) {
+                                            readable.push(DiscoItem::pubsub_node(
+                                                &target_bare.to_string(),
+                                                &node,
+                                            ));
+                                        }
+                                    }
+                                }
+                                readable
+                            }
                             Err(error) => {
                                 warn!(target = %target_bare, error = %error, "Failed to list PEP nodes");
                                 vec![]

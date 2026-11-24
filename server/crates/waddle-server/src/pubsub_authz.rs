@@ -308,6 +308,52 @@ pub async fn pep_read_decision(
     Ok(contact_decision(&node_meta.config, standing.as_ref()))
 }
 
+/// XEP-0163 §"Presence Sharing"/"Roster Item Modification": when a contact's
+/// presence subscription to `owner` ends or the owner's roster item for the
+/// contact changes, "the service MUST cancel the entity's subscription" if the
+/// change results in a loss of access. Re-decides every subscription `contact`
+/// holds on the owner's nodes with [`pep_read_decision`] and removes those no
+/// longer allowed, so they cannot resume silently if access returns.
+pub async fn revoke_lost_pep_subscriptions(
+    storage: &Arc<dyn PubSubStorage>,
+    contacts: &ContactDirectory<'_>,
+    owner: &BareJid,
+    contact: &BareJid,
+) -> Result<u64, XmppError> {
+    let mut revoked = 0;
+    for node in storage.list_nodes(owner).await? {
+        let held: Vec<_> = storage
+            .list_node_subscriptions(owner, &node)
+            .await?
+            .into_iter()
+            .filter(|subscription| subscription.subscriber.to_bare() == *contact)
+            .collect();
+        if held.is_empty() {
+            continue;
+        }
+        if matches!(
+            pep_read_decision(storage, contacts, owner, &node, contact).await?,
+            ReadDecision::Allowed
+        ) {
+            continue;
+        }
+        for subscription in held {
+            if storage
+                .unsubscribe(
+                    owner,
+                    &node,
+                    &subscription.subscriber,
+                    Some(&subscription.subid),
+                )
+                .await?
+            {
+                revoked += 1;
+            }
+        }
+    }
+    Ok(revoked)
+}
+
 /// Whether a PEP node is readable by its account alone, so that neither
 /// its access model nor an affiliation extends reads, subscriptions or
 /// event delivery to another entity.

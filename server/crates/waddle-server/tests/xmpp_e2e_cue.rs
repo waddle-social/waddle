@@ -57,7 +57,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:time", "XEP-0202"),
     ("jabber:iq:version", "XEP-0092"),
     ("http://jabber.org/protocol/pubsub", "XEP-0060"),
-    ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
     ("http://jabber.org/protocol/pubsub#auto-create", "XEP-0060"),
     (
         "http://jabber.org/protocol/pubsub#persistent-items",
@@ -1344,7 +1343,6 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("vcard-temp", "XEP-0054"),
         ("jabber:iq:search", "XEP-0055"),
         ("http://jabber.org/protocol/pubsub", "XEP-0060"),
-        ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
         ("urn:xmpp:avatar:metadata", "XEP-0084"),
         ("urn:xmpp:avatar:data", "XEP-0084"),
         ("http://jabber.org/protocol/chatstates", "XEP-0085"),
