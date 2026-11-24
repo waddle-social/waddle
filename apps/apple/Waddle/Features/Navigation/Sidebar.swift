@@ -34,6 +34,7 @@ struct Sidebar: View {
                     NoMatchesView(query: query)
                 }
             }
+            CurrentCallCardHost()
             SidebarAccountBar()
         }
         .background(Theme.Colors.bgRail.ignoresSafeArea())

@@ -42,6 +42,9 @@ struct SplitShell: View {
             guard !isFullScreen, let sid = session.calls.state.sid else { return }
             callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
         }
+        .onChange(of: columnVisibility, initial: true) { _, columns in
+            callStage.isSidebarShown = columns != .detailOnly
+        }
         .callFullScreen(isCallFullScreen) {
             // The window left full screen by its own button: the call steps down with it.
             guard let sid = session.calls.state.sid else { return }

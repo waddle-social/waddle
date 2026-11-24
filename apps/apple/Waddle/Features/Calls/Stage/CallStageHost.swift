@@ -10,6 +10,8 @@ final class CallStageModel {
     /// The pane a stage shares with its conversation, once the shell has
     /// laid it out: the dock and the stage both place the call by it.
     var pane: CGSize?
+    /// The sidebar is on screen to hold the card of a call whose conversation is not open.
+    var isSidebarShown = true
     @ObservationIgnored private(set) var tileSource = CallTileSource(video: { _ in nil }, togglePin: { _ in /* no call yet */ })
     /// The share of the pane each conversation's stage was dragged to, kept
     /// on this device (web keeps it per room in local storage).
@@ -42,7 +44,7 @@ final class CallStageModel {
     func surface(of state: CallState, open selection: ConversationID?, platform: CallSurface.Platform) -> CallSurface {
         CallSurface.placement(
             of: state, open: selection, platform: platform, pane: pane,
-            size: state.sid.map { stage(of: $0).size } ?? .defaultSize
+            size: state.sid.map { stage(of: $0).size } ?? .defaultSize, isSidebarShown: isSidebarShown
         )
     }
 

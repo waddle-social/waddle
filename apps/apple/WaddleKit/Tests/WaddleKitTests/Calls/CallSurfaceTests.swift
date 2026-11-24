@@ -104,16 +104,29 @@ import Testing
 
     // MARK: - Who draws the call
 
-    @Test func theShellDockYieldsToAStage() {
+    @Test func theShellDockYieldsToAStageAndToTheSidebarCard() {
         for surface in [CallSurface.split, .expanded, .fullscreen] {
             #expect(surface.showsStage)
             #expect(surface.dockContent(isInSession: true, isInSheet: false) == .hidden)
         }
-        for surface in [CallSurface.dock, .sidebarCard] {
-            #expect(!surface.showsStage)
-            #expect(surface.dockContent(isInSession: true, isInSheet: false) == .call)
-            #expect(surface.dockContent(isInSession: false, isInSheet: false) == .call)
+        #expect(!CallSurface.sidebarCard.showsStage)
+        #expect(CallSurface.sidebarCard.dockContent(isInSession: true, isInSheet: false) == .hidden)
+        #expect(!CallSurface.dock.showsStage)
+        #expect(CallSurface.dock.dockContent(isInSession: true, isInSheet: false) == .call)
+        #expect(CallSurface.dock.dockContent(isInSession: false, isInSheet: false) == .call)
+    }
+
+    @Test func aCallAwayFromItsConversationNeedsTheSidebarForItsCard() {
+        let join = CallJoin(url: "wss://sfu.waddle.test", room: "r", identity: "ada@waddle.test/mac", token: "t")
+        let active = CallState.active(ActiveCall(peer: Self.peer, sid: "c1", media: Self.media, join: join))
+        func surface(open: ConversationID?, isSidebarShown: Bool) -> CallSurface {
+            CallSurface.placement(of: active, open: open, platform: .regularWidth, pane: nil, isSidebarShown: isSidebarShown)
         }
+        #expect(surface(open: nil, isSidebarShown: true) == .sidebarCard)
+        // With the sidebar hidden nothing else would show the call or its controls.
+        #expect(surface(open: nil, isSidebarShown: false) == .dock)
+        // The stage does not need the sidebar.
+        #expect(surface(open: .direct(Self.peer.bare), isSidebarShown: false) == .split)
     }
 
     @Test(arguments: [CallSurface.dock, .sidebarCard, .split, .expanded, .fullscreen])
