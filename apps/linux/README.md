@@ -12,6 +12,7 @@ The native client currently supports:
 - **Chat:** rooms and DMs, paged history, replies, reactions, edits, deletions and attachments.
 - **Threads:** choose **Reply in Thread** below a message, or **Open Thread** from its message menu. Threads appear beneath their conversation in the sidebar, with separate unread counts and history. **Start Subthread** creates a nested thread; the back button returns to the main conversation. The original message appears above the replies when loaded. Thread views filter full archive pages so saved reactions, edits and Jev judgments remain available. Automatic scanning stops after three pages; **Load Earlier** continues through older history.
 - **Jev badges:** question and content-safety judgments appear beneath messages. Expand a badge to inspect probabilities, model and taxonomy versions. Judgments follow the exact message revision and disappear after an edit or deletion until a current result arrives.
+- **Notifications:** the bell in the conversation header sets all messages, mentions only or mute for that room or DM (XEP-0492, stored on the account and shared with its other devices); muted conversations show a bell-slash in the sidebar. Without a stored mode, DMs and members-only rooms notify for every message and other rooms for mentions. Desktop notifications are one per conversation (a newer message replaces the older), have **Reply** (opens the conversation with the composer focused; GNotification has no inline reply) and **Mark as Read** actions, and are withdrawn when the conversation is read here or on another device.
 
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
@@ -50,5 +51,7 @@ The GTK navigation regression test requires a display and is excluded from ordin
 | `src/runtime.rs` | tokio on its own threads; UI awaits work from the GLib main loop |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
+| `src/notify.rs` | Notification modes, XEP-0492 defaults and the announce decision (no GTK); tests |
+| `src/ui/notifications.rs` | Header menu, sidebar mute state and GNotification actions |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |
 | `data/` | Desktop entry, AppStream metadata, icon |

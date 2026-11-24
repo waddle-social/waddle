@@ -6,6 +6,7 @@ mod images;
 mod judgments;
 mod media;
 mod membership;
+mod notifications;
 mod suggestions;
 mod threads;
 mod window;
