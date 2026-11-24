@@ -197,24 +197,21 @@ fn xep_0424_retraction_emits_lookup_with_stanza_id() {
 
 #[test]
 fn xep_0461_reply_is_not_validated_against_the_archive() {
-    // XEP-0461 imposes no target-existence rule, and 1:1 replies name the
-    // target by origin-id or `id`, so no stanza-id lookup may be emitted.
-    for target in ["stanza-Y", "origin-Y"] {
+    // XEP-0461 imposes no target-existence rule, 1:1 replies name the target
+    // by origin-id or `id`, and `to` is optional, so no stanza-id lookup may
+    // be emitted.
+    let to: jid::Jid = "bob@example.com".parse().expect("valid jid");
+    for reference in [
+        ReplyReference::new("stanza-Y").with_to(to.clone()),
+        ReplyReference::new("origin-Y").with_to(to),
+        ReplyReference::new("id-only"),
+    ] {
         let local = full("alice@example.com/web");
         let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
-        msg.payloads.push(build_reply_element(
-            &ReplyReference::new(target).with_to("bob@example.com".parse().expect("valid jid")),
-        ));
+        msg.payloads.push(build_reply_element(&reference));
         let outcome = run(&local, &mut msg);
         assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
     }
-    // `to` is optional.
-    let local = full("alice@example.com/web");
-    let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
-    msg.payloads
-        .push(build_reply_element(&ReplyReference::new("id-only")));
-    let outcome = run(&local, &mut msg);
-    assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
 }
 
 #[test]

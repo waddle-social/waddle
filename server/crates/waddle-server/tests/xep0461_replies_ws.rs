@@ -12,14 +12,17 @@ const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
 static TEST_SERIAL: Mutex<()> = Mutex::const_new(());
 
+async fn connect(server: &TestServer, user: &str, password: &str) -> WsXmppClient {
+    let resource = format!("xep0461-{user}-{}", uuid::Uuid::new_v4());
+    WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, user, password, &resource)
+        .await
+        .expect("connect and auth")
+}
+
 async fn setup() -> (TestServer, WsXmppClient) {
     let server = TestServer::start();
-    let resource = format!("xep0461-{}", uuid::Uuid::new_v4());
     let password = server.fixed_account_password().to_string();
-    let client =
-        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, &resource)
-            .await
-            .expect("connect and auth");
+    let client = connect(&server, USERNAME, &password).await;
     (server, client)
 }
 
@@ -138,25 +141,24 @@ async fn setup_dm() -> (TestServer, WsXmppClient, WsXmppClient) {
     let bob_password = format!("ws-test-bob-password-{}", uuid::Uuid::new_v4());
     let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
     let admin_password = server.fixed_account_password().to_string();
-    let admin = WsXmppClient::connect_and_auth(
-        &server.ws_url(),
-        DOMAIN,
-        USERNAME,
-        &admin_password,
-        &format!("xep0461-admin-{}", uuid::Uuid::new_v4()),
-    )
-    .await
-    .expect("connect admin");
-    let bob = WsXmppClient::connect_and_auth(
-        &server.ws_url(),
-        DOMAIN,
-        "bob",
-        &bob_password,
-        &format!("xep0461-bob-{}", uuid::Uuid::new_v4()),
-    )
-    .await
-    .expect("connect bob");
+    let admin = connect(&server, USERNAME, &admin_password).await;
+    let bob = connect(&server, "bob", &bob_password).await;
     (server, admin, bob)
+}
+
+/// Sends a chat message from `sender` and returns the frame `recipient`
+/// receives carrying `marker`.
+async fn send_dm(
+    sender: &mut WsXmppClient,
+    recipient: &mut WsXmppClient,
+    stanza: &str,
+    marker: &str,
+) -> String {
+    sender.send(stanza).await.expect("send dm");
+    recipient
+        .recv_matching(|frame| frame.contains(marker))
+        .await
+        .expect("recipient receives dm")
 }
 
 #[tokio::test]
@@ -168,32 +170,24 @@ async fn one_to_one_reply_to_origin_id_is_delivered() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut admin, mut bob) = setup_dm().await;
 
-    admin
-        .send(&format!(
-            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-orig">
-                <body>dm question</body>
-                <origin-id xmlns="urn:xmpp:sid:0" id="dm-origin-1"/>
-            </message>"#
-        ))
-        .await
-        .expect("send original");
-    bob.recv_matching(|frame| frame.contains("dm question"))
-        .await
-        .expect("bob receives original");
-
-    admin
-        .send(&format!(
-            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-1">
-                <body>dm answer</body>
-                <reply xmlns="urn:xmpp:reply:0" to="bob@{DOMAIN}" id="dm-origin-1"/>
-            </message>"#
-        ))
-        .await
-        .expect("send reply");
-    let delivered = bob
-        .recv_matching(|frame| frame.contains("dm answer"))
-        .await
-        .expect("bob receives reply");
+    send_dm(
+        &mut admin,
+        &mut bob,
+        &format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-orig"><body>dm question</body><origin-id xmlns="urn:xmpp:sid:0" id="dm-origin-1"/></message>"#
+        ),
+        "dm question",
+    )
+    .await;
+    let delivered = send_dm(
+        &mut admin,
+        &mut bob,
+        &format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-1"><body>dm answer</body><reply xmlns="urn:xmpp:reply:0" to="bob@{DOMAIN}" id="dm-origin-1"/></message>"#
+        ),
+        "dm answer",
+    )
+    .await;
     assert!(delivered.contains("urn:xmpp:reply:0"), "{delivered}");
     assert!(delivered.contains("dm-origin-1"), "{delivered}");
 
@@ -208,19 +202,15 @@ async fn one_to_one_reply_without_to_or_known_target_is_delivered() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut admin, mut bob) = setup_dm().await;
 
-    admin
-        .send(&format!(
-            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-orphan">
-                <body>orphan dm reply</body>
-                <reply xmlns="urn:xmpp:reply:0" id="never-seen-id"/>
-            </message>"#
-        ))
-        .await
-        .expect("send reply");
-    let delivered = bob
-        .recv_matching(|frame| frame.contains("orphan dm reply"))
-        .await
-        .expect("bob receives reply");
+    let delivered = send_dm(
+        &mut admin,
+        &mut bob,
+        &format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-orphan"><body>orphan dm reply</body><reply xmlns="urn:xmpp:reply:0" id="never-seen-id"/></message>"#
+        ),
+        "orphan dm reply",
+    )
+    .await;
     assert!(delivered.contains("never-seen-id"), "{delivered}");
 
     let _ = admin.close().await;

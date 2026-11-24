@@ -196,20 +196,25 @@ fn zero_length_range_keeps_body_and_full_explicit_range_has_no_authored_text() {
     assert!(extracted(&message).is_none());
 }
 
+/// A reply with a hand-built `<reply/>` marker (optionally carrying `to`)
+/// followed by the given fallback.
+fn reply_with_marker(body: &str, author: Option<&str>, fallback: Element) -> Message {
+    let mut message = reply(body);
+    message.payloads.clear();
+    let mut marker = Element::builder("reply", NS_REPLY)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent");
+    if let Some(author) = author {
+        marker = marker.attr(minidom::rxml::xml_ncname!("to").to_owned(), author);
+    }
+    message.payloads.push(marker.build());
+    message.payloads.push(fallback);
+    message
+}
+
 #[test]
 fn reply_with_unparseable_author_retains_raw_body() {
     let body = "> quote\n\nvisible text";
-    let mut message = reply(body);
-    message.payloads.clear();
-    message.payloads.push(
-        Element::builder("reply", NS_REPLY)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent")
-            .attr(minidom::rxml::xml_ncname!("to").to_owned(), " ")
-            .build(),
-    );
-    message
-        .payloads
-        .push(explicit_fallback(Some("0"), Some("9")));
+    let message = reply_with_marker(body, Some(" "), explicit_fallback(Some("0"), Some("9")));
     assert_eq!(extracted(&message).expect("raw").as_str(), body);
 }
 
@@ -217,20 +222,15 @@ fn reply_with_unparseable_author_retains_raw_body() {
 fn reply_without_optional_author_still_strips_the_fallback() {
     // XEP-0461: the 'to' attribute is a SHOULD, only 'id' is required.
     let quote = "> quote\n\n";
-    let mut message = reply(&[quote, "visible text"].concat());
-    message.payloads.clear();
-    message.payloads.push(
-        Element::builder("reply", NS_REPLY)
-            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "parent")
-            .build(),
-    );
-    message
-        .payloads
-        .push(build_fallback_element(&FallbackIndication::for_range(
+    let message = reply_with_marker(
+        &[quote, "visible text"].concat(),
+        None,
+        build_fallback_element(&FallbackIndication::for_range(
             NS_REPLY,
             0,
             quote.chars().count(),
-        )));
+        )),
+    );
     assert_eq!(
         extracted(&message).expect("authored").as_str(),
         "visible text"
