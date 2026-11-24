@@ -105,7 +105,7 @@ impl WaddleWindow {
             self.draw_story_rail();
             if let Some(wire) = publish {
                 if let Err(message) = session.publish_story_reads(wire).await {
-                    tracing::debug!(%message, "could not store the seen stories");
+                    tracing::debug!(error = %message, "could not store the seen stories");
                 }
                 if imp.generation.get() != generation {
                     return;
