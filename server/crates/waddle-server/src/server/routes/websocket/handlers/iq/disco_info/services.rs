@@ -24,7 +24,16 @@ pub(super) fn handle_upload_disco_info<'a>(
 
     let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
     let features = upload_service_features();
-    let response = build_disco_info_response(req.request_iq, &identities, &features, None);
+    let max_size_form = waddle_xmpp::xep::xep0363::build_max_file_size_form(
+        crate::server::routes::uploads::max_upload_size(),
+    );
+    let response = build_disco_info_response_with_extensions(
+        req.request_iq,
+        &identities,
+        &features,
+        None,
+        &[max_size_form],
+    );
     Some(DiscoInfoResponse::iq(response))
 }
 

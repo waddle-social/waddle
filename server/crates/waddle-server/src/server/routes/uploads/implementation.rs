@@ -8,7 +8,7 @@ use super::Bytes;
 use super::Database;
 use super::IntoResponse;
 use super::Serialize;
-use super::{debug, error, info, instrument, warn};
+use super::{error, info, instrument, warn};
 use super::{get, put};
 use super::{header, HeaderMap, StatusCode};
 use super::{row_value, ValueExt};
@@ -129,6 +129,8 @@ pub enum UploadError {
     SlotAlreadyUsed(String),
     /// File size mismatch
     SizeMismatch { expected: i64, actual: i64 },
+    /// PUT Content-Type differs from the type declared in the slot request
+    ContentTypeMismatch { expected: String, actual: String },
     /// Storage error
     Storage(String),
     /// Database error
@@ -153,6 +155,16 @@ pub(in crate::server::routes::uploads) fn upload_error_to_response(
         UploadError::SlotAlreadyUsed(msg) => (
             StatusCode::CONFLICT,
             Json(ErrorResponse::new("slot_already_used", &msg)),
+        ),
+        UploadError::ContentTypeMismatch { expected, actual } => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(ErrorResponse::new(
+                "content_type_mismatch",
+                &format!(
+                    "Content-Type mismatch: slot declared '{}', got '{}'",
+                    expected, actual
+                ),
+            )),
         ),
         UploadError::SizeMismatch { expected, actual } => (
             StatusCode::BAD_REQUEST,
@@ -386,21 +398,25 @@ pub async fn upload_handler(
         .into_response();
     }
 
-    // Optionally validate Content-Type (but don't be too strict)
+    // XEP-0363 §5: reject the file if the Content-Type was specified in the
+    // slot request and does not match. Slots without a declared type store
+    // application/octet-stream, which accepts any PUT Content-Type.
     if let Some(content_type) = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
     {
-        // Only validate if it's not the default octet-stream
         if slot.content_type != "application/octet-stream"
-            && content_type != slot.content_type
-            && !content_type.starts_with(&slot.content_type)
+            && !waddle_xmpp::xep::xep0363::content_type_matches(&slot.content_type, content_type)
         {
-            debug!(
+            warn!(
                 "Content-Type mismatch for slot {}: expected '{}', got '{}'",
                 slot_id, slot.content_type, content_type
             );
-            // Don't fail on content-type mismatch, just log it
+            return upload_error_to_response(UploadError::ContentTypeMismatch {
+                expected: slot.content_type.clone(),
+                actual: content_type.to_string(),
+            })
+            .into_response();
         }
     }
 
