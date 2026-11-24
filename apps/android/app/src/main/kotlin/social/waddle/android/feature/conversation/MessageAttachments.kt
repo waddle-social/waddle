@@ -5,6 +5,17 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -219,12 +230,15 @@ private fun openSharedFile(
 
 /**
  * Full-screen image viewer on the night ground, edge to edge: the image
- * sits inside the system bars, a close button sits top-end, and a tap
- * anywhere or back also dismisses.
+ * sits inside the system bars and a close button sits top-end. Pinch zooms,
+ * one finger pans while zoomed, double-tap toggles zoom, and a single tap
+ * (when not zoomed) or back dismisses.
  */
 @Composable
 private fun MediaViewerDialog(model: Any, contentDescription: String?, onDismiss: () -> Unit) {
     val colors = Waddle.colors
+    var transform by remember { mutableStateOf(ViewerTransform()) }
+    var viewport by remember { mutableStateOf(Size.Zero) }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -233,7 +247,29 @@ private fun MediaViewerDialog(model: Any, contentDescription: String?, onDismiss
             modifier = Modifier
                 .fillMaxSize()
                 .background(colors.nightGround)
-                .clickable(onClickLabel = stringResource(R.string.media_viewer_close), onClick = onDismiss),
+                .onSizeChanged { viewport = Size(it.width.toFloat(), it.height.toFloat()) }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { if (!transform.isZoomed) onDismiss() },
+                        onDoubleTap = { tap -> transform = transform.toggled(viewport, tap) },
+                    )
+                }
+                .pointerInput(Unit) {
+                    // Pans only consume events while zoomed, so a single finger at
+                    // fit scale never competes with tap-to-dismiss.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        do {
+                            val event = awaitPointerEvent()
+                            val zoom = event.calculateZoom()
+                            val pan = event.calculatePan()
+                            if (event.changes.size > 1 || transform.isZoomed) {
+                                transform = transform.transformed(viewport, event.calculateCentroid(), pan, zoom)
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                },
         ) {
             AsyncImage(
                 model = model,
@@ -241,7 +277,13 @@ private fun MediaViewerDialog(model: Any, contentDescription: String?, onDismiss
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxSize()
-                    .systemBarsPadding(),
+                    .systemBarsPadding()
+                    .graphicsLayer {
+                        scaleX = transform.scale
+                        scaleY = transform.scale
+                        translationX = transform.offset.x
+                        translationY = transform.offset.y
+                    },
             )
             IconButton(
                 onClick = onDismiss,
