@@ -715,6 +715,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         // notifications leave for the subscriptions remote accounts made
         // themselves.
         crate::server::routes::websocket::s2s_spaces::host_spaces(&websocket_state, router);
+        // The notification outbox publishes to the Push Services of other
+        // servers through the router, and the services' answers decide
+        // whether their registrations stay enabled (XEP-0357 §5).
+        crate::server::routes::websocket::s2s_push::host_remote_push(&websocket_state, router);
         // The account side enables traffic between remote senders and
         // local accounts in both directions (gate G18).
         router.attach_accounts(Arc::new(

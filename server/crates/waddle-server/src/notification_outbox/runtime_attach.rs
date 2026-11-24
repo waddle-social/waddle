@@ -200,6 +200,7 @@ pub(super) async fn attach_existing(
     Ok(super::NotificationOutboxStore {
         db,
         owner_preparation: None,
+        remote_publisher: Default::default(),
     })
 }
 
