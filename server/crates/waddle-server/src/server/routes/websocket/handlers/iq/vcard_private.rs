@@ -1,8 +1,7 @@
 use super::{
     bad_format_iq_error, bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
     internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, not_authorized_iq_error,
-    row_value, warn, Arc, DbQueryOne, Element, FullJid, PubSubItem, VCardStore, Value, ValueExt,
-    WebSocketState,
+    row_value, warn, Arc, DbQueryOne, FullJid, VCardStore, Value, ValueExt, WebSocketState,
 };
 use waddle_xmpp::xep::xep0049::{self, PrivateStorageError};
 
@@ -161,54 +160,6 @@ pub(super) async fn handle_private_storage_iq(
             }
         };
 
-        if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
-            let stored_items = match state
-                .deps
-                .protocol
-                .pubsub_storage
-                .get_items(&bare_jid, waddle_xmpp::xep::xep0402::PEP_NODE, None, &[])
-                .await
-            {
-                Ok(items) => items,
-                Err(error) => {
-                    warn!(jid = %bare_jid, error = %error, "Failed to load PEP bookmarks");
-                    return vec![build_iq_error_xml_typed(
-                        iq.id(),
-                        response_from,
-                        response_to,
-                        internal_server_error_iq_error("Internal server error."),
-                    )];
-                }
-            };
-            let native_bookmarks: Vec<waddle_xmpp::xep::xep0402::Bookmark> = stored_items
-                .iter()
-                .filter_map(|item| {
-                    let xml = item.payload_xml.as_ref()?;
-                    let elem: Element = xml.parse().ok()?;
-                    waddle_xmpp::xep::xep0402::parse_bookmark(&item.id, &elem).ok()
-                })
-                .collect();
-            let legacy: Vec<waddle_xmpp::xep::xep0048::LegacyBookmark> = native_bookmarks
-                .iter()
-                .map(waddle_xmpp::xep::xep0048::from_native_bookmark)
-                .collect();
-            let bookmarks = waddle_xmpp::xep::xep0048::build_legacy_bookmarks_element(&legacy);
-            let value = match xep0049::PrivateStorageValue::from_element(bookmarks) {
-                Ok(value) => value,
-                Err(error) => {
-                    warn!(jid = %bare_jid, ?error, "Failed to build legacy private XML value");
-                    return vec![build_iq_error_xml_typed(
-                        iq.id(),
-                        response_from,
-                        response_to,
-                        internal_server_error_iq_error("Internal server error."),
-                    )];
-                }
-            };
-            let response = xep0049::build_private_storage_result(iq, Some(&value), &key);
-            return vec![iq_to_xml(response)];
-        }
-
         let row = match state
             .deps
             .app_state
@@ -287,19 +238,6 @@ pub(super) async fn handle_private_storage_iq(
         };
         let key = value.key.clone();
 
-        if waddle_xmpp::xep::xep0048::is_legacy_bookmarks_namespace(&key.namespace) {
-            if let Err(error) = replace_native_bookmarks(state, &bare_jid, &value.elements).await {
-                warn!(jid = %bare_jid, error = %error, "Failed to sync legacy bookmarks to PEP");
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-            return vec![iq_to_xml(xep0049::build_private_storage_success(iq))];
-        }
-
         let xml_content = value.to_xml_string();
         if let Err(error) = state
             .deps
@@ -331,48 +269,6 @@ pub(super) async fn handle_private_storage_iq(
         response_to,
         bad_request_iq_error("Malformed IQ payload."),
     )]
-}
-
-/// Replace the account's XEP-0402 bookmarks with the conferences in a legacy
-/// `storage:bookmarks` set (XEP-0049 replaces the whole stored element).
-///
-/// The pubsub storage offers no multi-item transaction, so a failure part-way
-/// leaves a partially applied list; the caller reports an error and the client
-/// is expected to retry the (idempotent) set. Publishes happen before
-/// retractions so a failure never drops bookmarks that are still wanted.
-async fn replace_native_bookmarks(
-    state: &WebSocketState,
-    bare_jid: &jid::BareJid,
-    elements: &[Element],
-) -> Result<(), waddle_xmpp::XmppError> {
-    let storage = &state.deps.protocol.pubsub_storage;
-    let node = waddle_xmpp::xep::xep0402::PEP_NODE;
-
-    let mut wanted: Vec<waddle_xmpp::xep::xep0402::Bookmark> = Vec::new();
-    for element in elements {
-        for legacy in waddle_xmpp::xep::xep0048::parse_legacy_bookmarks(element) {
-            if let Some(native) = waddle_xmpp::xep::xep0048::to_native_bookmark(&legacy) {
-                wanted.retain(|existing| existing.jid != native.jid);
-                wanted.push(native);
-            }
-        }
-    }
-
-    for native in &wanted {
-        let bookmark_elem = waddle_xmpp::xep::xep0402::build_bookmark_element(native);
-        let item = PubSubItem::new(Some(native.jid.to_string()), Some(bookmark_elem));
-        storage
-            .publish_item(bare_jid, node, &item, Some(bare_jid), true)
-            .await?;
-    }
-
-    let existing = storage.get_items(bare_jid, node, None, &[]).await?;
-    for stored in existing {
-        if !wanted.iter().any(|b| b.jid.to_string() == stored.id) {
-            storage.retract_item(bare_jid, node, &stored.id).await?;
-        }
-    }
-    Ok(())
 }
 
 fn private_storage_request_error(
