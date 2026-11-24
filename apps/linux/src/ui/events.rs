@@ -102,6 +102,7 @@ impl WaddleWindow {
     pub(super) fn show_calendar(&self) {
         let imp = self.imp();
         self.leave_inbox();
+        self.leave_admin();
         imp.calendar.borrow_mut().open = true;
         // Nothing is being read while the calendar is on screen.
         imp.current.replace(None);

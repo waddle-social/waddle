@@ -223,6 +223,16 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 ]
               }
 
+              [top]
+              ListBox admin_list {
+                row-activated => $on_admin_activated() swapped;
+                visible: false;
+
+                styles [
+                  "navigation-sidebar",
+                ]
+              }
+
               content: ScrolledWindow {
                 hscrollbar-policy: never;
 
@@ -456,6 +466,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 }
 
                 StackPage {
+                  name: "admin";
+
+                  child: Box admin_page {
+                    orientation: vertical;
+                  };
+                }
+
+                StackPage {
                   name: "timeline";
 
                   child: ScrolledWindow timeline_scroller {
@@ -611,6 +629,11 @@ template $WaddleWindow: Adw.ApplicationWindow {
 
 menu primary_menu {
   section {
+    item {
+      label: _("Preferences");
+      action: "app.preferences";
+    }
+
     item {
       label: _("Sign Out");
       action: "win.sign-out";
