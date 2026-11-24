@@ -7,6 +7,8 @@ mod images;
 mod judgments;
 mod media;
 mod membership;
+mod message_tools;
+mod notifications;
 mod people;
 mod person;
 mod pictures;

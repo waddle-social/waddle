@@ -74,6 +74,37 @@
   opacity: 0.55;
 }
 
+/* A pinned message, and one just jumped to. */
+.waddle-message.pinned {
+  box-shadow: inset 3px 0 0 alpha(var(--accent-bg-color), 0.7);
+}
+
+.waddle-message.jump-target {
+  background-color: alpha(var(--accent-bg-color), 0.16);
+}
+
+/* The message toolbar floats over a row's top corner on hover or focus. */
+.message-toolbar {
+  padding: 2px;
+  border-radius: 8px;
+  background-color: var(--popover-bg-color);
+  color: var(--popover-fg-color);
+  box-shadow: 0 1px 4px alpha(black, 0.25), 0 0 0 1px alpha(currentColor, 0.12);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.message-overlay:hover .message-toolbar,
+.message-overlay:focus-within .message-toolbar {
+  opacity: 1;
+}
+
+.message-toolbar button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 4px;
+}
+
 .waddle-message .sender {
   font-weight: 600;
 }

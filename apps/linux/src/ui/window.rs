@@ -71,11 +71,25 @@ mod imp {
         #[template_child]
         pub load_earlier: TemplateChild<gtk::Button>,
         #[template_child]
+        pub notify_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub timeline_view: TemplateChild<gtk::ListView>,
+        #[template_child]
+        pub pins_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub search_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub search_bar: TemplateChild<gtk::SearchBar>,
+        #[template_child]
+        pub search_entry: TemplateChild<gtk::SearchEntry>,
+        #[template_child]
+        pub search_results_scroller: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub search_results: TemplateChild<gtk::ListBox>,
         #[template_child]
         pub composer: TemplateChild<gtk::Box>,
         #[template_child]
@@ -109,6 +123,8 @@ mod imp {
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,
         pub unread: RefCell<HashMap<String, u32>>,
+        /// XEP-0492 modes and the desktop notifications on screen.
+        pub notifications: RefCell<crate::notify::Notifications>,
         /// Conversation keys whose unread count was modified by live events
         /// since the current connection's bootstrap started.
         pub live_unread_keys: RefCell<HashSet<String>>,
@@ -138,6 +154,8 @@ mod imp {
         /// Conversations with a history page in flight.
         pub loading_history: RefCell<HashSet<String>>,
         pub rows: RefCell<Option<gio::ListStore>>,
+        /// Pins, search and jumps (see ui/message_tools.rs).
+        pub tools: RefCell<crate::ui::message_tools::ToolsState>,
     }
 
     #[glib::object_subclass]

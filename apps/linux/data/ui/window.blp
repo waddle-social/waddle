@@ -287,12 +287,60 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 }
 
                 [end]
+                MenuButton notify_button {
+                  visible: false;
+                  icon-name: "preferences-system-notifications-symbolic";
+                  tooltip-text: _("Notifications");
+                  menu-model: notify_menu;
+                }
+
+                [end]
                 Button load_earlier {
                   visible: false;
                   label: _("Load Earlier");
                   tooltip-text: _("Load earlier conversation history");
                   clicked => $on_load_earlier() swapped;
                 }
+
+                [end]
+                ToggleButton search_button {
+                  visible: false;
+                  icon-name: "system-search-symbolic";
+                  tooltip-text: _("Search Messages (Ctrl+F)");
+                }
+
+                [end]
+                MenuButton pins_button {
+                  visible: false;
+                  icon-name: "view-pin-symbolic";
+                  tooltip-text: _("Pinned Messages");
+                }
+              }
+
+              [top]
+              SearchBar search_bar {
+                search-mode-enabled: bind search_button.active bidirectional;
+
+                child: SearchEntry search_entry {
+                  hexpand: true;
+                  placeholder-text: _("Search this conversation");
+                };
+              }
+
+              [top]
+              ScrolledWindow search_results_scroller {
+                visible: false;
+                hscrollbar-policy: never;
+                propagate-natural-height: true;
+                max-content-height: 280;
+
+                child: ListBox search_results {
+                  selection-mode: none;
+
+                  styles [
+                    "navigation-sidebar",
+                  ]
+                };
               }
 
               [top]
@@ -438,6 +486,30 @@ menu primary_menu {
     item {
       label: _("Quit");
       action: "app.quit";
+    }
+  }
+}
+
+menu notify_menu {
+  section {
+    label: _("Notify Me For");
+
+    item {
+      label: _("All Messages");
+      action: "win.notify-mode";
+      target: "always";
+    }
+
+    item {
+      label: _("Mentions Only");
+      action: "win.notify-mode";
+      target: "on-mention";
+    }
+
+    item {
+      label: _("Nothing (Mute)");
+      action: "win.notify-mode";
+      target: "never";
     }
   }
 }

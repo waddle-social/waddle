@@ -14,6 +14,7 @@
 //! Reconnection here is a stopgap with the ADR-0019 backoff curve. The
 //! shared `ConnectionController` replaces it.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,19 +24,20 @@ use waddle_client_session::{
     strip_fallback, Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo,
 };
 use waddle_xmpp_client_ffi::{
-    WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
-    WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleFallbackRange, WaddleInboxEntry, WaddleInboxMessageContent, WaddleInboxReadFilter,
-    WaddleMentionDirectory, WaddleMentionTarget, WaddleMessage, WaddleMessageAudience,
-    WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleSharedFile, WaddleStanzaId, WaddleStatusPreference, WaddleStickerHash, WaddleTopology,
-    WaddleUserSearchEntry,
+    WaddleArchivedMessage, WaddleBookmarkItem, WaddleCarbonDirection, WaddleChannel, WaddleClient,
+    WaddleClientEvent, WaddleConfig, WaddleDmBookmarkItem, WaddleEncryptedFile,
+    WaddleEncryptedFileHash, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry,
+    WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleMentionDirectory, WaddleMentionTarget,
+    WaddleMessage, WaddleMessageAudience, WaddlePresence, WaddleReplyTarget,
+    WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
+    WaddleStatusPreference, WaddleStickerHash, WaddleTopology, WaddleUserSearchEntry,
 };
 
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
 use crate::composer::Mentionable;
 use crate::judgments;
+use crate::notify::{self, NotifyMode, Stored};
 use crate::runtime;
 use crate::threads::{self, Thread};
 
@@ -270,10 +272,67 @@ impl Session {
         let _ = runtime::spawn(async move { client.disconnect().await }).await;
     }
 
-    pub async fn rooms(&self) -> Vec<Conversation> {
+    /// The rooms, and which of them are members-only (their XEP-0492
+    /// default notification mode differs).
+    pub async fn rooms(&self) -> (Vec<Conversation>, HashSet<String>) {
         let client = Arc::clone(&self.client);
         let topology = runtime::spawn(async move { client.discover_topology().await }).await;
-        topology.map(rooms_from).unwrap_or_default()
+        match topology {
+            Ok(topology) => {
+                let members_only = topology
+                    .channels
+                    .iter()
+                    .filter(|channel| channel.members_only == Some(true))
+                    .map(|channel| channel.room_jid.clone())
+                    .collect();
+                (rooms_from(topology), members_only)
+            }
+            _ => Default::default(),
+        }
+    }
+
+    /// The account's stored XEP-0492 modes for rooms and DMs.
+    pub async fn notify_bookmarks(&self) -> (Vec<WaddleBookmarkItem>, Vec<WaddleDmBookmarkItem>) {
+        let client = Arc::clone(&self.client);
+        let rooms = Arc::clone(&client);
+        let (rooms, directs) = tokio::join!(
+            runtime::spawn(async move { rooms.fetch_user_bookmarks().await }),
+            runtime::spawn(async move { client.fetch_dm_bookmarks().await }),
+        );
+        let rooms = rooms.ok().and_then(Result::ok).unwrap_or_default();
+        let directs = directs.ok().and_then(Result::ok).unwrap_or_default();
+        (rooms, directs)
+    }
+
+    /// Store a conversation's notification mode on the account. `None` if
+    /// the server did not take it.
+    pub async fn set_notify_mode(
+        &self,
+        conversation: &Conversation,
+        mode: NotifyMode,
+        rich: bool,
+    ) -> Option<Stored> {
+        let client = Arc::clone(&self.client);
+        let jid = conversation.jid.clone();
+        let name = conversation.name.clone();
+        match conversation.kind {
+            Kind::Room => runtime::spawn(async move {
+                client
+                    .set_room_notification_mode(jid, mode.ffi(), Some(name), rich)
+                    .await
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(notify::room_outcome),
+            Kind::Direct => runtime::spawn(async move {
+                client.set_dm_notification_mode(jid, mode.ffi(), rich).await
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(notify::dm_outcome),
+        }
     }
 
     /// XEP-0430 inbox: every conversation with its unread count.
@@ -1000,7 +1059,7 @@ fn timestamp_ms(raw: Option<&str>) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn me() -> Me {
@@ -1035,7 +1094,7 @@ mod tests {
         }
     }
 
-    fn wire(from: &str, kind: &str, body: &str) -> WaddleMessage {
+    pub(crate) fn wire(from: &str, kind: &str, body: &str) -> WaddleMessage {
         WaddleMessage {
             id: Some("m1".into()),
             from: Some(from.into()),

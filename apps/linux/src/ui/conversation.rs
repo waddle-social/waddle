@@ -8,7 +8,7 @@
 use adw::prelude::{
     ActionExt, ActionMapExt, ActionRowExt, AdjustmentExt, ApplicationExt, BoxExt, ButtonExt, Cast,
     CastNone, EntryExt, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
-    NavigationPageExt, ObjectExt, TextureExt, ToVariant, WidgetExt,
+    NavigationPageExt, ObjectExt, TextureExt, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::gio::prelude::FileExtManual;
@@ -47,7 +47,7 @@ impl Layout {
         day: false,
     };
 
-    fn of(timeline: &Timeline, at: usize, utc_offset_ms: i64) -> Self {
+    pub(super) fn of(timeline: &Timeline, at: usize, utc_offset_ms: i64) -> Self {
         let items = timeline.items();
         let local_day = |item: &TimelineItem| {
             (item.timestamp_ms + utc_offset_ms).div_euclid(24 * 60 * 60 * 1000)
@@ -90,6 +90,11 @@ impl WaddleWindow {
             item.set_child(Some(&widget));
             item.set_activatable(false);
             item.set_selectable(false);
+            // Arrow keys reach each message; Menu or Shift+F10 opens its actions.
+            item.set_focusable(true);
+            if let Some(parent) = widget.parent() {
+                super::message_tools::attach_menu_keys(&parent, item, &window);
+            }
         });
         let window = self.downgrade();
         factory.connect_bind(move |_, item| {
@@ -160,8 +165,10 @@ impl WaddleWindow {
                 window.read_current();
             }
         });
+        self.setup_notifications();
         self.setup_composer();
         self.setup_presence_input();
+        self.setup_message_tools();
     }
 
     pub(super) fn start_session(&self, account: &StoredAccount) {
@@ -210,12 +217,15 @@ impl WaddleWindow {
         imp.thread_roots.replace(Default::default());
         imp.thread_updates.replace(Default::default());
         imp.unread.replace(Default::default());
+        imp.notifications.borrow_mut().clear();
         imp.live_unread_keys.borrow_mut().clear();
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
         imp.images.replace(Default::default());
         imp.uploading.set(false);
         imp.loading_history.replace(Default::default());
+        self.reset_message_tools();
+        self.refresh_message_tools();
         self.cancel_compose();
         imp.profile.reset();
         self.refresh_account_row();
@@ -269,6 +279,7 @@ impl WaddleWindow {
                 imp.reconnect_attempt.set(0);
                 imp.live_unread_keys.borrow_mut().clear();
                 self.spawn_on_connected(generation, connect_epoch);
+                self.refresh_message_tools();
             }
             SessionEvent::Disconnected => {
                 imp.connect_epoch
@@ -276,6 +287,7 @@ impl WaddleWindow {
                 imp.connected.set(false);
                 self.presence_disconnected();
                 self.clear_membership();
+                self.reset_message_tools();
                 self.schedule_reconnect(generation);
             }
             SessionEvent::AuthenticationFailed => {
@@ -291,16 +303,20 @@ impl WaddleWindow {
                 else {
                     return;
                 };
+                if let Some(update) = crate::session_tools::pin_update(&message, &me) {
+                    return self.on_pin_update(update);
+                }
                 if let Some(arrival) = session::arrival(*message, &me) {
                     self.on_arrival(arrival);
                 }
             }
             SessionEvent::Inbox(entry) => self.update_inbox(&entry),
             SessionEvent::Presence(presence) => {
+                self.note_presence(&presence);
                 if imp.profile.book.borrow_mut().apply(&presence) {
                     self.refresh_people();
                 }
-                self.on_room_presence(*presence)
+                self.on_room_presence(*presence);
             }
             SessionEvent::AvatarChanged { jid, avatar_id } => {
                 self.on_avatar_changed(&jid, avatar_id.as_deref())
@@ -425,9 +441,7 @@ impl WaddleWindow {
             .entry(conversation.clone())
             .or_default() += 1;
         self.render_conversations();
-        if kind == Kind::Direct || mentions_me {
-            self.notify(&conversation, kind, &sender, &body);
-        }
+        self.announce_arrival(&destination, mentions_me, &sender, &body);
     }
 
     fn spawn_on_connected(&self, generation: u64, connect_epoch: u64) {
@@ -440,7 +454,8 @@ impl WaddleWindow {
         self.revalidate_avatars();
         let window = self.clone();
         glib::MainContext::default().spawn_local(async move {
-            let (rooms, inbox) = tokio::join!(session.rooms(), session.inbox());
+            let ((rooms, members_only), inbox, (bookmarks, directs)) =
+                tokio::join!(session.rooms(), session.inbox(), session.notify_bookmarks());
             let imp = window.imp();
             if imp.generation.get() != generation
                 || imp.connect_epoch.get() != connect_epoch
@@ -466,6 +481,10 @@ impl WaddleWindow {
                 }
             }
             imp.conversations.replace(conversations);
+            imp.notifications
+                .borrow_mut()
+                .load(&bookmarks, &directs, members_only);
+            window.refresh_notify_button();
             for entry in &inbox {
                 window.apply_inbox_entry(entry, true);
             }
@@ -508,18 +527,26 @@ impl WaddleWindow {
             imp.room_list.remove(&row);
         }
         let current = imp.current.borrow().clone();
-        let unread = imp.unread.borrow();
-        for conversation in imp.conversations.borrow().iter() {
-            let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
-            let picture = (conversation.kind == Kind::Direct)
-                .then(|| self.avatar_texture(&conversation.jid))
-                .flatten();
-            let row = conversation_row(conversation, unread, picture.as_ref());
-            imp.room_list.append(&row);
-            if current.as_deref() == Some(conversation.key().as_str()) {
-                imp.room_list.select_row(Some(&row));
+        {
+            let unread = imp.unread.borrow();
+            for conversation in imp.conversations.borrow().iter() {
+                let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
+                let picture = (conversation.kind == Kind::Direct)
+                    .then(|| self.avatar_texture(&conversation.jid))
+                    .flatten();
+                let row = conversation_row(
+                    conversation,
+                    unread,
+                    self.is_muted(conversation),
+                    picture.as_ref(),
+                );
+                imp.room_list.append(&row);
+                if current.as_deref() == Some(conversation.key().as_str()) {
+                    imp.room_list.select_row(Some(&row));
+                }
             }
         }
+        self.withdraw_read_notifications();
     }
 
     pub(super) fn conversation_at(&self, index: i32) -> Option<Conversation> {
@@ -564,6 +591,7 @@ impl WaddleWindow {
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
+        self.refresh_notify_button();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -578,6 +606,7 @@ impl WaddleWindow {
         self.rebuild_rows();
         self.refresh_history_controls();
         self.refresh_thread_context();
+        self.refresh_message_tools();
         self.scroll_to_end();
         if needs_history {
             self.load_history(conversation, None, HISTORY_SCAN_PAGES);
@@ -615,7 +644,7 @@ impl WaddleWindow {
 
     /// Tell the server this conversation is read, a moment from now, once
     /// for however many messages arrive meanwhile.
-    fn queue_read(&self, jid: &str) {
+    pub(super) fn queue_read(&self, jid: &str) {
         let imp = self.imp();
         if !imp.read_pending.borrow_mut().insert(jid.to_string()) {
             return;
@@ -639,31 +668,6 @@ impl WaddleWindow {
                 }
             }
         });
-    }
-
-    fn notify(&self, jid: &str, kind: Kind, sender: &str, body: &str) {
-        let Some(app) = self.application() else {
-            return;
-        };
-        let title = match kind {
-            Kind::Direct => sender.to_string(),
-            Kind::Room => {
-                let room = self
-                    .imp()
-                    .conversations
-                    .borrow()
-                    .iter()
-                    .find(|conversation| conversation.key() == jid)
-                    .map(|conversation| conversation.name.clone())
-                    .unwrap_or_default();
-                format!("{sender} in #{room}")
-            }
-        };
-        let notification = gio::Notification::new(&title);
-        notification.set_body(Some(body));
-        notification
-            .set_default_action_and_target_value("app.open-conversation", Some(&jid.to_variant()));
-        app.send_notification(Some(&notification_id(jid)), &notification);
     }
 
     fn refresh_history_controls(&self) {
@@ -731,6 +735,7 @@ impl WaddleWindow {
             let page = match result {
                 Ok(page) => page,
                 Err(message) => {
+                    window.cancel_jump();
                     window.toast(&message);
                     return;
                 }
@@ -807,6 +812,8 @@ impl WaddleWindow {
             if !page.complete && !had_content && advanced && remaining > 1 {
                 window.load_history(conversation, next_cursor, remaining - 1);
             }
+            // A jump to a pinned or searched message waits on older pages.
+            window.advance_jump();
         });
     }
 
@@ -957,7 +964,7 @@ impl WaddleWindow {
         }
     }
 
-    fn scroll_to(&self, index: usize) {
+    pub(super) fn scroll_to(&self, index: usize) {
         let Ok(index) = u32::try_from(index) else {
             return;
         };
@@ -997,6 +1004,7 @@ fn sidebar_title(conversation: &Conversation) -> String {
 fn conversation_row(
     conversation: &Conversation,
     unread: u32,
+    muted: bool,
     picture: Option<&gdk::Texture>,
 ) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
@@ -1041,6 +1049,13 @@ fn conversation_row(
         row.add_suffix(&badge);
         row.add_css_class("unread");
     }
+    if muted {
+        let icon = gtk::Image::from_icon_name("notifications-disabled-symbolic");
+        icon.set_valign(gtk::Align::Center);
+        icon.add_css_class("dim-label");
+        icon.set_tooltip_text(Some("Notifications are off"));
+        row.add_suffix(&icon);
+    }
     row
 }
 
@@ -1060,11 +1075,11 @@ fn section_header(kind: Kind) -> gtk::Label {
     label
 }
 
-fn boxed(item: TimelineItem, layout: Layout) -> glib::BoxedAnyObject {
+pub(super) fn boxed(item: TimelineItem, layout: Layout) -> glib::BoxedAnyObject {
     glib::BoxedAnyObject::new(Row { item, layout })
 }
 
-fn utc_offset_ms() -> i64 {
+pub(super) fn utc_offset_ms() -> i64 {
     glib::DateTime::now_local()
         .map(|now| now.utc_offset().as_milliseconds())
         .unwrap_or(0)
@@ -1219,8 +1234,14 @@ fn row_widget() -> gtk::Box {
     content.append(&thread);
     row.append(&gutter);
     row.append(&content);
+    // The toolbar floats over the row's top corner while the pointer or
+    // keyboard focus is on it (see style.css).
+    let overlay = gtk::Overlay::new();
+    overlay.add_css_class("message-overlay");
+    overlay.set_child(Some(&row));
+    overlay.add_overlay(&super::message_tools::new_toolbar());
     outer.append(&day);
-    outer.append(&row);
+    outer.append(&overlay);
     outer
 }
 
@@ -1231,6 +1252,7 @@ struct RowParts {
     day: gtk::Box,
     day_label: gtk::Label,
     row: gtk::Box,
+    toolbar: gtk::Box,
     gutter: gtk::Stack,
     avatar: adw::Avatar,
     gutter_time: gtk::Label,
@@ -1249,7 +1271,9 @@ struct RowParts {
 
 fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
     let day = widget.first_child().and_downcast::<gtk::Box>()?;
-    let row = day.next_sibling().and_downcast::<gtk::Box>()?;
+    let overlay = day.next_sibling().and_downcast::<gtk::Overlay>()?;
+    let row = overlay.child().and_downcast::<gtk::Box>()?;
+    let toolbar = overlay.last_child().and_downcast::<gtk::Box>()?;
     let gutter = row.first_child().and_downcast::<gtk::Stack>()?;
     let content = gutter.next_sibling()?;
     let header = content.first_child().and_downcast::<gtk::Box>()?;
@@ -1269,6 +1293,7 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
         reply_label: reply.last_child().and_downcast()?,
         day,
         row,
+        toolbar,
         gutter,
         header,
         reply,
@@ -1317,7 +1342,7 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
             } else {
                 match reply.snippet.as_deref() {
                     Some(snippet) if super::media::is_media_only(snippet) => "Photo".to_string(),
-                    Some(snippet) => snippet.to_string(),
+                    Some(snippet) => crate::message_text::preview(who, snippet),
                     None => "Original message not loaded".to_string(),
                 }
             };
@@ -1336,8 +1361,22 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         body.remove_css_class(class);
     }
     parts.row.remove_css_class("sending");
+    let (pinned, jumped) = window.upgrade().map_or((false, false), |window| {
+        (window.is_pinned(item), window.is_highlighted(item))
+    });
+    for (class, on) in [
+        ("pinned", pinned && !item.retracted),
+        ("jump-target", jumped),
+    ] {
+        if on {
+            parts.row.add_css_class(class);
+        } else {
+            parts.row.remove_css_class(class);
+        }
+    }
     super::media::bind(&parts.media, &item.body, item.retracted);
     bind_reactions(window, &parts.reactions, item);
+    super::message_tools::bind_toolbar(window, &parts.toolbar, widget, item);
     super::judgments::bind(&parts.judgments, item);
     // Replace the button on each bind so recycled rows retain no old target.
     let button = gtk::Button::builder()
@@ -1376,15 +1415,9 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     }
     let mut markup = if super::media::is_media_only(&item.body) {
         String::new()
-    } else if let Some(action) = crate::composer::me_action(&item.body) {
-        // XEP-0245: "* sender action".
-        format!(
-            "<i>* {} {}</i>",
-            glib::markup_escape_text(&item.sender),
-            body_markup(action)
-        )
     } else {
-        body_markup(&item.body)
+        // XEP-0245 actions read "* sender action", in italics.
+        crate::message_text::message_markup(&item.sender, &item.body)
     };
     let mut note = |text: &str| {
         if !markup.is_empty() {
@@ -1394,6 +1427,9 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     };
     if item.edited {
         note("(edited)");
+    }
+    if pinned {
+        note("· Pinned");
     }
     match item.delivery {
         Delivery::Sending => parts.row.add_css_class("sending"),
@@ -1406,37 +1442,6 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     }
     body.set_visible(!markup.is_empty());
     body.set_markup(&markup);
-}
-
-/// The body as Pango markup, with its web links clickable.
-fn body_markup(body: &str) -> String {
-    let mut markup = String::with_capacity(body.len());
-    let mut rest = body;
-    while !rest.is_empty() {
-        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        let (word, after) = rest.split_at(word_end);
-        let space_end = after
-            .find(|c: char| !c.is_whitespace())
-            .unwrap_or(after.len());
-        let (space, after) = after.split_at(space_end);
-        // Trailing punctuation usually ends the sentence, not the link.
-        let link_end = word
-            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"'])
-            .len();
-        let (link, trailing) = word.split_at(link_end);
-        let is_link = (link.starts_with("https://") || link.starts_with("http://"))
-            && url::Url::parse(link).is_ok();
-        if is_link {
-            let escaped = glib::markup_escape_text(link);
-            markup.push_str(&format!("<a href=\"{escaped}\">{escaped}</a>"));
-            markup.push_str(&glib::markup_escape_text(trailing));
-        } else {
-            markup.push_str(&glib::markup_escape_text(word));
-        }
-        markup.push_str(&glib::markup_escape_text(space));
-        rest = after;
-    }
-    markup
 }
 
 /// One toggle chip per emoji; clicking toggles the user's own reaction.
