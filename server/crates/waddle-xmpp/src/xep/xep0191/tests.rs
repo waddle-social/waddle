@@ -10,6 +10,18 @@ fn jid(value: &str) -> Jid {
     value.parse().expect("valid jid")
 }
 
+fn plain_items(values: &[&str]) -> BlockingRequest {
+    BlockingRequest::Block(
+        values
+            .iter()
+            .map(|value| super::BlockItem {
+                jid: jid(value),
+                report: None,
+            })
+            .collect(),
+    )
+}
+
 fn blocking_item(value: &str) -> Element {
     Element::builder("item", NS_BLOCKING)
         .attr(minidom::rxml::xml_ncname!("jid").to_owned(), value)
@@ -107,7 +119,7 @@ fn test_parse_block_request_uses_typed_jids() {
 
     assert_eq!(
         parse_blocking_request(&iq).unwrap(),
-        BlockingRequest::Block(vec![jid("romeo@montague.net"), jid("iago@shakespeare.lit")])
+        plain_items(&["romeo@montague.net", "iago@shakespeare.lit"])
     );
 }
 
@@ -125,11 +137,11 @@ fn test_parse_block_request_accepts_bare_full_and_domain_jids() {
 
     assert_eq!(
         parse_blocking_request(&iq).unwrap(),
-        BlockingRequest::Block(vec![
-            jid("romeo@montague.net"),
-            jid("romeo@montague.net/balcony"),
-            jid("montague.net"),
-            jid("montague.net/courtyard")
+        plain_items(&[
+            "romeo@montague.net",
+            "romeo@montague.net/balcony",
+            "montague.net",
+            "montague.net/courtyard",
         ])
     );
 }

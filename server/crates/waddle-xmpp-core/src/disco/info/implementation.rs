@@ -488,6 +488,7 @@ pub fn server_features() -> Vec<Feature> {
         Feature::vcard4(),
         Feature::http_upload(),
         Feature::blocking(),
+        Feature::reporting(),
         Feature::last_activity(),
         Feature::ping(),
         Feature::entity_time(),

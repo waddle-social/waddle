@@ -53,6 +53,8 @@ use minidom::Element;
 use std::collections::HashMap;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
+
+use super::xep0377::{is_report_element, parse_report, Report};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Namespace for XEP-0191 Blocking Command.
@@ -202,13 +204,23 @@ impl BlockingStorage for InMemoryBlockingStorage {
     }
 }
 
+/// One `<item/>` of a `<block/>` request: the JID and, per XEP-0377 §5, an
+/// optional abuse report about that JID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockItem {
+    /// The JID to block.
+    pub jid: Jid,
+    /// The XEP-0377 report attached to this item, if any.
+    pub report: Option<Report>,
+}
+
 /// Request type for blocking operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockingRequest {
     /// Get the current blocklist
     GetBlocklist,
-    /// Block one or more JIDs
-    Block(Vec<Jid>),
+    /// Block one or more JIDs, each optionally reported (XEP-0377)
+    Block(Vec<BlockItem>),
     /// Unblock one or more JIDs (empty vec means unblock all)
     Unblock(Vec<Jid>),
 }
@@ -228,6 +240,10 @@ pub enum BlockingBadRequest {
     MissingItemJid,
     /// An `<item/>` child contained a malformed XMPP JID.
     MalformedItemJid,
+    /// An `<item/>` carried a malformed XEP-0377 `<report/>`.
+    MalformedReport,
+    /// An `<item/>` carried more than one XEP-0377 `<report/>`.
+    MultipleReports,
     /// A `<block/>`, `<unblock/>`, or `<blocklist/>` child was not a blocking `<item/>`.
     UnexpectedChild,
     /// The stanza was not an IQ get or set request.
@@ -243,6 +259,8 @@ impl std::fmt::Display for BlockingBadRequest {
             BlockingBadRequest::MissingBlockItem => "block request must contain at least one item",
             BlockingBadRequest::MissingItemJid => "item element missing jid attribute",
             BlockingBadRequest::MalformedItemJid => "item element contains malformed jid",
+            BlockingBadRequest::MalformedReport => "item element contains a malformed report",
+            BlockingBadRequest::MultipleReports => "item element contains more than one report",
             BlockingBadRequest::UnexpectedChild => "blocking element contains unexpected child",
             BlockingBadRequest::ExpectedIqGetOrSet => "expected IQ get or set for blocking",
         };
@@ -342,19 +360,21 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
                 return Err(BlockingBadRequest::InvalidNamespace.into());
             }
 
-            let jids = extract_jids_from_element(elem)?;
-
             match elem.name() {
                 "block" => {
-                    if jids.is_empty() {
+                    let items = extract_items_from_element(elem, true)?;
+                    if items.is_empty() {
                         Err(BlockingBadRequest::MissingBlockItem.into())
                     } else {
-                        Ok(BlockingRequest::Block(jids))
+                        Ok(BlockingRequest::Block(items))
                     }
                 }
                 "unblock" => {
                     // Empty unblock means unblock all
-                    Ok(BlockingRequest::Unblock(jids))
+                    let items = extract_items_from_element(elem, false)?;
+                    Ok(BlockingRequest::Unblock(
+                        items.into_iter().map(|item| item.jid).collect(),
+                    ))
                 }
                 _ => Err(BlockingBadRequest::UnknownElement.into()),
             }
@@ -363,29 +383,47 @@ pub fn parse_blocking_request(iq: &Iq) -> Result<BlockingRequest, BlockingError>
     }
 }
 
-/// Extract JIDs from item children of a blocking element.
-fn extract_jids_from_element(elem: &Element) -> Result<Vec<Jid>, BlockingError> {
-    let mut jids = Vec::new();
+/// Extract the `<item/>` children of a blocking element.
+///
+/// With `allow_reports`, an item may carry one XEP-0377 `<report/>` child
+/// (only `<block/>` does; `<unblock/>` items stay empty).
+fn extract_items_from_element(
+    elem: &Element,
+    allow_reports: bool,
+) -> Result<Vec<BlockItem>, BlockingError> {
+    let mut items = Vec::new();
 
     for child in elem.children() {
         if child.name() != "item" || child.ns() != NS_BLOCKING {
             return Err(BlockingBadRequest::UnexpectedChild.into());
         }
-        if child.children().next().is_some() || !child.text().is_empty() {
+        if !child.text().trim().is_empty() {
             return Err(BlockingBadRequest::UnexpectedChild.into());
         }
-        if let Some(jid) = child.attr("jid") {
-            let jid = jid
-                .parse::<Jid>()
-                .map_err(|_| BlockingError::from(BlockingBadRequest::MalformedItemJid))?;
-            jids.push(jid);
-        } else {
-            return Err(BlockingBadRequest::MissingItemJid.into());
+        let mut report = None;
+        for grandchild in child.children() {
+            if !allow_reports || !is_report_element(grandchild) {
+                return Err(BlockingBadRequest::UnexpectedChild.into());
+            }
+            if report.is_some() {
+                return Err(BlockingBadRequest::MultipleReports.into());
+            }
+            report = Some(
+                parse_report(grandchild)
+                    .map_err(|_| BlockingError::from(BlockingBadRequest::MalformedReport))?,
+            );
         }
+        let Some(jid) = child.attr("jid") else {
+            return Err(BlockingBadRequest::MissingItemJid.into());
+        };
+        let jid = jid
+            .parse::<Jid>()
+            .map_err(|_| BlockingError::from(BlockingBadRequest::MalformedItemJid))?;
+        items.push(BlockItem { jid, report });
     }
 
-    debug!(count = jids.len(), "Extracted JIDs from blocking element");
-    Ok(jids)
+    debug!(count = items.len(), "Extracted items from blocking element");
+    Ok(items)
 }
 
 /// Build a blocklist response IQ.

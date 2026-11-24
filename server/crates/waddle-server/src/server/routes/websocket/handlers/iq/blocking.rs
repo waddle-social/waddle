@@ -77,7 +77,8 @@ pub(super) async fn handle_blocking_iq(
                 }
             };
         }
-        waddle_xmpp::xep::xep0191::BlockingRequest::Block(jids) => {
+        waddle_xmpp::xep::xep0191::BlockingRequest::Block(items) => {
+            let jids: Vec<Jid> = items.iter().map(|item| item.jid.clone()).collect();
             if let Err(error) = storage.add_blocks(&user_bare, &jids).await {
                 mark_span_error("failed to add blocks");
                 warn!(jid = %user_bare, error = %error, "Failed to add blocks");
@@ -87,6 +88,13 @@ pub(super) async fn handle_blocking_iq(
                     response_to,
                     internal_server_error_iq_error("Internal server error."),
                 )];
+            }
+            // XEP-0377 §5: the JID is blocked first, exactly as without a
+            // report; the report is then recorded for the operator.
+            for item in &items {
+                if let Some(report) = &item.report {
+                    waddle_xmpp::xep::xep0377::record_report(&user_bare, &item.jid, report);
+                }
             }
             send_blocking_presence_side_effects(state, &user_bare, &jids, true, None).await;
             // A remote sender the account blocks is not presented its
