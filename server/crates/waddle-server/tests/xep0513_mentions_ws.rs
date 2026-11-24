@@ -537,7 +537,7 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         NotificationThreadId,
     };
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
-    use waddle_xmpp::xep::{build_mention_element, generate_occupant_id, ExplicitMention};
+    use waddle_xmpp::xep::{build_mention_markup, generate_occupant_id, ExplicitMention};
 
     let owner = "juliet@example.com".parse().expect("owner");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
@@ -549,7 +549,7 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         let mut mention = ExplicitMention::occupant_id(occupant.as_str());
         mention.noping = noping;
         let mut envelope = xmpp_parsers::message::Message::new(None);
-        envelope.payloads.push(build_mention_element(&mention));
+        envelope.payloads.push(build_mention_markup(&mention));
         let candidate = candidate_from_envelope(
             &envelope,
             GroupchatCandidateIdentity {
@@ -707,9 +707,14 @@ async fn mention_count_cap_bounds_offline_non_member_inbox_rows() {
 
     // Five XEP-0513 occupant-id targets plus one XEP-0372 reference to
     // carol exceed the cap of five, so every mention is ignored.
-    let over_cap = (0..5)
-        .map(|_| format!(r#"<mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>"#))
-        .collect::<String>();
+    let over_cap = format!(
+        r#"<markup xmlns="urn:xmpp:markup:0">{}</markup>"#,
+        (0..5)
+            .map(|_| format!(
+                r#"<span start="0" end="6"><mention xmlns="urn:xmpp:mentions:0" type="urn:xmpp:mentions:0#occupant" target="{occupant_id}"/></span>"#
+            ))
+            .collect::<String>()
+    );
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-nm-1">
@@ -731,7 +736,9 @@ async fn mention_count_cap_bounds_offline_non_member_inbox_rows() {
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-nm-2">
                 <body>@admin @peer please check</body>
-                <mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>
+                <markup xmlns="urn:xmpp:markup:0">
+                    <span start="0" end="6"><mention xmlns="urn:xmpp:mentions:0" type="urn:xmpp:mentions:0#occupant" target="{occupant_id}"/></span>
+                </markup>
                 <reference xmlns="urn:xmpp:reference:0" type="mention" uri="xmpp:peer@localhost"/>
             </message>"#
         ))
