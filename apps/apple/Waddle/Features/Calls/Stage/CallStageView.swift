@@ -114,7 +114,7 @@ struct CallStageView: View {
     /// The indicator of a live call. While it reconnects, the header's own status says so.
     private var connectionChip: CallConnectionChip? {
         guard case .inCall = status, let connection else { return nil }
-        return CallConnectionChip(quality: connection, isReconnecting: false)
+        return CallConnectionChip(quality: connection)
     }
 
     /// What VoiceOver says when the status changes; never the ticking clock.
@@ -158,7 +158,8 @@ struct CallConnectionIndicator: View {
     }
 
     private var color: Color {
-        switch chip.tone {
+        if chip.isHealthy { return Theme.Colors.presenceAvailable }
+        return switch chip.tone {
         case .neutral: Theme.Colors.fgMuted
         case .warning: Theme.Colors.warningText
         case .danger: Theme.Colors.dangerText
@@ -196,7 +197,8 @@ private struct CallStageHeader: View {
             }
             .lineLimit(1)
             Spacer(minLength: Theme.Spacing.s)
-            if let connection { CallConnectionIndicator(chip: connection) }
+            // Never squeezed: a long room name gives way, not the word that the connection is lost.
+            if let connection { CallConnectionIndicator(chip: connection).fixedSize() }
             statusText
                 .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.xs))
                 .monospacedDigit()

@@ -46,6 +46,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
     private(set) var connectionQuality = CallConnectionQuality.unknown
+    /// A reconnect has begun and the server has not rated the new
+    /// connection yet: the SDK still holds the rating of the old one.
+    @ObservationIgnored private var awaitsConnectionRating = false
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
     /// The screens other people share, by who shares them.
@@ -588,6 +591,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }
+        awaitsConnectionRating = false
         appliedAudioProcessing = nil
         audioProcessingPublications = []
         #if os(macOS)
@@ -609,6 +613,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             wasEndedByServer = endedByServer
             onFailure?()
         case .reconnecting:
+            awaitsConnectionRating = true
             phase = .reconnecting
             refreshParticipants()
         case .reconnected:
@@ -622,6 +627,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         case .tracks:
             reconcileTracks(in: changed)
         case .participants:
+            refreshParticipants()
+        case .ownConnectionRated:
+            awaitsConnectionRating = false
             refreshParticipants()
         }
     }
@@ -754,13 +762,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             if connectionQuality != .unknown { connectionQuality = .unknown }
             return
         }
-        let quality: CallConnectionQuality = switch room.localParticipant.connectionQuality {
+        let rated: CallConnectionQuality = switch room.localParticipant.connectionQuality {
         case .excellent: .excellent
         case .good: .good
         case .poor: .poor
         case .lost: .lost
         case .unknown: .unknown
         }
+        let quality = awaitsConnectionRating ? .unknown : rated
         if connectionQuality != quality { connectionQuality = quality }
         // Ours first, then everyone else in the order they joined, so the
         // roster keeps its order from one report to the next.
@@ -878,6 +887,8 @@ private enum RoomChange {
     case tracks
     /// Someone joined, or the SDK reported who is speaking and how loudly.
     case participants
+    /// The server rated our own connection.
+    case ownConnectionRated
 }
 
 /// Hands room events to the controller as an ordered stream. The
@@ -956,7 +967,8 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
         forward(.participants, from: room)
     }
 
-    func room(_ room: Room, participant _: Participant, didUpdateConnectionQuality _: ConnectionQuality) {
-        forward(.participants, from: room)
+    func room(_ room: Room, participant: Participant, didUpdateConnectionQuality _: ConnectionQuality) {
+        // Only ours is shown.
+        if participant is LocalParticipant { forward(.ownConnectionRated, from: room) }
     }
 }
