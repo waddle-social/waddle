@@ -1,4 +1,5 @@
 import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
+import { useChatStatePreference } from "@/preferences/chat-states";
 import type { BrowserXmppClient, DmConversationScope } from "@/lib/xmpp-client";
 
 // XEP-0085 chat-state notifications for the DM side. Mirrors
@@ -16,6 +17,10 @@ const COMPOSING_PAUSE_MS = 3000;
 
 export function useDmChatStates(deps: UseDmChatStatesDeps) {
   const { xmppClient, activePeerJid, conversationScope } = deps;
+
+  // XEP-0085 §5.1: users must be able to disable chat state notifications.
+  // When disabled, nothing is sent (composing, paused, or active).
+  const { sendChatStates } = useChatStatePreference();
 
   const typingUsers = ref<string[]>([]);
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -67,7 +72,7 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
   function notifyComposing(thread?: { id: string; parent?: string }) {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
-    if (!client || !peerJid) return;
+    if (!client || !peerJid || !sendChatStates.value) return;
     const scope = conversationScope?.(peerJid) ?? "account";
     if (lastChatState !== "composing") {
       lastChatState = "composing";
@@ -76,6 +81,7 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     if (composingTimeout) clearTimeout(composingTimeout);
     composingTimeout = setTimeout(() => {
       if (xmppClient.value !== client || activePeerJid.value !== peerJid) return;
+      if (!sendChatStates.value) return;
       lastChatState = "paused";
       void client.sendDmChatState(peerJid, "paused", thread, scope).catch(() => undefined);
     }, COMPOSING_PAUSE_MS);

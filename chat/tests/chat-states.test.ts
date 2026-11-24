@@ -164,3 +164,61 @@ describe("useDmChatStates", () => {
     expect(sendDmChatState).not.toHaveBeenCalled();
   });
 });
+
+describe("XEP-0085 §5.1 — user can disable chat state notifications", () => {
+  test("channel: no composing or paused is sent when the preference is suppress", async () => {
+    const { useChatStatePreference } = await import("../src/preferences/chat-states");
+    const pref = useChatStatePreference();
+    pref.setChatStatePreference("suppress");
+    try {
+      const send = mock(async () => undefined);
+      const states = withScope(() => useChannelChatStates({
+        xmppClient: ref<BrowserXmppClient | null>(makeChannelClient(send)),
+        activeSpaceId: ref("space"),
+        activeChannelId: ref("general"),
+      }));
+      states.notifyComposing();
+      await new Promise((resolve) => setTimeout(resolve, 3100));
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      pref.setChatStatePreference("send");
+    }
+  });
+
+  test("dm: no composing or paused is sent when the preference is suppress", async () => {
+    const { useChatStatePreference } = await import("../src/preferences/chat-states");
+    const pref = useChatStatePreference();
+    pref.setChatStatePreference("suppress");
+    try {
+      const send = mock(async () => undefined);
+      const states = withScope(() => useDmChatStates({
+        xmppClient: ref<BrowserXmppClient | null>(makeDmClient(send)),
+        activePeerJid: ref("alice@example.com"),
+      }));
+      states.notifyComposing();
+      await new Promise((resolve) => setTimeout(resolve, 3100));
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      pref.setChatStatePreference("send");
+    }
+  });
+
+  test("turning the preference off mid-typing cancels the pending paused", async () => {
+    const { useChatStatePreference } = await import("../src/preferences/chat-states");
+    const pref = useChatStatePreference();
+    const send = mock(async () => undefined);
+    const states = withScope(() => useDmChatStates({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(send)),
+      activePeerJid: ref("alice@example.com"),
+    }));
+    states.notifyComposing();
+    expect(send).toHaveBeenCalledTimes(1);
+    pref.setChatStatePreference("suppress");
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 3100));
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      pref.setChatStatePreference("send");
+    }
+  });
+});
