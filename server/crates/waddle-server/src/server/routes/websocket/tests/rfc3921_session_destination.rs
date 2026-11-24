@@ -317,7 +317,7 @@ async fn foreign_session_before_binding_is_refused_as_not_authorized() {
 }
 
 #[tokio::test]
-async fn unregistered_session_namespace_keeps_feature_fallback() {
+async fn unregistered_session_namespace_gets_service_unavailable_fallback() {
     let mut state = create_test_websocket_state().await;
     Arc::get_mut(&mut state)
         .expect("exclusive state")
@@ -331,11 +331,11 @@ async fn unregistered_session_namespace_keeps_feature_fallback() {
     // consulted, registered or not.)
     let replies = dispatch(&state, &mut conn, request(None, true, Some(ORIGIN))).await;
     let [Iq::Error { error, .. }] = replies.as_slice() else {
-        panic!("feature fallback: {replies:?}")
+        panic!("namespace fallback: {replies:?}")
     };
     assert_eq!(
         error.defined_condition,
-        DefinedCondition::FeatureNotImplemented
+        DefinedCondition::ServiceUnavailable
     );
     assert!(error.by.is_none());
 }

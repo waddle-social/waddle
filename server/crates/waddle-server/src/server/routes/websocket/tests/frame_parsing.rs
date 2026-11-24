@@ -980,7 +980,7 @@ async fn handle_xmpp_frame_drops_whitespace_padded_oversized_input() {
 }
 
 #[tokio::test]
-async fn handle_xmpp_frame_invalid_iq_returns_feature_not_implemented() {
+async fn handle_xmpp_frame_unknown_iq_payload_returns_service_unavailable() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
 
@@ -995,7 +995,7 @@ async fn handle_xmpp_frame_invalid_iq_returns_feature_not_implemented() {
     assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
     assert!(responses[0].contains("type='error'"));
     assert!(responses[0].contains("id='bad-iq'"));
-    assert!(responses[0].contains("feature-not-implemented"));
+    assert!(responses[0].contains("service-unavailable"));
 }
 
 #[tokio::test]
