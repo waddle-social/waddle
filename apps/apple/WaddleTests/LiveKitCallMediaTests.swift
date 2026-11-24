@@ -163,6 +163,32 @@ final class LiveKitCallMediaTests: XCTestCase {
         await bob.disconnect()
     }
 
+    func testResetAllReachesSomeoneWhoHasLeftAndComesBack() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = LiveKitCallMediaController()
+        let bob = LiveKitCallMediaController()
+        let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/phone")
+        let none = CallMedia(audio: false, video: false)
+
+        try await bob.connect(join: bobJoin, media: none, iceServers: [])
+        try await alice.connect(join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: none, iceServers: [])
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        XCTAssertFalse(alice.hasChangedVolumes)
+        alice.setVolume(0, of: bobJoin.identity)
+        await bob.disconnect()
+        try await until { alice.participants.count == 1 }
+        XCTAssertTrue(alice.hasChangedVolumes, "a silenced person who left is still silenced")
+
+        alice.resetVolumes()
+        XCTAssertFalse(alice.hasChangedVolumes)
+        try await bob.connect(join: bobJoin, media: none, iceServers: [])
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        XCTAssertEqual(alice.participants.last?.volume, 1)
+        await alice.disconnect()
+        await bob.disconnect()
+    }
+
     private func until(timeout: Duration = .seconds(10), _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while !condition() {

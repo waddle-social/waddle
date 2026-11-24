@@ -148,6 +148,54 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    // MARK: - Participants
+
+    private static let roster: [CallStageTile] = [
+        you, tile("linus", isSpeaking: true, hasVideo: true), tile("grace", isMuted: true, isHandRaised: true), ken,
+    ]
+
+    /// Linus turned up, Grace silenced, Ken not yet in the media session.
+    private static func rows(of tiles: [CallStageTile]) -> [CallParticipantRow] {
+        CallParticipantRows.make(tiles: tiles, audio: audio)
+    }
+
+    private static let audio = [
+        CallParticipantAudio(identity: you.identity, hasMicrophone: true, volume: 1),
+        CallParticipantAudio(identity: roster[1].identity, hasMicrophone: true, volume: 1.4),
+        CallParticipantAudio(identity: roster[2].identity, hasMicrophone: true, volume: 0),
+    ]
+
+    #if os(macOS)
+    /// Drawn in a window: `ImageRenderer` leaves a scroll view and a slider blank.
+    private func assertParticipants(
+        tiles: [CallStageTile] = roster, coverTiles: Bool, size: CGSize, testName: String = #function, line: UInt = #line
+    ) async throws {
+        try await assertScreenSnapshot(
+            of: CallStageView(
+                title: "#design", subtitle: "3 others in call", status: .inCall(since: nil), tiles: tiles,
+                size: .expanded, participants: Self.rows(of: tiles), canResetVolumes: true, participantsCoverTiles: coverTiles, isMicrophoneOn: true,
+                isHandRaised: false, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+            ),
+            size: size, testName: testName, line: line
+        )
+    }
+
+    func testRoomExpandedWithParticipants() async throws {
+        try await assertParticipants(coverTiles: false, size: CGSize(width: 1000, height: 640))
+    }
+
+    /// The "+N more" tile stays a plain button beside the open panel.
+    func testRoomFullGalleryBesideParticipants() async throws {
+        let crowd = Self.roster + ["mika", "ada", "tim", "joan", "alan", "edsger", "barbara"].map { Self.tile($0) }
+        try await assertParticipants(tiles: crowd, coverTiles: false, size: CGSize(width: 1000, height: 640))
+    }
+
+    /// Too narrow for both: the panel takes the tiles' place.
+    func testRoomParticipantsInANarrowStage() async throws {
+        try await assertParticipants(coverTiles: true, size: CGSize(width: 560, height: 640))
+    }
+    #endif
+
     // MARK: - Control bar
 
     private func assertBar(

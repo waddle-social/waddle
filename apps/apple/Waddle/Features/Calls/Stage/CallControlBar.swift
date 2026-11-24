@@ -9,6 +9,9 @@ struct CallStageActions {
     let setViewMode: @MainActor (CallStagePresentation.ViewMode) -> Void
     let toggleSelfView: @MainActor () -> Void
     var setSize: @MainActor (CallSurface.Size) -> Void = { _ in /* a stage of one size */ }
+    var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
+    var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
+    var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     let hangUp: @MainActor () -> Void
 }
 
@@ -28,6 +31,7 @@ struct CallControlBar: View {
     var size = CallSurface.Size.split
     /// Off while something else on screen has a use for Escape.
     var escapeStepsDown = true
+    var showsParticipants = false
     let actions: CallStageActions
 
     var body: some View {
@@ -40,14 +44,21 @@ struct CallControlBar: View {
                 HStack(spacing: Theme.Spacing.s) { toggles }
                 endButton
             }
+            // The 400 pt column of a room's call: the view choice moves into More.
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
+                endButton
+            }
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Call controls"))
     }
 
+    private var toggles: some View { toggles(viewChoiceInMenu: false) }
+
     @ViewBuilder
-    private var toggles: some View {
+    private func toggles(viewChoiceInMenu: Bool) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -58,7 +69,7 @@ struct CallControlBar: View {
             tone: isCameraOn || !hasMedia ? .plain : .chosen, action: actions.toggleCamera
         )
         .disabled(!hasMedia)
-        viewSwitch
+        if !viewChoiceInMenu { viewSwitch }
         if let isHandRaised {
             CallControlButton(
                 title: isHandRaised ? "Lower hand" : "Raise hand", symbol: "hand.raised",
@@ -67,8 +78,13 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
+        CallControlButton(
+            title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
+            tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
+        )
+        .accessibilityAddTraits(showsParticipants ? .isSelected : [])
         sizeSteps
-        more
+        more(withViewChoice: viewChoiceInMenu)
     }
 
     // MARK: - Split, expanded, full screen
@@ -133,8 +149,15 @@ struct CallControlBar: View {
 
     // MARK: - More
 
-    private var more: some View {
+    private func more(withViewChoice: Bool) -> some View {
         Menu {
+            if withViewChoice {
+                Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
+                    Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
+                    Text("Speaker view").tag(CallStagePresentation.ViewMode.speaker)
+                }
+                .pickerStyle(.inline)
+            }
             Button(isSelfViewHidden ? "Show self view" : "Hide self view", action: actions.toggleSelfView)
         } label: {
             CallControlButton.face(symbol: "ellipsis", tone: .plain)

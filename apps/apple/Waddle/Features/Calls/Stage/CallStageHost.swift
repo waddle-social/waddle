@@ -114,6 +114,12 @@ struct CallStageHost: View {
             subtitle = CallStageSubtitle.room(others: rows.count { !$0.isSelf })
         }
         let memory = model.stage(of: call.sid)
+        let rows = memory.showsParticipants ? CallParticipantRows.make(
+            tiles: tiles,
+            audio: (media?.participants ?? []).map {
+                CallParticipantAudio(identity: $0.identity, hasMicrophone: $0.hasMicrophoneTrack, volume: $0.volume)
+            }
+        ) : nil
         return CallStageView(
             title: call.title,
             subtitle: subtitle,
@@ -124,6 +130,9 @@ struct CallStageHost: View {
             size: memory.size,
             // An open inspector has a composer whose Escape cancels a reply or an edit.
             escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
+            participants: rows,
+            canResetVolumes: media?.hasChangedVolumes ?? false,
+            participantsCoverTiles: (model.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
@@ -149,6 +158,9 @@ struct CallStageHost: View {
         call.status == .inCall(since: nil) ? .inCall(since: media?.connectedSince) : call.status
     }
 
+    /// A stage narrower than this gives the panel the tiles' place.
+    private static let widthForTilesAndPanel: CGFloat = 720
+
     private func actions(for sid: String) -> CallStageActions {
         let commands = CallCommands(calls: session.calls, media: media)
         return CallStageActions(
@@ -158,6 +170,9 @@ struct CallStageHost: View {
             setViewMode: { [model] mode in model.update(sid) { $0.presentation.viewMode = mode } },
             toggleSelfView: { [model] in model.update(sid) { $0.presentation.isSelfViewHidden.toggle() } },
             setSize: { [model] size in model.update(sid) { $0.size = size } },
+            toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
+            setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
+            resetVolumes: { [media] in media?.resetVolumes() },
             hangUp: commands.hangUp
         )
     }

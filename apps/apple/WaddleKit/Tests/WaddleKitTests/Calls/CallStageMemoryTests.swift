@@ -86,4 +86,23 @@ import Testing
         memory.follow(call: "b")
         #expect(memory.size == .split)
     }
+
+    @Test func theParticipantsPanelExpandsASplitStageAndClosesWithIt() {
+        var memory = CallStageMemory()
+        memory.follow(call: "a")
+        memory.toggleParticipants()
+        #expect(memory.showsParticipants)
+        #expect(memory.size == .expanded)
+        memory.size = .immersive
+        #expect(memory.showsParticipants)
+        memory.toggleParticipants()
+        #expect(!memory.showsParticipants)
+        #expect(memory.size == .immersive)
+        memory.toggleParticipants()
+        memory.size = .split
+        #expect(!memory.showsParticipants)
+        memory.toggleParticipants()
+        memory.follow(call: "b")
+        #expect(!memory.showsParticipants)
+    }
 }

@@ -3,8 +3,11 @@
 public struct CallStageMemory: Equatable, Sendable {
     public private(set) var sid: String?
     public var presentation = CallStagePresentation()
-    /// How much of the window the stage takes.
-    public var size = CallSurface.Size.defaultSize
+    /// How much of the window the stage takes. A split stage has no room for the participants panel.
+    public var size = CallSurface.Size.defaultSize {
+        didSet { if size == .split { showsParticipants = false } }
+    }
+    public private(set) var showsParticipants = false
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
 
@@ -18,6 +21,16 @@ public struct CallStageMemory: Equatable, Sendable {
 
     public mutating func togglePin(_ tile: CallStageTile.ID) {
         presentation.pinnedTileID = presentation.pinnedTileID == tile ? nil : tile
+    }
+
+    /// Opening the panel from a split stage expands it, as on the web.
+    public mutating func toggleParticipants() {
+        if showsParticipants {
+            showsParticipants = false
+        } else {
+            size = size == .split ? .expanded : size
+            showsParticipants = true
+        }
     }
 
     /// Call when the tiles or the self-view choice change. While the roster

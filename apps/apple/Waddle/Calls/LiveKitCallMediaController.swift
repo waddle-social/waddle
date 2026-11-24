@@ -57,6 +57,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshParticipants()
     }
 
+    /// Changes with `participants`, which every volume change refreshes.
+    var hasChangedVolumes: Bool { volumeGains.values.contains { $0 != 1 } }
+
+    func resetVolumes() {
+        for identity in volumeGains.keys {
+            for track in remoteAudioTracks[identity] ?? [] { applyVolume(1, to: track) }
+        }
+        volumeGains.removeAll()
+        refreshParticipants()
+    }
+
     private func applyVolume(_ gain: Double, to track: RemoteAudioTrack) {
         volumeUpdates.enqueue(for: track) { track.volume = gain }
     }
@@ -119,11 +130,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         captureChoices = [:]
         if isMicrophoneMutedByChoice { isMicrophoneMutedByChoice = false }
         volumeUpdates.removeAll()
-        for identity in volumeGains.keys {
-            for track in remoteAudioTracks[identity] ?? [] { applyVolume(1, to: track) }
-        }
-        volumeGains.removeAll()
-        refreshParticipants()
+        resetVolumes()
     }
 
     func setMicrophone(_ on: Bool) async {
