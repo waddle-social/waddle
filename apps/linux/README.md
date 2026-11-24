@@ -12,6 +12,10 @@ The native client currently supports:
 - **Chat:** rooms and DMs, paged history, replies, reactions, edits, deletions and attachments.
 - **Threads:** choose **Reply in Thread** below a message, or **Open Thread** from its message menu. Threads appear beneath their conversation in the sidebar, with separate unread counts and history. **Start Subthread** creates a nested thread; the back button returns to the main conversation. The original message appears above the replies when loaded. Thread views filter full archive pages so saved reactions, edits and Jev judgments remain available. Automatic scanning stops after three pages; **Load Earlier** continues through older history.
 - **Jev badges:** question and content-safety judgments appear beneath messages. Expand a badge to inspect probabilities, model and taxonomy versions. Judgments follow the exact message revision and disappear after an edit or deletion until a current result arrives.
+- **Message actions:** one list (`src/message_actions.rs`) decides what a message offers: add reaction (quick reactions and the full emoji chooser), reply, open thread, pin or unpin, copy text, edit and delete your own, and moderator removal in rooms. A toolbar floats over the row on hover or keyboard focus; right-click, long press, the Menu key or Shift+F10 opens the full menu.
+- **Pins:** the pin button in the conversation header lists pinned messages (`urn:waddle:pin:0`) and jumps to one; pin events update the list live and pinned rows are marked. A room that does not publish a pin policy is treated as admins-only, the server default.
+- **Search:** the search button (Ctrl+F) searches the open conversation's archive (XEP-0313); a result jumps to the message, paging older history in until it is loaded.
+- **`/me` actions (XEP-0245):** shown as italic "* Name action"; quotes and notifications show the same text.
 
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
@@ -48,6 +52,8 @@ The GTK navigation regression test requires a display and is excluded from ordin
 | `src/auth/device.rs` | Device-flow client; typed server URL, session id and JID; tests against a local stand-in server |
 | `src/auth/store.rs` | Secret Service account store |
 | `src/runtime.rs` | tokio on its own threads; UI awaits work from the GLib main loop |
+| `src/message_actions.rs`, `src/pins.rs`, `src/jump.rs`, `src/message_text.rs` | Message action rules, the pinned list, jump planning and body rendering, without widgets |
+| `src/session_tools.rs`, `src/ui/message_tools.rs` | Pin, search and moderation verbs; header buttons, search bar, hover toolbar |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |

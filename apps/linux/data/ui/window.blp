@@ -273,6 +273,46 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   tooltip-text: _("Load earlier conversation history");
                   clicked => $on_load_earlier() swapped;
                 }
+
+                [end]
+                ToggleButton search_button {
+                  visible: false;
+                  icon-name: "system-search-symbolic";
+                  tooltip-text: _("Search Messages (Ctrl+F)");
+                }
+
+                [end]
+                MenuButton pins_button {
+                  visible: false;
+                  icon-name: "view-pin-symbolic";
+                  tooltip-text: _("Pinned Messages");
+                }
+              }
+
+              [top]
+              SearchBar search_bar {
+                search-mode-enabled: bind search_button.active bidirectional;
+
+                child: SearchEntry search_entry {
+                  hexpand: true;
+                  placeholder-text: _("Search this conversation");
+                };
+              }
+
+              [top]
+              ScrolledWindow search_results_scroller {
+                visible: false;
+                hscrollbar-policy: never;
+                propagate-natural-height: true;
+                max-content-height: 280;
+
+                child: ListBox search_results {
+                  selection-mode: none;
+
+                  styles [
+                    "navigation-sidebar",
+                  ]
+                };
               }
 
               [top]
