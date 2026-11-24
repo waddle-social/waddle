@@ -215,6 +215,8 @@ struct CurrentCallCardHost: View {
         }
         .huddleAnimation(.settle, value: conversation)
         .callSettings(isPresented: $showsSettings)
+        // The settings were this call's.
+        .onChange(of: state.sid) { showsSettings = false }
     }
 
     private func card(for conversation: ConversationID, sid: String, state: CallState) -> some View {

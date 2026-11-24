@@ -122,10 +122,25 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             Task { @MainActor in await self?.refreshDevices() }
         }
         #endif
+        // A camera plugged in or pulled out: the list follows, and so does a camera that is on.
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            deviceObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    await self?.refreshDevices()
+                    await self?.applyCameraChoice()
+                }
+            })
+        }
+    }
+
+    @ObservationIgnored private nonisolated(unsafe) var deviceObservers: [any NSObjectProtocol] = []
+
+    deinit {
+        deviceObservers.forEach(NotificationCenter.default.removeObserver)
     }
 
     func refreshDevices() async {
-        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).map {
+        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).filter(Self.isOffered).map {
             CallDevice(id: $0.uniqueID, name: $0.localizedName)
         }
         var found = CallDevices(cameras: CallDeviceList(devices: cameras, preferred: devicePreferences[.camera]))
@@ -150,11 +165,36 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         devicePreferences[kind] = id
         defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
         await refreshDevices()
-        // A camera already on moves to the new one; one that is off starts with it next time.
-        if kind == .camera, let room,
-           let capturer = (publications(of: .video, in: room).first?.track as? LocalVideoTrack)?.capturer as? CameraCapturer {
-            _ = try? await capturer.set(options: cameraCaptureOptions() ?? CameraCaptureOptions())
+        if kind == .camera { await applyCameraChoice() }
+    }
+
+    /// Moves a camera that is on to the one that should be in use. A camera
+    /// that is off is never touched: changing a capturer's options restarts
+    /// its capture, which would turn the camera on behind a control that
+    /// says off. Its track is dropped, and the next turn-on makes a new one
+    /// with the choice.
+    private func applyCameraChoice() async {
+        guard let room else { return }
+        let wanted = cameraCaptureOptions()
+        for publication in publications(of: .video, in: room) {
+            if publication.isMuted {
+                try? await room.localParticipant.unpublish(publication: publication)
+            } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
+                      capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
+                _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())
+            }
         }
+        if self.room === room { refreshTracks() }
+    }
+
+    /// On iPhone and iPad the system lists every lens, and the combinations
+    /// of them, as cameras of their own: one front and one back is the choice a person has.
+    private static func isOffered(_ camera: AVCaptureDevice) -> Bool {
+        #if os(iOS)
+        camera.deviceType == .builtInWideAngleCamera || camera.deviceType == .external
+        #else
+        true
+        #endif
     }
 
     /// The camera the person chose, while it is connected; `nil` leaves the choice to the system.
@@ -163,8 +203,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
-        guard room == nil else { throw CallMediaError.alreadyConnected }
-        await refreshDevices()
         guard room == nil else { throw CallMediaError.alreadyConnected }
         wasEndedByServer = false
         let (changes, observer) = RoomObserver.make()
@@ -391,6 +429,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// Starts what the call agreed to, unless the person has since chosen
     /// otherwise for that device.
     private func publish(_ media: CallMedia, in room: Room) async {
+        // Here and not before the room exists: a hang-up must find a room to
+        // disconnect from the moment its connect starts.
+        await refreshDevices()
+        guard self.room === room else { return }
         if captureChoices[.audio] ?? media.audio { await setSource(.audio, enabled: true, in: room) }
         if captureChoices[.video] ?? media.video { await setSource(.video, enabled: true, in: room) }
     }

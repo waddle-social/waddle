@@ -121,7 +121,10 @@ struct CallStageHost: View {
         }
         .callSettings(isPresented: $showsSettings)
         // A list made for one call is not offered to the next.
-        .onChange(of: state.sid) { screenPicker = nil }
+        .onChange(of: state.sid) {
+            screenPicker = nil
+            showsSettings = false
+        }
         .sheet(isPresented: Binding(get: { screenPicker != nil }, set: { if !$0 { screenPicker = nil } })) {
             if let sources = screenPicker {
                 CallScreenPicker(sources: sources) { source in

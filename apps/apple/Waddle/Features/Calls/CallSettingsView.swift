@@ -37,6 +37,9 @@ struct CallSettingsView: View {
         }
         .frame(width: 420)
         .background(Theme.Colors.bg)
+        #if os(macOS)
+        .onExitCommand(perform: done)
+        #endif
     }
 
     private func section(_ kind: CallDeviceKind, _ list: CallDeviceList) -> some View {
