@@ -80,6 +80,55 @@ impl ToElement for AllowedActions {
     }
 }
 
+impl Command {
+    /// Parse a requester-originated `<command/>` (responder side).
+    ///
+    /// XEP-0050 §2.4: the `status` attribute "SHOULD be set only by the
+    /// responder. If specified by the requester, the responder MUST ignore
+    /// it", so `status`, `<actions/>` and `<note/>` are never read from a
+    /// request, whatever they contain. Only `node`, `sessionid`, `action`,
+    /// `xml:lang` and the data form are taken.
+    pub fn from_request_element(elem: &Element) -> Result<Self, CommandError> {
+        if elem.name() != "command" || elem.ns() != NS_COMMANDS {
+            return Err(CommandError::NotACommand);
+        }
+
+        let node = elem
+            .attr("node")
+            .ok_or(CommandError::MissingNode)?
+            .to_string();
+
+        let action = elem
+            .attr("action")
+            .map(|a| a.parse::<Action>())
+            .transpose()?;
+
+        let form = elem
+            .children()
+            .find(|c| c.name() == "x" && c.ns() == NS_DATA_FORMS)
+            .map(DataForm::from_element)
+            .transpose()?;
+
+        Ok(Self {
+            node,
+            session_id: elem.attr("sessionid").map(|s| s.to_string()),
+            action,
+            status: None,
+            actions: None,
+            notes: Vec::new(),
+            form,
+            lang: command_lang(elem),
+        })
+    }
+}
+
+fn command_lang(elem: &Element) -> Option<String> {
+    elem.attr_ns(&minidom::rxml::Namespace::XML, "lang")
+        .map(str::to_string)
+}
+
+/// Parse a responder-originated `<command/>` (requester side). Strict:
+/// every attribute and child must be well-formed.
 impl FromElement for Command {
     type Error = CommandError;
 
@@ -131,6 +180,7 @@ impl FromElement for Command {
             actions,
             notes,
             form,
+            lang: command_lang(elem),
         })
     }
 }
@@ -148,6 +198,14 @@ impl ToElement for Command {
             builder = builder.attr(
                 minidom::rxml::xml_ncname!("action").to_owned(),
                 action.as_str(),
+            );
+        }
+
+        if let Some(ref lang) = self.lang {
+            builder = builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang.as_str(),
             );
         }
 

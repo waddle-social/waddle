@@ -1,7 +1,7 @@
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
-use crate::xep::xep0004::{FromElement, ToElement};
+use crate::xep::xep0004::ToElement;
 
 use super::{Command, CommandError, NODE_COMMANDS, NS_COMMANDS};
 
@@ -14,11 +14,12 @@ pub fn is_command_request(iq: &Iq) -> bool {
     matches!(iq, Iq::Set { payload, .. } if payload.name() == "command" && payload.ns() == NS_COMMANDS)
 }
 
-/// Parse an ad-hoc command from an IQ set stanza.
+/// Parse a requester's ad-hoc command from an IQ set stanza (responder side;
+/// ignores requester-supplied `status`, `<actions/>` and `<note/>`).
 pub fn parse_command_from_iq(iq: &Iq) -> Result<Command, CommandError> {
     match iq {
         Iq::Set { payload, .. } if payload.name() == "command" && payload.ns() == NS_COMMANDS => {
-            Command::from_element(payload)
+            Command::from_request_element(payload)
         }
         _ => Err(CommandError::NotACommandIq),
     }

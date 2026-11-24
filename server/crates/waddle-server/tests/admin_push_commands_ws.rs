@@ -377,7 +377,7 @@ async fn xep0050_operator_push_forbids_non_admin_and_wrong_component() {
         false,
     )
     .await;
-    assert_error(&wrong_component, "service-unavailable");
+    assert_error(&wrong_component, "item-not-found");
     let inspected = command(
         &mut admin,
         "still-active",

@@ -327,6 +327,18 @@ impl AllowedActions {
         self
     }
 
+    /// Whether the responder permits `action` at this stage. `execute` and
+    /// `cancel` are not stage-specific actions, so neither can be an
+    /// `execute` default.
+    pub fn permits(&self, action: Action) -> bool {
+        match action {
+            Action::Next => self.next,
+            Action::Prev => self.prev,
+            Action::Complete => self.complete,
+            Action::Execute | Action::Cancel => false,
+        }
+    }
+
     /// Allow the `complete` action.
     pub fn with_complete(mut self) -> Self {
         self.complete = true;
@@ -355,6 +367,9 @@ pub struct Command {
     pub notes: Vec<Note>,
     /// Embedded data form payload.
     pub form: Option<DataForm>,
+    /// `xml:lang` of the command element. Responders SHOULD state it on
+    /// every response (XEP-0050 §2.4).
+    pub lang: Option<String>,
 }
 
 impl Command {
@@ -368,6 +383,7 @@ impl Command {
             actions: None,
             notes: Vec::new(),
             form: None,
+            lang: None,
         }
     }
 
@@ -380,6 +396,12 @@ impl Command {
     /// Set the action.
     pub fn with_action(mut self, action: Action) -> Self {
         self.action = Some(action);
+        self
+    }
+
+    /// Set the `xml:lang` of the command element.
+    pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = Some(lang.into());
         self
     }
 
