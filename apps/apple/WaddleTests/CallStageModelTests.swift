@@ -35,4 +35,20 @@ final class CallStageModelTests: XCTestCase {
         XCTAssertEqual(model.stage(of: "a").size, .expanded)
         XCTAssertEqual(model.stage(of: "b").size, .split)
     }
+
+    func testEachWindowPlacesTheCallByItsOwnSidebar() async throws {
+        let sample = SampleSession(account: SampleSession.anaOnThisMac)
+        await sample.answerCall(from: SampleSession.priya, video: true)
+        let state = sample.coordinator.calls.state
+        let withSidebar = CallWindowLayout()
+        let withoutSidebar = CallWindowLayout()
+        withoutSidebar.sidebarColumnIsShown = false
+
+        // Away from the call's conversation: a card where there is a sidebar, the dock where there is none.
+        XCTAssertEqual(sample.callStage.surface(of: state, open: nil, platform: .regularWidth, in: withSidebar), .sidebarCard)
+        XCTAssertEqual(sample.callStage.surface(of: state, open: nil, platform: .regularWidth, in: withoutSidebar), .dock)
+        // One window showing its sidebar again says nothing about the other.
+        withSidebar.sidebarIsOnScreen = true
+        XCTAssertEqual(sample.callStage.surface(of: state, open: nil, platform: .regularWidth, in: withoutSidebar), .dock)
+    }
 }

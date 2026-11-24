@@ -51,6 +51,8 @@ private struct LaunchView: View {
 private struct SignedInRoot: View {
     @Environment(AppState.self) private var app
     let session: ActiveSession
+    /// This window's own: another window has its own sidebar and pane.
+    @State private var callLayout = CallWindowLayout()
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -68,6 +70,7 @@ private struct SignedInRoot: View {
         .environment(session.coordinator)
         .environment(session.navigation)
         .environment(session.callStage)
+        .environment(callLayout)
         .environment(\.callMediaControls, session.callMedia)
         .advertisingSelfMute(
             calls: session.coordinator.calls, media: session.callMedia,

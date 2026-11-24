@@ -10,7 +10,7 @@ import WaddleKit
 struct Sidebar: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
-    @Environment(CallStageModel.self) private var callStage
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @State private var query = ""
     @State private var spaceID: String?
 
@@ -46,9 +46,9 @@ struct Sidebar: View {
             let frame = sidebar.frame(in: .global)
             return frame.width > 1 && frame.maxX > 1
         } action: { isOnScreen in
-            callStage.sidebarIsOnScreen = isOnScreen
+            layout?.sidebarIsOnScreen = isOnScreen
         }
-        .onDisappear { callStage.sidebarIsOnScreen = false }
+        .onDisappear { layout?.sidebarIsOnScreen = false }
         .navigationTitle("")
         #if os(iOS)
         .toolbarBackground(.hidden, for: .navigationBar)

@@ -27,6 +27,8 @@ struct CurrentCallCard: View {
     var hasMedia = true
     var isMicrophoneOn = false
     var isCameraOn = false
+    /// Something the person should know about their own devices, as when Waddle may not use one.
+    var notice: String?
     let actions: Actions
 
     var body: some View {
@@ -53,31 +55,29 @@ struct CurrentCallCard: View {
                 .accessibilityElement(children: .combine)
                 Spacer(minLength: 0)
             }
-            HStack(spacing: WaddleTokens.Spacing.s1Half) {
-                control(
-                    isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
-                    isOff: !isMicrophoneOn && hasMedia, action: actions.toggleMicrophone
-                )
-                .disabled(!hasMedia)
-                control(
-                    isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
-                    action: actions.toggleCamera
-                )
-                .disabled(!hasMedia)
-                control("Expand call", symbol: "arrow.up.left.and.arrow.down.right", action: actions.expand)
-                Spacer(minLength: 0)
-                // Beside the controls, not the text: the sidebar is too narrow to share a line with the summary.
-                Button("Return", action: actions.returnToCall)
-                    .buttonStyle(.huddle(size: .small))
-                    .fixedSize()
-                    .accessibilityLabel(Text("Return to the call with \(title)"))
-                    .help("Open the call's conversation")
-                Button(action: actions.hangUp) {
-                    glyph("phone.down", foreground: Theme.Colors.dangerFg, background: Theme.Colors.danger)
+            if let notice {
+                Text(notice)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // One row where the sidebar is wide enough; at its narrowest, and
+            // with a finger's controls on an iPad, the way back and out take a row of their own.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: WaddleTokens.Spacing.s1Half) {
+                    devices
+                    Spacer(minLength: 0)
+                    returnButton
+                    hangUpButton
                 }
-                .buttonStyle(CurrentCallControlStyle())
-                .accessibilityLabel(Text("Hang up"))
-                .help("Hang up")
+                VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+                    HStack(spacing: WaddleTokens.Spacing.s1Half) { devices }
+                    HStack(spacing: WaddleTokens.Spacing.s1Half) {
+                        returnButton
+                        Spacer(minLength: 0)
+                        hangUpButton
+                    }
+                }
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Text("Current call controls"))
@@ -88,6 +88,39 @@ struct CurrentCallCard: View {
         .overlay(Metrics.shape.strokeBorder(Theme.Colors.live, lineWidth: WaddleTokens.BorderWidth.hair))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Current call"))
+    }
+
+    @ViewBuilder
+    private var devices: some View {
+        control(
+            isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
+            isOff: !isMicrophoneOn && hasMedia, action: actions.toggleMicrophone
+        )
+        .disabled(!hasMedia)
+        control(
+            isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
+            action: actions.toggleCamera
+        )
+        .disabled(!hasMedia)
+        control("Expand call", symbol: "arrow.up.left.and.arrow.down.right", action: actions.expand)
+    }
+
+    /// Beside the controls, not the text: the sidebar is too narrow to share a line with the summary.
+    private var returnButton: some View {
+        Button("Return", action: actions.returnToCall)
+            .buttonStyle(.huddle(size: .small))
+            .fixedSize()
+            .accessibilityLabel(Text("Return to the call with \(title)"))
+            .help("Open the call's conversation")
+    }
+
+    private var hangUpButton: some View {
+        Button(action: actions.hangUp) {
+            glyph("phone.down", foreground: Theme.Colors.dangerFg, background: Theme.Colors.danger)
+        }
+        .buttonStyle(CurrentCallControlStyle())
+        .accessibilityLabel(Text("Hang up"))
+        .help("Hang up")
     }
 
     private func control(
@@ -141,12 +174,13 @@ struct CurrentCallCardHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(CallStageModel.self) private var model
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @Environment(\.callMediaControls) private var media
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let state = session.calls.state
-        let conversation = model.surface(of: state, open: navigation.selection, platform: model.shellPlatform) == .sidebarCard
+        let conversation = model.surface(of: state, open: navigation.selection, platform: layout?.shellPlatform ?? .phone, in: layout) == .sidebarCard
             ? state.sessionConversation : nil
         ZStack {
             if let conversation, let sid = state.sid {
@@ -178,6 +212,7 @@ struct CurrentCallCardHost: View {
             hasMedia: status != .connecting,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
+            notice: media?.deviceNotice,
             actions: .init(
                 returnToCall: { [model, navigation] in
                     // As the web does: back to the call as a split beside its conversation.

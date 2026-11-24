@@ -11,19 +11,25 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
     private static let actions = CurrentCallCard.Actions(
         returnToCall: noAction, expand: noAction, toggleMicrophone: noAction, toggleCamera: noAction, hangUp: noAction
     )
-    /// The sidebar at its ideal width.
-    private static let width: CGFloat = 280
+    /// The sidebar's widths (`SplitShell`): the one it opens at and the narrowest it can be dragged to.
+    private static let idealSidebar: CGFloat = 280
+    private static let narrowestSidebar: CGFloat = 240
 
-    private func assertCard(_ card: CurrentCallCard, testName: String = #function, line: UInt = #line) {
+    /// The card as `CurrentCallCardHost` places it in a sidebar `sidebar` wide.
+    private func assertCard(
+        _ card: CurrentCallCard, sidebar: CGFloat = idealSidebar, testName: String = #function, line: UInt = #line
+    ) {
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
             precision: 0.97,
             of: card
-                .padding(Theme.Spacing.m)
+                .padding(.horizontal, Theme.Spacing.m)
+                .padding(.vertical, Theme.Spacing.s)
+                .frame(width: sidebar)
                 .background(Theme.Colors.bgRail)
                 .environment(\.huddleGround, Theme.Colors.bgRail)
                 .environment(\.colorScheme, .dark),
-            width: Self.width + 2 * Theme.Spacing.l,
+            width: sidebar + 2 * Theme.Spacing.l,
             testName: testName,
             line: line
         )
@@ -49,6 +55,26 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
             title: "release-train with a long name",
             summary: CallCardSummary.line(status: .connecting, kind: .room(count: 1)),
             isConnected: false, hasMedia: false, actions: Self.actions
+        ))
+    }
+
+    /// Everything stays inside the narrowest sidebar.
+    func testInTheNarrowestSidebar() {
+        assertCard(
+            CurrentCallCard(
+                title: "#design", summary: CallCardSummary.line(status: .connected, kind: .room(count: 4)),
+                isMicrophoneOn: true, actions: Self.actions
+            ),
+            sidebar: Self.narrowestSidebar
+        )
+    }
+
+    func testCameraRefused() {
+        assertCard(CurrentCallCard(
+            title: "priya",
+            summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
+            isMicrophoneOn: true,
+            notice: "Waddle is not allowed to use the camera. Change that in Settings.", actions: Self.actions
         ))
     }
 }
