@@ -151,6 +151,7 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         }
         PubSubError::BadRequest
         | PubSubError::InvalidJid
+        | PubSubError::InvalidSubscriberJid
         | PubSubError::ItemRequired
         | PubSubError::NodeIdRequired
         | PubSubError::InvalidPayload
@@ -208,7 +209,7 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         stanza_error.other =
             Some(Element::builder("precondition-not-met", NS_PUBSUB_ERRORS).build());
     } else if let Some(condition) = match error {
-        PubSubError::InvalidJid => Some("invalid-jid"),
+        PubSubError::InvalidSubscriberJid => Some("invalid-jid"),
         PubSubError::ItemRequired => Some("item-required"),
         PubSubError::NodeIdRequired | PubSubError::InstantNodesUnsupported => {
             Some("nodeid-required")

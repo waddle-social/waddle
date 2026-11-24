@@ -264,10 +264,12 @@ pub enum PubSubError {
     NodeExists,
     /// The request is malformed, with optional explanatory text.
     BadRequest,
-    /// XEP-0060 §6.1.3.1: `<bad-request/>` + pubsub-namespaced
-    /// `<invalid-jid/>`: the supplied address is not a valid JID, or its bare
-    /// JID differs from the requester's.
+    /// The supplied address is not a valid JID (plain `<bad-request/>`).
     InvalidJid,
+    /// XEP-0060 §6.1.3.1: `<bad-request/>` + pubsub-namespaced
+    /// `<invalid-jid/>`: a subscriber or affiliate JID is unparsable, or its
+    /// bare JID differs from the requester's.
+    InvalidSubscriberJid,
     /// XEP-0060 §7.1.3.6 / §7.2.3.2: `<bad-request/>` + pubsub-namespaced
     /// `<item-required/>`: a publish or retract carried no `<item/>` (or no
     /// item id) where one is required.
@@ -367,7 +369,7 @@ pub fn parse_pubsub_event(message: &Message) -> CoreResult<PubSubEvent> {
 /// Returns the XEP-0060 error condition the request earns: `NodeIdRequired`
 /// for a missing `node`, `ItemRequired` for a publish without `<item/>` or a
 /// retract without an item id, `InstantNodesUnsupported` for a `<create/>`
-/// without a node, `InvalidJid` for an unparsable subscriber JID, and
+/// without a node, `InvalidSubscriberJid` for an unparsable subscriber JID, and
 /// `BadRequest` for any other malformed request.
 pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
     let pubsub_elem = match iq {
@@ -476,7 +478,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
             let entity_raw = required_attr(child, "jid")?;
             let entity: jid::BareJid = entity_raw
                 .parse()
-                .map_err(|_: jid::Error| PubSubError::InvalidJid)?;
+                .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
             let aff_raw = required_attr(child, "affiliation")?;
             let aff: Affiliation = aff_raw.parse().map_err(|_| {
                 CoreError::bad_request(Some(format!("invalid affiliation: {aff_raw}")))
@@ -499,7 +501,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
             let jid_raw = required_attr(child, "jid")?;
             let jid: jid::Jid = jid_raw
                 .parse()
-                .map_err(|_: jid::Error| PubSubError::InvalidJid)?;
+                .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
             let state_raw = required_attr(child, "subscription")?;
             let state: SubscriptionState = state_raw.parse().map_err(|_| {
                 CoreError::bad_request(Some(format!("invalid subscription: {state_raw}")))
@@ -528,7 +530,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
         let node = node_attr(subscribe)?;
         let jid = required_attr(subscribe, "jid")?
             .parse()
-            .map_err(|_: jid::Error| PubSubError::InvalidJid)?;
+            .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
         return Ok(PubSubRequest::Subscribe { node, jid });
     }
 
@@ -536,7 +538,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
         let node = node_attr(unsubscribe)?;
         let jid = required_attr(unsubscribe, "jid")?
             .parse()
-            .map_err(|_: jid::Error| PubSubError::InvalidJid)?;
+            .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
         let subid = unsubscribe.attr("subid").map(str::to_owned);
 
         return Ok(PubSubRequest::Unsubscribe { node, jid, subid });

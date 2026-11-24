@@ -274,7 +274,7 @@ pub(super) async fn handle_pubsub_admin_request(
             // XEP-0060 §6.1.3.1: a subscriber JID whose bare JID is not the
             // requester's is `<bad-request/>` + `<invalid-jid/>`.
             if subscription_jid != *user_jid {
-                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                let error = build_pubsub_error(iq, PubSubError::InvalidSubscriberJid);
                 return vec![error];
             }
             // A room-bound extension node is subscribed to by the room's
@@ -381,7 +381,7 @@ pub(super) async fn handle_pubsub_admin_request(
             // XEP-0060 §6.1.3.1: a subscriber JID whose bare JID is not the
             // requester's is `<bad-request/>` + `<invalid-jid/>`.
             if subscription_jid != *user_jid {
-                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
+                let error = build_pubsub_error(iq, PubSubError::InvalidSubscriberJid);
                 return vec![error];
             }
             let typed_subid = subid.as_deref().map(SubId::from_raw);
