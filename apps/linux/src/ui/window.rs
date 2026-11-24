@@ -63,6 +63,10 @@ mod imp {
         #[template_child]
         pub inbox_list: TemplateChild<gtk::ListBox>,
         #[template_child]
+        pub admin_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub admin_page: TemplateChild<gtk::Box>,
+        #[template_child]
         pub inbox_cards: TemplateChild<gtk::Box>,
         #[template_child]
         pub inbox_mark_all: TemplateChild<gtk::Button>,
@@ -178,6 +182,8 @@ mod imp {
         pub rooms: RefCell<crate::ui::rooms::RoomsState>,
         /// The unread overview (see ui/inbox.rs).
         pub inbox: RefCell<crate::ui::inbox::InboxState>,
+        /// The owner-only admin console (see ui/admin.rs).
+        pub admin: RefCell<crate::ui::admin::AdminState>,
     }
 
     #[glib::object_subclass]
@@ -205,6 +211,7 @@ mod imp {
             let window = self.obj().clone();
             window.setup_timeline();
             window.setup_inbox();
+            window.setup_admin();
             glib::spawn_future_local(async move { window.restore().await });
         }
 
@@ -330,6 +337,11 @@ impl WaddleWindow {
     #[template_callback]
     fn on_inbox_activated(&self) {
         self.show_inbox();
+    }
+
+    #[template_callback]
+    fn on_admin_activated(&self) {
+        self.show_admin();
     }
 
     #[template_callback]
