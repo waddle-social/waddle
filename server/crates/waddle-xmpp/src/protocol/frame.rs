@@ -88,7 +88,13 @@ pub enum ParseError {
     /// The payload exceeded the parser's maximum accepted frame size.
     #[error("frame exceeds maximum size")]
     TooLarge,
-    /// The payload was not well-formed XML.
+    /// The payload was not well-formed XML (RFC 6120 §4.9.3.13). The stream
+    /// cannot continue: the receiver sends a `<not-well-formed/>` stream
+    /// error and closes it.
+    #[error("not well-formed XML: {0}")]
+    NotWellFormed(String),
+    /// The payload was well-formed XML but a framing or SASL element had the
+    /// wrong namespace or carried content it must not.
     #[error("invalid XML: {0}")]
     InvalidXml(String),
     /// The payload's root element is not one of the frame roots we know how
@@ -154,7 +160,7 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
     }
 
     let root = peek_root_name(trimmed)
-        .ok_or_else(|| ParseError::InvalidXml("missing root element".to_string()))?;
+        .ok_or_else(|| ParseError::NotWellFormed("missing root element".to_string()))?;
 
     // Framing and SASL elements can use XML namespace prefixes. Classify by
     // local name only for these known roots; their parsers still validate the
@@ -199,7 +205,7 @@ fn peek_root_name(xml: &str) -> Option<&str> {
 
 fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+        Element::from_str(frame).map_err(|err| ParseError::NotWellFormed(err.to_string()))?;
     require_namespace(&element, "auth", SASL)?;
     require_text_only_element(&element, "auth")?;
     let mechanism = element
@@ -217,7 +223,7 @@ fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
 
 fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+        Element::from_str(frame).map_err(|err| ParseError::NotWellFormed(err.to_string()))?;
     if element.is("response", NS_SASL2) {
         let response = Sasl2Response::from_element(&element).map_err(|err| {
             ParseError::MalformedSasl(match err {
@@ -240,7 +246,7 @@ fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
 
 fn parse_sasl2_authenticate(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+        Element::from_str(frame).map_err(|err| ParseError::NotWellFormed(err.to_string()))?;
     let request = Sasl2Authenticate::from_element(&element).map_err(|err| {
         ParseError::MalformedSasl(match err {
             waddle_xmpp_core::xep0388::Sasl2Error::InvalidPayload => "invalid SASL2 payload",
@@ -258,7 +264,7 @@ fn parse_sasl2_authenticate(frame: &str) -> Result<ParsedFrame, ParseError> {
 
 fn parse_sasl2_abort(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+        Element::from_str(frame).map_err(|err| ParseError::NotWellFormed(err.to_string()))?;
     if element.is("abort", SASL) {
         // Keep the historical prebind classifier responsible for SASL1
         // aborts; only SASL2 aborts are typed in this parser.
@@ -299,7 +305,7 @@ fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
 
 fn parse_close(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+        Element::from_str(frame).map_err(|err| ParseError::NotWellFormed(err.to_string()))?;
     require_namespace(&element, "close", "urn:ietf:params:xml:ns:xmpp-framing")?;
     require_empty_element(&element, "close")?;
     Ok(ParsedFrame {
@@ -362,7 +368,7 @@ fn stanza_kind(kind: &str) -> &'static str {
 
 fn decode_stanza(frame: &str) -> Result<Element, ParseError> {
     let patched = inject_client_ns_if_missing(frame);
-    Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))
+    Element::from_str(&patched).map_err(|err| ParseError::NotWellFormed(err.to_string()))
 }
 
 fn parse_stanza_element(element: Element, kind: &str) -> Result<ParsedFrame, ParseError> {

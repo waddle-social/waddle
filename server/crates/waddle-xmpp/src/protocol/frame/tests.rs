@@ -418,8 +418,8 @@ fn rejects_auth_without_mechanism_attribute() {
 #[test]
 fn rejects_malformed_xml() {
     match parse_frame("<iq type='get' id='broken'") {
-        Err(ParseError::InvalidXml(_)) => {}
-        other => panic!("expected InvalidXml, got {other:?}"),
+        Err(ParseError::NotWellFormed(_)) => {}
+        other => panic!("expected NotWellFormed, got {other:?}"),
     }
 }
 
