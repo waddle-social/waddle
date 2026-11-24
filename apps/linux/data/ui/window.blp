@@ -215,6 +215,15 @@ template $WaddleWindow: Adw.ApplicationWindow {
               }
 
               [top]
+              ListBox calendar_list {
+                row-activated => $on_calendar_activated() swapped;
+
+                styles [
+                  "navigation-sidebar",
+                ]
+              }
+
+              [top]
               ListBox admin_list {
                 row-activated => $on_admin_activated() swapped;
                 visible: false;
@@ -445,6 +454,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                         };
                       };
                     }
+                  };
+                }
+
+                StackPage {
+                  name: "calendar";
+
+                  child: Box calendar_page {
+                    orientation: vertical;
                   };
                 }
 
