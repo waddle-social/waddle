@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import WaddleKit
@@ -35,7 +36,7 @@ import Testing
                 Window(number: 3, title: nil, application: "Dock", bundleID: "com.apple.dock"),
                 Window(number: 4, title: "Menu", application: "Safari", bundleID: "com.apple.Safari", layer: 25),
                 Window(number: 5, title: "Hidden", application: "Notes", bundleID: "com.apple.Notes", isOnScreen: false),
-                Window(number: 6, title: "Palette", application: "Sketch", bundleID: "com.sketch", width: 80, height: 300),
+                Window(number: 6, title: "Palette", application: "Sketch", bundleID: "com.sketch", size: CGSize(width: 80, height: 300)),
             ]),
             ownBundleID: nil
         )

@@ -195,7 +195,7 @@ final class CallStageSnapshotTests: XCTestCase {
             ownBundleID: nil
         )
         try await assertScreenSnapshot(
-            of: CallScreenPicker(sources: sources, pick: { _ in }, cancel: {}), size: CGSize(width: 420, height: 460)
+            of: CallScreenPicker(sources: sources, pick: { _ in /* drawn only */ }, cancel: Self.noAction), size: CGSize(width: 420, height: 460)
         )
     }
     #endif

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Something on this Mac that can be shared in a call: a whole screen or one window.
@@ -39,12 +40,11 @@ public struct CallScreenCandidates: Equatable, Sendable {
         /// 0 for an ordinary window; menus, the Dock and overlays are above it.
         public let layer: Int
         public let isOnScreen: Bool
-        public let width: Double
-        public let height: Double
+        public let size: CGSize
 
         public init(
             number: UInt32, title: String?, application: String?, bundleID: String?, layer: Int = 0,
-            isOnScreen: Bool = true, width: Double = 800, height: Double = 600
+            isOnScreen: Bool = true, size: CGSize = CGSize(width: 800, height: 600)
         ) {
             self.number = number
             self.title = title
@@ -52,8 +52,7 @@ public struct CallScreenCandidates: Equatable, Sendable {
             self.bundleID = bundleID
             self.layer = layer
             self.isOnScreen = isOnScreen
-            self.width = width
-            self.height = height
+            self.size = size
         }
     }
 
@@ -74,7 +73,7 @@ public struct CallScreenSources: Equatable, Sendable {
     public var isEmpty: Bool { screens.isEmpty && windows.isEmpty }
 
     /// The smallest window worth offering: anything less is a palette or a stray panel.
-    static let minimumWindowSide = 120.0
+    static let minimumWindowSide: CGFloat = 120
 
     /// The main screen first, then the others in the system's order. The
     /// windows are the ordinary ones on screen that have a title, by
@@ -92,7 +91,7 @@ public struct CallScreenSources: Equatable, Sendable {
         windows = candidates.windows
             .filter { window in
                 window.layer == 0 && window.isOnScreen
-                    && window.width >= Self.minimumWindowSide && window.height >= Self.minimumWindowSide
+                    && window.size.width >= Self.minimumWindowSide && window.size.height >= Self.minimumWindowSide
                     && !(window.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty
                     && (ownBundleID == nil || window.bundleID != ownBundleID)
             }

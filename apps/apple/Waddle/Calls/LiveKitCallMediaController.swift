@@ -39,6 +39,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// Moves on with every ask, so a share that finishes starting can tell it is no longer wanted.
     @ObservationIgnored private var screenShareGeneration = 0
     @ObservationIgnored private var screenCaptureWatcher: ScreenCaptureWatcher?
+    /// What the person last asked: a full reconnect republishes every track
+    /// it had, and a screen they stopped meanwhile must not come back.
+    @ObservationIgnored private var wantsScreenShare = false
     #endif
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
@@ -206,6 +209,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func stopScreenShare() async {
         // Overtakes a share that is still starting: it is taken down as soon as it is up.
+        wantsScreenShare = false
         screenShareGeneration += 1
         let earlier = screenShareWork
         let work = Task { [weak self] in
@@ -219,13 +223,18 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func startScreenShare(_ source: CallScreenSource, generation: Int) async {
         guard generation == screenShareGeneration, let room else { return }
         await unpublishScreens()
+        guard generation == screenShareGeneration else { return }
         if didScreenShareFail { didScreenShareFail = false }
+        wantsScreenShare = true
         isScreenShareStarting = true
         defer { isScreenShareStarting = false }
         // Listed again now: the picker's list may be minutes old, and a
         // screen is captured with the applications that exist when it is listed.
         guard room.connectionState == .connected, let capture = await capturableContent()?.sources[source.id] else {
-            if self.room === room, generation == screenShareGeneration { didScreenShareFail = true }
+            if self.room === room, generation == screenShareGeneration {
+                wantsScreenShare = false
+                didScreenShareFail = true
+            }
             return
         }
         let track = await LocalVideoTrack.createMacOSScreenShareTrack(
@@ -239,25 +248,32 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenShareEncoding: VideoEncoding(maxBitrate: 5_000_000, maxFps: Self.screenShareFPS),
             preferredCodec: .vp9, preferredBackupCodec: .vp8, degradationPreference: .maintainResolution
         )
-        let publication = try? await room.localParticipant.publish(videoTrack: track, options: options)
-        guard self.room === room, generation == screenShareGeneration else {
-            // The call ended, or the person stopped, while it was starting:
-            // the screen must not go on being captured for nobody.
-            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
-            _ = try? await track.stop()
-            return
-        }
-        guard publication != nil else {
-            _ = try? await track.stop()
-            didScreenShareFail = true
-            return
-        }
-        // The system, or the window closing, can end a capture without a word to the room.
+        // The system, or the window closing, can end a capture without a word
+        // to the room. Watched from before the publish, which starts the
+        // capture: one that ends while it is still being published stops the share too.
         let watcher = ScreenCaptureWatcher { [weak self] in
             Task { @MainActor in await self?.stopScreenShare() }
         }
         track.capturer.delegates.add(delegate: watcher)
         screenCaptureWatcher = watcher
+        let publication = try? await room.localParticipant.publish(videoTrack: track, options: options)
+        guard self.room === room, generation == screenShareGeneration else {
+            // The call ended, or the person or the system stopped, while it
+            // was starting: the screen must not go on being captured for nobody.
+            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
+            _ = try? await track.stop()
+            return
+        }
+        // Published, and still being captured: a capture can end before its watcher hears of it.
+        guard let publication, track.capturer.captureState == .started else {
+            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
+            _ = try? await track.stop()
+            screenCaptureWatcher = nil
+            wantsScreenShare = false
+            didScreenShareFail = true
+            refreshTracks()
+            return
+        }
         refreshTracks()
     }
 
@@ -288,7 +304,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             candidates.windows.append(.init(
                 number: window.windowID, title: window.title, application: window.owningApplication?.applicationName,
                 bundleID: window.owningApplication?.bundleIdentifier, layer: window.windowLayer,
-                isOnScreen: window.isOnScreen, width: window.frame.width, height: window.frame.height
+                isOnScreen: window.isOnScreen, size: window.frame.size
             ))
         }
         return (candidates, sources)
@@ -363,6 +379,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if didScreenShareFail { didScreenShareFail = false }
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
+        wantsScreenShare = false
         screenShareGeneration += 1
         screenCaptureWatcher = nil
         #endif
@@ -398,6 +415,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
+        #if os(macOS)
+        // A full reconnect republishes what it had: not a screen the person has stopped sharing since.
+        if !wantsScreenShare, room.localParticipant.localVideoTracks.contains(where: { $0.source == .screenShareVideo }) {
+            Task { await unpublishScreens() }
+        }
+        #endif
     }
 
     /// Every publication of one of our devices. There is normally one.
