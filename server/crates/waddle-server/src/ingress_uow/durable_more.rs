@@ -4,7 +4,10 @@ use crate::db::DatabaseDriver;
 use jid::BareJid;
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::ingress::{InboxProjectionMutation, MessageKey};
-use waddle_xmpp::mam::{ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone};
+use waddle_xmpp::mam::{
+    correction_payload_like_pattern, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+    CorrectionScope,
+};
 use waddle_xmpp_core::mam::ThreadId;
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -84,10 +87,10 @@ impl MamArchiveRepository {
         // change the payload between this check and the update.
         let sql = match tx.transaction_mut().driver() {
             DatabaseDriver::Postgres => {
-                "SELECT rich_payload FROM mam_messages WHERE room_jid = ? AND id = ? FOR UPDATE"
+                "SELECT rich_payload, from_jid, message_type, stanza_id, origin_id FROM mam_messages WHERE room_jid = ? AND id = ? FOR UPDATE"
             }
             DatabaseDriver::Sqlite => {
-                "SELECT rich_payload FROM mam_messages WHERE room_jid = ? AND id = ?"
+                "SELECT rich_payload, from_jid, message_type, stanza_id, origin_id FROM mam_messages WHERE room_jid = ? AND id = ?"
             }
         };
         let mut rows = tx
@@ -101,6 +104,10 @@ impl MamArchiveRepository {
             return Ok(());
         };
         let stored: Option<String> = row.get(0)?;
+        let author: String = row.get(1)?;
+        let message_type: String = row.get(2)?;
+        let wire_id: Option<String> = row.get(3)?;
+        let origin_id: Option<String> = row.get(4)?;
         drop(rows);
         let current = stored
             .as_deref()
@@ -125,6 +132,55 @@ impl MamArchiveRepository {
         let encoded =
             serde_json::to_string(&rich).map_err(|_| IngressUowError::TombstonePayloadEncoding)?;
         tx.transaction_mut().execute("UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ? WHERE room_jid = ? AND id = ?", crate::db_params![encoded, archive.to_string(), target.id.clone()]).await?;
+        // XEP-0424 §Tombstones: the original's XEP-0308 corrections are
+        // replaced in the same transaction, keeping their `<replace/>`.
+        let Some(scope) = CorrectionScope::new(
+            &author,
+            message_type == "groupchat",
+            wire_id.as_deref(),
+            origin_id.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let mut candidates = Vec::new();
+        for reference in scope.reference_ids() {
+            let mut rows = tx
+                .transaction_mut()
+                .query(
+                    "SELECT id, from_jid, rich_payload FROM mam_messages WHERE room_jid = ? AND id <> ? AND rich_payload LIKE ? ESCAPE '\\' ORDER BY archive_seq ASC",
+                    crate::db_params![
+                        archive.to_string(),
+                        target.id.clone(),
+                        correction_payload_like_pattern(reference)
+                    ],
+                )
+                .await?;
+            while let Some(row) = rows.next().await? {
+                let id: String = row.get(0)?;
+                let from: String = row.get(1)?;
+                let payload: Option<String> = row.get(2)?;
+                let rich = payload
+                    .as_deref()
+                    .map(serde_json::from_str::<ArchivedRichMessage>)
+                    .transpose()
+                    .map_err(|_| IngressUowError::InvalidArchiveRichPayload)?;
+                candidates.push((id, from, rich));
+            }
+        }
+        let replacements = scope.replacements(
+            candidates
+                .iter()
+                .map(|(id, from, rich)| (id.clone(), from.clone(), rich.as_ref())),
+            tombstone,
+        );
+        for (id, replacement) in replacements {
+            let encoded = serde_json::to_string(&ArchivedRichMessage {
+                payload: Some(ArchivedRichPayload::Tombstone(replacement)),
+                ..ArchivedRichMessage::default()
+            })
+            .map_err(|_| IngressUowError::TombstonePayloadEncoding)?;
+            tx.transaction_mut().execute("UPDATE mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ? WHERE room_jid = ? AND id = ?", crate::db_params![encoded, archive.to_string(), id]).await?;
+        }
         Ok(())
     }
 }

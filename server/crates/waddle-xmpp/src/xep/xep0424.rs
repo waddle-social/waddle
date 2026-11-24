@@ -51,6 +51,8 @@ pub enum RetractionError {
 pub struct Retraction {
     /// The id of the message being retracted.
     pub retracts_id: String,
+    /// The optional human-readable `<reason/>` of the retraction.
+    pub reason: Option<String>,
 }
 
 impl Retraction {
@@ -58,7 +60,15 @@ impl Retraction {
     pub fn new(retracts_id: impl Into<String>) -> Self {
         Self {
             retracts_id: retracts_id.into(),
+            reason: None,
         }
+    }
+
+    /// Attach the retraction's `<reason/>` text.
+    #[must_use]
+    pub fn with_reason(mut self, reason: Option<String>) -> Self {
+        self.reason = reason;
+        self
     }
 }
 
@@ -154,7 +164,13 @@ pub fn extract_retraction_from_message(msg: &Message) -> Option<RetractionKind> 
             "retract" => {
                 let id = elem.attr("id").unwrap_or("").to_owned();
                 if !id.is_empty() {
-                    return Some(RetractionKind::Request(Retraction::new(id)));
+                    let reason = elem
+                        .get_child("reason", NS_MESSAGE_RETRACT)
+                        .map(Element::text)
+                        .filter(|text| !text.trim().is_empty());
+                    return Some(RetractionKind::Request(
+                        Retraction::new(id).with_reason(reason),
+                    ));
                 }
             }
             "retracted" => {

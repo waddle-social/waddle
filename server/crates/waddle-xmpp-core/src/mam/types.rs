@@ -156,6 +156,18 @@ pub struct ArchivedTombstone {
     /// When set, this tombstone is the result of XEP-0425 moderation
     /// rather than a sender-initiated XEP-0424 retraction.
     pub moderation: Option<ArchivedModeration>,
+    /// XEP-0424 §Tombstones: the human-readable `<reason/>` of the
+    /// sender's retraction, copied into the tombstone's `<retracted/>`.
+    /// Moderation tombstones carry their reason in [`Self::moderation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RichText>,
+    /// XEP-0424 §Tombstones for corrected messages: set on the
+    /// tombstone of a XEP-0308 correction, holding the original
+    /// message's id from the correction's `<replace/>` so clients can
+    /// tell the original's tombstone from its corrections' tombstones.
+    /// `None` on the tombstone of an original message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_id: Option<RichMessageId>,
     /// Retained real bare JID of the tombstoned message's original
     /// sender, for the groupchat origin-id tombstone-retry match ONLY.
     ///
@@ -168,6 +180,19 @@ pub struct ArchivedTombstone {
     /// on 1:1 tombstones, which never tombstone-match).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_scope: Option<BareJid>,
+}
+
+impl ArchivedTombstone {
+    /// The tombstone that replaces a XEP-0308 correction of the message this
+    /// tombstone replaces: identical `<retracted/>` data, plus the kept
+    /// `<replace/>` reference to the original message.
+    #[must_use]
+    pub fn for_correction(&self, replaces_id: RichMessageId) -> Self {
+        Self {
+            replaces_id: Some(replaces_id),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +322,16 @@ impl ArchivedRichMessage {
         )
     }
 
+    /// The message id named by a XEP-0308 `<replace/>`, when this payload is
+    /// a live (not yet tombstoned) correction.
+    #[must_use]
+    pub fn correction_replaces_id(&self) -> Option<&RichMessageId> {
+        match self.payload.as_ref() {
+            Some(ArchivedRichPayload::Correction { replaces_id }) => Some(replaces_id),
+            _ => None,
+        }
+    }
+
     /// True when this payload carries no client-authored content
     /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).
@@ -322,6 +357,116 @@ impl ArchivedRichMessage {
         let content = self.content_only();
         (!content.is_empty()).then_some(content)
     }
+}
+
+/// SQL `LIKE ... ESCAPE '\\'` pattern that prefilters stored `rich_payload`
+/// JSON for a [`ArchivedRichPayload::Correction`] naming `replaces_id`.
+///
+/// This is only a candidate filter (`LIKE` may be case-insensitive and also
+/// matches the id inside other fields); callers must decode the payload and
+/// compare [`ArchivedRichMessage::correction_replaces_id`].
+#[must_use]
+pub fn correction_payload_like_pattern(replaces_id: &str) -> String {
+    let encoded = serde_json::to_string(replaces_id).unwrap_or_default();
+    let literal = format!("\"replaces_id\":{encoded}");
+    let escaped = literal
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+/// The identity a XEP-0308 correction must match to be tombstoned together
+/// with the message it corrects (XEP-0424 §Tombstones).
+///
+/// A correction belongs to the original when it is archived in the same
+/// archive by the same author (the exact occupant JID in a room, the bare
+/// account JID otherwise) and its `<replace id/>` names the original's wire
+/// id or, for 1:1 clients, its origin-id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionScope {
+    author: String,
+    exact_author: bool,
+    reference_ids: Vec<String>,
+}
+
+impl CorrectionScope {
+    /// Describe the corrections of an archived original; `None` when the
+    /// original carries no id a `<replace/>` could name.
+    #[must_use]
+    pub fn new(
+        author: &str,
+        groupchat: bool,
+        wire_id: Option<&str>,
+        origin_id: Option<&str>,
+    ) -> Option<Self> {
+        let mut reference_ids: Vec<String> = Vec::new();
+        for id in [wire_id, origin_id].into_iter().flatten() {
+            if !reference_ids.iter().any(|existing| existing == id) {
+                reference_ids.push(id.to_owned());
+            }
+        }
+        (!reference_ids.is_empty()).then(|| Self {
+            author: author.to_owned(),
+            exact_author: groupchat,
+            reference_ids,
+        })
+    }
+
+    /// The `<replace id/>` values that name the original.
+    #[must_use]
+    pub fn reference_ids(&self) -> &[String] {
+        &self.reference_ids
+    }
+
+    /// The tombstone replacing a candidate archive row, or `None` when the
+    /// row is not a live correction of the original by its author.
+    #[must_use]
+    pub fn tombstone_for(
+        &self,
+        candidate_from: &str,
+        candidate_rich: Option<&ArchivedRichMessage>,
+        tombstone: &ArchivedTombstone,
+    ) -> Option<ArchivedTombstone> {
+        let author_matches = if self.exact_author {
+            candidate_from == self.author
+        } else {
+            bare_jid_part(candidate_from) == bare_jid_part(&self.author)
+        };
+        let replaces_id = candidate_rich?.correction_replaces_id()?;
+        (author_matches
+            && self
+                .reference_ids
+                .iter()
+                .any(|reference| reference == replaces_id.as_str()))
+        .then(|| tombstone.for_correction(replaces_id.clone()))
+    }
+}
+
+impl CorrectionScope {
+    /// The tombstones to apply to a set of candidate rows given as
+    /// `(row id, from JID, decoded rich payload)`: one `(row id, tombstone)`
+    /// per live correction of the original.
+    pub fn replacements<'a, I>(
+        &self,
+        candidates: I,
+        tombstone: &ArchivedTombstone,
+    ) -> Vec<(String, ArchivedTombstone)>
+    where
+        I: IntoIterator<Item = (String, String, Option<&'a ArchivedRichMessage>)>,
+    {
+        candidates
+            .into_iter()
+            .filter_map(|(id, from, rich)| {
+                self.tombstone_for(&from, rich, tombstone)
+                    .map(|replacement| (id, replacement))
+            })
+            .collect()
+    }
+}
+
+fn bare_jid_part(jid: &str) -> &str {
+    jid.split('/').next().unwrap_or(jid)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

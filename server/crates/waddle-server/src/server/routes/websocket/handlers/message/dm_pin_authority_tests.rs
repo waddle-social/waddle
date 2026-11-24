@@ -241,6 +241,8 @@ async fn dm_pin_receipts(fixture: IngressFixture, replay: bool, cascade: bool) {
                             retraction_id: None,
                             stamp: chrono::Utc::now(),
                             moderation: None,
+                            reason: None,
+                            replaces_id: None,
                             sender_scope: None,
                         },
                     },

@@ -344,6 +344,8 @@ async fn sqlite_connection_helpers_ignore_temp_archive_shadows() {
             retraction_id: None,
             stamp: Utc::now(),
             moderation: None,
+            reason: None,
+            replaces_id: None,
             sender_scope: None,
         },
     )

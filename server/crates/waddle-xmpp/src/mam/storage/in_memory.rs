@@ -16,6 +16,7 @@ use super::query_semantics::{
 };
 use super::tombstone::apply_tombstone;
 use super::tombstone::origin_id_tombstone_match;
+use super::tombstone::tombstone_corrections;
 use super::{MamStorage, MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 
 #[derive(Clone, Default)]
@@ -336,13 +337,15 @@ impl MamStorage for InMemoryMamStorage {
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<bool, MamStorageError> {
         let mut entries = self.entries.write().await;
-        for (_jid, message) in entries.iter_mut() {
-            if message.id == archive_id {
-                apply_tombstone(message, tombstone);
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let Some(index) = entries
+            .iter()
+            .position(|(_, message)| message.id == archive_id)
+        else {
+            return Ok(false);
+        };
+        apply_tombstone(&mut entries[index].1, tombstone.clone());
+        tombstone_corrections(&mut entries, index, &tombstone);
+        Ok(true)
     }
 
     async fn replace_with_terminal_tombstone(
@@ -351,20 +354,22 @@ impl MamStorage for InMemoryMamStorage {
         tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
     ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
         let mut entries = self.entries.write().await;
-        let Some((_, message)) = entries
-            .iter_mut()
-            .find(|(_, message)| message.id == archive_id)
+        let Some(index) = entries
+            .iter()
+            .position(|(_, message)| message.id == archive_id)
         else {
             return Ok(TerminalTombstoneOutcome::NotFound);
         };
-        if message
+        if entries[index]
+            .1
             .rich
             .as_ref()
             .is_some_and(waddle_xmpp_core::mam::ArchivedRichMessage::is_tombstoned)
         {
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
-        apply_tombstone(message, tombstone);
+        apply_tombstone(&mut entries[index].1, tombstone.clone());
+        tombstone_corrections(&mut entries, index, &tombstone);
         Ok(TerminalTombstoneOutcome::Replaced)
     }
 }

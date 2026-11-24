@@ -14,7 +14,7 @@ use sqlx::{Connection as _, PgConnection, Postgres, QueryBuilder, Sqlite, Sqlite
 use tracing::debug;
 use uuid::Uuid;
 use waddle_xmpp_core::mam::{
-    ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload,
+    ArchiveOrdinal, ArchivedMessage, ArchivedRichMessage, ArchivedRichPayload, CorrectionScope,
 };
 
 pub(super) async fn store_message(
@@ -495,14 +495,22 @@ pub(super) async fn replace_with_tombstone(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
+    // The original and each of its XEP-0308 corrections change together.
     match backend {
         MamDatabaseBackend::Sqlite(pool) => {
-            let mut conn = pool.acquire().await?;
-            replace_with_tombstone_sqlite_connection(&mut conn, archive_id, tombstone).await
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+            let replaced =
+                replace_with_tombstone_sqlite_connection(&mut tx, archive_id, tombstone).await?;
+            tx.commit().await?;
+            Ok(replaced)
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
-            replace_with_tombstone_postgres_connection(&mut conn, None, archive_id, tombstone).await
+            let mut tx = pool.begin().await?;
+            let replaced =
+                replace_with_tombstone_postgres_connection(&mut tx, None, archive_id, tombstone)
+                    .await?;
+            tx.commit().await?;
+            Ok(replaced)
         }
     }
 }
@@ -514,16 +522,21 @@ pub(super) async fn replace_with_terminal_tombstone(
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
     match backend {
         MamDatabaseBackend::Sqlite(pool) => {
-            let mut conn = pool.acquire().await?;
-            replace_with_terminal_tombstone_sqlite_connection(&mut conn, archive_id, tombstone)
-                .await
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+            let outcome =
+                replace_with_terminal_tombstone_sqlite_connection(&mut tx, archive_id, tombstone)
+                    .await?;
+            tx.commit().await?;
+            Ok(outcome)
         }
         MamDatabaseBackend::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
-            replace_with_terminal_tombstone_postgres_connection(
-                &mut conn, None, archive_id, tombstone,
+            let mut tx = pool.begin().await?;
+            let outcome = replace_with_terminal_tombstone_postgres_connection(
+                &mut tx, None, archive_id, tombstone,
             )
-            .await
+            .await?;
+            tx.commit().await?;
+            Ok(outcome)
         }
     }
 }
@@ -576,7 +589,7 @@ pub(super) async fn replace_with_tombstone_postgres_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
+    let encoded = encode_tombstone_payload(tombstone.clone())?;
     let relation = super::postgres_relation(schema, "mam_messages");
     let mut builder = QueryBuilder::<Postgres>::new(format!(
         "UPDATE {relation} SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = "
@@ -585,8 +598,11 @@ pub(super) async fn replace_with_tombstone_postgres_connection(
         .push_bind(encoded.as_str())
         .push(" WHERE id = ")
         .push_bind(archive_id);
-    let rows = builder.build().execute(conn).await?.rows_affected();
+    let rows = builder.build().execute(&mut *conn).await?.rows_affected();
     debug!(archive_id = %archive_id, rows_affected = rows, "Replaced archived message with tombstone");
+    if rows > 0 {
+        tombstone_corrections_postgres(conn, schema, archive_id, &tombstone).await?;
+    }
     Ok(rows > 0)
 }
 
@@ -595,7 +611,7 @@ pub(super) async fn replace_with_tombstone_sqlite_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
+    let encoded = encode_tombstone_payload(tombstone.clone())?;
     let mut builder = QueryBuilder::<Sqlite>::new(
         "UPDATE main.mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
     );
@@ -603,8 +619,11 @@ pub(super) async fn replace_with_tombstone_sqlite_connection(
         .push_bind(encoded.as_str())
         .push(" WHERE id = ")
         .push_bind(archive_id);
-    let rows = builder.build().execute(conn).await?.rows_affected();
+    let rows = builder.build().execute(&mut *conn).await?.rows_affected();
     debug!(archive_id = %archive_id, rows_affected = rows, "Replaced archived message with tombstone");
+    if rows > 0 {
+        tombstone_corrections_sqlite(conn, archive_id, &tombstone).await?;
+    }
     Ok(rows > 0)
 }
 
@@ -614,7 +633,7 @@ pub(super) async fn replace_with_terminal_tombstone_postgres_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
+    let encoded = encode_tombstone_payload(tombstone.clone())?;
     let relation = super::postgres_relation(schema, "mam_messages");
     loop {
         let mut query = QueryBuilder::<Postgres>::new(format!(
@@ -647,6 +666,7 @@ pub(super) async fn replace_with_terminal_tombstone_postgres_connection(
             .push_bind(current_rich_payload.as_deref());
         if update.build().execute(&mut *conn).await?.rows_affected() > 0 {
             debug!(archive_id = %archive_id, "Replaced live archived message with terminal tombstone");
+            tombstone_corrections_postgres(conn, schema, archive_id, &tombstone).await?;
             return Ok(TerminalTombstoneOutcome::Replaced);
         }
     }
@@ -657,7 +677,7 @@ pub(super) async fn replace_with_terminal_tombstone_sqlite_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone)?;
+    let encoded = encode_tombstone_payload(tombstone.clone())?;
     loop {
         let mut query =
             QueryBuilder::<Sqlite>::new("SELECT rich_payload FROM main.mam_messages WHERE id = ");
@@ -688,9 +708,152 @@ pub(super) async fn replace_with_terminal_tombstone_sqlite_connection(
             .push_bind(current_rich_payload.as_deref());
         if update.build().execute(&mut *conn).await?.rows_affected() > 0 {
             debug!(archive_id = %archive_id, "Replaced live archived message with terminal tombstone");
+            tombstone_corrections_sqlite(conn, archive_id, &tombstone).await?;
             return Ok(TerminalTombstoneOutcome::Replaced);
         }
     }
+}
+
+/// XEP-0424 §Tombstones: a retraction applies to a message together with all
+/// of its XEP-0308 corrections, and the archive replaces each correction with
+/// a tombstone that keeps its `<replace/>`. Corrections reference the original
+/// by the `<replace id/>` value: its wire id or, for 1:1 clients, its
+/// origin-id. Only corrections by the original's author are affected; live
+/// corrections only (an existing tombstone stays terminal).
+const CORRECTION_TOMBSTONE_SET: &str = "SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ";
+
+/// `(room_jid, from_jid, message_type, stanza_id, origin_id)` of the retracted row.
+type CorrectionOriginRow = (String, String, String, Option<String>, Option<String>);
+
+/// Append the candidate filter shared by both backends: rows of the original's
+/// archive, other than the original, whose payload may be a correction naming
+/// one of the original's ids. `LIKE` only prefilters; the payload is decoded
+/// and compared as typed data afterwards.
+fn push_correction_candidates<'q, DB>(
+    query: &mut QueryBuilder<'q, DB>,
+    archive: String,
+    original_archive_id: String,
+    scope: &CorrectionScope,
+) where
+    DB: sqlx::Database,
+    String: sqlx::Encode<'q, DB> + sqlx::Type<DB> + 'q,
+{
+    query
+        .push_bind(archive)
+        .push(" AND id <> ")
+        .push_bind(original_archive_id)
+        .push(" AND (");
+    for (index, id) in scope.reference_ids().iter().enumerate() {
+        if index > 0 {
+            query.push(" OR ");
+        }
+        query
+            .push("rich_payload LIKE ")
+            .push_bind(waddle_xmpp_core::mam::correction_payload_like_pattern(id))
+            .push(" ESCAPE '\\'");
+    }
+    query.push(") ORDER BY archive_seq ASC");
+}
+
+fn correction_scope(original: CorrectionOriginRow) -> Option<(String, CorrectionScope)> {
+    let (archive, author, message_type, wire_id, origin_id) = original;
+    CorrectionScope::new(
+        &author,
+        message_type == "groupchat",
+        wire_id.as_deref(),
+        origin_id.as_deref(),
+    )
+    .map(|scope| (archive, scope))
+}
+
+/// Decode candidate rows and encode the tombstone payload for each live
+/// correction of the original, as `(row id, encoded payload)`.
+fn correction_updates(
+    scope: &CorrectionScope,
+    rows: Vec<(String, String, Option<String>)>,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<Vec<(String, String)>, MamStorageError> {
+    let decoded = rows
+        .into_iter()
+        .map(|(id, from, payload)| Ok((id, from, decode_rich_payload(payload.as_deref())?)))
+        .collect::<Result<Vec<_>, MamStorageError>>()?;
+    scope
+        .replacements(
+            decoded
+                .iter()
+                .map(|(id, from, rich)| (id.clone(), from.clone(), rich.as_ref())),
+            tombstone,
+        )
+        .into_iter()
+        .map(|(id, replacement)| Ok((id, encode_tombstone_payload(replacement)?)))
+        .collect()
+}
+
+async fn tombstone_corrections_postgres(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    original_archive_id: &str,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<(), MamStorageError> {
+    let relation = super::postgres_relation(schema, "mam_messages");
+    let original: Option<CorrectionOriginRow> = sqlx::query_as(&format!(
+        "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM {relation} WHERE id = $1"
+    ))
+    .bind(original_archive_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((archive, scope)) = original.and_then(correction_scope) else {
+        return Ok(());
+    };
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "SELECT id, from_jid, rich_payload FROM {relation} WHERE room_jid = "
+    ));
+    push_correction_candidates(&mut query, archive, original_archive_id.to_owned(), &scope);
+    let rows = query.build_query_as().fetch_all(&mut *conn).await?;
+    for (id, encoded) in correction_updates(&scope, rows, tombstone)? {
+        let mut update =
+            QueryBuilder::<Postgres>::new(format!("UPDATE {relation} {CORRECTION_TOMBSTONE_SET}"));
+        update
+            .push_bind(encoded)
+            .push(" WHERE id = ")
+            .push_bind(id.as_str());
+        update.build().execute(&mut *conn).await?;
+        debug!(archive_id = %id, "Replaced archived correction with tombstone");
+    }
+    Ok(())
+}
+
+async fn tombstone_corrections_sqlite(
+    conn: &mut SqliteConnection,
+    original_archive_id: &str,
+    tombstone: &waddle_xmpp_core::mam::ArchivedTombstone,
+) -> Result<(), MamStorageError> {
+    let original: Option<CorrectionOriginRow> = sqlx::query_as(
+        "SELECT room_jid, from_jid, message_type, stanza_id, origin_id FROM main.mam_messages WHERE id = ?",
+    )
+    .bind(original_archive_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((archive, scope)) = original.and_then(correction_scope) else {
+        return Ok(());
+    };
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT id, from_jid, rich_payload FROM main.mam_messages WHERE room_jid = ",
+    );
+    push_correction_candidates(&mut query, archive, original_archive_id.to_owned(), &scope);
+    let rows = query.build_query_as().fetch_all(&mut *conn).await?;
+    for (id, encoded) in correction_updates(&scope, rows, tombstone)? {
+        let mut update = QueryBuilder::<Sqlite>::new(format!(
+            "UPDATE main.mam_messages {CORRECTION_TOMBSTONE_SET}"
+        ));
+        update
+            .push_bind(encoded)
+            .push(" WHERE id = ")
+            .push_bind(id.as_str());
+        update.build().execute(&mut *conn).await?;
+        debug!(archive_id = %id, "Replaced archived correction with tombstone");
+    }
+    Ok(())
 }
 
 fn encode_tombstone_payload(

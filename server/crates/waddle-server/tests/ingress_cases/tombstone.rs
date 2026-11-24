@@ -46,6 +46,8 @@ async fn retraction_tombstone(fixture: IngressFixture) {
                     retraction_id: None,
                     stamp: chrono::Utc::now(),
                     moderation: None,
+                    reason: None,
+                    replaces_id: None,
                     sender_scope: None,
                 },
             },
@@ -109,6 +111,8 @@ async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
             retraction_id: None,
             stamp: chrono::Utc::now(),
             moderation: None,
+            reason: None,
+            replaces_id: None,
             sender_scope: None,
         },
     )

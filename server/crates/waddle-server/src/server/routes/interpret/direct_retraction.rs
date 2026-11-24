@@ -81,6 +81,8 @@ pub(super) async fn apply_retraction_tombstone(
         retraction_id: Some(retraction_id),
         stamp: chrono::Utc::now(),
         moderation: None,
+        reason: super::groupchat_archive::retraction_reason(retraction_message),
+        replaces_id: None,
         // 1:1 tombstones never enter the groupchat tombstone-retry
         // match; there is no occupant identity to retain.
         sender_scope: None,

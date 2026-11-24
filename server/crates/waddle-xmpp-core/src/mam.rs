@@ -20,9 +20,10 @@ pub use stanza_id_filter::{
     MamFilterStanzaId, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, STANZA_ID_FILTER_FIELD,
 };
 pub use types::{
-    ArchivedMention, ArchivedMessage, ArchivedModeration, ArchivedMucSender, ArchivedOccupantId,
-    ArchivedReactionSet, ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage,
-    ArchivedRichPayload, ArchivedTombstone, MamQuery, MamResult, RichMessageId, RichText, ThreadId,
+    correction_payload_like_pattern, ArchivedMention, ArchivedMessage, ArchivedModeration,
+    ArchivedMucSender, ArchivedOccupantId, ArchivedReactionSet, ArchivedReference, ArchivedReply,
+    ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+    CorrectionScope, MamQuery, MamResult, RichMessageId, RichText, ThreadId,
 };
 
 /// MAM XML namespace (XEP-0313 v2).
