@@ -141,16 +141,16 @@ pub(super) async fn handle_spaces_disco_info<'a>(
         if state.deps.app_state.host_grants.space_enrolled(node).await != Ok(false) {
             return Some(DiscoInfoResponse::error(
                 req.id,
-                None,
-                None,
+                req.response_from,
+                req.response_to,
                 item_not_found_iq_error("Requested item not found."),
             ));
         }
         let Ok(spaces_jid) = spaces_service_bare_jid(req.spaces_domain) else {
             return Some(DiscoInfoResponse::error(
                 req.id,
-                None,
-                None,
+                req.response_from,
+                req.response_to,
                 internal_server_error_iq_error("Internal server error."),
             ));
         };
@@ -165,8 +165,8 @@ pub(super) async fn handle_spaces_disco_info<'a>(
             Ok(None) => {
                 return Some(DiscoInfoResponse::error(
                     req.id,
-                    None,
-                    None,
+                    req.response_from,
+                    req.response_to,
                     item_not_found_iq_error("Requested item not found."),
                 ));
             }
@@ -174,8 +174,8 @@ pub(super) async fn handle_spaces_disco_info<'a>(
                 warn!(node, error = %error, "Failed to resolve Spaces node info");
                 return Some(DiscoInfoResponse::error(
                     req.id,
-                    None,
-                    None,
+                    req.response_from,
+                    req.response_to,
                     item_not_found_iq_error("Requested item not found."),
                 ));
             }
@@ -189,8 +189,8 @@ pub(super) async fn handle_spaces_disco_info<'a>(
             );
             return Some(DiscoInfoResponse::error(
                 req.id,
-                None,
-                None,
+                req.response_from,
+                req.response_to,
                 internal_server_error_iq_error("Internal server error."),
             ));
         };

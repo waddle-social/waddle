@@ -8,7 +8,10 @@
 //! Muji + Jingle + RTP + LiveKit-transport features the server
 //! understands.
 
-use super::{build_disco_info_response, DiscoInfoRequest, DiscoInfoResponse, Feature, Identity};
+use super::{
+    build_disco_info_response, item_not_found_iq_error, DiscoInfoRequest, DiscoInfoResponse,
+    Feature, Identity,
+};
 
 /// Handle a disco#info query targeted at `calls.<server-domain>`.
 /// Returns `None` for queries to any other JID so the dispatcher
@@ -19,6 +22,16 @@ pub(super) fn handle_calls_mixer_disco_info<'a>(
     let expected = format!("calls.{}", req.domain);
     if req.target_to != Some(expected.as_str()) {
         return None;
+    }
+
+    // The mixer hosts no nodes (XEP-0030 §3.1).
+    if req.node.is_some() {
+        return Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            item_not_found_iq_error("Requested item not found."),
+        ));
     }
 
     // Identity matches the av-conferences ProtoXEP convention

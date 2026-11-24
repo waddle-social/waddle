@@ -488,6 +488,24 @@ pub(super) async fn handle_disco_items_iq(
             // well-known nodes: the XEP-0472 feed and the XEP-0501
             // stories node. Surface both so clients can enumerate
             // before subscribing.
+            if let Some(node) = query.node.as_deref() {
+                // Only the three hosted nodes exist; each lists no sub-nodes.
+                if !matches!(
+                    node,
+                    waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
+                        | waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
+                        | waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
+                ) {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )];
+                }
+                let response = build_disco_items_response(request_iq, &[], Some(node));
+                return vec![iq_to_xml(response)];
+            }
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(_) => vec![],
                 None => vec![
@@ -646,6 +664,51 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         if target_to == Some(push_domain) {
+            if let Some(node) = query.node.as_deref() {
+                // Only a registered command or a node the requester owns
+                // exists (XEP-0030 §4.1); both list no sub-nodes.
+                let commands = state.deps.protocol.command_registry.list_commands().await;
+                let exists = if super::command_name_by_boundary(
+                    &commands,
+                    node,
+                    CommandBoundary::PushService,
+                )
+                .is_some()
+                {
+                    Ok(true)
+                } else if let Some(owner) = phase.bound_jid().map(|jid| jid.to_bare()) {
+                    state
+                        .deps
+                        .protocol
+                        .push_service
+                        .get_node_for_owner(&owner, node)
+                        .await
+                        .map(|found| found.is_some())
+                } else {
+                    Ok(false)
+                };
+                return match exists {
+                    Ok(true) => {
+                        let response = build_disco_items_response(request_iq, &[], Some(node));
+                        vec![iq_to_xml(response)]
+                    }
+                    Ok(false) => vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested Push Service node not found."),
+                    )],
+                    Err(error) => {
+                        warn!(error = %error, node, "Failed to load Push Service node for disco#items");
+                        vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )]
+                    }
+                };
+            }
             let items: Vec<DiscoItem> = match query.node.as_deref() {
                 Some(_) => Vec::new(),
                 None => {
@@ -764,8 +827,23 @@ pub(super) async fn handle_disco_items_iq(
             )];
         }
 
-        debug!("Disco items query on server");
         let calls_mixer_domain = format!("calls.{domain}");
+        // The upload service and the call mixer are leaf entities with no
+        // items. Any other address that reaches this point does not exist.
+        if let Some(target) = target_to.filter(|target| *target != domain) {
+            if target == upload_domain || target == calls_mixer_domain {
+                let response = build_disco_items_response(request_iq, &[], None);
+                return vec![iq_to_xml(response)];
+            }
+            return vec![build_iq_error_xml_typed(
+                id,
+                response_from,
+                response_to,
+                item_not_found_iq_error("Requested item not found."),
+            )];
+        }
+
+        debug!("Disco items query on server");
         let items = vec![
             DiscoItem::muc_service(muc_domain, Some("Chatrooms")),
             DiscoItem::upload_service(upload_domain, Some("HTTP File Upload")),

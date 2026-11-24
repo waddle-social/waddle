@@ -28,8 +28,8 @@ pub(super) fn handle_community_disco_info<'a>(
             _ => {
                 return Some(DiscoInfoResponse::error(
                     req.id,
-                    None,
-                    None,
+                    req.response_from,
+                    req.response_to,
                     item_not_found_iq_error("Requested item not found."),
                 ));
             }
