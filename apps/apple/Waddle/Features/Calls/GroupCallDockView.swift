@@ -266,7 +266,8 @@ struct GroupCallDockView: View {
     private var videoStage: some View {
         CallVideoStage(
             video: video,
-            label: video.remote == nil ? "Nobody else’s camera is on" : "A camera in the call"
+            label: video.screenSharer.map { "\($0)’s screen" }
+                ?? (video.remote == nil ? "Nobody else’s camera is on" : "A camera in the call")
         ) {
             roomMark(size: Theme.Size.callStageAvatar, glyph: stageMarkGlyph)
         }

@@ -243,7 +243,8 @@ struct CallDockView: View {
     private var videoStage: some View {
         CallVideoStage(
             video: video,
-            label: video.remote == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"
+            label: video.screenSharer != nil ? "\(peerName)’s screen"
+                : video.remote == nil ? "\(peerName)’s camera is off" : "\(peerName)’s video"
         ) {
             avatar(size: Theme.Size.callStageAvatar)
         }

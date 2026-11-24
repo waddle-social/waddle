@@ -299,7 +299,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             if let publication = remote.videoTracks.first(where: { $0.source == .screenShareVideo && $0.isLive }),
                let track = publication.track as? VideoTrack {
                 screens[identity] = SharedScreen(track: track, publicationID: publication.sid.stringValue)
-                if dockCameras.remoteScreen == nil { dockCameras.remoteScreen = identity }
             }
             // A camera that is off shows no picture rather than its last frame.
             guard remote.isCameraEnabled(), let track = remote.firstCameraVideoTrack else { continue }
@@ -314,6 +313,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if cameraTracks.count != tracks.count || tracks.contains(where: { cameraTracks[$0.key] !== $0.value }) {
             cameraTracks = tracks
         }
+        // The dock's one screen is the first in a fixed order, so it does not
+        // hop between two sharers as people come and go.
+        dockCameras.remoteScreen = screens.keys.min()
         if screenTracks.count != screens.count || screens.contains(where: { screenTracks[$0.key] != $0.value }) {
             screenTracks = screens
         }
