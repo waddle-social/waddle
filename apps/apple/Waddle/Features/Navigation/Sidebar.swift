@@ -10,6 +10,7 @@ import WaddleKit
 struct Sidebar: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
+    @Environment(CallStageModel.self) private var callStage
     @State private var query = ""
     @State private var spaceID: String?
 
@@ -40,6 +41,14 @@ struct Sidebar: View {
         .background(Theme.Colors.bgRail.ignoresSafeArea())
         .environment(\.huddleGround, Theme.Colors.bgRail)
         .environment(\.colorScheme, .dark)
+        // The system can take the sidebar away without a word to the split view's binding.
+        .onGeometryChange(for: Bool.self) { sidebar in
+            let frame = sidebar.frame(in: .global)
+            return frame.width > 1 && frame.maxX > 1
+        } action: { isOnScreen in
+            callStage.sidebarIsOnScreen = isOnScreen
+        }
+        .onDisappear { callStage.sidebarIsOnScreen = false }
         .navigationTitle("")
         #if os(iOS)
         .toolbarBackground(.hidden, for: .navigationBar)

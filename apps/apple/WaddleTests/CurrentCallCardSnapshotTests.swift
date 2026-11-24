@@ -23,7 +23,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
                 .background(Theme.Colors.bgRail)
                 .environment(\.huddleGround, Theme.Colors.bgRail)
                 .environment(\.colorScheme, .dark),
-            width: Self.width,
+            width: Self.width + 2 * Theme.Spacing.l,
             testName: testName,
             line: line
         )
@@ -48,7 +48,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
         assertCard(CurrentCallCard(
             title: "release-train with a long name",
             summary: CallCardSummary.line(status: .connecting, kind: .room(count: 1)),
-            isConnected: false, actions: Self.actions
+            isConnected: false, hasMedia: false, actions: Self.actions
         ))
     }
 }

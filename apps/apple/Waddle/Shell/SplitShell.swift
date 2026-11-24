@@ -43,7 +43,10 @@ struct SplitShell: View {
             callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
         }
         .onChange(of: columnVisibility, initial: true) { _, columns in
-            callStage.isSidebarShown = columns != .detailOnly
+            callStage.sidebarColumnIsShown = columns != .detailOnly
+        }
+        .onChange(of: callPlatform, initial: true) { _, platform in
+            callStage.shellPlatform = platform
         }
         .callFullScreen(isCallFullScreen) {
             // The window left full screen by its own button: the call steps down with it.

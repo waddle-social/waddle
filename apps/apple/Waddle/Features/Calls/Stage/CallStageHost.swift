@@ -10,8 +10,16 @@ final class CallStageModel {
     /// The pane a stage shares with its conversation, once the shell has
     /// laid it out: the dock and the stage both place the call by it.
     var pane: CGSize?
-    /// The sidebar is on screen to hold the card of a call whose conversation is not open.
-    var isSidebarShown = true
+    /// The sidebar is on screen to hold the card of a call whose conversation
+    /// is not open: its column is shown and the sidebar itself says it is there.
+    var isSidebarShown: Bool { sidebarColumnIsShown && sidebarIsOnScreen }
+    var sidebarColumnIsShown = true
+    /// Assumed until the sidebar has been laid out.
+    var sidebarIsOnScreen = true
+    /// Where the split shell draws calls, decided once at its root: a
+    /// split view's sidebar column is compact on an iPad, and the card in
+    /// it must still agree with the dock about who has the call.
+    var shellPlatform = CallSurface.Platform.phone
     @ObservationIgnored private(set) var tileSource = CallTileSource(video: { _ in nil }, togglePin: { _ in /* no call yet */ })
     /// The share of the pane each conversation's stage was dragged to, kept
     /// on this device (web keeps it per room in local storage).

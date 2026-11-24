@@ -21,48 +21,57 @@ struct CurrentCallCard: View {
     let title: String
     /// `CallCardSummary.line`.
     let summary: String
-    /// Media is up: the dot is live and the devices can be switched.
+    /// Media is up: the dot is live.
     var isConnected = true
+    /// The devices can be switched: media has connected, even if it is reconnecting now.
+    var hasMedia = true
     var isMicrophoneOn = false
     var isCameraOn = false
     let actions: Actions
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            HStack(spacing: WaddleTokens.Spacing.s2Half) {
+            HStack(alignment: .top, spacing: WaddleTokens.Spacing.s2Half) {
                 Circle()
                     .fill(isConnected ? Theme.Colors.live : Theme.Colors.fgSoft)
                     .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
+                    // Beside the title, wherever the summary wraps.
+                    .padding(.top, Metrics.dotInset)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(title)
                         .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.sm))
                         .foregroundStyle(Theme.Colors.fg)
+                        .lineLimit(1)
+                    // The whole line matters: at the sidebar's narrowest it takes a second row.
                     Text(summary)
                         .huddleText(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.liveText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .lineLimit(1)
                 .accessibilityElement(children: .combine)
                 Spacer(minLength: 0)
-                Button("Return", action: actions.returnToCall)
-                    .buttonStyle(.huddle(size: .small))
-                    .accessibilityLabel(Text("Return to the call with \(title)"))
-                    .help("Open the call's conversation")
             }
             HStack(spacing: WaddleTokens.Spacing.s1Half) {
                 control(
                     isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
-                    isOff: !isMicrophoneOn && isConnected, action: actions.toggleMicrophone
+                    isOff: !isMicrophoneOn && hasMedia, action: actions.toggleMicrophone
                 )
-                .disabled(!isConnected)
+                .disabled(!hasMedia)
                 control(
                     isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
                     action: actions.toggleCamera
                 )
-                .disabled(!isConnected)
+                .disabled(!hasMedia)
                 control("Expand call", symbol: "arrow.up.left.and.arrow.down.right", action: actions.expand)
                 Spacer(minLength: 0)
+                // Beside the controls, not the text: the sidebar is too narrow to share a line with the summary.
+                Button("Return", action: actions.returnToCall)
+                    .buttonStyle(.huddle(size: .small))
+                    .fixedSize()
+                    .accessibilityLabel(Text("Return to the call with \(title)"))
+                    .help("Open the call's conversation")
                 Button(action: actions.hangUp) {
                     glyph("phone.down", foreground: Theme.Colors.dangerFg, background: Theme.Colors.danger)
                 }
@@ -106,6 +115,7 @@ struct CurrentCallCard: View {
 
     private enum Metrics {
         static let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        static let dotInset: CGFloat = 5
         /// The web's small icon button under a pointer; a finger gets the touch height.
         #if os(macOS)
         static let control: CGFloat = 32
@@ -133,11 +143,10 @@ struct CurrentCallCardHost: View {
     @Environment(CallStageModel.self) private var model
     @Environment(\.callMediaControls) private var media
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @CallPlatform private var platform
 
     var body: some View {
         let state = session.calls.state
-        let conversation = model.surface(of: state, open: navigation.selection, platform: platform) == .sidebarCard
+        let conversation = model.surface(of: state, open: navigation.selection, platform: model.shellPlatform) == .sidebarCard
             ? state.sessionConversation : nil
         ZStack {
             if let conversation, let sid = state.sid {
@@ -166,6 +175,7 @@ struct CurrentCallCardHost: View {
             title: conversation.isRoom ? header.title : header.name,
             summary: CallCardSummary.line(status: status, kind: kind),
             isConnected: status == .connected,
+            hasMedia: status != .connecting,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             actions: .init(
