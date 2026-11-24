@@ -13,8 +13,13 @@
 //! > one it intends to stamp.
 //!
 //! Cross-archive `<stanza-id>` siblings (any other `by=`) are
-//! **preserved**, supporting the local-to-local flow where Alice's
-//! archive stamp survives Bob's recipient-pass stamping.
+//! **preserved**, with one exception. XEP-0313 §4.1.1: "Servers MUST NOT
+//! include the `<stanza-id/>` element in messages addressed to JIDs that
+//! do not have permissions to access the archive, such as a users'
+//! outgoing messages to their contacts." The recipient pass therefore
+//! strips the sender's own archive stamp (`by=<sender bare>`) from the
+//! copy delivered to a different account; only the recipient's stamp
+//! remains. The sender keeps it on its archived row and on sent carbons.
 //!
 //! `<origin-id>` (XEP-0359 §3.2) is treated as **read-only** — never
 //! stripped, never modified. The XEP forbids it.
@@ -107,6 +112,13 @@ impl MessageHandler for CanonicalizeHandler {
         // `<stanza-id by='<domain>'/>` is equally spoofable and MUST be
         // stripped, even though the server never stamps under it.
         let server_domain: Option<BareJid> = ctx.domain.parse().ok();
+        // XEP-0313 §4.1.1: the recipient of a message from another account
+        // has no access to the sender's archive, so the sender's stamp is
+        // not delivered to it.
+        let foreign_sender_archive: Option<BareJid> =
+            message.from.as_ref().map(Jid::to_bare).filter(|sender| {
+                matches!(ctx.locality, Locality::Recipient) && *sender != local_archive
+            });
         message.payloads.retain(|p| {
             if !is_stanza_id_element(p) {
                 return true;
@@ -120,7 +132,11 @@ impl MessageHandler for CanonicalizeHandler {
                 .map(str::trim)
                 .and_then(|raw| raw.parse::<BareJid>().ok())
             {
-                Some(parsed) => parsed != local_archive && Some(&parsed) != server_domain.as_ref(),
+                Some(parsed) => {
+                    parsed != local_archive
+                        && Some(&parsed) != server_domain.as_ref()
+                        && Some(&parsed) != foreign_sender_archive.as_ref()
+                }
                 // Malformed `by=` — leave the element alone; the
                 // server can't claim ownership of an unparseable bare.
                 None => true,
@@ -271,9 +287,10 @@ mod tests {
     }
 
     #[test]
-    fn xep_0359_preserves_cross_archive_stanza_ids() {
-        // Recipient pass on Bob's machine. Alice's stamp (by=alice@…)
-        // must be preserved; Bob's fresh stamp (by=bob@…) is added.
+    fn xep_0359_recipient_copy_drops_sender_archive_stanza_id() {
+        // Recipient pass on Bob's machine. XEP-0313 §4.1.1: Alice's archive
+        // stamp (by=alice@…) MUST NOT reach Bob; only Bob's fresh stamp
+        // (by=bob@…) remains.
         let local = full("bob@example.com/desk");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         msg.payloads.push(build_stanza_id_element(
@@ -284,11 +301,9 @@ mod tests {
         run_with_id(&local, &mut msg, "bob-B1");
 
         let stamps = extract_stanza_ids(&msg);
-        assert_eq!(stamps.len(), 2);
-        let alice = jid("alice@example.com");
-        let bob = jid("bob@example.com");
-        assert!(stamps.iter().any(|s| s.by == alice && s.id == "alice-A1"));
-        assert!(stamps.iter().any(|s| s.by == bob && s.id == "bob-B1"));
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].by, jid("bob@example.com"));
+        assert_eq!(stamps[0].id, "bob-B1");
     }
 
     #[test]
@@ -307,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn xep_0359_preserves_multiple_cross_archive_stamps() {
+    fn xep_0359_preserves_third_party_stamps_but_not_the_sender_archive_stamp() {
         let local = full("bob@example.com/desk");
         let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
         msg.payloads.push(build_stanza_id_element(
@@ -322,11 +337,10 @@ mod tests {
         run_with_id(&local, &mut msg, "bob-B1");
 
         let stamps = extract_stanza_ids(&msg);
-        assert_eq!(stamps.len(), 3);
-        let alice = jid("alice@example.com");
+        assert_eq!(stamps.len(), 2);
         let charlie = jid("charlie@example.com");
         let bob = jid("bob@example.com");
-        assert!(stamps.iter().any(|s| s.by == alice && s.id == "alice-A1"));
+        assert!(stamps.iter().all(|s| s.by != jid("alice@example.com")));
         assert!(stamps
             .iter()
             .any(|s| s.by == charlie && s.id == "charlie-C1"));
