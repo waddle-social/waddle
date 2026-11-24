@@ -367,6 +367,64 @@ pub fn sanitize_filename(filename: &str) -> String {
     }
 }
 
+/// Validity of a slot's PUT URL in seconds (XEP-0363 §6: "relatively low
+/// timeout values of around 300s are RECOMMENDED").
+pub const SLOT_VALIDITY_SECS: i64 = 300;
+
+/// Percent-encode a sanitized filename for use as a URL path segment
+/// (XEP-0363 §3: "Non ASCII characters MUST be percent-encoded", RFC 3986).
+/// Only ASCII unreserved characters are left as-is.
+fn encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// PUT URL of a slot.
+pub fn slot_put_url(base_url: &str, slot_id: &str) -> String {
+    format!("{}/api/upload/{}", base_url.trim_end_matches('/'), slot_id)
+}
+
+/// GET URL of a slot; the filename is percent-encoded so the URL is pure
+/// ASCII per RFC 3986.
+pub fn slot_get_url(base_url: &str, slot_id: &str, safe_filename: &str) -> String {
+    format!(
+        "{}/api/files/{}/{}",
+        base_url.trim_end_matches('/'),
+        slot_id,
+        encode_path_segment(safe_filename)
+    )
+}
+
+/// Whether a PUT `Content-Type` matches the type declared in the slot
+/// request. Parameters (`; charset=...`) and case are ignored.
+pub fn content_type_matches(declared: &str, actual: &str) -> bool {
+    let essence = |v: &str| {
+        v.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    };
+    essence(declared) == essence(actual)
+}
+
+/// XEP-0128 service discovery extension advertising the maximum file size
+/// (XEP-0363 §2: field `max-file-size`, value in bytes).
+pub fn build_max_file_size_form(max_size: u64) -> Element {
+    use super::xep0004::{DataForm, Field, FormType, ToElement};
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(NS_HTTP_UPLOAD))
+        .add_field(Field::text_single("max-file-size", max_size.to_string()))
+        .to_element()
+}
+
 /// Get the effective content type, with a sensible default.
 pub fn effective_content_type(content_type: Option<&str>) -> &str {
     content_type.unwrap_or("application/octet-stream")
