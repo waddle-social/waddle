@@ -29,6 +29,7 @@ mod preferences;
 mod profile;
 mod read_markers;
 mod rooms;
+mod shortcuts;
 mod status;
 mod stories;
 mod suggestions;

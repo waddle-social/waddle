@@ -377,3 +377,14 @@ button.link-card:hover {
   border-radius: 999px;
   background-color: alpha(currentColor, 0.08);
 }
+
+/* A shortcut's keys in the Keyboard Shortcuts window. */
+.keycap {
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--wd-border);
+  background-color: var(--wd-surface-2);
+  color: var(--wd-fg);
+  font-family: monospace;
+  font-size: 0.9em;
+}

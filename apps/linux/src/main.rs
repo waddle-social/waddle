@@ -46,6 +46,7 @@ mod session_profile;
 mod session_rooms;
 mod session_tools;
 mod settings;
+mod shortcuts;
 mod stickers;
 mod stories;
 mod thread_updates;

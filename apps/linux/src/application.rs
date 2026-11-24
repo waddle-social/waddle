@@ -147,8 +147,10 @@ impl WaddleApplication {
             decline,
             show_call,
         ]);
-        self.set_accels_for_action("app.quit", &["<Control>q"]);
-        self.set_accels_for_action("app.preferences", &["<Control>comma"]);
+        // One table feeds these and the Keyboard Shortcuts window.
+        for (action, accel) in crate::shortcuts::bindings() {
+            self.set_accels_for_action(action, &[accel]);
+        }
     }
 
     /// The one window, made on first use. It hides on close, so it

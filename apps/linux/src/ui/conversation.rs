@@ -171,6 +171,7 @@ impl WaddleWindow {
         self.setup_presence_input();
         self.setup_message_tools();
         self.setup_room_tools();
+        self.setup_shortcuts();
         self.setup_link();
     }
 
