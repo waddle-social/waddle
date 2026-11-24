@@ -80,7 +80,7 @@ impl WaddleWindow {
         let was_idle = {
             let mut presence = state.presence.borrow_mut();
             presence.note_input(now);
-            presence.shown() != Show::Available
+            presence.idle_by_itself()
         };
         // Coming back from Away should show at once, not at the next tick.
         if was_idle {

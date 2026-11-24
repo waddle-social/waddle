@@ -11,6 +11,7 @@ The native client currently supports:
 - **Shell:** an adaptive `AdwNavigationSplitView` that collapses at phone widths.
 - **Chat:** rooms and DMs, paged history, replies, reactions, edits, deletions and attachments.
 - **Threads:** choose **Reply in Thread** below a message, or **Open Thread** from its message menu. Threads appear beneath their conversation in the sidebar, with separate unread counts and history. **Start Subthread** creates a nested thread; the back button returns to the main conversation. The original message appears above the replies when loaded. Thread views filter full archive pages so saved reactions, edits and Jev judgments remain available. Automatic scanning stops after three pages; **Load Earlier** continues through older history.
+- **Profile and presence:** the account row opens your profile: picture, status (Automatic, Online, Away, Do not disturb) with a message, name, nickname, pronouns, about and link, and your mood, activity and tune. A picked status is stored on the account and taken up by every device; Automatic goes Away after 10 minutes without input in the window and Extended Away after 30. Avatars show in the sidebar, the timeline and People, and author names use their XEP-0392 color. Click an avatar or name for a profile; **People** in the sidebar lists everyone the account knows.
 - **Jev badges:** question and content-safety judgments appear beneath messages. Expand a badge to inspect probabilities, model and taxonomy versions. Judgments follow the exact message revision and disappear after an edit or deletion until a current result arrives.
 
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
@@ -39,7 +40,7 @@ desktop-file-validate data/social.waddle.Waddle.desktop
 appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml
 ```
 
-The GTK navigation regression test requires a display and is excluded from ordinary headless runs. Run it separately with `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`.
+The GTK window tests require a display and are excluded from ordinary headless runs. GTK can start once per process, so run each separately: `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`, then the same with `profile_surfaces_open_and_resolve_authors` (the profile, People and profile-sheet dialogs, built against a session that cannot connect).
 
 ## Layout
 
@@ -49,6 +50,8 @@ The GTK navigation regression test requires a display and is excluded from ordin
 | `src/auth/store.rs` | Secret Service account store |
 | `src/runtime.rs` | tokio on its own threads; UI awaits work from the GLib main loop |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
+| `src/presence.rs`, `src/avatars.rs`, `src/profile.rs`, `src/people.rs`, `src/nick_color.rs` | Presence mode and auto-away, avatar cache, profile fields and registries, the People listing, nick colors: all without widgets |
+| `src/ui/status.rs`, `pictures.rs`, `profile.rs`, `person.rs`, `people.rs`, `identity.rs` | Their windows: presence plumbing, avatar loading and publishing, your profile, someone's profile sheet, the People view, author resolution |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |
 | `data/` | Desktop entry, AppStream metadata, icon |

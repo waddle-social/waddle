@@ -239,6 +239,12 @@ impl Controller {
         self.shown.unwrap_or(Show::Available)
     }
 
+    /// Auto-away has taken this device away, so input should bring it
+    /// back at once. A picked status ignores input.
+    pub fn idle_by_itself(&self) -> bool {
+        self.mode == PresenceMode::Automatic && self.shown() != Show::Available
+    }
+
     /// The user did something on this device. Reports may come late and
     /// out of order: only a later one counts.
     pub fn note_input(&mut self, at_ms: i64) {
@@ -617,6 +623,16 @@ mod tests {
         let back = controller.refresh(31 * MIN);
         assert_eq!(announced(&back)[0].show, Show::Available);
         assert_eq!(announced(&back)[0].idle_since_ms, None);
+    }
+
+    #[test]
+    fn only_auto_away_is_ended_by_input() {
+        let mut controller = connected();
+        assert!(!controller.idle_by_itself());
+        controller.refresh(10 * MIN);
+        assert!(controller.idle_by_itself());
+        controller.set_mode(AWAY, 10 * MIN);
+        assert!(!controller.idle_by_itself());
     }
 
     #[test]
