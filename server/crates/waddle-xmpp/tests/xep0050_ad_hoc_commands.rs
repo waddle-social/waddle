@@ -310,6 +310,31 @@ mod session_flow {
         }
     }
 
+    /// Dispatch a continuing-session command carrying a filled form.
+    async fn continue_with(
+        registry: &CommandRegistry,
+        session: &str,
+        action: Option<Action>,
+        form: DataForm,
+    ) -> CommandResult {
+        let mut cmd = Command::new(NODE).with_session_id(session);
+        cmd.action = action;
+        cmd.form = Some(form);
+        registry.dispatch(context(cmd)).await
+    }
+
+    /// Dispatch a continuing-session command without a form.
+    async fn continue_bare(
+        registry: &CommandRegistry,
+        session: &str,
+        action: Action,
+    ) -> CommandResult {
+        let cmd = Command::new(NODE)
+            .with_action(action)
+            .with_session_id(session);
+        registry.dispatch(context(cmd)).await
+    }
+
     fn filled(form_type: FormType) -> DataForm {
         DataForm::new(form_type).add_field(waddle_xmpp::xep::xep0004::Field::text_single("a", "b"))
     }
@@ -320,11 +345,13 @@ mod session_flow {
         // the advertised <actions/> ('complete' here).
         let (registry, seen) = wizard().await;
         let session = start(&registry).await;
-        let mut cmd = Command::new(NODE)
-            .with_action(Action::Execute)
-            .with_session_id(&session);
-        cmd.form = Some(filled(FormType::Submit));
-        let result = registry.dispatch(context(cmd)).await;
+        let result = continue_with(
+            &registry,
+            &session,
+            Some(Action::Execute),
+            filled(FormType::Submit),
+        )
+        .await;
         assert!(matches!(result, CommandResult::Completed { .. }));
         assert_eq!(seen.lock().expect("lock")[0].0, Some(Action::Complete));
         assert!(registry.get_session(&session).await.is_none());
@@ -334,9 +361,7 @@ mod session_flow {
     async fn absent_action_on_continuing_session_means_execute() {
         let (registry, seen) = wizard().await;
         let session = start(&registry).await;
-        let mut cmd = Command::new(NODE).with_session_id(&session);
-        cmd.form = Some(filled(FormType::Submit));
-        let result = registry.dispatch(context(cmd)).await;
+        let result = continue_with(&registry, &session, None, filled(FormType::Submit)).await;
         assert!(matches!(result, CommandResult::Completed { .. }));
         assert_eq!(seen.lock().expect("lock")[0].0, Some(Action::Complete));
     }
@@ -365,13 +390,7 @@ mod session_flow {
             })
             .await;
         let session = start(&registry).await;
-        registry
-            .dispatch(context(
-                Command::new(NODE)
-                    .with_action(Action::Execute)
-                    .with_session_id(session),
-            ))
-            .await;
+        continue_bare(&registry, &session, Action::Execute).await;
         assert_eq!(*seen.lock().expect("lock"), Some(Action::Next));
     }
 
@@ -390,13 +409,7 @@ mod session_flow {
             })
             .await;
         let session = start(&registry).await;
-        let result = registry
-            .dispatch(context(
-                Command::new(NODE)
-                    .with_action(Action::Execute)
-                    .with_session_id(session),
-            ))
-            .await;
+        let result = continue_bare(&registry, &session, Action::Execute).await;
         match result {
             CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
                 assert_eq!(condition, AdHocCommandCondition::BadAction)
@@ -411,11 +424,14 @@ mod session_flow {
         // correctable with the same sessionid.
         let (registry, _) = wizard().await;
         let session = start(&registry).await;
-        let mut bad = Command::new(NODE)
-            .with_action(Action::Complete)
-            .with_session_id(&session);
-        bad.form = Some(DataForm::new(FormType::Submit));
-        match registry.dispatch(context(bad)).await {
+        let bad = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            DataForm::new(FormType::Submit),
+        )
+        .await;
+        match bad {
             CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
                 assert_eq!(condition, AdHocCommandCondition::BadPayload)
             }
@@ -423,14 +439,14 @@ mod session_flow {
         }
         assert!(registry.get_session(&session).await.is_some());
 
-        let mut good = Command::new(NODE)
-            .with_action(Action::Complete)
-            .with_session_id(&session);
-        good.form = Some(filled(FormType::Submit));
-        assert!(matches!(
-            registry.dispatch(context(good)).await,
-            CommandResult::Completed { .. }
-        ));
+        let good = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            filled(FormType::Submit),
+        )
+        .await;
+        assert!(matches!(good, CommandResult::Completed { .. }));
         assert!(registry.get_session(&session).await.is_none());
     }
 
@@ -452,13 +468,7 @@ mod session_flow {
             })
             .await;
         let session = start(&registry).await;
-        let result = registry
-            .dispatch(context(
-                Command::new(NODE)
-                    .with_action(Action::Complete)
-                    .with_session_id(&session),
-            ))
-            .await;
+        let result = continue_bare(&registry, &session, Action::Complete).await;
         assert!(matches!(result, CommandResult::Error(_)));
         assert!(registry.get_session(&session).await.is_none());
     }
@@ -469,11 +479,13 @@ mod session_flow {
         // <x type='submit'/>."
         let (registry, seen) = wizard().await;
         let session = start(&registry).await;
-        let mut cmd = Command::new(NODE)
-            .with_action(Action::Complete)
-            .with_session_id(&session);
-        cmd.form = Some(filled(FormType::Cancel));
-        let result = registry.dispatch(context(cmd)).await;
+        let result = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            filled(FormType::Cancel),
+        )
+        .await;
         assert!(matches!(result, CommandResult::Completed { .. }));
         assert_eq!(seen.lock().expect("lock")[0].1, FormType::Submit);
     }
