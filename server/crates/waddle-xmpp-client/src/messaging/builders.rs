@@ -610,7 +610,7 @@ fn build_origin_id(stanza_id: &str) -> Element {
 ///
 /// # Errors
 ///
-/// Returns `CoreError::BadRequest` if an encrypted file lacks a plaintext content hash or has no non-blank ciphertext source URL.
+/// Returns `CoreError::BadRequest` if an encrypted file lacks a plaintext content hash, has no non-blank ciphertext source URL, or its `size` disagrees with the encrypted envelope's `plaintext_size`.
 pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
     // XEP-0448 §2.1: for encrypted transfers the `<file/>` metadata MUST
     // carry at least one plaintext `<hash/>` so recipients can verify the
@@ -643,7 +643,19 @@ pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
                 .build(),
         );
     }
-    if let Some(size) = file.size {
+    // XEP-0448 §2.1: `<size/>` is REQUIRED for encrypted sends; the envelope
+    // carries it as a mandatory field, so it cannot be omitted.
+    let size = match (file.encrypted.as_ref(), file.size) {
+        (Some(encrypted), Some(size)) if size != encrypted.plaintext_size => {
+            return Err(CoreError::bad_request(Some(
+                "encrypted shared file size must equal the encrypted plaintext size".to_string(),
+            ))
+            .into());
+        }
+        (Some(encrypted), _) => Some(encrypted.plaintext_size),
+        (None, size) => size,
+    };
+    if let Some(size) = size {
         metadata.append_child(
             Element::builder("size", NS_FILE_METADATA)
                 .append(size.to_string())

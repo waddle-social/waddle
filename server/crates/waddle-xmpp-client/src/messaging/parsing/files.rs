@@ -120,7 +120,11 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
                     url = source_el.attr("target").map(String::from);
                 }
             } else if xep_encrypted_file::is_encrypted_element(source_el) {
-                encrypted = xep_encrypted_file::parse_encrypted_element(source_el);
+                // XEP-0448 §2.1: `<size/>` is REQUIRED for encrypted shares.
+                // An envelope without it is treated as malformed.
+                encrypted = size.and_then(|plaintext_size| {
+                    xep_encrypted_file::parse_encrypted_element(source_el, plaintext_size)
+                });
             }
         }
     }

@@ -358,6 +358,7 @@ fn encrypted_file_to_ffi(
 
 fn encrypted_file_from_ffi(
     enc: WaddleEncryptedFile,
+    plaintext_size: Option<u64>,
 ) -> Result<waddle_xmpp_client::xep::encrypted_file::EncryptedFile, String> {
     use waddle_xmpp_client::xep::encrypted_file::{Cipher, EncryptedFile, EncryptedHash};
     let cipher = Cipher::from_uri(&enc.cipher).ok_or_else(|| {
@@ -372,6 +373,9 @@ fn encrypted_file_from_ffi(
                 .to_string(),
         );
     }
+    // XEP-0448 §2.1: the plaintext `<size/>` is REQUIRED for encrypted sends.
+    let plaintext_size = plaintext_size
+        .ok_or_else(|| "encrypted attachment requires the plaintext file size".to_string())?;
     Ok(EncryptedFile {
         cipher,
         key_b64: enc.key_b64,
@@ -385,6 +389,7 @@ fn encrypted_file_from_ffi(
             })
             .collect(),
         sources: enc.sources,
+        plaintext_size,
     })
 }
 
@@ -1107,7 +1112,10 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
                 Some(file.disposition.as_str()),
                 file.media_type.as_deref(),
             );
-            let encrypted = file.encrypted.map(encrypted_file_from_ffi).transpose()?;
+            let encrypted = file
+                .encrypted
+                .map(|enc| encrypted_file_from_ffi(enc, file.size))
+                .transpose()?;
             let hashes = file
                 .hashes
                 .into_iter()
