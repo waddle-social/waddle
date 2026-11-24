@@ -105,7 +105,66 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// The room holds its delegates weakly.
     @ObservationIgnored private var observer: RoomObserver?
 
+    // MARK: - Devices
+
+    private(set) var devices = CallDevices()
+    /// What the person chose, kept on this device (web keeps it in local storage).
+    @ObservationIgnored private var devicePreferences: CallDevicePreferences
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let devicePreferencesKey = "callDevicePreferences"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
+        #if os(macOS)
+        // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
+        AudioManager.shared.onDeviceUpdate = { [weak self] _ in
+            Task { @MainActor in await self?.refreshDevices() }
+        }
+        #endif
+    }
+
+    func refreshDevices() async {
+        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).map {
+            CallDevice(id: $0.uniqueID, name: $0.localizedName)
+        }
+        var found = CallDevices(cameras: CallDeviceList(devices: cameras, preferred: devicePreferences[.camera]))
+        #if os(macOS)
+        // The system's own choice is our "System default" row, not a device of its own.
+        func listed(_ all: [AudioDevice]) -> [CallDevice] {
+            all.filter { !$0.isDefault }.map { CallDevice(id: $0.deviceId, name: $0.name) }
+        }
+        let audio = AudioManager.shared
+        found.microphones = CallDeviceList(devices: listed(audio.inputDevices), preferred: devicePreferences[.microphone])
+        found.speakers = CallDeviceList(devices: listed(audio.outputDevices), preferred: devicePreferences[.speaker])
+        // A chosen device that is gone gives way to the system's, and takes over again when it is back.
+        let input = audio.inputDevices.first { $0.deviceId == found.microphones.chosen?.id } ?? audio.defaultInputDevice
+        if audio.inputDevice.deviceId != input.deviceId { audio.inputDevice = input }
+        let output = audio.outputDevices.first { $0.deviceId == found.speakers.chosen?.id } ?? audio.defaultOutputDevice
+        if audio.outputDevice.deviceId != output.deviceId { audio.outputDevice = output }
+        #endif
+        if devices != found { devices = found }
+    }
+
+    func chooseDevice(_ kind: CallDeviceKind, id: String?) async {
+        devicePreferences[kind] = id
+        defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
+        await refreshDevices()
+        // A camera already on moves to the new one; one that is off starts with it next time.
+        if kind == .camera, let room,
+           let capturer = (publications(of: .video, in: room).first?.track as? LocalVideoTrack)?.capturer as? CameraCapturer {
+            _ = try? await capturer.set(options: cameraCaptureOptions() ?? CameraCaptureOptions())
+        }
+    }
+
+    /// The camera the person chose, while it is connected; `nil` leaves the choice to the system.
+    private func cameraCaptureOptions() -> CameraCaptureOptions? {
+        (devices.cameras.chosen?.id).flatMap(AVCaptureDevice.init(uniqueID:)).map { CameraCaptureOptions(device: $0) }
+    }
+
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
+        guard room == nil else { throw CallMediaError.alreadyConnected }
+        await refreshDevices()
         guard room == nil else { throw CallMediaError.alreadyConnected }
         wasEndedByServer = false
         let (changes, observer) = RoomObserver.make()
@@ -345,7 +404,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if kind == .audio {
             _ = try? await room.localParticipant.setMicrophone(enabled: enabled)
         } else {
-            _ = try? await room.localParticipant.setCamera(enabled: enabled)
+            _ = try? await room.localParticipant.setCamera(enabled: enabled, captureOptions: enabled ? cameraCaptureOptions() : nil)
         }
         // The SDK toggles one publication per device. Off means all of them.
         if !enabled {
