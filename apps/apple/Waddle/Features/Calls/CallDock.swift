@@ -110,10 +110,14 @@ struct CallDock: View {
     private var dockVideo: CallDockVideo {
         guard let media else { return CallDockVideo() }
         let cameras = media.dockCameraIdentities
-        return CallDockVideo(
-            remote: cameras.remote.flatMap { media.video(of: $0, source: .camera) },
-            preview: cameras.local.flatMap { media.video(of: $0, source: .camera) }
-        )
+        let preview = cameras.local.flatMap { media.video(of: $0, source: .camera) }
+        // A shared screen is what the call is about while it is shared.
+        if let sharer = cameras.remoteScreen, let screen = media.video(of: sharer, source: .screen) {
+            return CallDockVideo(
+                remote: screen, preview: preview, screenSharer: JID(parsing: sharer)?.bare.localpart ?? sharer
+            )
+        }
+        return CallDockVideo(remote: cameras.remote.flatMap { media.video(of: $0, source: .camera) }, preview: preview)
     }
 }
 

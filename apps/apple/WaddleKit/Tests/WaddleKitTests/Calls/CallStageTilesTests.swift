@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import WaddleKit
@@ -87,6 +88,67 @@ import Testing
     }
 
     // MARK: - Words
+
+    // MARK: - Shared screens
+
+    @Test func aSharedScreenIsATileOfItsOwnAfterItsPersonsCamera() {
+        let sharing = CallStageParticipant(
+            identity: Self.peer.description, isSelf: false, hasCamera: true, screenPublicationID: "TR_screen1"
+        )
+        let tiles = CallStageTiles.direct(
+            live: [Self.live(Self.own, isSelf: true), sharing], own: Self.own, peer: Self.peer, peerName: "Linus"
+        )
+        #expect(tiles.map(\.id) == [
+            CallStageTile.ID(identity: Self.own.description, source: .camera),
+            CallStageTile.ID(identity: Self.peer.description, source: .camera),
+            CallStageTile.ID(identity: Self.peer.description, source: .screen),
+        ])
+        #expect(tiles[2] == CallStageTile(
+            identity: Self.peer.description, source: .screen, label: "Linus's screen", hasVideo: true,
+            screenPublicationID: "TR_screen1"
+        ))
+    }
+
+    @Test func aScreenInARoomIsNamedForItsPersonAndCarriesNoneOfTheirBadges() {
+        let rows = [GroupCallRosterRow(
+            nick: "Grace H", jid: Self.grace.bare, isHandRaised: true, isMuted: true, isSpeaking: true, isSelf: false
+        )]
+        let sharing = CallStageParticipant(
+            identity: Self.grace.description, isSelf: false, hasCamera: false, screenPublicationID: "TR_s"
+        )
+        let tiles = CallStageTiles.room(live: [Self.live(Self.own, isSelf: true), sharing], own: Self.own, rows: rows)
+        let screen = tiles[2]
+        #expect(screen.label == "Grace H's screen")
+        // A mute, a hand and speaking belong to the person, whose own tile shows them.
+        #expect(!screen.isMuted && !screen.isHandRaised && !screen.isSpeaking)
+        #expect(tiles[1].isMuted && tiles[1].isHandRaised)
+    }
+
+    @Test func ourOwnShareIsCalledOurScreen() {
+        let me = CallStageParticipant(identity: Self.own.description, isSelf: true, hasCamera: true, screenPublicationID: "TR_me")
+        let tiles = CallStageTiles.direct(live: [me], own: Self.own, peer: Self.peer, peerName: "Linus")
+        #expect(tiles.first { $0.source == .screen }?.label == "Your screen")
+        #expect(tiles.first { $0.source == .screen }?.isSelf == true)
+    }
+
+    @Test func aRemoteScreenTakesTheLargeTile() {
+        let sharing = CallStageParticipant(
+            identity: Self.peer.description, isSelf: false, hasCamera: true, screenPublicationID: "TR_screen1"
+        )
+        let tiles = CallStageTiles.direct(
+            live: [Self.live(Self.own, isSelf: true), sharing], own: Self.own, peer: Self.peer, peerName: "Linus"
+        )
+        var presentation = CallStagePresentation()
+        presentation.reconcile(with: tiles)
+        guard case let .spotlight(main, strip) = CallStageLayout.make(
+            tiles: tiles, presentation: presentation, promoted: nil, size: CGSize(width: 900, height: 600), maxTiles: 9
+        ) else {
+            Issue.record("a shared screen is shown large even in gallery view")
+            return
+        }
+        #expect(main.source == .screen)
+        #expect(strip.map(\.source) == [.camera, .camera])
+    }
 
     @Test func aTileIsSpokenWithItsBadges() {
         let plain = CallStageTile(identity: Self.peer.description, source: .camera, label: "Linus")

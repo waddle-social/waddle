@@ -69,6 +69,8 @@ struct CallIconToggle: View {
 struct CallDockVideo {
     var remote: AnyView?
     var preview: AnyView?
+    /// Whose screen `remote` is, when it is a shared screen and not a camera.
+    var screenSharer: String?
 
     var hasCamera: Bool { remote != nil || preview != nil }
 }

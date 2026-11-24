@@ -78,6 +78,11 @@ struct CallTileView: View, Equatable {
 
     private var plate: some View {
         HStack(spacing: WaddleTokens.Spacing.s1Half) {
+            if tile.source == .screen {
+                // The web's presenting glyph: this tile is a screen, not a person.
+                Image(systemName: "rectangle.inset.filled.and.person.filled")
+                    .font(.system(size: Metrics.plateGlyph, weight: .semibold))
+            }
             Text(tile.label)
                 .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.xs))
                 .lineLimit(1)

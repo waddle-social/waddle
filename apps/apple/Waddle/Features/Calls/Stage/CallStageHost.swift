@@ -120,7 +120,10 @@ struct CallStageHost: View {
 
     private func stage(of call: Call) -> some View {
         let live = (media?.participants ?? []).map {
-            CallStageParticipant(identity: $0.identity, isSelf: $0.isLocal, hasCamera: $0.isCameraOn)
+            CallStageParticipant(
+                identity: $0.identity, isSelf: $0.isLocal, hasCamera: $0.isCameraOn,
+                screenPublicationID: $0.screenPublicationID
+            )
         }
         // The microphone starts a moment after media connects; until then it is not a mute.
         let isSelfMuted = call.status != .connecting && media?.isMicrophoneOn == false
@@ -167,7 +170,9 @@ struct CallStageHost: View {
         )
         // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.
         .onChange(
-            of: Roster(tiles: tiles.map(\.id), isAvailable: !live.isEmpty, isSelfViewHidden: memory.presentation.isSelfViewHidden),
+            of: Roster(
+                tiles: tiles.map(\.id), screens: tiles.map(\.screenPublicationID), isAvailable: !live.isEmpty, isSelfViewHidden: memory.presentation.isSelfViewHidden
+            ),
             initial: true
         ) { _, roster in
             // During a reconnect nobody is live and the tiles are stand-ins.
@@ -205,6 +210,8 @@ struct CallStageHost: View {
     /// What the pin is reconciled against.
     private struct Roster: Equatable {
         let tiles: [CallStageTile.ID]
+        /// A share that ends and starts again between two draws keeps its tile and is still a new share.
+        let screens: [String?]
         let isAvailable: Bool
         let isSelfViewHidden: Bool
     }

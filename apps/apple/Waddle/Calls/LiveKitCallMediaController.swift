@@ -29,6 +29,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var activeSpeakersLoudestFirst: [String] = []
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
+    /// The screens other people share, by who shares them.
+    private var screenTracks: [String: SharedScreen] = [:]
     /// LiveKit can briefly clear our identity during a full reconnect.
     @ObservationIgnored private var joinedIdentity: String?
     @ObservationIgnored private var remoteAudioTracks: [String: [RemoteAudioTrack]] = [:]
@@ -43,9 +45,15 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// is publishing yet. What the system's call screen shows as muted.
     private(set) var isMicrophoneMutedByChoice = false
     func video(of identity: String, source: CallVideoSource) -> AnyView? {
-        guard source == .camera, let track = cameraTracks[identity] else { return nil }
-        // A remote portrait camera keeps the whole face.
-        return AnyView(SwiftUIVideoView(track, layoutMode: identity == dockCameraIdentities.local ? .fill : .fit))
+        switch source {
+        case .camera:
+            guard let track = cameraTracks[identity] else { return nil }
+            // A remote portrait camera keeps the whole face.
+            return AnyView(SwiftUIVideoView(track, layoutMode: identity == dockCameraIdentities.local ? .fill : .fit))
+        case .screen:
+            // All of a screen, never cropped.
+            return screenTracks[identity].map { AnyView(SwiftUIVideoView($0.track, layoutMode: .fit)) }
+        }
     }
 
     func setVolume(_ gain: Double, of identity: String) {
@@ -279,6 +287,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let microphone = room.map { publications(of: .audio, in: $0).contains(where: \.isLive) } ?? false
         let camera = preview != nil
         var tracks: [String: VideoTrack] = [:]
+        var screens: [String: SharedScreen] = [:]
         var dockCameras = CallDockCameraIdentities()
         if let preview, let local = room?.localParticipant.identity?.stringValue ?? joinedIdentity {
             tracks[local] = preview
@@ -286,9 +295,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         let remotes = room.map { Array($0.remoteParticipants.values) } ?? []
         for remote in remotes {
+            guard let identity = remote.identity?.stringValue else { continue }
+            if let publication = remote.videoTracks.first(where: { $0.source == .screenShareVideo && $0.isLive }),
+               let track = publication.track as? VideoTrack {
+                screens[identity] = SharedScreen(track: track, publicationID: publication.sid.stringValue)
+            }
             // A camera that is off shows no picture rather than its last frame.
-            guard let identity = remote.identity?.stringValue, remote.isCameraEnabled(),
-                  let track = remote.firstCameraVideoTrack else { continue }
+            guard remote.isCameraEnabled(), let track = remote.firstCameraVideoTrack else { continue }
             tracks[identity] = track
             // Keep the dock's original choice from the room map. The roster
             // has a different order so people don't move around while talking.
@@ -299,6 +312,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // A replacement can reuse a WebRTC track ID but needs a new renderer binding.
         if cameraTracks.count != tracks.count || tracks.contains(where: { cameraTracks[$0.key] !== $0.value }) {
             cameraTracks = tracks
+        }
+        // The dock's one screen is the first in a fixed order, so it does not
+        // hop between two sharers as people come and go.
+        dockCameras.remoteScreen = screens.keys.min()
+        if screenTracks.count != screens.count || screens.contains(where: { screenTracks[$0.key] != $0.value }) {
+            screenTracks = screens
         }
         if dockCameraIdentities != dockCameras { dockCameraIdentities = dockCameras }
         refreshRemoteAudio(remotes, restoringVolumes: restoringVolumes)
@@ -350,6 +369,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             let isLocal = participant === room.localParticipant
             return CallMediaParticipant(
                 identity: identity, isLocal: isLocal, isCameraOn: cameraTracks[identity] != nil,
+                screenPublicationID: screenTracks[identity]?.publicationID,
                 hasMicrophoneTrack: participant.audioTracks.contains { $0.source == .microphone && $0.isLive },
                 isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : volumeGains[identity] ?? 1
             )
@@ -361,6 +381,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             participant.identity.map { ($0.stringValue, participant.isSpeaking, participant.audioLevel) }
         })
         if activeSpeakersLoudestFirst != speakers { activeSpeakersLoudestFirst = speakers }
+    }
+}
+
+/// A screen someone shares: its picture, and the publication that tells one share from the next.
+private struct SharedScreen: Equatable {
+    let track: VideoTrack
+    let publicationID: String
+
+    /// A replacement can reuse a publication but needs a new renderer binding.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.track === rhs.track && lhs.publicationID == rhs.publicationID
     }
 }
 

@@ -6,6 +6,8 @@ struct CallMediaParticipant: Identifiable, Equatable {
     let identity: String
     let isLocal: Bool
     let isCameraOn: Bool
+    /// The publication of the screen this device is sharing, while we can see it.
+    var screenPublicationID: String?
     let hasMicrophoneTrack: Bool
     let isSpeaking: Bool
     /// Playout gain from 0 to 2, with 1 at unity.
@@ -17,6 +19,8 @@ struct CallMediaParticipant: Identifiable, Equatable {
 struct CallDockCameraIdentities: Equatable {
     var local: String?
     var remote: String?
+    /// Someone sharing their screen: the dock shows it in place of a camera.
+    var remoteScreen: String?
 }
 
 /// What call views read from, and ask of, the media session.
