@@ -89,7 +89,7 @@ Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` an
 | Feed | | ❌ | feed and stories |
 | Stories | | ❌ | feed and stories |
 | Events and calendar, RSVP | | ❌ | events |
-| Admin console (owners) | | ❌ | admin |
+| Admin console (owners) | | 🟡 | admin: sidebar Admin (owners only): spaces (create, edit, delete), space members and roles, channels (create, edit, delete), channel affiliations, occupants and kick, user list. Not exercised against a live server. The affiliation tier filter is not surfaced, and no FFI verb grants the community owner hat. Room Details (`rooms.rs`) stays the per-room moderation surface; the console uses the owner-only `urn:waddle:admin:*` verbs |
 | 1:1 and group voice/video, screen share | 0353, 0166, Muji | ❌ | calls |
 
 ## Platform

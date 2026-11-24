@@ -1,4 +1,5 @@
 mod actions;
+mod admin;
 mod avatar;
 mod conversation;
 mod directory;

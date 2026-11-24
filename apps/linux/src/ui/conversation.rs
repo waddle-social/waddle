@@ -229,6 +229,7 @@ impl WaddleWindow {
         self.reset_message_tools();
         self.refresh_message_tools();
         self.reset_inbox();
+        self.reset_admin();
         self.cancel_compose();
         imp.profile.reset();
         self.refresh_account_row();
@@ -282,6 +283,7 @@ impl WaddleWindow {
                 imp.reconnect_attempt.set(0);
                 imp.live_unread_keys.borrow_mut().clear();
                 self.spawn_on_connected(generation, connect_epoch);
+                self.probe_admin(generation);
                 self.refresh_message_tools();
             }
             SessionEvent::Disconnected => {
@@ -504,7 +506,7 @@ impl WaddleWindow {
                 .or_else(|| imp.current.borrow().clone())
                 .or_else(|| {
                     // The overview stays up across a reconnect.
-                    (!window.inbox_open())
+                    (!window.inbox_open() && !window.admin_open())
                         .then(|| imp.conversations.borrow().first().map(Conversation::key))
                         .flatten()
                 });
@@ -600,6 +602,7 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         self.leave_inbox();
+        self.leave_admin();
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
