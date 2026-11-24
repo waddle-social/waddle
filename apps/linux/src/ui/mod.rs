@@ -1,6 +1,8 @@
 mod actions;
 mod avatar;
+mod connection;
 mod conversation;
+mod delivery;
 mod directory;
 mod identity;
 mod images;
@@ -16,10 +18,12 @@ mod people;
 mod person;
 mod pictures;
 mod profile;
+mod read_markers;
 mod rooms;
 mod status;
 mod suggestions;
 mod threads;
+mod typing;
 mod window;
 
 pub use window::WaddleWindow;

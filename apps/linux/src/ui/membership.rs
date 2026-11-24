@@ -311,6 +311,8 @@ impl WaddleWindow {
             ));
         }
         self.refresh_composer();
+        // Messages waiting for this room can go now.
+        self.flush_outbox();
     }
 
     pub(super) fn on_message_rejected(&self, id: String, from: String, to: Option<String>) {
@@ -332,6 +334,7 @@ impl WaddleWindow {
         }
         imp.outbound.borrow_mut().remove(&id);
         self.edit_conversation(&conversation.key(), |timeline| timeline.reject_send(&id));
+        self.outbox_rejected(&id);
         self.toast("The server rejected the message.");
     }
 }

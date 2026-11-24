@@ -21,6 +21,10 @@ pub enum MessageAction {
     Delete,
     /// A moderator removes someone else's message from a room (XEP-0425).
     Remove,
+    /// Send a failed message again.
+    Retry,
+    /// Drop a message that was not sent.
+    Discard,
 }
 
 impl MessageAction {
@@ -36,6 +40,8 @@ impl MessageAction {
             Self::Edit => ("document-edit-symbolic", "Edit"),
             Self::Delete => ("user-trash-symbolic", "Delete"),
             Self::Remove => ("action-unavailable-symbolic", "Remove Message"),
+            Self::Retry => ("view-refresh-symbolic", "Retry"),
+            Self::Discard => ("user-trash-symbolic", "Discard"),
         }
     }
 
@@ -43,12 +49,12 @@ impl MessageAction {
     pub fn in_toolbar(self) -> bool {
         matches!(
             self,
-            Self::AddReaction | Self::Reply | Self::OpenThread | Self::Subthread
+            Self::AddReaction | Self::Reply | Self::OpenThread | Self::Subthread | Self::Retry
         )
     }
 
     pub fn destructive(self) -> bool {
-        matches!(self, Self::Delete | Self::Remove)
+        matches!(self, Self::Delete | Self::Remove | Self::Discard)
     }
 }
 
@@ -61,6 +67,8 @@ pub struct Context {
     pub can_pin: bool,
     /// The conversation is a room where the account is a moderator.
     pub can_moderate: bool,
+    /// The failed message is still held, so it can be sent again.
+    pub can_retry: bool,
 }
 
 /// The id a pin names: the archive's stanza id, which a message has once
@@ -77,6 +85,17 @@ pub fn pin_target(item: &TimelineItem) -> Option<&str> {
 pub fn actions(item: &TimelineItem, context: Context, pinned: bool) -> Vec<MessageAction> {
     if item.retracted {
         return Vec::new();
+    }
+    // A message that was not sent can be sent again or dropped; nothing
+    // else (a reply or reaction to it, an edit) makes sense yet.
+    if item.own && item.delivery == Delivery::Failed {
+        let mut list = Vec::new();
+        if context.can_retry {
+            list.push(MessageAction::Retry);
+        }
+        list.push(MessageAction::Copy);
+        list.push(MessageAction::Discard);
+        return list;
     }
     let referenced = item.reference_id.is_some();
     let mut list = Vec::new();
@@ -187,6 +206,34 @@ mod tests {
         let mut failed = item(true, Some("s1"));
         failed.delivery = Delivery::Failed;
         assert!(!actions(&failed, Context::default(), false).contains(&MessageAction::Edit));
+    }
+
+    #[test]
+    fn a_failed_send_offers_retry_while_held_and_always_discard() {
+        let mut failed = item(true, None);
+        failed.delivery = Delivery::Failed;
+        let held = Context {
+            can_retry: true,
+            ..Context::default()
+        };
+        assert_eq!(
+            actions(&failed, held, false),
+            [
+                MessageAction::Retry,
+                MessageAction::Copy,
+                MessageAction::Discard
+            ]
+        );
+        assert_eq!(
+            actions(&failed, Context::default(), false),
+            [MessageAction::Copy, MessageAction::Discard]
+        );
+        assert!(MessageAction::Retry.in_toolbar());
+        assert!(MessageAction::Discard.destructive());
+        // Someone else's failed-looking row is not ours to retry.
+        let mut theirs = item(false, Some("s1"));
+        theirs.delivery = Delivery::Failed;
+        assert!(!actions(&theirs, held, false).contains(&MessageAction::Retry));
     }
 
     #[test]

@@ -11,12 +11,12 @@
 //! its `by` is the room. In a DM they reference the sender's origin id or
 //! `@id`. Corrections reference the sender's origin id or `@id` in both.
 //!
-//! Reconnection here is a stopgap with the ADR-0019 backoff curve. The
-//! shared `ConnectionController` replaces it.
+//! Reconnection is decided by `reconnect.rs`, the Linux-local stand-in for
+//! the shared `ConnectionController` ADR-0019 names (it does not exist in
+//! `waddle-client-session` yet).
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::DateTime;
 use jid::{BareJid, Jid};
@@ -697,16 +697,6 @@ fn reply_author(kind: Kind, conversation: &str, quote: &Quote, me: &Me) -> Strin
         Kind::Direct if quote.own => me.bare.to_string(),
         Kind::Direct => conversation.to_string(),
     }
-}
-
-/// Reconnect delay for the `attempt`th retry: uniform in
-/// [1 s, min(60 s, 2ⁿ s)] (ADR-0019), from the caller's randomness.
-pub fn reconnect_delay(attempt: u32, unit_random: f64) -> Duration {
-    let ceiling = 2f64
-        .powi(i32::try_from(attempt.min(6)).unwrap_or(6))
-        .min(60.0);
-    let seconds = 1.0 + (ceiling - 1.0).max(0.0) * unit_random.clamp(0.0, 1.0);
-    Duration::from_secs_f64(seconds)
 }
 
 /// Rooms for the sidebar: channels in catalogue order, then group DMs.
@@ -1570,14 +1560,6 @@ pub(crate) mod tests {
     fn timestamps_parse_rfc3339_to_utc_millis() {
         assert_eq!(timestamp_ms(Some("1970-01-01T00:00:01+00:00")), 1000);
         assert_eq!(timestamp_ms(Some("1970-01-01T01:00:01+01:00")), 1000);
-    }
-
-    #[test]
-    fn reconnect_backoff_follows_the_adr_curve() {
-        assert_eq!(reconnect_delay(0, 0.9), Duration::from_secs(1));
-        assert_eq!(reconnect_delay(3, 0.0), Duration::from_secs(1));
-        assert_eq!(reconnect_delay(3, 1.0), Duration::from_secs(8));
-        assert_eq!(reconnect_delay(40, 1.0), Duration::from_secs(60));
     }
 
     fn judgment(room: &str) -> waddle_xmpp_client_ffi::WaddleSafetyScoresFastening {
