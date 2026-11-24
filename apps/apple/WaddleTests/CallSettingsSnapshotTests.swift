@@ -14,10 +14,10 @@ final class CallSettingsSnapshotTests: XCTestCase {
 
     private func assertSettings(
         _ devices: CallDevices, kinds: [CallDeviceKind] = CallDeviceKind.allCases, width: CGFloat = CallSettingsView.width,
-        height: CGFloat = 340, testName: String = #function, line: UInt = #line
+        audioProcessing: CallAudioProcessing = CallAudioProcessing(), height: CGFloat = 520, testName: String = #function, line: UInt = #line
     ) async throws {
         try await assertScreenSnapshot(
-            of: CallSettingsView(devices: devices, kinds: kinds, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }),
+            of: CallSettingsView(devices: devices, kinds: kinds, audioProcessing: audioProcessing, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }),
             size: CGSize(width: width, height: height), testName: testName, line: line
         )
     }
@@ -37,7 +37,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
                 microphones: CallDeviceList(devices: [Self.builtIn], preferred: Self.headset.id),
                 speakers: CallDeviceList(devices: [Self.speakers])
             ),
-            height: 380
+            audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false), height: 560
         )
     }
 
@@ -49,7 +49,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
             CallDevices(cameras: CallDeviceList(devices: [
                 CallDevice(id: "front", name: "Front Camera"), CallDevice(id: "back", name: "Back Camera"),
             ])),
-            kinds: [.camera], width: 375, height: 260
+            kinds: [.camera], width: 375, height: 420
         )
     }
     #endif

@@ -60,6 +60,10 @@ protocol CallMediaControls: AnyObject, Observable {
     func refreshDevices() async
     /// Uses device `id` for calls from now on, this one included; `nil` goes back to the system's choice.
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async
+    /// What is done to the microphone's sound before it is sent.
+    var audioProcessing: CallAudioProcessing { get }
+    /// Uses `processing` for calls from now on, this one included.
+    func setAudioProcessing(_ processing: CallAudioProcessing) async
     /// This device can share its screen into a call: a Mac.
     var canShareScreen: Bool { get }
     /// Our screen, or a window of ours, is being shared. Its picture is `video(of:source:)` of our own identity.

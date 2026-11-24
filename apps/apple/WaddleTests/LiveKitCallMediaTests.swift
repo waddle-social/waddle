@@ -22,6 +22,41 @@ final class LiveKitCallMediaTests: XCTestCase {
         return defaults
     }
 
+    func testAudioProcessingIsAllOnUntilChosenAndIsKept() async {
+        let defaults = makeDefaults()
+        let media = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(media.audioProcessing, CallAudioProcessing())
+        await media.setAudioProcessing(CallAudioProcessing(noiseSuppression: false, autoGainControl: false))
+
+        let next = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(next.audioProcessing, CallAudioProcessing(noiseSuppression: false, echoCancellation: true, autoGainControl: false))
+    }
+
+    /// The SDK fixes a track's processing when it makes it, so a change
+    /// while the microphone is on is a new track that carries the choice.
+    func testAChangeOfProcessingReplacesALiveMicrophoneAndLeavesAMutedOneOff() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = makeController()
+        try await alice.connect(
+            join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: CallMedia(audio: true, video: false),
+            iceServers: []
+        )
+        try await until { alice.isMicrophoneOn }
+
+        await alice.setAudioProcessing(CallAudioProcessing(noiseSuppression: false))
+        XCTAssertTrue(alice.isMicrophoneOn, "the microphone is on again once it has been replaced")
+        XCTAssertEqual(alice.audioProcessing.noiseSuppression, false)
+
+        await alice.setMicrophone(false)
+        try await until { !alice.isMicrophoneOn }
+        await alice.setAudioProcessing(CallAudioProcessing())
+        XCTAssertFalse(alice.isMicrophoneOn, "a change never turns on a microphone that is off")
+        await alice.setMicrophone(true)
+        try await until { alice.isMicrophoneOn }
+        await alice.disconnect()
+    }
+
     func testADeviceChoiceIsKeptForTheNextSessionAndCanBeCleared() async {
         let defaults = makeDefaults()
         let media = LiveKitCallMediaController(defaults: defaults)
