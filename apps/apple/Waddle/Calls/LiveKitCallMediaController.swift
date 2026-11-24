@@ -119,12 +119,18 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private let defaults: UserDefaults
     private static let devicePreferencesKey = "callDevicePreferences"
     private static let audioProcessingKey = "callAudioProcessing"
+    private static let backgroundKey = "callBackground"
+    private(set) var background = CallBackground.off
+    /// The blur, kept here: a capturer holds its processor weakly. One for
+    /// the session, made when first wanted, since it sets up Vision and Metal.
+    @ObservationIgnored private var blurProcessor: BackgroundBlurVideoProcessor?
     private(set) var audioProcessing = CallAudioProcessing()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
+        background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
         #if os(macOS)
         // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
         AudioManager.shared.onDeviceUpdate = { [weak self] _ in
@@ -338,6 +344,32 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             if total > 0 { sample.lossFraction = Double(missing) / Double(total) }
         }
         sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
+    }
+
+    // MARK: - Camera background
+
+    func setBackground(_ background: CallBackground) {
+        guard background != self.background else { return }
+        self.background = background
+        defaults.set(background.rawValue, forKey: Self.backgroundKey)
+        if let room { giveBackgroundToCameras(in: room) }
+    }
+
+    /// Puts the chosen background on every camera of ours, and takes it off
+    /// one that should have none. The picture is changed as it is captured,
+    /// so our own preview shows what the others see; nothing is restarted.
+    private func giveBackgroundToCameras(in room: Room) {
+        let wanted: BackgroundBlurVideoProcessor?
+        switch background {
+        case .off: wanted = nil
+        case .blur:
+            if blurProcessor == nil { blurProcessor = BackgroundBlurVideoProcessor() }
+            wanted = blurProcessor
+        }
+        for publication in publications(of: .video, in: room) {
+            guard let capturer = (publication.track as? LocalVideoTrack)?.capturer else { continue }
+            if capturer.processor !== wanted { capturer.processor = wanted }
+        }
     }
 
     // MARK: - Audio processing
@@ -826,6 +858,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
+        // A camera just turned on, or published again after a reconnect, has a capturer that has not been given it.
+        giveBackgroundToCameras(in: room)
         giveAudioProcessingToNewPublications(in: room)
         #if os(macOS)
         // A full reconnect republishes what it had: not a screen the person has stopped sharing since.

@@ -70,6 +70,10 @@ protocol CallMediaControls: AnyObject, Observable {
     func videoSamples() async -> [CallVideoSample]
     /// How many times each of our devices has been tried and refused or failed in this call.
     var mediaRefusals: [CallMediaIssue.Kind: Int] { get }
+    /// What stands behind us in our camera's picture.
+    var background: CallBackground { get }
+    /// Uses `background` for calls from now on, this one included.
+    func setBackground(_ background: CallBackground)
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.
