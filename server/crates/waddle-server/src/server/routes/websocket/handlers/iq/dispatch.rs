@@ -92,6 +92,64 @@ pub(in crate::server::routes::websocket::handlers) struct IqHandlerContext<'a> {
     pub(in crate::server::routes::websocket::handlers) response_to: Option<&'a str>,
 }
 
+/// XEP-0191 §3.4-3.5 gate for an IQ request to a local account's bare JID,
+/// which the server answers on the account's behalf (vCard, disco, PEP,
+/// private storage, ...). It runs before any per-namespace handler.
+///
+/// - The target has blocked the sender: `service-unavailable`.
+/// - The sender has blocked the target: `not-acceptable` with `<blocked/>`.
+/// - The blocklist cannot be read: `internal-server-error`.
+///
+/// Requests to the sender's own bare JID are never gated (note 8: a block rule
+/// cannot separate a user's own resources). Returns `None` to continue.
+async fn local_bare_block_gate(
+    iq: &xmpp_parsers::iq::Iq,
+    sender: &jid::FullJid,
+    target: &jid::BareJid,
+    state: &WebSocketState,
+) -> Option<Vec<String>> {
+    if *target == sender.to_bare() {
+        return None;
+    }
+    let blocking = state.deps.app_state.db_pool.blocking_storage();
+    let outgoing = blocking
+        .is_blocked_jid(&sender.to_bare(), &jid::Jid::from(target.clone()))
+        .await;
+    let incoming = match outgoing {
+        Ok(false) => {
+            blocking
+                .is_blocked_jid(target, &jid::Jid::from(sender.clone()))
+                .await
+        }
+        _ => Ok(false),
+    };
+    let error = |condition| {
+        vec![build_iq_error_xml_typed(
+            iq.id(),
+            Some(target.as_str()),
+            Some(sender.as_str()),
+            condition,
+        )]
+    };
+    match (outgoing, incoming) {
+        (Ok(true), _) => Some(super::outgoing_block_frames(
+            iq,
+            sender,
+            &jid::Jid::from(target.clone()),
+        )),
+        (Ok(false), Ok(true)) => Some(error(service_unavailable_iq_error(
+            "Service unavailable at this address.",
+        ))),
+        (Ok(false), Ok(false)) => None,
+        (Err(e), _) | (_, Err(e)) => {
+            warn!(error = %e, target = %target, sender = %sender, "Failed to check blocklist before answering IQ for a local account");
+            Some(error(internal_server_error_iq_error(
+                "Internal server error.",
+            )))
+        }
+    }
+}
+
 pub async fn handle_iq_with_conn_state(
     mut iq: xmpp_parsers::iq::Iq,
     domain: &str,
@@ -154,6 +212,12 @@ pub async fn handle_iq_with_conn_state(
             Some(sender) => route_unserved_request(iq, unserved, sender, state).await,
             None => refuse_unbound_unserved_request(&iq, response_from),
         };
+    }
+
+    if let (Destination::LocalBare(target), Some(sender)) = (&destination, phase.bound_jid()) {
+        if let Some(frames) = local_bare_block_gate(&iq, sender, target, state).await {
+            return frames.into();
+        }
     }
 
     let payload_ns = match &iq {

@@ -1,7 +1,7 @@
 use super::{
     build_iq_error_xml_typed, build_last_activity_response, chrono, forbidden_iq_error,
     internal_server_error_iq_error, iq_to_xml, local_account_exists, not_authorized_iq_error,
-    service_unavailable_iq_error, warn, FullJid, Jid, WebSocketState,
+    service_unavailable_iq_error, warn, FullJid, WebSocketState,
 };
 
 pub(super) async fn handle_last_activity_iq(
@@ -50,31 +50,8 @@ pub(super) async fn handle_last_activity_iq(
     if target.node().is_some() && target.resource().is_none() && target.domain().as_str() == domain
     {
         let target_bare = target.to_bare();
-        let blocking_storage = state.deps.app_state.db_pool.blocking_storage();
-        match blocking_storage
-            .is_blocked_jid(&target_bare, &Jid::from(sender_jid.clone()))
-            .await
-        {
-            Ok(true) => {
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    service_unavailable_iq_error("Service unavailable at this address."),
-                )];
-            }
-            Ok(false) => {}
-            Err(error) => {
-                warn!(error = %error, target = %target_bare, "Failed to check last-activity block state");
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )];
-            }
-        }
-
+        // XEP-0191 block state is enforced by the dispatch gate before this
+        // handler runs.
         // XEP-0012: only entities authorized to view the user's presence may
         // learn availability or last activity; everyone else gets the same
         // answer as for an offline user (forbidden / service-unavailable).
