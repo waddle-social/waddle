@@ -1513,7 +1513,12 @@ async fn websocket_storage_bookmarks_is_generic_private_storage_not_pep() {
         "expected result, got: {response}"
     );
 
-    let get = private_storage_iq("bm-get", "get", None, [opaque_storage_bookmarks("")]);
+    let get = private_storage_iq(
+        "bm-get",
+        "get",
+        None,
+        [Element::builder("storage", "storage:bookmarks").build()],
+    );
     client.send(&get).await.expect("send get");
     let stored = client
         .recv_matching(|frame| frame.contains("bm-get"))
