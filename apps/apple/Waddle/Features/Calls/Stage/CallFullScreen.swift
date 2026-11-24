@@ -30,20 +30,31 @@ private struct CallFullScreen: ViewModifier {
             .background(WindowReader(window: $window))
             .onChange(of: isOn) { _, isOn in
                 guard let window else { return }
-                let isFullScreen = window.styleMask.contains(.fullScreen)
-                if isOn, !isFullScreen {
+                if isOn, !window.styleMask.contains(.fullScreen) {
                     entered = true
                     window.toggleFullScreen(nil)
                 } else if !isOn {
-                    if entered, isFullScreen { window.toggleFullScreen(nil) }
-                    entered = false
+                    leave(window)
                 }
+            }
+            // The call stepped down while the window was still on its way in.
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
+                guard let window, note.object as? NSWindow === window, !isOn else { return }
+                leave(window)
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
                 guard let window, note.object as? NSWindow === window else { return }
                 entered = false
                 if isOn { exited() }
             }
+            // Signing out mid-call takes the shell away with the call still full screen.
+            .onDisappear { if let window { leave(window) } }
+    }
+
+    /// `entered` clears when the window has left, so a toggle AppKit drops
+    /// mid-transition is made again once the window has arrived.
+    private func leave(_ window: NSWindow) {
+        if entered, window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
     }
 }
 

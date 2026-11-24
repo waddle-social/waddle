@@ -26,6 +26,8 @@ struct CallControlBar: View {
     var viewMode = CallStagePresentation.ViewMode.gallery
     var isSelfViewHidden = false
     var size = CallSurface.Size.split
+    /// Off while something else on screen has a use for Escape.
+    var escapeStepsDown = true
     let actions: CallStageActions
 
     var body: some View {
@@ -73,7 +75,7 @@ struct CallControlBar: View {
 
     /// One step at a time, as on the web: split and expanded swap, and full
     /// screen is offered from expanded and offers only its way back. Escape
-    /// takes the step down.
+    /// takes the step down unless something else on screen wants it.
     @ViewBuilder
     private var sizeSteps: some View {
         if size != .immersive {
@@ -82,7 +84,7 @@ struct CallControlBar: View {
                 title: isExpanded ? "Collapse call" : "Expand call",
                 symbol: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
             ) { actions.setSize(isExpanded ? .split : .expanded) }
-            .keyboardShortcut(isExpanded ? .cancelAction : nil)
+            .keyboardShortcut(isExpanded && escapeStepsDown ? .cancelAction : nil)
         }
         if size != .split {
             let isFullScreen = size == .immersive
@@ -90,7 +92,7 @@ struct CallControlBar: View {
                 title: isFullScreen ? "Exit full screen" : "Full screen",
                 symbol: isFullScreen ? "arrow.down.right.and.arrow.up.left.rectangle" : "arrow.up.left.and.arrow.down.right.rectangle"
             ) { actions.setSize(isFullScreen ? .expanded : .immersive) }
-            .keyboardShortcut(isFullScreen ? .cancelAction : nil)
+            .keyboardShortcut(isFullScreen && escapeStepsDown ? .cancelAction : nil)
         }
     }
 

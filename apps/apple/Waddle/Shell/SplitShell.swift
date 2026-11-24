@@ -36,6 +36,12 @@ struct SplitShell: View {
             }
         }
         .tint(Theme.Colors.action)
+        .onChange(of: isCallFullScreen) { _, isFullScreen in
+            // Full screen is asked for each time: a call that lost it, as by
+            // opening another conversation, comes back expanded.
+            guard !isFullScreen, let sid = session.calls.state.sid else { return }
+            callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
+        }
         .callFullScreen(isCallFullScreen) {
             // The window left full screen by its own button: the call steps down with it.
             guard let sid = session.calls.state.sid else { return }

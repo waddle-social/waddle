@@ -22,6 +22,7 @@ final class CallStageModelTests: XCTestCase {
 
         model.setSplitPercent(62, for: lounge)
         model.setSplitPercent(5, for: priya)
+        model.saveSplitPercents()
 
         let relaunched = CallStageModel(calls: SampleSession().coordinator.calls, media: nil, defaults: defaults)
         XCTAssertEqual(relaunched.splitPercent(for: lounge), 62)

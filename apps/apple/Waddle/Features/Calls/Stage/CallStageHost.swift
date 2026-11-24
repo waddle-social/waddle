@@ -54,6 +54,10 @@ final class CallStageModel {
         let percent = CallSurface.clampSplitPercent(percent)
         guard splitPercents[conversation.description] != percent else { return }
         splitPercents[conversation.description] = percent
+    }
+
+    /// Once a drag is over, not on each point of it.
+    func saveSplitPercents() {
         defaults.set(splitPercents, forKey: Self.splitPercentsKey)
     }
 
@@ -72,6 +76,7 @@ final class CallStageModel {
 struct CallStageHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(CallStageModel.self) private var model
+    @Environment(NavigationModel.self) private var navigation
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
 
@@ -117,6 +122,8 @@ struct CallStageHost: View {
             presentation: memory.presentation,
             promotedSpeaker: memory.promotedSpeaker,
             size: memory.size,
+            // An open inspector has a composer whose Escape cancels a reply or an edit.
+            escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,

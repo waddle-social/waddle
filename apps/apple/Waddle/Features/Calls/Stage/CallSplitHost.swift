@@ -32,8 +32,12 @@ struct CallSplitHost<Content: View>: View {
         content
             .padding(showsStage ? inset(for: arrangement) : EdgeInsets())
             // Behind a stage that fills the pane the conversation is out of reach, not gone.
-            .allowsHitTesting(!covers)
+            .disabled(covers)
             .accessibilityHidden(covers)
+            .onChange(of: covers) { _, covers in
+                // Typing must not go on into a composer nobody can see.
+                if covers { Self.resignKeyboardFocus() }
+            }
             .overlay(alignment: .topTrailing) {
                 if showsStage {
                     stage(arrangement, of: conversation)
@@ -48,6 +52,14 @@ struct CallSplitHost<Content: View>: View {
     }
 
     private static var paneSpace: String { "callPane" }
+
+    private static func resignKeyboardFocus() {
+        #if os(macOS)
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        #else
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+    }
 
     /// One stage however it stands: moving it between beside, above and
     /// filling, as when the inspector opens mid-call or the call is
@@ -86,6 +98,9 @@ struct CallSplitHost<Content: View>: View {
             model.setSplitPercent(CallSurface.splitPercent(stage: stage, of: paneExtent), for: conversation)
         } step: { percent in
             model.setSplitPercent(percent, for: conversation)
+            model.saveSplitPercents()
+        } ended: {
+            model.saveSplitPercents()
         }
         // The line itself stays on the stage's first point; the reach straddles it.
         .offset(
@@ -123,6 +138,8 @@ struct CallSplitHandle: View {
     let drag: @MainActor (CGPoint) -> Void
     /// Called with the share VoiceOver stepped to.
     let step: @MainActor (Double) -> Void
+    /// The drag is over.
+    let ended: @MainActor () -> Void
     @State private var isHovered = false
     @GestureState private var isDragging = false
 
@@ -153,6 +170,7 @@ struct CallSplitHandle: View {
                 DragGesture(minimumDistance: 1, coordinateSpace: .named(paneSpace))
                     .updating($isDragging) { _, dragging, _ in dragging = true }
                     .onChanged { drag($0.location) }
+                    .onEnded { _ in ended() }
             )
             .onDisappear {
                 #if os(macOS)
@@ -178,8 +196,12 @@ struct CallSplitHandle: View {
 
     private enum Metrics {
         static let hair = WaddleTokens.BorderWidth.hair
-        /// The web handle's height: wide enough to catch without hunting.
+        /// The web handle's height under a pointer; a finger needs more.
+        #if os(macOS)
         static let reach: CGFloat = 10
+        #else
+        static let reach: CGFloat = 28
+        #endif
         static let grip: CGFloat = 4
         static let gripLength: CGFloat = 36
         static let step = 5.0
