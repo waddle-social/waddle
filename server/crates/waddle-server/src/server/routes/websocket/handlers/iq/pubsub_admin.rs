@@ -7,6 +7,7 @@ use super::{
     debug, is_pep_self_or_to, spaces_service_bare_jid, warn, BareJid, Permission, PubSubError,
     PubSubRequest, Session, SubId, SubscriptionState, WebSocketState,
 };
+use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
 
@@ -226,6 +227,22 @@ pub(super) async fn handle_pubsub_admin_request(
                 };
             }
 
+            // XEP-0060 §8.4.2: subscribers are told of the deletion. The node's
+            // configuration and subscriptions decide who, so the notice goes
+            // out before they are removed.
+            if state
+                .deps
+                .protocol
+                .pubsub_storage
+                .get_node(target_jid, &node)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                pubsub_fanout::fan_out_delete(state, target_jid, &node, is_pep).await;
+            }
+
             let result = state
                 .deps
                 .protocol
@@ -254,8 +271,10 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::Subscribe { node, jid } => {
             let subscription_jid = jid.to_bare();
+            // XEP-0060 §6.1.3.1: a subscriber JID whose bare JID is not the
+            // requester's is `<bad-request/>` + `<invalid-jid/>`.
             if subscription_jid != *user_jid {
-                let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
                 return vec![error];
             }
             // A room-bound extension node is subscribed to by the room's
@@ -359,8 +378,10 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::Unsubscribe { node, jid, subid } => {
             let subscription_jid = jid.to_bare();
+            // XEP-0060 §6.1.3.1: a subscriber JID whose bare JID is not the
+            // requester's is `<bad-request/>` + `<invalid-jid/>`.
             if subscription_jid != *user_jid {
-                let error = build_pubsub_error(iq, PubSubError::Forbidden);
+                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
                 return vec![error];
             }
             let typed_subid = subid.as_deref().map(SubId::from_raw);
@@ -442,6 +463,8 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 Ok(_) => {
+                    // XEP-0060 §8.5.2: one `<purge/>` per subscriber.
+                    pubsub_fanout::fan_out_purge(state, target_jid, &node, is_pep).await;
                     vec![build_pubsub_success(iq)]
                 }
                 Err(e) => {

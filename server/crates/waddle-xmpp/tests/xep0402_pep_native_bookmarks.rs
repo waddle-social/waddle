@@ -288,3 +288,22 @@ fn xep0402_parse_refuses_item_ids_the_jid_parser_would_fold() {
     let canonical = parse_bookmark_item_id("room@xn--bcher-kva.example").expect("canonical id");
     assert_eq!(canonical.as_str(), "room@xn--bcher-kva.example");
 }
+
+#[test]
+fn xep0402_account_advertises_delete_items_required_by_section_5() {
+    // XEP-0402 §5: server support for the "delete-items" pubsub feature is
+    // REQUIRED, and XEP-0163 §6 has the account advertise what it supports.
+    let advertised: Vec<String> = waddle_xmpp::pubsub::pep_features()
+        .into_iter()
+        .map(|feature| feature.0)
+        .collect();
+    for feature in [
+        "http://jabber.org/protocol/pubsub#delete-items",
+        "http://jabber.org/protocol/pubsub#retract-items",
+    ] {
+        assert!(
+            advertised.iter().any(|var| var == feature),
+            "{feature} missing from {advertised:?}"
+        );
+    }
+}

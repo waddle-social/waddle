@@ -54,10 +54,9 @@ pub(super) async fn handle_pubsub_iq(
 
         let request = match parse_pubsub_iq(iq) {
             Ok(req) => req,
-            Err(e) => {
-                warn!("Failed to parse PubSub request: {}", e);
-                let error = build_pubsub_error(iq, PubSubError::InvalidJid);
-                return vec![iq_to_xml(error)];
+            Err(error) => {
+                warn!(?error, "Failed to parse PubSub request");
+                return vec![iq_to_xml(build_pubsub_error(iq, error))];
             }
         };
 

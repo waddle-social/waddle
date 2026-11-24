@@ -1,11 +1,11 @@
 //! Implementation behind the parent module facade.
 
-use super::build_pubsub_retract_event;
 use super::BroadcastOutcome;
 use super::HashSet;
 use super::Message;
 use super::Stanza;
 use super::WebSocketState;
+use super::{build_pubsub_delete_event, build_pubsub_purge_event, build_pubsub_retract_event};
 use super::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
 use super::{info, warn};
 use super::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
@@ -69,6 +69,10 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) enum Notificat
         item_id: &'a str,
         notify: bool,
     },
+    /// XEP-0060 §8.4: sent while the node and its subscriptions still exist.
+    Delete,
+    /// XEP-0060 §8.5: a single `<purge/>` per subscriber.
+    Purge,
 }
 
 pub(in crate::server::routes::websocket::handlers::pubsub_fanout) struct EventFanOutRequest<'a> {
@@ -211,6 +215,20 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 return;
             }
             build_pubsub_retract_event(&from, &from, node, item_id)
+        }
+        Notification::Delete => {
+            if !node_cfg.notify_delete {
+                return;
+            }
+            build_pubsub_delete_event(&from, &from, node)
+        }
+        Notification::Purge => {
+            // §8.5.2: purge notifications follow the node's item-deletion
+            // notification setting.
+            if !node_cfg.notify_retract {
+                return;
+            }
+            build_pubsub_purge_event(&from, &from, node)
         }
     };
 
@@ -682,6 +700,36 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 item_id: req.item_id,
                 notify,
             },
+        },
+    )
+    .await;
+}
+
+/// XEP-0060 §8.4 node-deletion notification to every deliverable subscriber.
+/// Call before the node is removed: its configuration, subscriptions and
+/// affiliations decide who is notified.
+pub async fn fan_out_delete(state: &WebSocketState, owner: &BareJid, node: &str, is_pep: bool) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner,
+            node,
+            is_pep,
+            notification: Notification::Delete,
+        },
+    )
+    .await;
+}
+
+/// XEP-0060 §8.5 node-purge notification to every deliverable subscriber.
+pub async fn fan_out_purge(state: &WebSocketState, owner: &BareJid, node: &str, is_pep: bool) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner,
+            node,
+            is_pep,
+            notification: Notification::Purge,
         },
     )
     .await;

@@ -15,7 +15,7 @@ mod tests;
 pub use builders::{
     build_pubsub_affiliations_result, build_pubsub_configure_form_result,
     build_pubsub_delete_event, build_pubsub_error, build_pubsub_event, build_pubsub_items_result,
-    build_pubsub_owner_subscriptions_result, build_pubsub_publish_result,
+    build_pubsub_owner_subscriptions_result, build_pubsub_publish_result, build_pubsub_purge_event,
     build_pubsub_retract_event, build_pubsub_subscribe_result, build_pubsub_success,
 };
 

@@ -135,7 +135,7 @@ impl DatabasePushServiceStore {
         }
 
         match waddle_xmpp::pubsub::parse_pubsub_iq(iq)
-            .map_err(|error| XmppError::bad_request(Some(error.to_string())))?
+            .map_err(|error| XmppError::bad_request(Some(format!("{error:?}"))))?
         {
             PubSubRequest::Publish {
                 node,
