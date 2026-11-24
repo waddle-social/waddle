@@ -78,7 +78,7 @@ pub(crate) async fn create_upload_slot(
     Ok(UploadSlotInfo {
         put_url,
         get_url,
-        put_headers: vec![("Content-Type".to_string(), effective_type)],
+        put_headers: Vec::new(),
     })
 }
 

@@ -432,7 +432,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
 
             let slot = UploadSlot {
                 put_url,
-                put_headers: vec![("Content-Type".to_string(), content_type)],
+                put_headers: Vec::new(),
                 get_url,
             };
             let response = build_upload_slot_response(request_iq, &slot);
