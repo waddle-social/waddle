@@ -204,11 +204,17 @@ async fn bind(
     let before = resources(state);
     let frame = authenticate_as(peer, token, &bind_request(bind), user_agent).await;
     let bound = bound_of(&frame);
+    let identifier = Sasl2Success::from_element(&frame)
+        .expect("SASL2 success")
+        .authorization_identifier;
     expect_post_auth_features(peer).await;
     let mut after = resources(state);
     after.retain(|jid| !before.contains(jid));
     assert_eq!(after.len(), 1, "exactly one new resource: {after:?}");
-    (after.remove(0), bound)
+    let jid = after.remove(0);
+    // XEP-0386: the authorization identifier is the client's full JID.
+    assert_eq!(identifier.to_string(), jid.to_string());
+    (jid, bound)
 }
 
 fn resources(state: &WebSocketState) -> Vec<FullJid> {

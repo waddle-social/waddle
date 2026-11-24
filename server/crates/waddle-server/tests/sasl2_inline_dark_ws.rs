@@ -127,11 +127,15 @@ async fn authenticate(peer: &mut Peer, token: &str, inline: &Sasl2InlineRequests
 
 fn inline_results(frame: &Element) -> Sasl2InlineResults {
     let success = Sasl2Success::from_element(frame).expect("SASL2 success");
-    assert_eq!(
-        success.authorization_identifier.to_string(),
-        "alice@example.com"
-    );
-    Sasl2InlineResults::from_success(&success).expect("typed inline results")
+    let results = Sasl2InlineResults::from_success(&success).expect("typed inline results");
+    // A bind reports the full JID (XEP-0386); otherwise the bare account.
+    let identifier = success.authorization_identifier.to_string();
+    if results.bound.is_some() {
+        assert!(identifier.starts_with("alice@example.com/"), "{identifier}");
+    } else {
+        assert_eq!(identifier, "alice@example.com");
+    }
+    results
 }
 
 fn bind_with_resumable_session() -> Sasl2InlineRequests {

@@ -679,7 +679,7 @@ pub(super) fn sasl2_success_responses(
     } = exchange;
     if requests.is_empty() {
         return vec![
-            sasl2_success_element(additional_data, authorization_identifier, Vec::new()),
+            sasl2_success_element(additional_data, authorization_identifier.into(), Vec::new()),
             super::transport_xml::build_stream_features_element(true),
         ]
         .into();
@@ -697,12 +697,12 @@ pub(super) fn sasl2_success_responses(
 
 fn sasl2_success_element(
     additional_data: Option<Vec<u8>>,
-    authorization_identifier: BareJid,
+    authorization_identifier: jid::Jid,
     inline_results: Vec<Element>,
 ) -> Element {
     waddle_xmpp_core::xep0388::Sasl2Success {
         additional_data: additional_data.map(waddle_xmpp_core::xep0388::Sasl2Data::new),
-        authorization_identifier: authorization_identifier.into(),
+        authorization_identifier,
         inline_results,
     }
     .to_element()
@@ -1025,9 +1025,15 @@ pub(super) async fn finish_sasl2_inline(
             return;
         }
     };
+    // XEP-0386: after a bind the authorization identifier is the client's
+    // full JID, which is how the client learns its generated resource.
+    let authorization_identifier = match (&results.bound, conn.phase.bound_jid()) {
+        (Some(_), Some(full)) => full.clone().into(),
+        _ => pending.authorization_identifier.into(),
+    };
     let success = sasl2_success_element(
         pending.additional_data,
-        pending.authorization_identifier,
+        authorization_identifier,
         results.to_elements(),
     );
     if resumed {
