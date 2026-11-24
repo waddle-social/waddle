@@ -1375,3 +1375,408 @@ async fn xep_0313_open_room_archive_accessible_to_non_member() {
     let _ = mallory.close().await;
     let _ = admin.close().await;
 }
+
+// =========================================================================
+// XEP-0059 index / flip-page / archive metadata / foreign archives
+// =========================================================================
+
+const NS_MAM: &str = "urn:xmpp:mam:2";
+const NS_RSM: &str = "http://jabber.org/protocol/rsm";
+
+fn parse_frame(frame: &str) -> Element {
+    frame
+        .parse::<Element>()
+        .unwrap_or_else(|error| panic!("unparseable frame ({error}): {frame}"))
+}
+
+/// The `<set/>` of the `<fin/>` that ends a MAM page.
+fn fin_rsm(frames: &[String]) -> Element {
+    let fin = parse_frame(frames.last().expect("fin frame"));
+    fin.get_child("fin", NS_MAM)
+        .and_then(|fin| fin.get_child("set", NS_RSM))
+        .cloned()
+        .unwrap_or_else(|| panic!("fin without rsm set: {fin:?}"))
+}
+
+fn mam_rsm_query_xml(id: &str, archive_jid: &str, rsm_children: &str, flip: bool) -> String {
+    let flip = if flip { "<flip-page/>" } else { "" };
+    format!(
+        r#"<iq type="set" id="{id}" to="{archive_jid}"><query xmlns="urn:xmpp:mam:2"><set xmlns="http://jabber.org/protocol/rsm">{rsm_children}</set>{flip}</query></iq>"#
+    )
+}
+
+fn page_bodies(frames: &[String]) -> Vec<String> {
+    frames.iter().filter_map(|f| extract_mam_body(f)).collect()
+}
+
+fn page_ids(frames: &[String]) -> Vec<String> {
+    frames
+        .iter()
+        .filter(|f| f.contains("<forwarded"))
+        .filter_map(|f| extract_result_id(f))
+        .collect()
+}
+
+/// Join a fresh room and archive `count` groupchat messages in it.
+async fn room_with_messages(client: &mut WsXmppClient, count: usize) -> String {
+    let room = format!("mam-ext-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("join responses");
+    for i in 1..=count {
+        let body = format!("ext msg {i}");
+        client
+            .send(&format!(
+                r#"<message type="groupchat" to="{room}"><body>{body}</body></message>"#
+            ))
+            .await
+            .expect("send");
+        client
+            .recv_matching(|f| f.contains(&body))
+            .await
+            .expect("echo");
+    }
+    room
+}
+
+async fn metadata_query(client: &mut WsXmppClient, to: Option<&str>) -> String {
+    let id = format!("meta-{}", uuid::Uuid::new_v4());
+    let to = to.map(|to| format!(r#" to="{to}""#)).unwrap_or_default();
+    client
+        .send(&format!(
+            r#"<iq type="get" id="{id}"{to}><metadata xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send metadata query");
+    client
+        .recv_matching(|f| f.contains(&id))
+        .await
+        .expect("metadata reply")
+}
+
+/// XEP-0059 §2.6: "<index/> ... the index of the first item to be
+/// returned"; "The 'index' attribute of the <first/> element MUST be the
+/// same as the index specified in the request. If the index specified by
+/// the requesting entity is greater than or equal to the number of items in
+/// the full set then the responding entity MUST return an empty page."
+#[tokio::test]
+async fn xep_0059_room_archive_honours_rsm_index_and_reports_first_index() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = room_with_messages(&mut client, 5).await;
+
+    let q = format!("idx-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&q, &room, "<max>2</max><index>2</index>", false),
+    )
+    .await
+    .expect("index query");
+    assert_eq!(page_bodies(&frames), ["ext msg 3", "ext msg 4"]);
+    let rsm = fin_rsm(&frames);
+    let first = rsm.get_child("first", NS_RSM).expect("first");
+    assert_eq!(first.attr("index"), Some("2"));
+    assert_eq!(
+        rsm.get_child("count", NS_RSM).map(Element::text).as_deref(),
+        Some("5")
+    );
+    let ids = page_ids(&frames);
+    assert_eq!(first.text(), ids[0]);
+
+    // Past the end: an empty page with no first/last.
+    let q = format!("idx-end-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&q, &room, "<max>2</max><index>5</index>", false),
+    )
+    .await
+    .expect("index past end");
+    assert!(page_bodies(&frames).is_empty());
+    let rsm = fin_rsm(&frames);
+    assert!(rsm.get_child("first", NS_RSM).is_none());
+    assert!(rsm.get_child("last", NS_RSM).is_none());
+    assert_eq!(
+        rsm.get_child("count", NS_RSM).map(Element::text).as_deref(),
+        Some("5")
+    );
+
+    // The first page reports index 0 even though none was asked for.
+    let q = format!("idx-0-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(&mut client, &mam_query_xml(&q, &room, Some(2)))
+        .await
+        .expect("first page");
+    let rsm = fin_rsm(&frames);
+    assert_eq!(
+        rsm.get_child("first", NS_RSM).and_then(|f| f.attr("index")),
+        Some("0")
+    );
+
+    // The last page reports count minus the page size.
+    let q = format!("idx-last-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&q, &room, "<max>2</max><before/>", false),
+    )
+    .await
+    .expect("last page");
+    assert_eq!(page_bodies(&frames), ["ext msg 4", "ext msg 5"]);
+    let rsm = fin_rsm(&frames);
+    assert_eq!(
+        rsm.get_child("first", NS_RSM).and_then(|f| f.attr("index")),
+        Some("3")
+    );
+
+    // An index cannot be combined with a UID cursor: bad-request.
+    let q = format!("idx-bad-{}", uuid::Uuid::new_v4());
+    client
+        .send(&mam_rsm_query_xml(
+            &q,
+            &room,
+            "<index>1</index><after>x</after>",
+            false,
+        ))
+        .await
+        .expect("send");
+    let reply = client
+        .recv_matching(|f| f.contains(&q))
+        .await
+        .expect("bad index reply");
+    assert!(reply.contains("<bad-request"), "{reply}");
+
+    let _ = client.close().await;
+}
+
+/// XEP-0313 §4.3.3: a flipped page holds the same results, "in reverse
+/// order"; "flipping a page does not affect what results are returned".
+#[tokio::test]
+async fn xep_0313_room_archive_flips_page_without_changing_its_contents() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = room_with_messages(&mut client, 5).await;
+
+    let plain_q = format!("plain-{}", uuid::Uuid::new_v4());
+    let plain = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&plain_q, &room, "<max>3</max><before/>", false),
+    )
+    .await
+    .expect("plain page");
+    assert_eq!(page_bodies(&plain), ["ext msg 3", "ext msg 4", "ext msg 5"]);
+
+    let flip_q = format!("flip-{}", uuid::Uuid::new_v4());
+    let flipped = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&flip_q, &room, "<max>3</max><before/>", true),
+    )
+    .await
+    .expect("flipped page");
+    assert_eq!(
+        page_bodies(&flipped),
+        ["ext msg 5", "ext msg 4", "ext msg 3"]
+    );
+    let mut reversed = page_ids(&flipped);
+    reversed.reverse();
+    assert_eq!(reversed, page_ids(&plain));
+    // The result set describes the page in archive order either way.
+    let (plain_rsm, flipped_rsm) = (fin_rsm(&plain), fin_rsm(&flipped));
+    for name in ["first", "last", "count"] {
+        assert_eq!(
+            plain_rsm.get_child(name, NS_RSM).map(Element::text),
+            flipped_rsm.get_child(name, NS_RSM).map(Element::text),
+            "{name}"
+        );
+    }
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn xep_0313_personal_archive_flips_page() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let bare_jid = format!("{USERNAME}@{DOMAIN}");
+    let tag = uuid::Uuid::new_v4();
+    for i in 1..=3 {
+        client
+            .send(&format!(
+                r#"<message type="chat" to="{bare_jid}"><body>flip-{tag}-{i}</body></message>"#
+            ))
+            .await
+            .expect("send DM");
+        let _ = client
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .await;
+    }
+    let q = format!("pflip-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(
+        &mut client,
+        &mam_rsm_query_xml(&q, &bare_jid, "<max>3</max><before/>", true),
+    )
+    .await
+    .expect("flipped personal page");
+    let bodies: Vec<String> = page_bodies(&frames)
+        .into_iter()
+        .filter(|body| body.contains(&tag.to_string()))
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            format!("flip-{tag}-3"),
+            format!("flip-{tag}-2"),
+            format!("flip-{tag}-1")
+        ]
+    );
+    let _ = client.close().await;
+}
+
+/// XEP-0313 §7: a non-empty archive's metadata "MUST include <start/> and
+/// <end/>"; "If the archive is empty, the server MUST instead send an empty
+/// <metadata/> element."
+#[tokio::test]
+async fn xep_0313_room_archive_metadata_reports_first_and_last_message() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+
+    // A room nobody has spoken in has an empty archive.
+    let empty_room = format!("mam-empty-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<presence to="{empty_room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    client
+        .recv_until(|f| f.contains("<subject"))
+        .await
+        .expect("join responses");
+    let reply = parse_frame(&metadata_query(&mut client, Some(&empty_room)).await);
+    assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+    let metadata = reply.get_child("metadata", NS_MAM).expect("metadata");
+    assert_eq!(metadata.children().count(), 0, "{metadata:?}");
+
+    let room = room_with_messages(&mut client, 3).await;
+    let q = format!("meta-all-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(&mut client, &mam_query_xml(&q, &room, Some(10)))
+        .await
+        .expect("full page");
+    let ids = page_ids(&frames);
+    let reply = parse_frame(&metadata_query(&mut client, Some(&room)).await);
+    assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+    assert_eq!(reply.attr("from"), Some(room.as_str()));
+    let metadata = reply.get_child("metadata", NS_MAM).expect("metadata");
+    let start = metadata.get_child("start", NS_MAM).expect("start");
+    let end = metadata.get_child("end", NS_MAM).expect("end");
+    assert_eq!(start.attr("id"), ids.first().map(String::as_str));
+    assert_eq!(end.attr("id"), ids.last().map(String::as_str));
+    for edge in [start, end] {
+        let stamp = edge.attr("timestamp").expect("timestamp");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(stamp).is_ok(),
+            "XEP-0082 timestamp: {stamp}"
+        );
+    }
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn xep_0313_personal_archive_metadata_reports_first_and_last_message() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let bare_jid = format!("{USERNAME}@{DOMAIN}");
+    for i in 1..=2 {
+        client
+            .send(&format!(
+                r#"<message type="chat" to="{bare_jid}"><body>meta-dm-{i}</body></message>"#
+            ))
+            .await
+            .expect("send DM");
+        let _ = client
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .await;
+    }
+    let q = format!("meta-p-{}", uuid::Uuid::new_v4());
+    let frames = query_mam(&mut client, &mam_query_xml(&q, &bare_jid, Some(100)))
+        .await
+        .expect("personal page");
+    let ids = page_ids(&frames);
+    assert!(ids.len() >= 2, "{frames:?}");
+
+    // Without 'to' and with the owner's bare JID the same archive answers.
+    for to in [None, Some(bare_jid.as_str())] {
+        let reply = parse_frame(&metadata_query(&mut client, to).await);
+        assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+        let metadata = reply.get_child("metadata", NS_MAM).expect("metadata");
+        assert_eq!(
+            metadata
+                .get_child("start", NS_MAM)
+                .and_then(|e| e.attr("id")),
+            ids.first().map(String::as_str)
+        );
+        assert_eq!(
+            metadata.get_child("end", NS_MAM).and_then(|e| e.attr("id")),
+            ids.last().map(String::as_str)
+        );
+    }
+    let _ = client.close().await;
+}
+
+/// XEP-0313 §Security: "If a client requests access to an archive it does
+/// not have permissions for the server MUST return an iq with type error,
+/// and the error condition SHOULD be 'forbidden'."
+#[tokio::test]
+async fn xep_0313_foreign_personal_archive_is_forbidden() {
+    let _guard = TEST_SERIAL.lock().await;
+    let mallory_pass = format!("mallory-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("mallory", &mallory_pass)]);
+    let mut mallory = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "mallory",
+        &mallory_pass,
+        &format!("test-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("mallory connect");
+    let victim = format!("{USERNAME}@{DOMAIN}");
+
+    let q = format!("foreign-{}", uuid::Uuid::new_v4());
+    mallory
+        .send(&mam_query_xml(&q, &victim, Some(10)))
+        .await
+        .expect("send");
+    let reply = mallory
+        .recv_matching(|f| f.contains(&q))
+        .await
+        .expect("reply");
+    assert!(reply.contains("<forbidden"), "{reply}");
+    assert!(
+        reply.contains("type='error'") || reply.contains(r#"type="error""#),
+        "{reply}"
+    );
+
+    let reply = metadata_query(&mut mallory, Some(&victim)).await;
+    assert!(reply.contains("<forbidden"), "{reply}");
+
+    // An account that does not exist is refused the same way, so the
+    // answer does not reveal which accounts exist.
+    let q = format!("absent-{}", uuid::Uuid::new_v4());
+    mallory
+        .send(&mam_query_xml(&q, &format!("nobody@{DOMAIN}"), Some(10)))
+        .await
+        .expect("send");
+    let reply = mallory
+        .recv_matching(|f| f.contains(&q))
+        .await
+        .expect("reply");
+    assert!(reply.contains("<forbidden"), "{reply}");
+
+    let _ = mallory.close().await;
+}

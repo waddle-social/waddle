@@ -386,6 +386,7 @@ async fn xep_0313_archive_direct_drops_when_storage_errors() {
                 first_id: None,
                 last_id: None,
                 count: Some(0),
+                first_index: None,
             })
         }
         async fn get_message(&self, _: &str) -> Result<Option<ArchivedMessage>, MamStorageError> {
@@ -951,6 +952,7 @@ async fn xep_0359_lookup_archived_message_propagates_room_archive_kind() {
                 first_id: Some(self.row.id.clone()),
                 last_id: Some(self.row.id.clone()),
                 count: Some(1),
+                first_index: None,
             })
         }
 

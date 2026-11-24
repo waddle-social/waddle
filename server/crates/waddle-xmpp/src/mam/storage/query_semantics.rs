@@ -65,6 +65,7 @@ pub(super) fn finalize_result(
         first_id,
         last_id,
         count,
+        first_index: None,
     }
 }
 

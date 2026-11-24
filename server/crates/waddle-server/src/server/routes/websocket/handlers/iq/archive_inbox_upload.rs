@@ -1,15 +1,16 @@
 use super::{
     bad_request_iq_error, build_fin_iq, build_inbox_entry_message, build_inbox_fin_iq,
-    build_iq_error_xml_typed, build_mark_read_result, build_query_form_iq, build_result_messages,
-    build_upload_error, build_upload_slot_response, chrono, debug, effective_content_type,
-    feature_not_implemented_iq_error, forbidden_iq_error, get_managed_channel_for_room,
-    host_grant_read_still_admitted, internal_server_error_iq_error, iq_to_xml, is_inbox_iq,
-    is_mam_query, is_mam_query_form_request, is_mark_read_iq, is_muc_room_jid, is_upload_request,
-    item_not_found_iq_error, jid_malformed_iq_error, not_authorized_iq_error, parse_inbox_query,
-    parse_mam_query, parse_mark_read, parse_upload_request, resolve_muc_room_archive_access,
-    sanitize_filename, stanza_to_xml, warn, BareJid, CheckPermission, ConnectionPhase, DbExecute,
-    InboxFinCounts, InboxLastMessage, Object, ObjectType, Permission, RoomArchiveAccess, Stanza,
-    Subject, UploadError, UploadSlot, WebSocketState, XmppChannelRecord,
+    build_iq_error_xml_typed, build_mark_read_result, build_metadata_iq, build_query_form_iq,
+    build_result_messages, build_upload_error, build_upload_slot_response, chrono, debug,
+    effective_content_type, feature_not_implemented_iq_error, forbidden_iq_error,
+    get_managed_channel_for_room, host_grant_read_still_admitted, internal_server_error_iq_error,
+    iq_to_xml, is_inbox_iq, is_mam_metadata_query, is_mam_query, is_mam_query_form_request,
+    is_mark_read_iq, is_muc_room_jid, is_upload_request, item_not_found_iq_error,
+    jid_malformed_iq_error, not_authorized_iq_error, parse_inbox_query, parse_mam_query,
+    parse_mark_read, parse_upload_request, resolve_muc_room_archive_access, sanitize_filename,
+    stanza_to_xml, warn, BareJid, CheckPermission, ConnectionPhase, DbExecute, InboxFinCounts,
+    InboxLastMessage, Object, ObjectType, Permission, RoomArchiveAccess, Stanza, Subject,
+    UploadError, UploadSlot, WebSocketState, XmppChannelRecord,
 };
 use crate::db::actor::DbQueryOne;
 
@@ -21,8 +22,8 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     state: &WebSocketState,
     phase: &ConnectionPhase,
 ) -> Vec<String> {
-    // MAM (Message Archive Management) query
-    if is_mam_query(iq) {
+    // MAM (Message Archive Management) query or XEP-0313 §7 metadata query
+    if is_mam_query(iq) || is_mam_metadata_query(iq) {
         let request_iq = &iq;
         let sender_bare = phase.bound_jid().map(|jid| jid.to_bare());
 
@@ -65,6 +66,18 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             .is_some_and(|bare| *bare == target_bare);
 
         if !is_personal && !is_muc_room_jid(state, &target_bare).await {
+            // XEP-0313 §Security: a client asking for an archive it may not
+            // access gets 'forbidden'. An account of this server has a
+            // personal archive that is not the requester's; anything else
+            // names no archive this server hosts.
+            if target_bare.domain().as_str() == domain {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    forbidden_iq_error("Operation not permitted."),
+                )];
+            }
             return vec![build_iq_error_xml_typed(
                 id,
                 None,
@@ -125,27 +138,6 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             return vec![iq_to_xml(build_query_form_iq(request_iq))];
         }
 
-        let (query_id, mut query) = match parse_mam_query(request_iq) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                warn!(error = %err, target = %target_bare, "Invalid MAM query");
-                if matches!(err, waddle_xmpp::CoreError::NotImplemented) {
-                    return vec![build_iq_error_xml_typed(
-                        id,
-                        None,
-                        None,
-                        feature_not_implemented_iq_error("Requested feature not implemented."),
-                    )];
-                }
-                return vec![build_iq_error_xml_typed(
-                    id,
-                    None,
-                    None,
-                    bad_request_iq_error("Malformed IQ payload."),
-                )];
-            }
-        };
-
         let visibility = group_dm_archive_visibility(
             state,
             &target_bare,
@@ -173,6 +165,70 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 )];
             }
         };
+        if is_mam_metadata_query(request_iq) {
+            let bounds = match state
+                .deps
+                .protocol
+                .mam_storage
+                .archive_bounds(
+                    &target_bare,
+                    if is_personal {
+                        waddle_xmpp::mam::MamArchiveKind::Personal
+                    } else {
+                        waddle_xmpp::mam::MamArchiveKind::Room
+                    },
+                    visibility_boundary,
+                )
+                .await
+            {
+                Ok(bounds) => bounds,
+                Err(err) => {
+                    warn!(error = %err, target = %target_bare, "MAM metadata query failed");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        internal_server_error_iq_error("Internal server error."),
+                    )];
+                }
+            };
+            // The bounds of a managed room's archive are sent only on a
+            // decision taken after they were read, like a page of it.
+            if !is_personal
+                && host_grant_read_still_admitted(state, &target_bare, sender_bare.as_ref()).await
+                    == Some(false)
+            {
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    forbidden_iq_error("Operation not permitted."),
+                )];
+            }
+            return vec![iq_to_xml(build_metadata_iq(request_iq, bounds.as_ref()))];
+        }
+
+        let (query_id, mut query) = match parse_mam_query(request_iq) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(error = %err, target = %target_bare, "Invalid MAM query");
+                if matches!(err, waddle_xmpp::CoreError::NotImplemented) {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        feature_not_implemented_iq_error("Requested feature not implemented."),
+                    )];
+                }
+                return vec![build_iq_error_xml_typed(
+                    id,
+                    None,
+                    None,
+                    bad_request_iq_error("Malformed IQ payload."),
+                )];
+            }
+        };
+
         if let Some(boundary) = visibility_boundary {
             query.start = Some(query.start.map_or(boundary, |start| start.max(boundary)));
         }
@@ -262,6 +318,7 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 forbidden_iq_error("Operation not permitted."),
             )];
         }
+        result.arrange_for_transmission(&query);
         let archive_jid = jid::Jid::from(target_bare.clone());
         let mut responses: Vec<String> =
             build_result_messages(&query_id, &archive_jid, &recipient_jid, &result.messages)

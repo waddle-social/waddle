@@ -8,8 +8,8 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::types::{
-    ArchivedMessage, ArchivedMucSender, ArchivedOccupantId, ArchivedRichMessage,
-    ArchivedRichPayload, MamResult,
+    ArchiveBounds, ArchiveEdge, ArchivedMessage, ArchivedMucSender, ArchivedOccupantId,
+    ArchivedRichMessage, ArchivedRichPayload, MamResult,
 };
 use super::{
     CLIENT_NS, DELAY_NS, FORWARD_NS, MAM_NS, MESSAGE_CORRECT_NS, MESSAGE_MODERATE_NS,
@@ -61,6 +61,36 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
         to: original_iq.from().cloned(),
         id: original_iq.id().to_string(),
         payload: Some(fin),
+    }
+}
+
+/// Build the XEP-0313 §7 archive metadata result.
+///
+/// A non-empty archive reports `<start/>` and `<end/>`; an empty one gets
+/// an empty `<metadata/>`.
+#[must_use]
+pub fn build_metadata_iq(original_iq: &Iq, bounds: Option<&ArchiveBounds>) -> Iq {
+    let edge = |name: &str, edge: &ArchiveEdge| {
+        Element::builder(name, MAM_NS)
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), &edge.id)
+            .attr(
+                minidom::rxml::xml_ncname!("timestamp").to_owned(),
+                edge.timestamp
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            )
+            .build()
+    };
+    let mut metadata = Element::builder("metadata", MAM_NS);
+    if let Some(bounds) = bounds {
+        metadata = metadata
+            .append(edge("start", &bounds.start))
+            .append(edge("end", &bounds.end));
+    }
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(metadata.build()),
     }
 }
 
@@ -596,7 +626,15 @@ fn build_rsm_response_element(result: &MamResult) -> Element {
     let mut builder = Element::builder("set", RSM_NS);
 
     if let Some(first) = result.first_id.as_deref() {
-        builder = builder.append(Element::builder("first", RSM_NS).append(first).build());
+        let mut first_element = Element::builder("first", RSM_NS);
+        // XEP-0059 §2.1: the position of the first item within the full set.
+        if let Some(index) = result.first_index {
+            first_element = first_element.attr(
+                minidom::rxml::xml_ncname!("index").to_owned(),
+                index.to_string(),
+            );
+        }
+        builder = builder.append(first_element.append(first).build());
     }
     if let Some(last) = result.last_id.as_deref() {
         builder = builder.append(Element::builder("last", RSM_NS).append(last).build());

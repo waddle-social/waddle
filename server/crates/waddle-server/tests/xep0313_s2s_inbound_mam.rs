@@ -103,6 +103,60 @@ async fn a_remote_occupant_reads_the_rooms_archive_in_order_before_the_fin() {
     assert!(last_result < fin_at, "{last_result:?} {fin_at:?}");
 }
 
+/// XEP-0313 §7 and §4.3.3 through S2S: a remote asker reads the bounds of
+/// the room's archive and a flipped page of it.
+#[tokio::test]
+async fn a_remote_asker_reads_archive_metadata_and_a_flipped_page() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    for (id, text) in [("m1", "first"), ("m2", "second")] {
+        local_groupchat(&mut alice, ROOM, id, text).await;
+        local_receives(&mut alice, ARRIVES, |stanza| {
+            stanza.name() == "message" && stanza.attr("id") == Some(id)
+        })
+        .await
+        .expect("the sender's reflection");
+    }
+    let metadata = Iq::Get {
+        from: Some(jid(BOB)),
+        to: Some(jid(ROOM)),
+        id: "meta".to_owned(),
+        payload: Element::builder("metadata", NS_MAM).build(),
+    };
+    hosted.peer_sends(metadata).await;
+    let reply = hosted.answered("meta").await;
+    assert_eq!(reply.attr("type"), Some("result"), "{reply:?}");
+    assert_eq!(reply.attr("from"), Some(ROOM));
+    let bounds = reply.get_child("metadata", NS_MAM).expect("metadata");
+    assert!(bounds.get_child("start", NS_MAM).is_some(), "{bounds:?}");
+    assert!(bounds.get_child("end", NS_MAM).is_some(), "{bounds:?}");
+
+    let flipped = Iq::Set {
+        from: Some(jid(BOB)),
+        to: Some(jid(ROOM)),
+        id: "flip".to_owned(),
+        payload: Element::builder("query", NS_MAM)
+            .attr(
+                minidom::rxml::xml_ncname!("queryid").to_owned(),
+                "page-flip",
+            )
+            .append(Element::builder("flip-page", NS_MAM).build())
+            .build(),
+    };
+    hosted.peer_sends(flipped).await;
+    let fin = hosted.answered("flip").await;
+    assert_eq!(fin.attr("type"), Some("result"), "{fin:?}");
+    let stanzas = hosted.captured.stanzas();
+    let bodies: Vec<String> = stanzas
+        .iter()
+        .filter(|stanza| is_result_of(stanza, "page-flip"))
+        .map(|stanza| format!("{stanza:?}"))
+        .collect();
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    let at = |text: &str| bodies.iter().position(|body| body.contains(text));
+    assert!(at("second") < at("first"), "newest first: {bodies:?}");
+}
+
 #[tokio::test]
 async fn an_asker_that_may_enter_an_open_room_reads_its_archive_without_joining() {
     let hosted = Hosted::start(RouterLimits::default(), no_change).await;

@@ -43,8 +43,9 @@ use minidom::Element;
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::ingress::{DigestContext, NormalizedTarget, TransportGeneration};
 use waddle_xmpp::mam::{
-    build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query_form_request,
-    parse_mam_query, MamArchiveKind, MamStorageError,
+    build_fin_iq, build_metadata_iq, build_query_form_iq, build_result_messages,
+    is_mam_metadata_query, is_mam_query_form_request, parse_mam_query, MamArchiveKind,
+    MamStorageError,
 };
 use waddle_xmpp::muc::presence::{NS_MUC, NS_MUC_USER};
 use waddle_xmpp::muc::room_actor::{
@@ -897,6 +898,30 @@ impl Asked<'_> {
         if is_mam_query_form_request(iq) {
             return RoomReplies::of(vec![Stanza::Iq(Box::new(build_query_form_iq(iq)))]);
         }
+        if is_mam_metadata_query(iq) {
+            let storage = &self.state.deps.protocol.mam_storage;
+            let Ok(bounds) = storage
+                .archive_bounds(&room, MamArchiveKind::Room, None)
+                .await
+            else {
+                return self.refuse(internal());
+            };
+            if host_grant_read_still_admitted_as(
+                self.state,
+                &room,
+                Some(&self.account),
+                &self.evidence,
+            )
+            .await
+                == Some(false)
+            {
+                return self.refuse(forbidden("Operation not permitted."));
+            }
+            return RoomReplies::of(vec![Stanza::Iq(Box::new(build_metadata_iq(
+                iq,
+                bounds.as_ref(),
+            )))]);
+        }
         let Ok((query_id, query)) = parse_mam_query(iq) else {
             return self.refuse(error(
                 ErrorType::Modify,
@@ -925,6 +950,7 @@ impl Asked<'_> {
         {
             return self.refuse(forbidden("Operation not permitted."));
         }
+        page.arrange_for_transmission(&query);
         let asker = self.request.principal.address().clone();
         let mut replies: Vec<Stanza> =
             build_result_messages(&query_id, &Jid::from(room), &asker, &page.messages)

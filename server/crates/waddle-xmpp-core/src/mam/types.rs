@@ -705,6 +705,13 @@ pub struct MamQuery {
     pub before_id: Option<String>,
     /// RSM pagination cursor: after this ID.
     pub after_id: Option<String>,
+    /// XEP-0059 §2.6 `<index/>`: zero-based position, within the filtered
+    /// result set, of the first item to return. Mutually exclusive with
+    /// `before_id` and `after_id`; the query parser enforces that.
+    pub index: Option<u32>,
+    /// XEP-0313 §4.3.3 `<flip-page/>`: transmit the page in reverse
+    /// chronological order. It never changes which items the page holds.
+    pub flip_page: bool,
 }
 
 /// MAM query result.
@@ -720,4 +727,39 @@ pub struct MamResult {
     pub last_id: Option<String>,
     /// Total count (if available).
     pub count: Option<u32>,
+    /// XEP-0059 §2.1 position of `first_id` within the filtered result set
+    /// (the `index` attribute of `<first/>`), when the page is not empty.
+    pub first_index: Option<u32>,
+}
+
+impl MamResult {
+    /// Put the page into transmission order for `query`.
+    ///
+    /// XEP-0313 §4.3.3: a flipped page holds the same items, sent newest
+    /// first. `first_id`, `last_id` and `first_index` keep describing the
+    /// page in archive order, so a client pages with them as usual.
+    pub fn arrange_for_transmission(&mut self, query: &MamQuery) {
+        if query.flip_page {
+            self.messages.reverse();
+        }
+    }
+}
+
+/// One end of an archive: the id and receive time of its first or last
+/// message (XEP-0313 §7 `<start/>` / `<end/>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveEdge {
+    /// The archive id of the message.
+    pub id: String,
+    /// When the archive received the message.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// The first and last messages of a non-empty archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveBounds {
+    /// The oldest message.
+    pub start: ArchiveEdge,
+    /// The newest message.
+    pub end: ArchiveEdge,
 }

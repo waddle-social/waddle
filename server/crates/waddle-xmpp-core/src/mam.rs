@@ -11,19 +11,22 @@ mod tests;
 mod types;
 
 pub use ordinal::{ArchiveOrdinal, ArchiveOrdinalError};
-pub use query::{build_query_form_iq, is_mam_query, is_mam_query_form_request, parse_mam_query};
+pub use query::{
+    build_query_form_iq, is_mam_metadata_query, is_mam_query, is_mam_query_form_request,
+    parse_mam_query,
+};
 pub use response::{
     archived_inner_message, build_archived_muc_sender_x, build_archived_occupant_id_element,
-    build_fin_iq, build_result_messages, message_type_wire_str,
+    build_fin_iq, build_metadata_iq, build_result_messages, message_type_wire_str,
 };
 pub use stanza_id_filter::{
     MamFilterStanzaId, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, STANZA_ID_FILTER_FIELD,
 };
 pub use types::{
-    correction_payload_like_pattern, ArchivedMention, ArchivedMessage, ArchivedModeration,
-    ArchivedMucSender, ArchivedOccupantId, ArchivedReactionSet, ArchivedReference, ArchivedReply,
-    ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
-    CorrectionScope, MamQuery, MamResult, RichMessageId, RichText, ThreadId,
+    correction_payload_like_pattern, ArchiveBounds, ArchiveEdge, ArchivedMention, ArchivedMessage,
+    ArchivedModeration, ArchivedMucSender, ArchivedOccupantId, ArchivedReactionSet,
+    ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload,
+    ArchivedTombstone, CorrectionScope, MamQuery, MamResult, RichMessageId, RichText, ThreadId,
 };
 
 /// MAM XML namespace (XEP-0313 v2).

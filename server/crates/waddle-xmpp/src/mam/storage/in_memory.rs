@@ -183,6 +183,10 @@ impl MamStorage for InMemoryMamStorage {
             messages.retain(|message| archive_order_after(message, cursor));
         }
         let count = Some(u32::try_from(messages.len()).unwrap_or(u32::MAX));
+        // Positions within the filtered set, for the page's `first index`.
+        let mut filtered_ordinals: Vec<_> =
+            messages.iter().map(|message| message.ordinal).collect();
+        filtered_ordinals.sort();
 
         if let Some(cursor) = before_cursor {
             messages.retain(|message| archive_order_before(message, &cursor));
@@ -199,6 +203,12 @@ impl MamStorage for InMemoryMamStorage {
             messages.sort_by_key(|a| a.ordinal);
         }
 
+        // XEP-0059 §2.6: a page that starts at an index of the filtered set.
+        if let Some(index) = query.index {
+            let skipped = (index as usize).min(messages.len());
+            messages.drain(..skipped);
+        }
+
         let actual_limit = query.max.unwrap_or(100).min(500) as usize;
         let mut complete = true;
         if messages.len() > actual_limit {
@@ -212,12 +222,17 @@ impl MamStorage for InMemoryMamStorage {
 
         let first_id = messages.first().map(|message| message.id.clone());
         let last_id = messages.last().map(|message| message.id.clone());
+        let first_index = messages.first().map(|first| {
+            let before = filtered_ordinals.partition_point(|ordinal| *ordinal < first.ordinal);
+            u32::try_from(before).unwrap_or(u32::MAX)
+        });
         Ok(MamResult {
             messages,
             complete,
             first_id,
             last_id,
             count,
+            first_index,
         })
     }
 

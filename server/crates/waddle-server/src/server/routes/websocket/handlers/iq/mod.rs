@@ -12,9 +12,10 @@ use waddle_xmpp::disco::{
     spaces_service_features, upload_service_features, DiscoItem, Feature, Identity,
 };
 use waddle_xmpp::mam::{
-    build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
-    is_mam_query_form_request, parse_mam_query, ArchivedMessage, ArchivedModeration,
-    ArchivedRichMessage, ArchivedRichPayload, RichMessageId, RichText,
+    build_fin_iq, build_metadata_iq, build_query_form_iq, build_result_messages,
+    is_mam_metadata_query, is_mam_query, is_mam_query_form_request, parse_mam_query,
+    ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload, RichMessageId,
+    RichText,
 };
 use waddle_xmpp::muc::admin::{
     build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_iq,
