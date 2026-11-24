@@ -69,6 +69,14 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // replies, it MUST specify the 'urn:xmpp:reply:0' feature". Replies
         // are built and parsed in xep/reply.rs.
         crate::xep::reply::NS_REPLY,
+        // XEP-0372 §Discovery: "If a client implements references, it MUST
+        // specify the 'urn:xmpp:reference:0' feature". Built in
+        // messaging/builders.rs, parsed in messaging/parsing/message.rs.
+        crate::messaging::namespaces::NS_REFERENCES,
+        // XEP-0422 §Discovering support: a client able to understand the
+        // fastening payload when received MUST specify 'urn:xmpp:fasten:0'.
+        // The client parses `<apply-to/>` (xep/safety_scores.rs).
+        crate::xep::safety_scores::NS_FASTEN,
         // NOTE: no feature is advertised for XEP-0353 Jingle Message
         // Initiation (the XEP intentionally defines no discovery), XEP-0272
         // Muji (no disco clause), XEP-0447 file sharing, XEP-0449 stickers,
@@ -232,6 +240,14 @@ mod tests {
         assert!(features.contains(&NS_MESSAGE_RETRACT), "XEP-0424");
         assert!(features.contains(&NS_REACTIONS), "XEP-0444");
         assert!(features.contains(&crate::xep::reply::NS_REPLY), "XEP-0461");
+        assert!(
+            features.contains(&crate::messaging::namespaces::NS_REFERENCES),
+            "XEP-0372"
+        );
+        assert!(
+            features.contains(&crate::xep::safety_scores::NS_FASTEN),
+            "XEP-0422"
+        );
         assert!(features.contains(&NS_MESSAGE_CORRECT), "XEP-0308");
         assert!(
             features.contains(&crate::messaging::NS_STANZA_ID),
@@ -301,6 +317,7 @@ mod tests {
                 crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
                 NS_AVATAR_METADATA_NOTIFY,
                 NS_CHAT_MARKERS,
+                crate::xep::safety_scores::NS_FASTEN,
                 NS_JINGLE,
                 NS_JINGLE_RTP,
                 NS_JINGLE_RTP_AUDIO,
@@ -309,6 +326,7 @@ mod tests {
                 NS_MESSAGE_CORRECT,
                 NS_MESSAGE_RETRACT,
                 NS_REACTIONS,
+                crate::messaging::namespaces::NS_REFERENCES,
                 crate::xep::reply::NS_REPLY,
                 crate::messaging::NS_STANZA_ID,
             ],
@@ -316,7 +334,7 @@ mod tests {
         );
         assert_eq!(
             client_caps_verification_string(),
-            "SEOIzts8nvglx2+mDLiZsscdBMY="
+            "1zCJQhz3KMhqZLdRixWzDwTCp48="
         );
     }
 
