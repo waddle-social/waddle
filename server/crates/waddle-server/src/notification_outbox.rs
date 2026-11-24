@@ -37,6 +37,7 @@ mod payload;
 mod prune;
 mod publish;
 mod publisher_persistence;
+mod remote;
 pub(crate) mod runtime_attach;
 #[cfg(all(test, feature = "test-support"))]
 #[path = "notification_outbox/runtime_attach_tests.rs"]
@@ -73,6 +74,7 @@ pub use payload::{
     target_from_subscription, RichSummary, WADDLE_PUSH_CONTEXT_NS, XEP0357_SUMMARY_FORM_TYPE,
 };
 pub(crate) use publisher_persistence::retire_registration_outbox_tx;
+pub use remote::{RemotePushPublication, RemotePushPublishOutcome, RemotePushPublisher};
 pub use runtime_attach::NotificationOutboxRuntimeAttachError;
 pub(crate) use types::SuppressedReason;
 pub use types::{
@@ -102,6 +104,7 @@ use unanswered::DueCallKey;
 pub struct NotificationOutboxStore {
     db: Database,
     owner_preparation: Option<OwnerPreparationProof>,
+    remote_publisher: remote::RemotePublisherSlot,
 }
 
 /// Proof that this exact URL-opened owner pool completed the legacy outbox
@@ -131,6 +134,7 @@ impl NotificationOutboxStore {
         let store = Self {
             db,
             owner_preparation: None,
+            remote_publisher: Default::default(),
         };
         store.initialize().await?;
         Ok(store)
@@ -152,6 +156,7 @@ impl NotificationOutboxStore {
         let temporary = Self {
             db: db.clone(),
             owner_preparation: None,
+            remote_publisher: Default::default(),
         };
         temporary.initialize_legacy_postgres_inline().await?;
         drop(temporary);
@@ -183,6 +188,7 @@ impl NotificationOutboxStore {
         let store = Self {
             db,
             owner_preparation: None,
+            remote_publisher: Default::default(),
         };
         store.validate_typed_schema_contract()?;
         let mut tx = store.db.begin().await?;
@@ -246,6 +252,7 @@ impl NotificationOutboxStore {
         let store = Self {
             db: db.clone(),
             owner_preparation: None,
+            remote_publisher: Default::default(),
         };
         store.validate_typed_schema_contract()?;
         let mut preparing = store.clone();

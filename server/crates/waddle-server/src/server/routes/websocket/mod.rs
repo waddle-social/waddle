@@ -84,6 +84,7 @@ mod resource_binding;
 mod resume_replay;
 pub(crate) mod s2s_accounts;
 pub(crate) mod s2s_delivery;
+pub(crate) mod s2s_push;
 #[cfg(feature = "clustering")]
 mod s2s_room_relay;
 #[cfg(all(feature = "clustering", feature = "test-support"))]
