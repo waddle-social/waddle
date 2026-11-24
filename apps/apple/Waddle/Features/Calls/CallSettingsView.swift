@@ -11,6 +11,8 @@ struct CallSettingsView: View {
     var kinds: [CallDeviceKind] = CallDeviceKind.allCases
     var audioProcessing = CallAudioProcessing()
     var setAudioProcessing: @MainActor (CallAudioProcessing) -> Void = { _ in /* a sheet without it */ }
+    /// The call's video streams as measured; `nil` where nothing measures, which hides the section.
+    var videoStats: [CallVideoStat]?
     let choose: @MainActor (CallDeviceKind, String?) -> Void
     let done: @MainActor () -> Void
 
@@ -30,6 +32,7 @@ struct CallSettingsView: View {
                     if kind == .microphone { processing }
                 }
                 if !kinds.contains(.microphone) { processing }
+                if let videoStats { video(videoStats) }
             }
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.bottom, Theme.Spacing.l)
@@ -77,6 +80,53 @@ struct CallSettingsView: View {
                         .foregroundStyle(Theme.Colors.warningText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+
+    /// How each video stream of the call is doing (web "Video" statistics).
+    private func video(_ stats: [CallVideoStat]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+            Text("Video")
+                .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.sm))
+                .foregroundStyle(Theme.Colors.fg)
+            if stats.isEmpty {
+                Text("No video right now. Turn on your camera or share your screen to see its resolution, bitrate and packet loss.")
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // A big room has many cameras: the list scrolls, and the sheet keeps its height and its Done.
+            if stats.count > Self.videoRowsShown {
+                ScrollView { videoRows(stats) }.frame(height: Self.videoRowsHeight)
+            } else {
+                videoRows(stats)
+            }
+        }
+    }
+
+    private static let videoRowsShown = 4
+    private static let videoRowsHeight: CGFloat = 176
+
+    private func videoRows(_ stats: [CallVideoStat]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+            ForEach(stats) { stat in
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    HStack {
+                        Text(stat.title).foregroundStyle(Theme.Colors.fg)
+                        Spacer(minLength: Theme.Spacing.s)
+                        Text("\(stat.resolution) · \(stat.framesPerSecond)").monospacedDigit()
+                    }
+                    Text("\(stat.bitrate) · loss \(stat.loss) · \(stat.roundTrip) · \(stat.codec) · \(stat.path)")
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(
+                    "\(stat.title): \(stat.resolution), \(stat.framesPerSecond), \(stat.bitrate), loss \(stat.loss), round trip \(stat.roundTrip), \(stat.codec), \(stat.path)"
+                ))
             }
         }
     }
@@ -152,18 +202,39 @@ struct CallSettingsSheet: ViewModifier {
 
     func body(content: Content) -> some View {
         content.sheet(isPresented: $isPresented) {
-            if let media {
-                CallSettingsView(
-                    devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
-                    setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } }
-                ) { kind, id in
-                    Task { await media.chooseDevice(kind, id: id) }
-                } done: {
-                    isPresented = false
-                }
-                // What is plugged in may have changed since the call began.
-                .task { await media.refreshDevices() }
+            if let media { CallSettingsContent(media: media) { isPresented = false } }
+        }
+    }
+}
+
+/// The settings of the session's call. The figures renewed every second
+/// are this view's own state, so a tick redraws the sheet and never the
+/// stage or the sidebar that presented it.
+private struct CallSettingsContent: View {
+    let media: any CallMediaControls
+    let done: @MainActor () -> Void
+    @State private var tracker = CallVideoStatsTracker()
+    @State private var videoStats: [CallVideoStat] = []
+
+    var body: some View {
+        CallSettingsView(
+            devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
+            setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
+            videoStats: videoStats,
+            choose: { kind, id in Task { await media.chooseDevice(kind, id: id) } },
+            done: done
+        )
+        // What is plugged in may have changed since the call began.
+        .task { await media.refreshDevices() }
+        // Measured only while someone is looking, once a second as the web does.
+        .task {
+            tracker = CallVideoStatsTracker()
+            await media.setMeasuresVideo(true)
+            while !Task.isCancelled {
+                videoStats = tracker.update(with: await media.videoSamples())
+                try? await Task.sleep(for: .seconds(1))
             }
+            await media.setMeasuresVideo(false)
         }
     }
 }

@@ -266,6 +266,72 @@ final class LiveKitCallMediaTests: XCTestCase {
         await bob.disconnect()
     }
 
+    /// Real readings from the engine for a stream we receive: they carry a
+    /// byte count, and a timestamp the tracker reads as now.
+    func testAMeasuredStreamHasReadingsTheTrackerCanTime() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = makeController()
+        let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/web")
+        let bob = Room()
+        try await bob.connect(url: bobJoin.url, token: bobJoin.token)
+        try await alice.connect(
+            join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: CallMedia(audio: false, video: false),
+            iceServers: []
+        )
+        let screen = await LocalVideoTrack.createBufferTrack(source: .screenShareVideo)
+        let frames = Task {
+            var buffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, 640, 360, kCVPixelFormatType_32BGRA, nil, &buffer)
+            while !Task.isCancelled, let buffer {
+                (screen.capturer as? BufferCapturer)?.capture(buffer)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { frames.cancel() }
+        _ = try await bob.localParticipant.publish(videoTrack: screen)
+        try await until { alice.participants.last?.screenPublicationID != nil }
+        let unmeasured = await alice.videoSamples()
+        XCTAssertTrue(unmeasured.isEmpty, "nothing is measured until someone looks")
+
+        await alice.setMeasuresVideo(true)
+        var sample: CallVideoSample?
+        let deadline = ContinuousClock.now + .seconds(15)
+        while sample?.bytes == nil, ContinuousClock.now < deadline {
+            sample = await alice.videoSamples().first
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let reading = try XCTUnwrap(sample)
+        XCTAssertNotNil(reading.bytes)
+        XCTAssertEqual(reading.key, "\(bobJoin.identity):screen:received")
+        XCTAssertEqual(reading.label, "bob")
+        XCTAssertEqual(reading.direction, .received)
+        let taken = CallVideoStatsTracker.seconds(reading.timestamp)
+        XCTAssertEqual(taken, Date().timeIntervalSince1970, accuracy: 3600, "the engine's timestamp is read in the right unit")
+        // A per-track report carries the path the media takes, not only the stream's own counters.
+        XCTAssertNotNil(reading.candidateType, "the network path is part of a track's report")
+        XCTAssertNotNil(reading.transport)
+        if let codec = reading.codec { XCTAssertNotEqual(codec.lowercased(), "video/rtx", "the stream's own codec, never the retransmission one") }
+
+        // A second window opens its settings and the first closes: the one still open keeps its figures.
+        await alice.setMeasuresVideo(true)
+        await alice.setMeasuresVideo(false)
+        let stillWatched = await alice.videoSamples()
+        XCTAssertFalse(stillWatched.isEmpty, "measuring goes on while anyone is looking")
+
+        await alice.setMeasuresVideo(false)
+        let after = await alice.videoSamples()
+        XCTAssertTrue(after.isEmpty)
+        // One close too many does not leave the count below nothing.
+        await alice.setMeasuresVideo(false)
+        await alice.setMeasuresVideo(true)
+        let again = await alice.videoSamples()
+        XCTAssertFalse(again.isEmpty)
+        await alice.setMeasuresVideo(false)
+        await alice.disconnect()
+        await bob.disconnect()
+    }
+
     func testAScreenSomeoneSharesIsTheirsToShowUntilTheyStop() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
