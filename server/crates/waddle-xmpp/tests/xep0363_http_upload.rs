@@ -18,9 +18,10 @@ use minidom::Element;
 use std::str::FromStr;
 use waddle_xmpp::disco::{server_features, upload_service_features, Feature};
 use waddle_xmpp::xep::xep0363::{
-    build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
-    parse_upload_request, sanitize_filename, UploadBadRequest, UploadError, UploadRequest,
-    UploadSlot, DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD,
+    build_max_file_size_form, build_upload_error, build_upload_slot_response, content_type_matches,
+    effective_content_type, is_upload_request, parse_upload_request, sanitize_filename,
+    slot_get_url, slot_put_url, UploadBadRequest, UploadError, UploadRequest, UploadSlot,
+    DEFAULT_MAX_FILE_SIZE, NS_HTTP_UPLOAD, SLOT_VALIDITY_SECS,
 };
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -551,4 +552,42 @@ fn xep0363_upload_request_struct_carries_required_and_optional_fields() {
     assert_eq!(req.filename, "a.bin");
     assert_eq!(req.size, 1024);
     assert!(req.content_type.is_none());
+}
+
+#[test]
+fn xep0363_get_url_is_ascii_with_percent_encoded_filename() {
+    let name = sanitize_filename("tr\u{e8}s cool.jpg");
+    let url = slot_get_url("https://example.com/", "slot", &name);
+    assert_eq!(url, "https://example.com/api/files/slot/tr%C3%A8s_cool.jpg");
+    assert_eq!(
+        slot_put_url("https://example.com/", "slot"),
+        "https://example.com/api/upload/slot"
+    );
+}
+
+#[test]
+fn xep0363_put_url_validity_is_about_300_seconds() {
+    assert_eq!(SLOT_VALIDITY_SECS, 300);
+}
+
+#[test]
+fn xep0363_content_type_match_ignores_parameters_and_case() {
+    assert!(content_type_matches("image/png", "Image/PNG; foo=bar"));
+    assert!(!content_type_matches("image/png", "image/pngx"));
+    assert!(!content_type_matches("image/png", "text/html"));
+}
+
+#[test]
+fn xep0363_max_file_size_form_uses_xep0128_shape() {
+    let form = build_max_file_size_form(1234);
+    assert_eq!(form.ns(), "jabber:x:data");
+    assert_eq!(form.attr("type"), Some("result"));
+    let field = |var: &str| {
+        form.children()
+            .find(|f| f.attr("var") == Some(var))
+            .and_then(|f| f.get_child("value", "jabber:x:data"))
+            .map(Element::text)
+    };
+    assert_eq!(field("FORM_TYPE").as_deref(), Some(NS_HTTP_UPLOAD));
+    assert_eq!(field("max-file-size").as_deref(), Some("1234"));
 }

@@ -446,13 +446,16 @@ pub(super) async fn handle_archive_inbox_upload_iq(
             let safe_filename = sanitize_filename(&request.filename);
             let content_type = effective_content_type(request.content_type.as_deref()).to_string();
             let slot_id = uuid::Uuid::new_v4().to_string();
-            let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+            let expires_at = (chrono::Utc::now()
+                + chrono::Duration::seconds(waddle_xmpp::xep::xep0363::SLOT_VALIDITY_SECS))
+            .to_rfc3339();
 
             let base_url =
                 std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", domain));
             let base_url = base_url.trim_end_matches('/');
-            let put_url = format!("{}/api/upload/{}", base_url, slot_id);
-            let get_url = format!("{}/api/files/{}/{}", base_url, slot_id, safe_filename);
+            let put_url = waddle_xmpp::xep::xep0363::slot_put_url(base_url, &slot_id);
+            let get_url =
+                waddle_xmpp::xep::xep0363::slot_get_url(base_url, &slot_id, &safe_filename);
 
             if let Err(e) = state
                 .deps
