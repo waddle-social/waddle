@@ -40,8 +40,8 @@ impl ConnectionRegistry {
             .is_some()
     }
 
-    /// Owner-gated presence availability write returning `Some(was_available)`
-    /// on success, or `None` when the registry slot is absent or superseded.
+    /// Owner-gated presence availability write returning
+    /// `Some((was_available, previous_priority))` on success, or `None` when the registry slot is absent or superseded.
     ///
     /// Uses an atomic swap on `presence_available` under the entry guard so
     /// callers can distinguish the initial transition from unavailable to
@@ -53,7 +53,7 @@ impl ConnectionRegistry {
         owner: &LocalConnectionBindingId,
         available: bool,
         priority: i8,
-    ) -> Option<bool> {
+    ) -> Option<(bool, i8)> {
         let entry = self.connections.get(jid)?;
         if entry.value().binding_id() != *owner {
             return None;
@@ -62,11 +62,11 @@ impl ConnectionRegistry {
             .value()
             .presence_available
             .swap(available, Ordering::AcqRel);
-        entry
+        let previous_priority = entry
             .value()
             .presence_priority
-            .store(priority, Ordering::Relaxed);
-        Some(was_available)
+            .swap(priority, Ordering::Relaxed);
+        Some((was_available, previous_priority))
     }
 
     /// Owner-gated [`Self::update_presence_state`]: writes the JID-keyed
