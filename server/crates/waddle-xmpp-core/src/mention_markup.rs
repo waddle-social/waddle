@@ -330,7 +330,7 @@ mod tests {
             occupant_id: Some("dd72603deec90a38ba552f7c68cbcc61bca202cd".into()),
             ..MentionSpan::default()
         };
-        let markup = mention_markup_element(&[span.clone()]).expect("markup");
+        let markup = mention_markup_element(std::slice::from_ref(&span)).expect("markup");
         let expected = parse(
             "<markup xmlns='urn:xmpp:markup:0'><span start='7' end='12'>\
              <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant' \
@@ -349,7 +349,7 @@ mod tests {
             active: true,
             ..MentionSpan::default()
         };
-        let markup = mention_markup_element(&[span.clone()]).expect("markup");
+        let markup = mention_markup_element(std::slice::from_ref(&span)).expect("markup");
         let expected = parse(
             "<markup xmlns='urn:xmpp:markup:0'><span start='0' end='5'>\
              <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel' \
@@ -379,7 +379,7 @@ mod tests {
             .expect("extension");
         assert_eq!(extension.attr("jid"), Some("alice@example.com"));
         assert_eq!(extension.attr("noping"), Some("true"));
-        let markup = mention_markup_element(&[span.clone()]).expect("markup");
+        let markup = mention_markup_element(std::slice::from_ref(&span)).expect("markup");
         assert_eq!(mentions_from_markup(&markup), vec![span]);
     }
 
