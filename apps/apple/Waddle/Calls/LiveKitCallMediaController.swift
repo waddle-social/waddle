@@ -198,7 +198,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             echoCancellation: wanted.echoCancellation, autoGainControl: wanted.autoGainControl,
             noiseSuppression: wanted.noiseSuppression
         )
-        let tracks = publications(of: .audio, in: room).compactMap { $0.track as? LocalAudioTrack }
+        let published = publications(of: .audio, in: room)
+        let tracks = published.compactMap { $0.track as? LocalAudioTrack }
+        let publicationIDs = Set(published.map(\.sid.stringValue))
         guard !tracks.isEmpty else { return }
         // The SDK waits on WebRTC's signalling thread for each write, so
         // they leave the main thread; one queue keeps them in the order asked.
@@ -209,7 +211,23 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             }
         }
         // The latest choice may have moved on while this one was written; its own write follows.
-        if accepted, wanted == audioProcessing { appliedAudioProcessing = wanted }
+        if accepted, wanted == audioProcessing {
+            appliedAudioProcessing = wanted
+            audioProcessingPublications = publicationIDs
+        }
+    }
+
+    /// The microphone publications that have the choice. A reconnect takes
+    /// the publication away and publishes the track again, restarted with
+    /// the options it was made with, so one that is not here has yet to be given it.
+    @ObservationIgnored private var audioProcessingPublications: Set<String> = []
+
+    /// Gives the choice to a microphone publication that has not had it: one
+    /// that came back after a reconnect, or appeared while a change found none.
+    private func giveAudioProcessingToNewPublications(in room: Room) {
+        let current = Set(publications(of: .audio, in: room).map(\.sid.stringValue))
+        guard !current.isEmpty, current != audioProcessingPublications || appliedAudioProcessing != audioProcessing else { return }
+        Task { await applyAudioProcessing() }
     }
 
     private static let audioProcessingWrites = DispatchQueue(label: "waddle.call-audio-processing", qos: .userInitiated)
@@ -570,6 +588,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }
         appliedAudioProcessing = nil
+        audioProcessingPublications = []
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
         wantsScreenShare = false
@@ -610,6 +629,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
+        giveAudioProcessingToNewPublications(in: room)
         #if os(macOS)
         // A full reconnect republishes what it had: not a screen the person has stopped sharing since.
         if !wantsScreenShare, room.localParticipant.localVideoTracks.contains(where: { $0.source == .screenShareVideo }) {
