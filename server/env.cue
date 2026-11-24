@@ -1830,10 +1830,10 @@ schema.#Project & {
 				install_dir=$(mktemp -d)
 				export KANI_HOME="$install_dir/bundle"
 				export PATH="$install_dir/bin:$PATH"
-				cargo +stable install --locked --root "$install_dir" --version 0.68.0 kani-verifier
+				rustup run stable cargo install --locked --root "$install_dir" --version 0.68.0 kani-verifier
 				cd specs/stream-management/proof
-				cargo +stable fetch --locked
-				CARGO_NET_OFFLINE=true cargo +stable kani
+				rustup run stable cargo fetch --locked
+				CARGO_NET_OFFLINE=true rustup run stable cargo kani
 				git diff --exit-code -- Cargo.lock
 				"""]
 			inputs: [
