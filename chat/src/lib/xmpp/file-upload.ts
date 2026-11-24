@@ -49,13 +49,16 @@ export function extractDroppedFiles(event: DragEvent): File[] {
   return Array.from(event.dataTransfer?.files ?? []);
 }
 
+/** XEP-0363 §4: the only headers a slot's put may ask the client to send. */
+const ALLOWED_PUT_HEADERS = new Set(["authorization", "cookie", "expires"]);
+
 function parseSlotResponse(response: WasmUploadSlot): SlotInfo {
   if (!response.put_url || !response.get_url) throw new Error("Upload slot missing PUT or GET URL");
   return {
     putUrl: response.put_url,
     getUrl: response.get_url,
     putHeaders: (response.put_headers ?? [])
-      .filter((header) => header.name && header.value)
+      .filter((header) => header.name && header.value && ALLOWED_PUT_HEADERS.has(header.name.toLowerCase()))
       .map((header) => [header.name, header.value]),
   };
 }
