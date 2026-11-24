@@ -66,6 +66,77 @@ pub(super) fn escape_like_pattern(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Bind every whitespace-separated XEP-0431 term as a literal,
+/// case-insensitive substring match on PostgreSQL. `%`, `_` and `\\` in
+/// the term are escaped so they match themselves rather than acting as
+/// `LIKE` wildcards, matching the in-memory `matches_fulltext` matcher.
+fn push_postgres_fulltext_filter<'args>(
+    builder: &mut QueryBuilder<'args, Postgres>,
+    query: &'args MamQuery,
+) {
+    let Some(fulltext) = query.fulltext.as_ref() else {
+        return;
+    };
+    for term in fulltext.as_str().split_whitespace() {
+        builder
+            .push(" AND LOWER(body) LIKE ")
+            .push_bind(format!("%{}%", escape_like_pattern(&term.to_lowercase())))
+            .push(" ESCAPE '\\'");
+    }
+}
+
+/// Bind every whitespace-separated XEP-0431 term as a literal,
+/// Unicode-case-insensitive substring match on SQLite.
+///
+/// SQLite's built-in `LOWER()` and `LIKE` only fold ASCII, so `LIKE`
+/// would never match `Ü` for a search of `ü`. `GLOB` is case-sensitive
+/// and has no wildcard escape other than bracket classes, which lets
+/// each character of the term become a class of its case variants
+/// (see [`sqlite_fulltext_glob`]) with no custom SQL function.
+fn push_sqlite_fulltext_filter<'args>(
+    builder: &mut QueryBuilder<'args, Sqlite>,
+    query: &'args MamQuery,
+) {
+    let Some(fulltext) = query.fulltext.as_ref() else {
+        return;
+    };
+    for term in fulltext.as_str().split_whitespace() {
+        builder
+            .push(" AND body GLOB ")
+            .push_bind(sqlite_fulltext_glob(term));
+    }
+}
+
+/// Build a `GLOB` pattern matching `term` as a case-insensitive
+/// substring: `*[uU]...*`. Glob metacharacters in the term are
+/// neutralised as one-character classes (`[*]`, `[?]`, `[[]`).
+pub(super) fn sqlite_fulltext_glob(term: &str) -> String {
+    let mut pattern = String::from("*");
+    for ch in term.to_lowercase().chars() {
+        let mut upper = ch.to_uppercase();
+        let upper_ch = match (upper.next(), upper.next()) {
+            (Some(single), None) if single != ch => Some(single),
+            _ => None,
+        };
+        match (ch, upper_ch) {
+            ('*' | '?' | '[', _) => {
+                pattern.push('[');
+                pattern.push(ch);
+                pattern.push(']');
+            }
+            (_, Some(upper_ch)) => {
+                pattern.push('[');
+                pattern.push(ch);
+                pattern.push(upper_ch);
+                pattern.push(']');
+            }
+            _ => pattern.push(ch),
+        }
+    }
+    pattern.push('*');
+    pattern
+}
+
 macro_rules! push_common_mam_filters {
     ($builder:expr, $query:expr, $with_filter:expr) => {{
         if let Some(with) = $with_filter {
@@ -151,13 +222,6 @@ macro_rules! push_common_mam_filters {
                 .push_bind(thread_id.as_str())
                 .push("))");
         }
-        if let Some(fulltext) = $query.fulltext.as_ref() {
-            for term in fulltext.as_str().split_whitespace() {
-                $builder
-                    .push(" AND LOWER(body) LIKE ")
-                    .push_bind(format!("%{}%", term.to_lowercase()));
-            }
-        }
     }};
 }
 
@@ -191,6 +255,7 @@ pub(super) fn push_sqlite_mam_filters<'args>(
             .push_bind(cursor.to_storage());
     }
     push_common_mam_filters!(builder, query, with_filter);
+    push_sqlite_fulltext_filter(builder, query);
 }
 
 pub(super) fn push_postgres_mam_filters<'args>(
@@ -219,4 +284,5 @@ pub(super) fn push_postgres_mam_filters<'args>(
             .push_bind(cursor.to_storage());
     }
     push_common_mam_filters!(builder, query, with_filter);
+    push_postgres_fulltext_filter(builder, query);
 }
