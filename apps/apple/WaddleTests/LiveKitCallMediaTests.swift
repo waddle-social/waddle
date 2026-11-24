@@ -32,9 +32,9 @@ final class LiveKitCallMediaTests: XCTestCase {
         XCTAssertEqual(next.audioProcessing, CallAudioProcessing(noiseSuppression: false, echoCancellation: true, autoGainControl: false))
     }
 
-    /// The SDK fixes a track's processing when it makes it, so a change
-    /// while the microphone is on is a new track that carries the choice.
-    func testAChangeOfProcessingReplacesALiveMicrophoneAndLeavesAMutedOneOff() async throws {
+    /// The microphone's own track takes a change: the same publication, on
+    /// or muted, with nothing for the others to miss.
+    func testAChangeOfProcessingIsTakenByTheMicrophonesTrackInPlace() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
         let alice = makeController()
@@ -43,18 +43,24 @@ final class LiveKitCallMediaTests: XCTestCase {
             iceServers: []
         )
         try await until { alice.isMicrophoneOn }
+        let publication = try XCTUnwrap(alice.microphonePublicationID)
+        // The track was made with the choice, and took it again as it came on.
+        try await until { alice.appliedAudioProcessing == CallAudioProcessing() }
 
-        await alice.setAudioProcessing(CallAudioProcessing(noiseSuppression: false))
-        XCTAssertTrue(alice.isMicrophoneOn, "the microphone is on again once it has been replaced")
-        XCTAssertEqual(alice.audioProcessing.noiseSuppression, false)
+        let quiet = CallAudioProcessing(noiseSuppression: false, autoGainControl: false)
+        await alice.setAudioProcessing(quiet)
+        XCTAssertEqual(alice.appliedAudioProcessing, quiet, "the SDK accepted the options on the live track")
+        XCTAssertEqual(alice.microphonePublicationID, publication, "the microphone was not republished")
+        XCTAssertTrue(alice.isMicrophoneOn)
 
         await alice.setMicrophone(false)
         try await until { !alice.isMicrophoneOn }
         await alice.setAudioProcessing(CallAudioProcessing())
+        XCTAssertEqual(alice.appliedAudioProcessing, CallAudioProcessing(), "a muted microphone's track takes a change too")
+        XCTAssertEqual(alice.microphonePublicationID, publication)
         XCTAssertFalse(alice.isMicrophoneOn, "a change never turns on a microphone that is off")
-        await alice.setMicrophone(true)
-        try await until { alice.isMicrophoneOn }
         await alice.disconnect()
+        XCTAssertNil(alice.appliedAudioProcessing)
     }
 
     func testADeviceChoiceIsKeptForTheNextSessionAndCanBeCleared() async {

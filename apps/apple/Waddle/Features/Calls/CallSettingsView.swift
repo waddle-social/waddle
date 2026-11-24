@@ -90,10 +90,6 @@ struct CallSettingsView: View {
             toggle("Noise suppression", \.noiseSuppression)
             toggle("Echo cancellation", \.echoCancellation)
             toggle("Automatic gain control", \.autoGainControl)
-            Text("Changing these while your microphone is on restarts it; others may miss a word.")
-                .huddleText(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.fgMuted)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
