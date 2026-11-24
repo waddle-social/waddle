@@ -25,8 +25,8 @@ use super::Session;
 use super::WebSocketState;
 use super::ROSTER_NS;
 use super::{
-    bad_request_iq_error, feature_not_implemented_iq_error, forbidden_iq_error,
-    internal_server_error_iq_error, item_not_found_iq_error,
+    bad_request_iq_error, forbidden_iq_error, internal_server_error_iq_error,
+    item_not_found_iq_error, service_unavailable_iq_error,
 };
 use super::{
     classify_iq_destination, refuse_unbound_unserved_request, route_iq_response,
@@ -501,14 +501,17 @@ pub async fn handle_iq_with_conn_state(
         );
     }
 
-    // Unknown IQ - log a compact summary and return an error.
+    // Unknown IQ namespace - log a compact summary and return an error.
+    // RFC 6120 section 8.4 / 10.3.3: a get or set whose payload namespace
+    // the entity does not understand MUST be answered with
+    // <service-unavailable/>.
     let payload_ns = (!payload_ns.is_empty()).then_some(payload_ns.as_str());
     warn!(id = %id, payload_ns, "Unhandled IQ stanza");
     vec![build_iq_error_xml_typed(
         &id,
         response_from,
         response_to,
-        feature_not_implemented_iq_error("Requested feature not implemented."),
+        service_unavailable_iq_error("Service unavailable at this address."),
     )]
     .into()
 }

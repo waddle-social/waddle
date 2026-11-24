@@ -8,7 +8,7 @@
 //! removed. These tests pin the removal:
 //! - server disco#info must not report either retired ISR namespace
 //! - the legacy `<token-request/>` IQ must get a plain
-//!   `feature-not-implemented` error, never a token
+//!   `service-unavailable` error, never a token
 //!
 //! The stream-features counterpart (no `<isr/>` child post-auth) lives
 //! in `websocket/tests/stream_features.rs` next to the feature builder.
@@ -72,7 +72,7 @@ async fn server_disco_info_does_not_advertise_isr() {
 }
 
 #[tokio::test]
-async fn legacy_isr_token_request_iq_is_not_implemented() {
+async fn legacy_isr_token_request_iq_is_service_unavailable() {
     let (_server, mut client) = setup().await;
 
     let token_request = element_to_xml(
@@ -98,8 +98,8 @@ async fn legacy_isr_token_request_iq_is_not_implemented() {
         "expected IQ error for legacy ISR token request, got: {response}"
     );
     assert!(
-        response.contains("feature-not-implemented"),
-        "expected feature-not-implemented, got: {response}"
+        response.contains("service-unavailable"),
+        "expected service-unavailable, got: {response}"
     );
     assert!(
         !response.contains("<token "),

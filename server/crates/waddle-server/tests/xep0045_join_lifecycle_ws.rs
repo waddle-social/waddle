@@ -735,3 +735,63 @@ async fn xep_0045_groupchat_to_nonexistent_room_bounces_item_not_found() {
 
     let _ = admin.close().await;
 }
+
+/// XEP-0045 §7.10: "If the room or service does not support
+/// registration, it MUST return a <service-unavailable/> error to the
+/// user" (xep-0045.xml:2692). Waddle rooms do not implement
+/// `jabber:iq:register`, so a get to an existing room is answered with
+/// `<service-unavailable/>` (type cancel), not `<feature-not-implemented/>`.
+#[tokio::test]
+async fn xep_0045_register_get_to_room_is_service_unavailable() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "register-room-admin").await;
+
+    let room = format!("register-room-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut admin, &room, ADMIN).await;
+
+    let iq_id = format!("room-register-{}", uuid::Uuid::new_v4());
+    let iq = Element::builder("iq", "jabber:client")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+            iq_id.clone(),
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+            "get",
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
+            room.clone(),
+        )
+        .append(Element::builder("query", "jabber:iq:register").build())
+        .build();
+    admin
+        .send(&element_to_xml(iq))
+        .await
+        .expect("send register get to room");
+
+    let frame = admin
+        .recv_matching(|frame| frame.contains(&iq_id))
+        .await
+        .expect("error reply for register get to room");
+    let element = frame
+        .parse::<Element>()
+        .unwrap_or_else(|err| panic!("frame must parse as XML: {err}; frame={frame}"));
+    assert_eq!(element.attr("type"), Some("error"), "{frame}");
+    let error = element
+        .get_child("error", "jabber:client")
+        .unwrap_or_else(|| panic!("iq error element: {frame}"));
+    assert_eq!(error.attr("type"), Some("cancel"), "{frame}");
+    assert!(
+        find_descendant(error, "service-unavailable", NS_XMPP_STANZAS).is_some(),
+        "XEP-0045 §7.10: unsupported room registration is <service-unavailable/>: {frame}"
+    );
+    assert!(
+        find_descendant(error, "feature-not-implemented", NS_XMPP_STANZAS).is_none(),
+        "{frame}"
+    );
+
+    let _ = admin.close().await;
+}

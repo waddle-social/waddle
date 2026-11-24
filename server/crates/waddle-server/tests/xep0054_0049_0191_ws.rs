@@ -798,7 +798,7 @@ async fn websocket_push_enable_rejects_invalid_service_jid() {
 }
 
 /// The retired `urn:xmpp:isr:0` `<token-request/>` IQ falls through to the
-/// ordinary unhandled-IQ catch-all (`feature-not-implemented`), exactly like
+/// ordinary unhandled-IQ catch-all (`service-unavailable`), exactly like
 /// any other unsupported payload.
 #[tokio::test]
 async fn websocket_legacy_isr_token_request_iq_is_gone() {
@@ -819,8 +819,8 @@ async fn websocket_legacy_isr_token_request_iq_is_gone() {
         "expected an error reply for the retired IQ path, got: {response}"
     );
     assert!(
-        response.contains("feature-not-implemented"),
-        "expected feature-not-implemented (the unhandled-IQ catch-all), got: {response}"
+        response.contains("service-unavailable"),
+        "expected service-unavailable (the unhandled-IQ catch-all), got: {response}"
     );
 
     let _ = client.close().await;
