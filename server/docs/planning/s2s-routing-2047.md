@@ -1114,7 +1114,7 @@ unless the S2S snapshot's host policy says otherwise
 (`[host_policy] federate_new_rooms`, off by default; it applies when a
 room is created by its first occupant or by the channel-creation command,
 and never to a room that exists). An owner sets it in the room's
-configuration form (`urn:waddle:roomconfig:federated`, a boolean field of
+configuration form (`{urn:waddle:roomconfig}federated`, a boolean field of
 the `muc#owner` form). A room an enrolled scope manages needs the setting
 like any other; its grants decide who enters once it is on. A group
 conversation of this deployment's accounts is never federated.
@@ -1863,7 +1863,7 @@ and requests nothing the item names.
 while its `federated` setting is on. The setting is off for every Space
 that existed before it did and for every new one; there is no deployment
 default that turns it on. A Space's owner reads and sets it in the node's
-configuration form (`urn:waddle:spaces:federated`, a boolean field of the
+configuration form (`{urn:waddle:spaces}federated`, a boolean field of the
 `pubsub#owner` configure form on the Spaces service). It is stored apart
 from the PubSub node (`s2s_federated_spaces`, migration 2012), as a row
 that exists while the setting is on and names the creation time of the node
@@ -2659,7 +2659,7 @@ runbook (G24):
   notified to the Space's local subscribers as a retract, where nobody was
   told before; the retract itself already notified them.
 - A Space owner's configuration form on the Spaces service carries one
-  more field, `urn:waddle:spaces:federated`, off by default.
+  more field, `{urn:waddle:spaces}federated`, off by default.
 - A privileged standing on a Space is no longer written for an account at
   a domain the deployment does not serve: `spaces:set-role` refuses the
   owner and admin roles, the PubSub `<affiliations/>` change refuses the
@@ -2728,7 +2728,7 @@ runbook (G24):
   such an account the same way. Before, it wrote one for any JID.
 - Migration 2009 adds `channels.federated` on both engines, zero for every
   row. The owner's configuration form of every room offers a new boolean
-  field, `urn:waddle:roomconfig:federated`, off for every room; setting it
+  field, `{urn:waddle:roomconfig}federated`, off for every room; setting it
   has no effect while S2S is off, since no remote principal reaches a room.
   A configuration change that turns it on or off is announced to the
   room's occupants as any other change that is not a privacy change

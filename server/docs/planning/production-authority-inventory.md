@@ -1951,7 +1951,7 @@ no producer of stream evidence changed.
 The selected evidence was refreshed a fifty-third time, through
 `26140482c16973f53e02fb77e978bb703b57a798`. One reviewed file changed, and only in a test:
 `websocket/tests/muc.rs`, whose owner configuration form case now expects
-the `urn:waddle:roomconfig:federated` field and its default `0`. No
+the `{urn:waddle:roomconfig}federated` field and its default `0`. No
 production code among the reviewed files changed, the anchor `e-repair`
 moved with the nine lines added above it, and no grant writer, storage
 plane or producer of stream evidence was added.

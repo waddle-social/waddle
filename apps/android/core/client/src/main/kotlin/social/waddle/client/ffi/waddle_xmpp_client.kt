@@ -12664,7 +12664,7 @@ data class WaddleRoomConfig (
     var `moderated`: kotlin.Boolean?
     ,
     /**
-     * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+     * Waddle forum-mode flag (`{urn:waddle:roomconfig}forum`, pre-existing
      * registrar-prefix debt carried for parity).
      */
     var `forum`: kotlin.Boolean?
@@ -16531,7 +16531,7 @@ public object FfiConverterTypeWaddlePinAction: FfiConverterRustBuffer<WaddlePinA
 
 
 /**
- * `urn:waddle:roomconfig:pinpermission` policy values.
+ * `{urn:waddle:roomconfig}pinpermission` policy values.
  */
 
 enum class WaddlePinPermission {

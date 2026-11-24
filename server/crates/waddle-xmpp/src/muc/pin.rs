@@ -19,7 +19,7 @@ pub const MAX_PREVIEW_LEN: usize = 280;
 /// Per-room pin permission policy (#415). Drives the `MucPinHandler`
 /// authorization gate via `RoomConfig.pin_permission`. The value is
 /// configurable through the standard XEP-0045 owner-config form using
-/// the `urn:waddle:roomconfig:pinpermission` field.
+/// the `{urn:waddle:roomconfig}pinpermission` field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PinPermission {
@@ -31,7 +31,7 @@ pub enum PinPermission {
 }
 
 impl PinPermission {
-    /// Wire value used in the `urn:waddle:roomconfig:pinpermission`
+    /// Wire value used in the `{urn:waddle:roomconfig}pinpermission`
     /// data-form field. Stable across Waddle versions.
     pub fn as_form_value(self) -> &'static str {
         match self {

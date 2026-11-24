@@ -30,7 +30,7 @@ pub fn on_waddle(room: &str) -> bool {
 /// join is unlocked as its owner would: a stock server's with the default
 /// configuration, a Waddle room by submitting its owner form with the
 /// room opened to accounts at other servers
-/// (`urn:waddle:roomconfig:federated`), since a Waddle room is closed to
+/// (`{urn:waddle:roomconfig}federated`), since a Waddle room is closed to
 /// them until an owner opens it.
 pub async fn join(session: &mut Session, room: &str, nick: &str) -> Result<Element> {
     join_with(session, room, nick, &[]).await

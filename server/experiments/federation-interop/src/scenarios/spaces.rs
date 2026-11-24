@@ -27,7 +27,7 @@ fn room_item(name: &str) -> Element {
 
 /// Open the Space `node` on a Waddle Spaces `service` to accounts at
 /// other servers, as its owner does with the Space configuration field
-/// `urn:waddle:spaces:federated`: a Waddle Space is closed to them until
+/// `{urn:waddle:spaces}federated`: a Waddle Space is closed to them until
 /// then.
 async fn federate_space(owner: &mut Session, service: &str, node: &str) -> Result<()> {
     let configured = ask(

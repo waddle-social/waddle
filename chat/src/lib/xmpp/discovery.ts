@@ -37,7 +37,7 @@ const NS_MUC_ROOMINFO = "http://jabber.org/protocol/muc#roominfo";
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const DATAFORM_NS = "jabber:x:data";
-const FIELD_FORUM_MODE = "muc#roomconfig_forum";
+const FIELD_FORUM_MODE = "{urn:waddle:roomconfig}forum";
 
 type DiscoveryRole = "owner" | "admin" | "moderator" | "member" | null;
 

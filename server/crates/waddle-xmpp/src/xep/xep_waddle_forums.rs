@@ -24,7 +24,7 @@
 //!
 //! ## Room Type
 //!
-//! Forum rooms are MUC rooms with `muc#roomconfig_forum` set to `true`.
+//! Forum rooms are MUC rooms with `{urn:waddle:roomconfig}forum` set to `true`.
 //! They support both forum threads and regular chat messages.
 
 use minidom::Element;
@@ -34,7 +34,7 @@ use xmpp_parsers::message::Message;
 pub const NS_FORUMS: &str = "urn:waddle:forums:0";
 
 /// Room config field for enabling forum mode.
-pub const FIELD_FORUM_MODE: &str = "muc#roomconfig_forum";
+pub const FIELD_FORUM_MODE: &str = "{urn:waddle:roomconfig}forum";
 
 /// A thread creation element.
 #[derive(Debug, Clone, PartialEq, Eq)]
