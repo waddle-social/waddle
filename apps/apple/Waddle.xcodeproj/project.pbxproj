@@ -383,6 +383,7 @@
 		7F71BD4A95C45D3C1FC34F5D /* AdminSpaceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06527FE40737212DA821400F /* AdminSpaceRow.swift */; };
 		802554785F689417C3ED30DC /* AdminView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05A4701A3A1BB24DC5BDC9BF /* AdminView.swift */; };
 		806DB2B5A7584C082B829E4A /* CallTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8ED6A447CC603FC6D89AF0A /* CallTileView.swift */; };
+		808772284F06E4953870819D /* CallScreenShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72B0A13D8042D61186403B1E /* CallScreenShare.swift */; };
 		80B556D4C7F2A380A208E707 /* NavigationModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A24803E67A2932C18014F56 /* NavigationModelTests.swift */; };
 		80C84FC8272979AA9ABFEFE5 /* ConversationRowTrailing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D57D4986811AD186C88D991 /* ConversationRowTrailing.swift */; };
 		80EF91F0C84BEB0CB8812817 /* PeopleList+Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4FAD78B88531EBF7368AC3A /* PeopleList+Session.swift */; };
@@ -392,6 +393,7 @@
 		82C6874F3E5BF0A2BB9EAE50 /* ConversationRowActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 098B60096BCF101EAAEE5F7F /* ConversationRowActions.swift */; };
 		83FD36173753A3D410016707 /* MentionCandidates.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CE4092CC362E23E8DD915E7 /* MentionCandidates.swift */; };
 		8401B5D8C618D5ADCBB2995C /* ConversationTimelineList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */; };
+		84232B7B44DA55A3CC9C1646 /* CallScreenShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72B0A13D8042D61186403B1E /* CallScreenShare.swift */; };
 		84392B636588E2274502CD34 /* RichTextLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38D6A2D53CA28F752EF4E16C /* RichTextLayout.swift */; };
 		84403245DAF3F46758BAC695 /* CallToneDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE65DBCBF636D9C3AC197602 /* CallToneDecodingTests.swift */; };
 		85221B3DD2E3642577AF64E2 /* InboxRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFDFEB1DCF16FE1667D8DFC4 /* InboxRows.swift */; };
@@ -919,6 +921,7 @@
 		6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventDetailSheet.swift; sourceTree = "<group>"; };
 		7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerActions.swift; sourceTree = "<group>"; };
 		71B981349099DC164D28D158 /* TimelineDayLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineDayLabel.swift; sourceTree = "<group>"; };
+		72B0A13D8042D61186403B1E /* CallScreenShare.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallScreenShare.swift; sourceTree = "<group>"; };
 		73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		745E4D7A386971E4AA451053 /* BridgeLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLog.swift; sourceTree = "<group>"; };
 		749944689EAAD79B60977AEA /* EventsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsView.swift; sourceTree = "<group>"; };
@@ -1926,6 +1929,7 @@
 				CFC8D95D5BADEA4D6991B578 /* CallControlBar.swift */,
 				4CBB552FE231D709F6DB925E /* CallFullScreen.swift */,
 				AA0B10D2497823F0DFF609CB /* CallParticipantsPanel.swift */,
+				72B0A13D8042D61186403B1E /* CallScreenShare.swift */,
 				90FBDD682CE060917E3DF182 /* CallSplitHost.swift */,
 				802FC9A55D416EAC683730E6 /* CallStageHost.swift */,
 				6DC9776C06EC9C735E95BE71 /* CallStageView.swift */,
@@ -2351,6 +2355,7 @@
 				76E5B1FE49F45E1E387B5851 /* CallMediaControls.swift in Sources */,
 				2B80D3FC284A043296A44D9B /* CallParticipantsPanel.swift in Sources */,
 				4A6AE4D1348161F6DB0DEE69 /* CallRinger.swift in Sources */,
+				84232B7B44DA55A3CC9C1646 /* CallScreenShare.swift in Sources */,
 				DDC831729FA22569008226BB /* CallSessionWiring.swift in Sources */,
 				FFB4C250C0EE9ADDDAE95657 /* CallSplitHost.swift in Sources */,
 				5B8E36CC5E591BDC495BD956 /* CallStageHost.swift in Sources */,
@@ -2725,6 +2730,7 @@
 				786084370B7C716874FD6620 /* CallMediaControls.swift in Sources */,
 				047D302157D81D28980CB687 /* CallParticipantsPanel.swift in Sources */,
 				2D366B2F3F1DBB09FD6F2FA3 /* CallRinger.swift in Sources */,
+				808772284F06E4953870819D /* CallScreenShare.swift in Sources */,
 				E54A01480F2E4DE8E3379706 /* CallSessionWiring.swift in Sources */,
 				36A78F7D3970F69724FFAB5A /* CallSplitHost.swift in Sources */,
 				1310F2E1EE67748F89278B0C /* CallStageHost.swift in Sources */,

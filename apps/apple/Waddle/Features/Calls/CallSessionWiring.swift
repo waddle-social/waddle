@@ -59,7 +59,10 @@ struct CallCommands {
 extension CallMediaControls {
     /// What to tell the person when Waddle may not use a device their call needs.
     var deviceNotice: String? {
-        switch (isMicrophoneBlocked, isCameraBlocked) {
+        if isScreenShareBlocked {
+            return "Waddle is not allowed to record the screen. Allow it under Screen & System Audio Recording in System Settings, then try again."
+        }
+        return switch (isMicrophoneBlocked, isCameraBlocked) {
         case (true, true): "Waddle is not allowed to use the microphone or camera. Change that in Settings."
         case (true, false): "Waddle is not allowed to use the microphone. Change that in Settings."
         case (false, true): "Waddle is not allowed to use the camera. Change that in Settings."

@@ -160,6 +160,46 @@ final class CallStageSnapshotTests: XCTestCase {
         assertStage(tiles: tiles, presentation: presentation, stageSize: .expanded, size: CGSize(width: 1000, height: 640))
     }
 
+    /// We share our screen: the strip says so and shows what everyone sees; our screen is not a tile.
+    func testRoomWhileWeShareOurScreen() {
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: CallStageView(
+                title: "#design", subtitle: "2 others in call", status: .inCall(since: nil),
+                tiles: [Self.you, Self.linus, Self.grace], size: .expanded, isMicrophoneOn: true, isHandRaised: false,
+                isSharingScreen: true,
+                ownScreen: CallStageTile(
+                    identity: Self.you.identity, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
+                ),
+                tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+            )
+            .frame(width: 1000, height: 640),
+            width: 1000 + 2 * Theme.Spacing.l
+        )
+    }
+
+    #if os(macOS)
+    func testScreenPicker() async throws {
+        let sources = CallScreenSources(
+            CallScreenCandidates(
+                screens: [
+                    .init(number: 1, width: 3024, height: 1964, isMain: true),
+                    .init(number: 2, width: 2560, height: 1440, isMain: false),
+                ],
+                windows: [
+                    .init(number: 11, title: "Roadmap — Q1", application: "Keynote", bundleID: "com.apple.iWork.Keynote"),
+                    .init(number: 12, title: "waddle — zsh", application: "Terminal", bundleID: "com.apple.Terminal"),
+                    .init(number: 13, title: "Pull requests · waddle", application: "Safari", bundleID: "com.apple.Safari"),
+                ]
+            ),
+            ownBundleID: nil
+        )
+        try await assertScreenSnapshot(
+            of: CallScreenPicker(sources: sources, pick: { _ in }, cancel: {}), size: CGSize(width: 420, height: 460)
+        )
+    }
+    #endif
+
     // MARK: - Participants
 
     private static let roster: [CallStageTile] = [
@@ -212,13 +252,14 @@ final class CallStageSnapshotTests: XCTestCase {
 
     private func assertBar(
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, hasMedia: Bool = true, isHandRaised: Bool? = nil,
-        viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split, testName: String = #function, line: UInt = #line
+        viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split,
+        isSharingScreen: Bool? = nil, testName: String = #function, line: UInt = #line
     ) {
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
-                viewMode: viewMode, size: size, actions: Self.actions
+                viewMode: viewMode, size: size, isSharingScreen: isSharingScreen, actions: Self.actions
             )
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
@@ -243,6 +284,14 @@ final class CallStageSnapshotTests: XCTestCase {
 
     func testControlBarExpanded() {
         assertBar(size: .expanded)
+    }
+
+    func testControlBarWithScreenShare() {
+        assertBar(isHandRaised: false, isSharingScreen: false)
+    }
+
+    func testControlBarWhileSharingTheScreen() {
+        assertBar(isHandRaised: false, size: .expanded, isSharingScreen: true)
     }
 
     func testControlBarFullScreen() {

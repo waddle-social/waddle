@@ -25,6 +25,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var isCameraOn = false
     private(set) var isMicrophoneBlocked = false
     private(set) var isCameraBlocked = false
+    private(set) var isScreenShareOn = false
+    private(set) var isScreenShareBlocked = false
+    /// Our own shared screen, for the notice that shows us what everyone sees.
+    private var ownScreenTrack: VideoTrack?
+    #if os(macOS)
+    /// What the last listing found, so a pick can be handed to the capturer.
+    @ObservationIgnored private var listedScreenSources: [String: any MacOSScreenCaptureSource] = [:]
+    #endif
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
@@ -52,7 +60,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             return AnyView(SwiftUIVideoView(track, layoutMode: identity == dockCameraIdentities.local ? .fill : .fit))
         case .screen:
             // All of a screen, never cropped.
-            return screenTracks[identity].map { AnyView(SwiftUIVideoView($0.track, layoutMode: .fit)) }
+            let own = room?.localParticipant.identity?.stringValue ?? joinedIdentity
+            let track = identity == own ? ownScreenTrack : screenTracks[identity]?.track
+            return track.map { AnyView(SwiftUIVideoView($0, layoutMode: .fit)) }
         }
     }
 
@@ -153,6 +163,84 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let room else { return }
         await setSource(.video, enabled: on, in: room)
     }
+
+    // MARK: - Sharing our screen
+
+    #if os(macOS)
+    var canShareScreen: Bool { true }
+
+    func screenSources() async -> CallScreenSources? {
+        // The first request shows the system's prompt and returns at once; the
+        // listing below then fails until the person has allowed it.
+        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
+        do {
+            let displays = try await MacOSScreenCapturer.displaySources()
+            let windows = try await MacOSScreenCapturer.windowSources()
+            let main = CGMainDisplayID()
+            var listed: [String: any MacOSScreenCaptureSource] = [:]
+            var candidates = CallScreenCandidates()
+            for display in displays {
+                listed["screen:\(display.displayID)"] = display
+                candidates.screens.append(.init(
+                    number: display.displayID, width: display.width, height: display.height,
+                    isMain: display.displayID == main
+                ))
+            }
+            for window in windows {
+                listed["window:\(window.windowID)"] = window
+                candidates.windows.append(.init(
+                    number: window.windowID, title: window.title, application: window.owningApplication?.applicationName,
+                    bundleID: window.owningApplication?.bundleIdentifier, layer: window.windowLayer,
+                    isOnScreen: window.isOnScreen, width: window.frame.width, height: window.frame.height
+                ))
+            }
+            listedScreenSources = listed
+            if isScreenShareBlocked { isScreenShareBlocked = false }
+            return CallScreenSources(candidates, ownBundleID: Bundle.main.bundleIdentifier)
+        } catch {
+            listedScreenSources = [:]
+            // Refused, or not yet answered: either way there is nothing to pick from.
+            isScreenShareBlocked = !CGPreflightScreenCaptureAccess()
+            return isScreenShareBlocked ? nil : CallScreenSources(CallScreenCandidates(), ownBundleID: nil)
+        }
+    }
+
+    func shareScreen(_ source: CallScreenSource) async {
+        guard let room, room.connectionState == .connected, let capture = listedScreenSources[source.id] else { return }
+        await stopScreenShare()
+        guard self.room === room else { return }
+        let track = await LocalVideoTrack.createMacOSScreenShareTrack(
+            source: capture, options: ScreenShareCaptureOptions(fps: Self.screenShareFPS, showCursor: true)
+        )
+        // As the web publishes a shared screen: VP9 with VP8 for those who
+        // cannot decode it, up to 5 Mbps so dense text stays sharp, and
+        // resolution kept over frame rate when the network is short.
+        let options = VideoPublishOptions(
+            screenShareEncoding: VideoEncoding(maxBitrate: 5_000_000, maxFps: Self.screenShareFPS),
+            preferredCodec: .vp9, preferredBackupCodec: .vp8, degradationPreference: .maintainResolution
+        )
+        _ = try? await room.localParticipant.publish(videoTrack: track, options: options)
+        if self.room === room { refreshTracks() }
+    }
+
+    func stopScreenShare() async {
+        guard let room else { return }
+        for publication in room.localParticipant.localVideoTracks where publication.source == .screenShareVideo {
+            try? await room.localParticipant.unpublish(publication: publication)
+        }
+        if self.room === room { refreshTracks() }
+    }
+
+    private static let screenShareFPS = 30
+    #else
+    var canShareScreen: Bool { false }
+
+    func screenSources() async -> CallScreenSources? { nil }
+
+    func shareScreen(_: CallScreenSource) async { /* Sharing from iOS needs a broadcast extension; not built. */ }
+
+    func stopScreenShare() async { /* Nothing is ever shared from here. */ }
+    #endif
 
     /// Starts what the call agreed to, unless the person has since chosen
     /// otherwise for that device.
@@ -286,6 +374,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let preview = room.flatMap { publications(of: .video, in: $0).first(where: \.isLive)?.track as? VideoTrack }
         let microphone = room.map { publications(of: .audio, in: $0).contains(where: \.isLive) } ?? false
         let camera = preview != nil
+        let ownScreen = room?.localParticipant.localVideoTracks
+            .first { $0.source == .screenShareVideo && !$0.isMuted }?.track as? VideoTrack
         var tracks: [String: VideoTrack] = [:]
         var screens: [String: SharedScreen] = [:]
         var dockCameras = CallDockCameraIdentities()
@@ -309,6 +399,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         if isMicrophoneOn != microphone { isMicrophoneOn = microphone }
         if isCameraOn != camera { isCameraOn = camera }
+        if ownScreenTrack !== ownScreen { ownScreenTrack = ownScreen }
+        if isScreenShareOn != (ownScreen != nil) { isScreenShareOn = ownScreen != nil }
         // A replacement can reuse a WebRTC track ID but needs a new renderer binding.
         if cameraTracks.count != tracks.count || tracks.contains(where: { cameraTracks[$0.key] !== $0.value }) {
             cameraTracks = tracks

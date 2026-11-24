@@ -38,6 +38,10 @@ struct CallStageView: View {
     var isHandRaised: Bool?
     /// Something the person should know about their own devices.
     var notice: String?
+    /// Whether we are sharing our screen; `nil` where this device cannot.
+    var isSharingScreen: Bool?
+    /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
+    var ownScreen: CallStageTile?
     /// Where the tiles get their pictures and send a pin.
     let tileSource: CallTileSource
     /// Off in a snapshot, which has nobody to speak to.
@@ -52,6 +56,11 @@ struct CallStageView: View {
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warningText)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.Spacing.l)
+                    .padding(.bottom, Theme.Spacing.s)
+            }
+            if let ownScreen {
+                CallSelfShareNotice(screen: ownScreen, source: tileSource)
                     .padding(.horizontal, Theme.Spacing.l)
                     .padding(.bottom, Theme.Spacing.s)
             }
@@ -79,7 +88,7 @@ struct CallStageView: View {
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
                 isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
-                showsParticipants: participants != nil, actions: actions
+                showsParticipants: participants != nil, isSharingScreen: isSharingScreen, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)

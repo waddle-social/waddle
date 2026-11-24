@@ -12,6 +12,8 @@ struct CallStageActions {
     var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
+    /// Starts sharing our screen, by way of the picker, or stops it.
+    var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
     let hangUp: @MainActor () -> Void
 }
 
@@ -32,6 +34,8 @@ struct CallControlBar: View {
     /// Off while something else on screen has a use for Escape.
     var escapeStepsDown = true
     var showsParticipants = false
+    /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
+    var isSharingScreen: Bool?
     let actions: CallStageActions
 
     var body: some View {
@@ -76,6 +80,14 @@ struct CallControlBar: View {
                 tone: isHandRaised ? .chosen : .plain, action: actions.toggleHand
             )
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
+            .disabled(!hasMedia)
+        }
+        if let isSharingScreen {
+            CallControlButton(
+                title: isSharingScreen ? "Stop sharing" : "Share screen", symbol: "rectangle.inset.filled.and.person.filled",
+                tone: isSharingScreen ? .chosen : .plain, action: actions.toggleScreenShare
+            )
+            .accessibilityAddTraits(isSharingScreen ? .isSelected : [])
             .disabled(!hasMedia)
         }
         CallControlButton(
