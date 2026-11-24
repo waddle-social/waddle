@@ -196,20 +196,21 @@ fn xep_0424_retraction_emits_lookup_with_stanza_id() {
 }
 
 #[test]
-fn xep_0461_reply_emits_lookup_with_stanza_id() {
-    let local = full("alice@example.com/web");
-    let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
-    msg.payloads.push(build_reply_element(
-        &ReplyReference::new("stanza-Y").with_to("bob@example.com".parse().expect("valid jid")),
-    ));
-
-    let outcome = run(&local, &mut msg);
-    let (_id, _archive, _archive_kind, reference) = extract_lookup_event(&outcome);
-    match reference {
-        MessageRef::StanzaId { stanza_id } => {
-            assert_eq!(stanza_id.as_str(), "stanza-Y");
-        }
-        other => panic!("expected StanzaId ref, got {other:?}"),
+fn xep_0461_reply_is_not_validated_against_the_archive() {
+    // XEP-0461 imposes no target-existence rule, 1:1 replies name the target
+    // by origin-id or `id`, and `to` is optional, so no stanza-id lookup may
+    // be emitted.
+    let to: jid::Jid = "bob@example.com".parse().expect("valid jid");
+    for reference in [
+        ReplyReference::new("stanza-Y").with_to(to.clone()),
+        ReplyReference::new("origin-Y").with_to(to),
+        ReplyReference::new("id-only"),
+    ] {
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
+        msg.payloads.push(build_reply_element(&reference));
+        let outcome = run(&local, &mut msg);
+        assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
     }
 }
 
@@ -269,19 +270,6 @@ fn xep_0424_retraction_target_not_found_emits_item_not_found() {
     );
     let parsed = extract_error_payload(&outcome);
     assert_eq!(parsed.type_, ErrorType::Cancel);
-    assert_eq!(parsed.defined_condition, DefinedCondition::ItemNotFound);
-}
-
-#[test]
-fn xep_0461_reply_target_not_found_emits_item_not_found() {
-    let original = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
-    let outcome = RichTargetValidationHandler::handle_completion(
-        RichTargetKind::Reply,
-        &original,
-        None,
-        &bare("alice@example.com"),
-    );
-    let parsed = extract_error_payload(&outcome);
     assert_eq!(parsed.defined_condition, DefinedCondition::ItemNotFound);
 }
 
@@ -350,20 +338,6 @@ fn xep_0424_retraction_by_same_author_continues() {
     let archived = archived_message_from("alice@example.com/web", "original");
     let outcome = RichTargetValidationHandler::handle_completion(
         RichTargetKind::Retraction,
-        &original,
-        Some(&archived),
-        &bare("alice@example.com"),
-    );
-    assert!(matches!(outcome, HandlerOutcome::Continue(ref e) if e.is_empty()));
-}
-
-#[test]
-fn xep_0461_reply_existence_is_sufficient_regardless_of_author() {
-    // §3.3 — a reply doesn't impose author-equality.
-    let original = chat_with_body("alice@example.com/web", "bob@example.com", "agreed");
-    let archived = archived_message_from("mallory@example.com/web", "thread root");
-    let outcome = RichTargetValidationHandler::handle_completion(
-        RichTargetKind::Reply,
         &original,
         Some(&archived),
         &bare("alice@example.com"),

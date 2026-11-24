@@ -12,10 +12,10 @@ pub const NS_FALLBACK: &str = "urn:xmpp:fallback:0";
 /// A typed reply marker: which message is being replied to, and its author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyMarker {
-    /// The `to` attribute on `<reply/>` — the JID of the author of the message
-    /// being replied to. For MUC this is the occupant full JID; for 1:1 the
-    /// bare JID.
-    pub to: Jid,
+    /// The optional `to` attribute on `<reply/>` — the JID of the author of
+    /// the message being replied to. For MUC this is the occupant full JID;
+    /// for 1:1 the bare JID. XEP-0461 makes it a SHOULD, so it may be absent.
+    pub to: Option<Jid>,
     /// The `id` attribute on `<reply/>` — id of the message being replied to.
     pub id: String,
 }
@@ -32,14 +32,14 @@ pub struct FallbackRange {
 }
 
 /// Build a `<reply xmlns='urn:xmpp:reply:0' to='…' id='…'/>` element from a
-/// typed marker.
+/// typed marker; `to` is omitted when the marker carries none.
 #[must_use]
 pub fn build_reply_element(marker: &ReplyMarker) -> Element {
-    Element::builder("reply", NS_REPLY)
-        .attr(
-            minidom::rxml::xml_ncname!("to").to_owned(),
-            marker.to.to_string(),
-        )
+    let mut builder = Element::builder("reply", NS_REPLY);
+    if let Some(to) = marker.to.as_ref() {
+        builder = builder.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
+    }
+    builder
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
             marker.id.as_str(),
@@ -69,13 +69,17 @@ pub fn build_fallback_element(range: &FallbackRange) -> Element {
 }
 
 /// Parse `<reply xmlns='urn:xmpp:reply:0' to='…' id='…'/>` out of a message
-/// element. Returns `None` if no reply child is present or if required
-/// attributes are missing or malformed.
+/// element. Returns `None` if no reply child is present, the required `id`
+/// is missing, or a present `to` is not a valid JID. An absent `to` is valid
+/// (XEP-0461: it SHOULD be present, `id` MUST be).
 #[must_use]
 pub fn parse_reply(message: &Element) -> Option<ReplyMarker> {
     let reply_el = message.get_child("reply", NS_REPLY)?;
     let id = reply_el.attr("id")?.to_string();
-    let to = reply_el.attr("to")?.parse::<Jid>().ok()?;
+    let to = match reply_el.attr("to") {
+        Some(value) => Some(value.parse::<Jid>().ok()?),
+        None => None,
+    };
     Some(ReplyMarker { to, id })
 }
 
@@ -123,7 +127,10 @@ mod tests {
         );
         let marker = parse_reply(&el).expect("expected reply");
         assert_eq!(marker.id, "m42");
-        assert_eq!(marker.to.to_string(), "alice@example.com");
+        assert_eq!(
+            marker.to.as_ref().map(ToString::to_string).as_deref(),
+            Some("alice@example.com")
+        );
     }
 
     #[test]
@@ -137,6 +144,31 @@ mod tests {
         let el = parse_el(
             "<message xmlns='jabber:client'>\
                <reply xmlns='urn:xmpp:reply:0' to='alice@example.com'/>\
+             </message>",
+        );
+        assert!(parse_reply(&el).is_none());
+    }
+
+    #[test]
+    fn parses_reply_without_optional_to() {
+        let el = parse_el(
+            "<message xmlns='jabber:client'>\
+               <reply xmlns='urn:xmpp:reply:0' id='m42'/>\
+             </message>",
+        );
+        let marker = parse_reply(&el).expect("id-only reply is valid");
+        assert_eq!(marker.id, "m42");
+        assert_eq!(marker.to, None);
+        let rebuilt = build_reply_element(&marker);
+        assert_eq!(rebuilt.attr("to"), None);
+        assert_eq!(rebuilt.attr("id"), Some("m42"));
+    }
+
+    #[test]
+    fn rejects_reply_with_malformed_to() {
+        let el = parse_el(
+            "<message xmlns='jabber:client'>\
+               <reply xmlns='urn:xmpp:reply:0' to=' ' id='m42'/>\
              </message>",
         );
         assert!(parse_reply(&el).is_none());
@@ -195,7 +227,7 @@ mod tests {
     #[test]
     fn builds_reply_element() {
         let marker = ReplyMarker {
-            to: "alice@example.com".parse::<Jid>().expect("valid jid"),
+            to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
             id: "target-msg-id".to_string(),
         };
         let el = build_reply_element(&marker);
@@ -222,7 +254,7 @@ mod tests {
     #[test]
     fn build_and_parse_reply_roundtrip() {
         let marker = ReplyMarker {
-            to: "bob@example.com/phone".parse::<Jid>().expect("valid jid"),
+            to: Some("bob@example.com/phone".parse::<Jid>().expect("valid jid")),
             id: "m-123".to_string(),
         };
         let range = FallbackRange { start: 5, end: 100 };
@@ -235,7 +267,14 @@ mod tests {
 
         let parsed_marker = parse_reply(&message).expect("marker parses");
         assert_eq!(parsed_marker.id, "m-123");
-        assert_eq!(parsed_marker.to.to_string(), "bob@example.com/phone");
+        assert_eq!(
+            parsed_marker
+                .to
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("bob@example.com/phone")
+        );
         let parsed_range = parse_fallback(&message).expect("range parses");
         assert_eq!(parsed_range, range);
     }
