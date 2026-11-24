@@ -275,17 +275,44 @@ pub(super) async fn handle_pubsub_admin_request(
             }
 
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            match crate::pubsub_authz::can_subscribe(
-                &state.deps.protocol.pubsub_storage,
-                target_jid,
-                &node,
-                &subscription_jid,
-                is_pep,
-            )
-            .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
+            let decision = if is_pep {
+                crate::pubsub_authz::pep_read_decision(
+                    &state.deps.protocol.pubsub_storage,
+                    &crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool),
+                    target_jid,
+                    &node,
+                    &subscription_jid,
+                )
+                .await
+            } else {
+                crate::pubsub_authz::can_subscribe(
+                    &state.deps.protocol.pubsub_storage,
+                    target_jid,
+                    &node,
+                    &subscription_jid,
+                    false,
+                )
+                .await
+                .map(|allowed| {
+                    if allowed {
+                        crate::pubsub_authz::ReadDecision::Allowed
+                    } else {
+                        crate::pubsub_authz::ReadDecision::Denied
+                    }
+                })
+            };
+            match decision {
+                Ok(crate::pubsub_authz::ReadDecision::Allowed) => {}
+                Ok(crate::pubsub_authz::ReadDecision::PresenceSubscriptionRequired) => {
+                    return vec![build_pubsub_error(
+                        iq,
+                        PubSubError::PresenceSubscriptionRequired,
+                    )];
+                }
+                Ok(crate::pubsub_authz::ReadDecision::NotInRosterGroup) => {
+                    return vec![build_pubsub_error(iq, PubSubError::NotInRosterGroup)];
+                }
+                Ok(crate::pubsub_authz::ReadDecision::Denied) => {
                     // Distinguish missing node (XEP-0060 §6.1: item-not-found) from
                     // access denial (forbidden).
                     let node_exists = state

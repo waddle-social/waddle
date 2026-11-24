@@ -2188,3 +2188,219 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
 
     let _ = alice.close().await;
 }
+
+// ============================================================================
+// XEP-0060 §4.5.1 / §6.1.3 / §6.5 — presence access model on PEP nodes
+// ============================================================================
+//
+// "presence": an entity with a presence subscription to the owner (roster
+// subscription `from` or `both`) may subscribe and retrieve items. Anyone
+// else gets <not-authorized/> + <presence-subscription-required/>.
+
+async fn presence_pair(
+    alice_resource: &str,
+    bob_resource: &str,
+) -> (TestServer, WsXmppClient, WsXmppClient) {
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        alice_resource,
+    )
+    .await
+    .expect("alice connect");
+    let bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        bob_resource,
+    )
+    .await
+    .expect("bob connect");
+    (server, alice, bob)
+}
+
+#[tokio::test]
+async fn pep_presence_node_items_readable_by_presence_subscriber() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-pres-1", "bob-pres-1").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "http://jabber.org/protocol/mood";
+
+    let publish = iq_set_to(
+        &mut alice,
+        "pres-pub-1",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="pres-item-1"><mood xmlns="{node}"><happy/></mood></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type='result'"#), "publish: {publish}");
+
+    // Before any presence subscription bob is refused.
+    let before = iq_get_to(
+        &mut bob,
+        "pres-get-before",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        before.contains(r#"type='error'"#) && !before.contains("pres-item-1"),
+        "non-contact read must be refused: {before}"
+    );
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let after = iq_get_to(
+        &mut bob,
+        "pres-get-after",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        after.contains(r#"type='result'"#) && after.contains("pres-item-1"),
+        "presence subscriber must retrieve items (XEP-0060 §4.5.1): {after}"
+    );
+
+    let subscribe = iq_set_to(
+        &mut bob,
+        "pres-sub-after",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribe.contains(r#"type='result'"#),
+        "presence subscriber must be able to subscribe: {subscribe}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_presence_node_refuses_non_contact_with_presence_subscription_required() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-pres-2", "bob-pres-2").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "http://jabber.org/protocol/mood";
+
+    let publish = iq_set_to(
+        &mut alice,
+        "pres2-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="pres2-payload"><mood xmlns="{node}"><sad/></mood></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type='result'"#), "publish: {publish}");
+
+    for (id, body) in [
+        (
+            "pres2-items",
+            format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+        ),
+        (
+            "pres2-sub",
+            format!(
+                r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{node}" jid="{bob_bare}"/></pubsub>"#
+            ),
+        ),
+    ] {
+        let resp = if id == "pres2-items" {
+            iq_get_to(&mut bob, id, &alice_bare, &body).await
+        } else {
+            iq_set_to(&mut bob, id, &alice_bare, &body).await
+        };
+        assert!(resp.contains(r#"type='error'"#), "{id}: {resp}");
+        assert!(resp.contains("not-authorized"), "{id}: {resp}");
+        assert!(
+            resp.contains("presence-subscription-required")
+                && resp.contains("http://jabber.org/protocol/pubsub#errors"),
+            "{id}: {resp}"
+        );
+        assert!(!resp.contains("pres2-payload"), "{id}: {resp}");
+    }
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+#[tokio::test]
+async fn pep_vcard4_node_on_presence_model_readable_by_presence_subscriber() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-pres-3", "bob-pres-3").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "urn:xmpp:vcard4";
+
+    let publish = iq_set_to(
+        &mut alice,
+        "vc-pub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="current"><vcard xmlns="urn:ietf:params:xml:ns:vcard-4.0"><fn><text>Alice</text></fn></vcard></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type='result'"#), "publish: {publish}");
+
+    let configure = iq_set_to(
+        &mut alice,
+        "vc-cfg",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#access_model"><value>presence</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        configure.contains(r#"type='result'"#),
+        "configure: {configure}"
+    );
+
+    let refused = iq_get_to(
+        &mut bob,
+        "vc-get-before",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        refused.contains("presence-subscription-required"),
+        "non-contact vcard4 read: {refused}"
+    );
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let read = iq_get_to(
+        &mut bob,
+        "vc-get-after",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        read.contains(r#"type='result'"#) && read.contains("Alice"),
+        "contact must read presence-model vcard4: {read}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}

@@ -1493,8 +1493,17 @@ async fn republish_keeps_owner_configured_avatar_access_model() {
                 &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{node}"/></pubsub>"#),
             )
             .await;
+            // XEP-0060 items retrieval: presence and roster denials are
+            // not-authorized with the model's pubsub#errors condition.
+            let condition = if access_model == "presence" {
+                "<presence-subscription-required"
+            } else {
+                "<not-in-roster-group"
+            };
             assert!(
-                resp.contains("<forbidden"),
+                resp.contains("type='error'")
+                    && resp.contains("<not-authorized")
+                    && resp.contains(condition),
                 "non-roster peer MUST stay denied on a {access_model} {node}: {resp}"
             );
         }

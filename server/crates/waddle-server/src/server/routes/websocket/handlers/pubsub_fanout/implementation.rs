@@ -274,6 +274,31 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
             continue;
         }
 
+        // A subscription to a presence/roster-model PEP node outlives the
+        // roster standing that admitted it: re-check it per delivery.
+        if is_pep
+            && matches!(
+                node_cfg.access_model,
+                AccessModel::Presence | AccessModel::Roster
+            )
+            && sub.subscriber.to_bare() != *owner
+        {
+            let allowed = matches!(
+                crate::pubsub_authz::pep_read_decision(
+                    &state.deps.protocol.pubsub_storage,
+                    &crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool),
+                    owner,
+                    node,
+                    &sub.subscriber.to_bare(),
+                )
+                .await,
+                Ok(crate::pubsub_authz::ReadDecision::Allowed)
+            );
+            if !allowed {
+                continue;
+            }
+        }
+
         let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
             Ok(full) => vec![full.clone()],
             Err(bare) => {

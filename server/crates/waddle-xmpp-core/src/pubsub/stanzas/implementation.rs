@@ -246,6 +246,14 @@ pub enum PubSubError {
     ItemNotFound,
     /// The requester does not have permission to perform the operation.
     Forbidden,
+    /// XEP-0060 §6.1.3.2: `<not-authorized/>` + pubsub-namespaced
+    /// `<presence-subscription-required/>`: the node's access model is
+    /// `presence` and the requester has no presence subscription to the owner.
+    PresenceSubscriptionRequired,
+    /// XEP-0060 §6.1.3.3: `<not-authorized/>` + pubsub-namespaced
+    /// `<not-in-roster-group/>`: the node's access model is `roster` and
+    /// the requester is in none of the allowed roster groups.
+    NotInRosterGroup,
     /// The node does not accept additional subscriptions.
     ClosedNode,
     /// The requested node already exists.

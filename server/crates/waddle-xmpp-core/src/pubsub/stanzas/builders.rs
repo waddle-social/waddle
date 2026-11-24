@@ -127,6 +127,9 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
             (ErrorType::Cancel, DefinedCondition::ItemNotFound)
         }
         PubSubError::Forbidden => (ErrorType::Auth, DefinedCondition::Forbidden),
+        PubSubError::PresenceSubscriptionRequired | PubSubError::NotInRosterGroup => {
+            (ErrorType::Auth, DefinedCondition::NotAuthorized)
+        }
         PubSubError::ClosedNode => (ErrorType::Cancel, DefinedCondition::NotAllowed),
         PubSubError::NodeExists | PubSubError::PreconditionNotMet => {
             (ErrorType::Cancel, DefinedCondition::Conflict)
@@ -156,6 +159,12 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
                 )
                 .build(),
         );
+    } else if let PubSubError::PresenceSubscriptionRequired = error {
+        stanza_error.other =
+            Some(Element::builder("presence-subscription-required", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::NotInRosterGroup = error {
+        stanza_error.other =
+            Some(Element::builder("not-in-roster-group", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::ClosedNode = error {
         stanza_error.other = Some(Element::builder("closed-node", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::NotSubscribed = error {
