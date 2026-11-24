@@ -375,7 +375,6 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
                 minidom::rxml::xml_ncname!("var").to_owned(),
                 "pubsub#purge_offline",
             )
-            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "boolean")
             .append(
                 Element::builder("value", "jabber:x:data")
                     .append("0")
