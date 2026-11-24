@@ -73,6 +73,7 @@ impl MentionSpan {
     /// A group `type` is authoritative: when both a group URI and an
     /// occupant-id are set, only the group mention is emitted (XEP-0513 says
     /// a group mention MUST NOT carry a `target`).
+    #[must_use]
     pub fn to_span_element(&self) -> Element {
         let mut span = Element::builder("span", NS_MARKUP).build();
         if let Some(begin) = self.begin {
@@ -150,6 +151,7 @@ impl MentionSpan {
 
 /// Wrap `spans` in a `<markup xmlns='urn:xmpp:markup:0'/>` element.
 /// Returns `None` when there is nothing to carry.
+#[must_use]
 pub fn mention_markup_element(spans: &[MentionSpan]) -> Option<Element> {
     if spans.is_empty() {
         return None;
@@ -194,6 +196,7 @@ fn extension_fields(extension: &Element, into: &mut MentionSpan) {
 /// extension element in the same span merges into the first one; an
 /// extension with no XEP-0513 sibling, or a further extension, is a mention
 /// of its own.
+#[must_use]
 pub fn mentions_from_markup(markup: &Element) -> Vec<MentionSpan> {
     let mut out = Vec::new();
     if !markup.is("markup", NS_MARKUP) {
@@ -241,6 +244,7 @@ pub fn mentions_from_markup(markup: &Element) -> Vec<MentionSpan> {
 }
 
 /// Whether `markup` carries any mention element (either namespace).
+#[must_use]
 pub fn markup_has_mention(markup: &Element) -> bool {
     markup.is("markup", NS_MARKUP)
         && markup
@@ -289,6 +293,7 @@ fn span_has_mention(span: &Element) -> bool {
 /// without a `type`, a `#occupant` mention without a `target`, a Waddle
 /// extension carrying a mentioned `jid`, or an extension with no XEP-0513
 /// sibling to qualify.
+#[must_use]
 pub fn markup_has_malformed_mention(markup: &Element) -> bool {
     if !markup.is("markup", NS_MARKUP) {
         return false;

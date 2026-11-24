@@ -436,7 +436,11 @@ fn xep0513_official_namespace_carries_only_spec_attributes() {
     let official = span
         .get_child("mention", NS_EXPLICIT_MENTIONS)
         .expect("XEP-0513 mention");
-    assert_eq!(official.attrs().into_iter().count(), 2, "only type and target");
+    assert_eq!(
+        official.attrs().into_iter().count(),
+        2,
+        "only type and target"
+    );
     assert_eq!(official.attr("type"), Some(OCCUPANT_TYPE));
     assert_eq!(official.attr("target"), Some("opaque-occupant-id"));
     assert_eq!(official.children().count(), 0);
