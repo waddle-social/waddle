@@ -37,12 +37,14 @@ use waddle_xmpp_client_ffi::{
 
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
+use crate::call::CallEvent;
 use crate::composer::Mentionable;
 use crate::judgments;
 use crate::markup::{self, Span};
 use crate::media_index::{self, MessageMedia};
 use crate::notify::{self, NotifyMode, Stored};
 use crate::runtime;
+use crate::session_calls;
 use crate::threads::{self, Thread};
 
 const PAGE_SIZE: u32 = 50;
@@ -129,6 +131,8 @@ pub enum SessionEvent {
         from: String,
         to: Option<String>,
     },
+    /// A XEP-0353 invitation or XEP-0166 session event for the call slot.
+    Call(Box<CallEvent>),
 }
 
 /// Who this account is in conversations.
@@ -231,6 +235,10 @@ impl WaddleEventListener for Forwarder {
                 from: from.to_string(),
                 to: to.map(|jid| jid.to_string()),
             },
+            WaddleClientEvent::Call { event } => match session_calls::call_event_from(event) {
+                Some(event) => SessionEvent::Call(Box::new(event)),
+                None => return,
+            },
             WaddleClientEvent::Error { description } => {
                 tracing::warn!(%description, "xmpp client error");
                 return;
@@ -252,6 +260,8 @@ pub struct Session {
     /// For XEP-0363 uploads and fetching shared files.
     transfers: attachments::Transfers,
     pub me: Me,
+    /// This install's XMPP resource, which names this device in calls.
+    pub(crate) resource: String,
 }
 
 impl Session {
@@ -274,6 +284,7 @@ impl Session {
         let session = Self {
             client,
             transfers,
+            resource: account.resource.clone(),
             me: Me {
                 bare: account.session.jid.clone(),
                 nick: account.session.username.clone(),

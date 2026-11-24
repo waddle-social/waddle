@@ -167,6 +167,7 @@ impl WaddleWindow {
             }
         });
         self.setup_notifications();
+        self.setup_calls();
         self.setup_composer();
         self.setup_presence_input();
         self.setup_message_tools();
@@ -191,6 +192,7 @@ impl WaddleWindow {
         self.clear_membership();
         self.clear_directory_search();
         let (session, events) = Session::start(account, transfers);
+        self.begin_calls(&session, generation);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
 
@@ -208,6 +210,7 @@ impl WaddleWindow {
     pub(super) async fn stop_session(&self) {
         let imp = self.imp();
         imp.generation.set(imp.generation.get().wrapping_add(1));
+        self.end_calls();
         if let Some(session) = imp.session.take() {
             session.disconnect().await;
         }
@@ -290,6 +293,7 @@ impl WaddleWindow {
                     .set(imp.connect_epoch.get().wrapping_add(1));
                 imp.connected.set(false);
                 self.presence_disconnected();
+                self.refresh_call_button();
                 imp.extension_commands.take();
                 self.clear_membership();
                 self.reset_message_tools();
@@ -333,6 +337,7 @@ impl WaddleWindow {
             SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
             SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
             SessionEvent::DeliveryFailed(id) => self.set_delivery(&id, Delivery::Failed),
+            SessionEvent::Call(event) => self.on_call_event(&event),
         }
     }
 

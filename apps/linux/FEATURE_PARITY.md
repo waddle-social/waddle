@@ -90,7 +90,13 @@ Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` an
 | Stories | | ❌ | feed and stories |
 | Events and calendar, RSVP | | ❌ | events |
 | Admin console (owners) | | ❌ | admin |
-| 1:1 and group voice/video, screen share | 0353, 0166, Muji | ❌ | calls |
+| 1:1 and group voice/video, screen share | 0353, 0166, Muji | 🟡 | 1:1 audio only (see Calls below): place, ring, answer, decline, hang up, busy, mute, devices, notification. Video, screen share and group (Muji) calls are not built; not run against a live server or audio device |
+
+### Calls
+
+Signalling is XEP-0353 Jingle Message Initiation (propose, ringing, proceed, reject, retract, finish) followed by a XEP-0166 session whose transport carries LiveKit credentials (room URL and a join token) issued by the server; media runs through the SFU. This is the same wire shape as the Apple and web clients, through the FFI's existing call verbs, so there is no protocol change. The rules (`src/call.rs`, `src/call_engine.rs`, `src/call_screen.rs`) are widget-free and tested; the engine follows the Apple `CallStore` (tie-break by lower session id, only the answering device speaks for the call, the 45 s ring and session timeouts, finish after terminate). Media (`src/call_media.rs`) is the LiveKit Rust SDK with libwebrtc's platform audio device module for the microphone and speakers over PulseAudio or ALSA, with the server's XEP-0215 STUN and TURN services as ICE servers. A call is started from the header button of a one-to-one conversation (not rooms or group chats); an incoming call opens the call window and, when the app is not in front, posts a notification with Answer and Decline.
+
+Gaps: video, screen share and group (Muji, XEP-0272) calls; a ring and ringback tone (the call is seen and notified, not heard); Do Not Disturb does not change how a call is announced; call history rows and the call badge in People; the XEP-0353 existing-session migration (a same-peer proposal during a call is refused, which only upgrades matter for); the `report_call_lifecycle` telemetry; remembering the chosen devices between calls, and the device list does not mark which device is in use (the first entry is shown); Flatpak permissions for the microphone and sound server (packaging is the polish PR); a mute chosen before the media is up is applied when it joins. Verified here: the signalling rules by unit tests, and that the window follows the slot under a headless display. Not verified: anything against a live server, SFU or real microphone and speakers.
 
 ## Platform
 
@@ -119,5 +125,5 @@ must be.
 9. **settings**: one preferences window.
 10. **feed and stories**, **events**, **admin**.
 11. **delivery**: ack states, queue, typing, shared reconnect.
-12. **calls**.
+12. **calls**: 1:1 audio landed (see Calls); video, screen share and group calls follow.
 13. **polish**: design tokens, shortcuts, accessibility, Flatpak.

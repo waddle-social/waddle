@@ -108,7 +108,29 @@ impl WaddleApplication {
                 }
             })
             .build();
-        self.add_action_entries([about, quit, open, reply, mark_read]);
+        // A ringing call's notification: answer, decline, or just look.
+        let answer = gio::ActionEntry::builder("answer-call")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(|app: &Self, _, target| {
+                if let Some(sid) = target.and_then(|target| target.get::<String>()) {
+                    app.window().answer_call(&sid);
+                }
+            })
+            .build();
+        let decline = gio::ActionEntry::builder("decline-call")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(|app: &Self, _, target| {
+                if let Some(sid) = target.and_then(|target| target.get::<String>()) {
+                    app.window().decline_call(&sid);
+                }
+            })
+            .build();
+        let show_call = gio::ActionEntry::builder("show-call")
+            .activate(|app: &Self, _, _| app.window().show_call())
+            .build();
+        self.add_action_entries([
+            about, quit, open, reply, mark_read, answer, decline, show_call,
+        ]);
         self.set_accels_for_action("app.quit", &["<Control>q"]);
     }
 

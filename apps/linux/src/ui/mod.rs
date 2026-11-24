@@ -1,5 +1,6 @@
 mod actions;
 mod avatar;
+mod calls;
 mod commands;
 mod composer_view;
 mod conversation;
