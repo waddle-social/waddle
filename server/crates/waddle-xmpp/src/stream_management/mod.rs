@@ -71,7 +71,9 @@ pub use session_registry::{
     StoredDetachedSession, TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry,
     DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
-pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
+pub use stanzas::{
+    SmAck, SmEnable, SmEnabled, SmFailed, SmMalformed, SmRequest, SmResume, SmResumed, SmStanza,
+};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};
 pub use unacked_queue::{UnackedPushResult, UnackedQueue, UnackedStanza};
 
