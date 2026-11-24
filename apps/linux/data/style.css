@@ -187,11 +187,16 @@ button.link-card:hover {
   border-radius: 14px;
 }
 
-.composer .composer-entry {
+.composer .composer-entry,
+.composer .composer-entry text {
   min-height: 40px;
   background: none;
   box-shadow: none;
   border: none;
+}
+
+.composer .composer-entry text {
+  min-height: 0;
 }
 
 <<<<<<< HEAD
