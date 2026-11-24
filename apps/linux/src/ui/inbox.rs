@@ -160,6 +160,7 @@ impl WaddleWindow {
         let imp = self.imp();
         self.leave_feed();
         self.leave_admin();
+        self.leave_calendar();
         {
             let mut state = imp.inbox.borrow_mut();
             state.open = true;

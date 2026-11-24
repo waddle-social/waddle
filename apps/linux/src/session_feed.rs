@@ -22,13 +22,13 @@ use crate::stories::{self, Reactions, Reads, Story};
 const NAME_LOOKUPS: usize = 4;
 
 impl Session {
-    fn community(&self) -> String {
+    fn feed_community(&self) -> String {
         feed::community_service(self.me.bare.domain().as_ref())
     }
 
     /// The community feed, newest first.
     pub async fn feed(&self) -> Result<Vec<Post>, String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         let entries =
             runtime::spawn(
                 async move { client.fetch_feed(community, Some(feed::PAGE_SIZE)).await },
@@ -41,7 +41,7 @@ impl Session {
 
     /// Post to the feed; the post comes back as the server will show it.
     pub async fn post_to_feed(&self, draft: PostDraft) -> Result<Post, String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         let post = WaddleFeedPost {
             title: None,
             body: draft.body,
@@ -56,7 +56,7 @@ impl Session {
 
     /// The stories still up, in the server's order.
     pub async fn stories(&self, now_ms: i64) -> Result<Vec<Story>, String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         let wire =
             runtime::spawn(
                 async move { client.fetch_stories(community, Some(feed::PAGE_SIZE)).await },
@@ -75,7 +75,7 @@ impl Session {
         media_type: String,
         caption: Option<String>,
     ) -> Result<Story, String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         let post = WaddleStoryPost {
             body: caption,
             media_url,
@@ -110,7 +110,7 @@ impl Session {
 
     /// The reactions on one story and which are this account's.
     pub async fn story_reactions(&self, story_id: String) -> Result<Reactions, String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         runtime::spawn(async move { client.fetch_story_reactions(community, story_id).await })
             .await
             .map_err(|_| interrupted())?
@@ -124,7 +124,7 @@ impl Session {
         story_id: String,
         emojis: Vec<String>,
     ) -> Result<(), String> {
-        let (client, community) = (Arc::clone(&self.client), self.community());
+        let (client, community) = (Arc::clone(&self.client), self.feed_community());
         runtime::spawn(async move {
             client
                 .set_story_reactions(community, story_id, emojis)

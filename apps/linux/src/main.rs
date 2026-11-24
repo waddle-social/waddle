@@ -11,6 +11,7 @@ mod auth;
 mod avatars;
 mod composer;
 mod delivery;
+mod events;
 mod extension_commands;
 mod feed;
 mod gifs;

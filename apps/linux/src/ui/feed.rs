@@ -194,6 +194,7 @@ impl WaddleWindow {
     pub(super) fn show_feed(&self) {
         let imp = self.imp();
         self.leave_inbox();
+        self.leave_calendar();
         self.leave_admin();
         imp.feed.borrow_mut().open = true;
         // Nothing is being read while the feed is on screen.

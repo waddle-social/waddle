@@ -7,6 +7,8 @@ mod connection;
 mod conversation;
 mod delivery;
 mod directory;
+mod event_form;
+mod events;
 mod feed;
 mod identity;
 mod images;

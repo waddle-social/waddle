@@ -71,6 +71,10 @@ mod imp {
         #[template_child]
         pub inbox_mark_all: TemplateChild<gtk::Button>,
         #[template_child]
+        pub calendar_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub calendar_page: TemplateChild<gtk::Box>,
+        #[template_child]
         pub room_page: TemplateChild<adw::NavigationPage>,
         #[template_child]
         pub room_title: TemplateChild<adw::WindowTitle>,
@@ -184,6 +188,8 @@ mod imp {
         pub inbox: RefCell<crate::ui::inbox::InboxState>,
         /// The community feed and stories (see ui/feed.rs).
         pub feed: RefCell<crate::ui::feed::FeedState>,
+        /// Community events (see ui/events.rs).
+        pub calendar: RefCell<crate::ui::events::CalendarState>,
         /// The owner-only admin console (see ui/admin.rs).
         pub admin: RefCell<crate::ui::admin::AdminState>,
     }
@@ -214,6 +220,7 @@ mod imp {
             window.setup_timeline();
             window.setup_inbox();
             window.setup_feed();
+            window.setup_calendar();
             window.setup_admin();
             glib::spawn_future_local(async move { window.restore().await });
         }
@@ -344,6 +351,11 @@ impl WaddleWindow {
         } else {
             self.show_inbox();
         }
+    }
+
+    #[template_callback]
+    fn on_calendar_activated(&self) {
+        self.show_calendar();
     }
 
     #[template_callback]
