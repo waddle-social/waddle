@@ -24,11 +24,12 @@ use waddle_client_session::{
     strip_fallback, Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo,
 };
 use waddle_xmpp_client_ffi::{
-    WaddleArchivedMessage, WaddleBookmarkItem, WaddleCarbonDirection, WaddleChannel, WaddleClient,
-    WaddleClientEvent, WaddleConfig, WaddleDmBookmarkItem, WaddleEncryptedFile,
-    WaddleEncryptedFileHash, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry,
-    WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleMentionDirectory, WaddleMentionTarget,
-    WaddleMessage, WaddleMessageAudience, WaddlePresence, WaddleReplyTarget,
+    WaddleAdhocAction, WaddleArchivedMessage, WaddleBookmarkItem, WaddleCarbonDirection,
+    WaddleChannel, WaddleClient, WaddleClientEvent, WaddleConfig, WaddleDmBookmarkItem,
+    WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener, WaddleExtensionCommand,
+    WaddleExtensionCommandResult, WaddleExtensionFormField, WaddleFallbackRange, WaddleInboxEntry,
+    WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleMarkupSpan, WaddleMentionDirectory,
+    WaddleMentionTarget, WaddleMessage, WaddleMessageAudience, WaddlePresence, WaddleReplyTarget,
     WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
     WaddleStatusPreference, WaddleStickerHash, WaddleStickerRef, WaddleTopology,
     WaddleUserSearchEntry,
@@ -38,6 +39,7 @@ use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
 use crate::composer::Mentionable;
 use crate::judgments;
+use crate::markup::{self, Span};
 use crate::media_index::{self, MessageMedia};
 use crate::notify::{self, NotifyMode, Stored};
 use crate::runtime;
@@ -188,6 +190,8 @@ pub struct Draft {
     pub files: Vec<WaddleSharedFile>,
     /// Whom the body's typed `@nick`s may mention (XEP-0372).
     pub mentionable: Vec<Mentionable>,
+    /// XEP-0394 spans over `body`, before any reply quote is prepended.
+    pub markup: Vec<Span>,
     pub thread: Option<Thread>,
     /// XEP-0449: the pack this sticker is from; `files` holds its picture
     /// and `body` its text.
@@ -424,6 +428,7 @@ impl Session {
             quote,
             files,
             mentionable,
+            markup,
             thread,
             sticker,
         } = draft;
@@ -436,10 +441,13 @@ impl Session {
             thread: thread.as_ref().map(Thread::wire),
             ..WaddleSendOptions::default()
         };
+        options.markup_spans = markup::to_wire(&markup, 0);
         if let Some(quote) = quote {
             let (quoted, start, end) =
                 waddle_client_session::with_reply_fallback(&quote.sender, &quote.text, &body);
             body = quoted;
+            // The spans sit after the quote, which `end` characters cover.
+            options.markup_spans = markup::to_wire(&markup, end as usize);
             options.fallback = Some(WaddleFallbackRange { start, end });
             options.reply = Some(WaddleReplyTarget {
                 author_jid: reply_author(kind, jid, &quote, &self.me),
@@ -546,7 +554,8 @@ impl Session {
     }
 
     /// XEP-0308: replace the body of the message with `correction_id`. The
-    /// correction carries the new body's mentions, as a fresh send would.
+    /// correction carries the new body's mentions and markup, as a fresh
+    /// send would.
     pub async fn correct(
         &self,
         jid: &str,
@@ -554,8 +563,10 @@ impl Session {
         correction_id: String,
         body: String,
         mentionable: &[Mentionable],
+        markup: &[Span],
     ) -> bool {
         let options = WaddleSendOptions {
+            markup_spans: markup::to_wire(markup, 0),
             mention_directory: mention_directory(kind, mentionable),
             ..WaddleSendOptions::default()
         };
@@ -583,6 +594,57 @@ impl Session {
             }
             Err(_) => None,
         }
+    }
+
+    /// XEP-0050: the server's extension commands. `None` when discovery
+    /// fails.
+    pub async fn extension_commands(&self) -> Option<Vec<WaddleExtensionCommand>> {
+        let client = Arc::clone(&self.client);
+        match runtime::spawn(async move { client.discover_extension_commands().await }).await {
+            Ok(Ok(commands)) => Some(commands),
+            Ok(Err(error)) => {
+                tracing::debug!(?error, "could not discover extension commands");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// XEP-0050 §2.4: start a command, in `room` when run from one.
+    pub async fn invoke_extension_command(
+        &self,
+        command: &WaddleExtensionCommand,
+        room: Option<String>,
+    ) -> Option<WaddleExtensionCommandResult> {
+        let client = Arc::clone(&self.client);
+        let (service, node) = (command.service_jid.clone(), command.node.clone());
+        runtime::spawn(async move { client.invoke_extension_command(service, node, room).await })
+            .await
+            .ok()?
+            .map_err(|error| tracing::debug!(?error, "extension command failed"))
+            .ok()
+    }
+
+    /// XEP-0050 §3: advance a command session with `action`.
+    pub async fn submit_extension_command(
+        &self,
+        command: &WaddleExtensionCommand,
+        session_id: Option<String>,
+        fields: Vec<WaddleExtensionFormField>,
+        action: WaddleAdhocAction,
+        room: Option<String>,
+    ) -> Option<WaddleExtensionCommandResult> {
+        let client = Arc::clone(&self.client);
+        let (service, node) = (command.service_jid.clone(), command.node.clone());
+        runtime::spawn(async move {
+            client
+                .submit_extension_command_form(service, node, session_id, fields, action, room)
+                .await
+        })
+        .await
+        .ok()?
+        .map_err(|error| tracing::debug!(?error, "extension command failed"))
+        .ok()
     }
 
     /// XEP-0424: retract the message with `reference_id`.
@@ -832,6 +894,15 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
     };
     let stanza_id = verified_stanza_id(&message.stanza_ids, &room);
     record_media(room.as_str(), stanza_id.as_deref(), &message);
+    record_markup(
+        room.as_str(),
+        &[
+            stanza_id.as_deref(),
+            message.origin_id.as_deref(),
+            message.id.as_deref(),
+        ],
+        &Markup::of(&message),
+    );
     let mentions_me = message.broadcast_mention.is_some()
         || message
             .mention_uris
@@ -894,6 +965,15 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
     }
     let reference_id = message.origin_id.clone().or_else(|| message.id.clone());
     record_media(peer.as_str(), reference_id.as_deref(), &message);
+    record_markup(
+        peer.as_str(),
+        &[
+            reference_id.as_deref(),
+            message.origin_id.as_deref(),
+            message.id.as_deref(),
+        ],
+        &Markup::of(&message),
+    );
     let incoming = IncomingMessage {
         stanza_id: verified_stanza_id(&message.stanza_ids, &me.bare),
         origin_id: message.origin_id,
@@ -1030,6 +1110,16 @@ pub fn archived_from(
             message.sticker_pack.as_ref(),
         ),
     );
+    record_markup(
+        conversation.as_str(),
+        &[reference_id.as_deref(), message.origin_id.as_deref()],
+        &Markup {
+            body: message.body.as_deref(),
+            spans: &message.markup_spans,
+            fallback: message.reply_fallback_start.zip(message.reply_fallback_end),
+            replaces: message.replaces_id.as_deref(),
+        },
+    );
     let score_target = (kind == Kind::Room)
         .then(|| {
             judgments::target(
@@ -1069,6 +1159,50 @@ pub fn archived_from(
         attachments: message.shared_files.iter().map(attachment_from).collect(),
         ..IncomingMessage::default()
     })
+}
+
+/// What a wire message says about its markup.
+struct Markup<'a> {
+    body: Option<&'a str>,
+    spans: &'a [WaddleMarkupSpan],
+    fallback: Option<(u32, u32)>,
+    /// The message this one corrects.
+    replaces: Option<&'a str>,
+}
+
+impl<'a> Markup<'a> {
+    fn of(message: &'a WaddleMessage) -> Self {
+        Self {
+            body: message.body.as_deref(),
+            spans: &message.markup_spans,
+            fallback: message.reply_fallback_start.zip(message.reply_fallback_end),
+            replaces: message.replaces_id.as_deref(),
+        }
+    }
+}
+
+/// Remember the XEP-0394 spans a message carries, moved onto the body the
+/// timeline shows (the shared timeline has no place for them; see
+/// `markup.rs`). A correction records them under the id it replaces, so
+/// the corrected row draws the new markup, or none.
+fn record_markup(conversation: &str, ids: &[Option<&str>], markup: &Markup<'_>) {
+    let Some(wire_body) = markup.body else {
+        return;
+    };
+    let (start, end) = markup.fallback.unzip();
+    let body = reply_body(Some(wire_body.to_string()), start, end).unwrap_or_default();
+    let spans = markup::without_fallback(
+        markup::from_wire(markup.spans),
+        wire_body.chars().count(),
+        markup.fallback,
+    );
+    match markup.replaces {
+        Some(replaced) => markup::record(conversation, &[replaced], &body, &spans, true),
+        None => {
+            let ids: Vec<&str> = ids.iter().flatten().copied().collect();
+            markup::record(conversation, &ids, &body, &spans, false);
+        }
+    }
 }
 
 /// Remember the link preview cards and sticker marker a live message

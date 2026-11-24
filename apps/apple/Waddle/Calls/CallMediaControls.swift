@@ -60,6 +60,8 @@ protocol CallMediaControls: AnyObject, Observable {
     func refreshDevices() async
     /// Uses device `id` for calls from now on, this one included; `nil` goes back to the system's choice.
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async
+    /// How good our own connection to the call is; unknown until the server has measured it.
+    var connectionQuality: CallConnectionQuality { get }
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.

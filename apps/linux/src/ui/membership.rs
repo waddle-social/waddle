@@ -2,7 +2,7 @@
 //! The same presence stream tells who else is in each room, for mentions.
 use std::collections::{HashMap, VecDeque};
 
-use adw::prelude::{EntryExt, ObjectExt, WidgetExt};
+use adw::prelude::{ObjectExt, WidgetExt};
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::glib;
 use jid::{BareJid, Jid};
@@ -215,7 +215,7 @@ impl WaddleWindow {
             } else {
                 "Joining room…".to_string()
             };
-            self.imp().composer_entry.set_placeholder_text(Some(&hint));
+            self.imp().composer_placeholder.set_label(&hint);
         }
     }
 

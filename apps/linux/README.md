@@ -10,6 +10,7 @@ The native client currently supports:
 - **Accounts:** stored in the Secret Service (`oo7`), one item per server and JID, so several communities can be signed in at once.
 - **Shell:** an adaptive `AdwNavigationSplitView` that collapses at phone widths.
 - **Chat:** rooms and DMs, paged history, replies, reactions, edits, deletions and attachments.
+- **Composer:** a multi-line text view; Enter sends, Shift+Enter breaks the line. The formatting button opens a bar (bold, italic, strikethrough, code, code block, quote; Ctrl+B and Ctrl+I) that inserts markdown markers, which become XEP-0394 markup on send and draw in received messages. Slash suggestions list the built-ins and the server's XEP-0050 extension commands, which run inline or open their XEP-0004 form in a dialog.
 - **Media:** the composer's `+` menu offers Photo or File, a GIF picker (search and trending through the web app's `/api/giphy` proxy; set `WADDLE_GIF_PROXY_URL` to use a web app other than `https://waddle.chat`) and your sticker packs (XEP-0449). Received stickers draw in place, and the link preview cards the server attaches show under messages.
 - **Inbox:** the sidebar's **Inbox** lists every room or DM with unread messages, newest first, with unread thread replies under each card. Click a card or message to open it there; **Mark Read** clears one card and **Mark All Read** clears everything.
 - **Threads:** choose **Reply in Thread** below a message, or **Open Thread** from its message menu. Threads appear beneath their conversation in the sidebar, with separate unread counts and history. **Start Subthread** creates a nested thread; the back button returns to the main conversation. The original message appears above the replies when loaded. Thread views filter full archive pages so saved reactions, edits and Jev judgments remain available. Automatic scanning stops after three pages; **Load Earlier** continues through older history.
@@ -66,10 +67,14 @@ The GTK window tests require a display and are excluded from ordinary headless r
 | `src/delivery.rs`, `src/typing.rs`, `src/read_sync.rs`, `src/reconnect.rs` | The unsent queue and delivery states, chat states, read markers and cursors, and the reconnect state machine: no widgets, with tests |
 | `src/session_link.rs`, `src/ui/delivery.rs`, `typing.rs`, `read_markers.rs`, `connection.rs` | Their session verbs and window glue: the queue, typing line, marker dispatch, banner, focus and network triggers |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
+| `src/markup.rs` | XEP-0394: markdown markers to spans, spans to markers, the formatting bar's edits, the span index |
+| `src/extension_commands.rs` | XEP-0050 slash commands and XEP-0004 form rules |
 | `src/presence.rs`, `src/avatars.rs`, `src/profile.rs`, `src/people.rs`, `src/nick_color.rs` | Presence mode and auto-away, avatar cache, profile fields and registries, the People listing, nick colors: all without widgets |
 | `src/ui/status.rs`, `pictures.rs`, `profile.rs`, `person.rs`, `people.rs`, `identity.rs` | Their windows: presence plumbing, avatar loading and publishing, your profile, someone's profile sheet, the People view, author resolution |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
 | `src/notify.rs` | Notification modes, XEP-0492 defaults and the announce decision (no GTK); tests |
 | `src/ui/notifications.rs` | Header menu, sidebar mute state and GNotification actions |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |
+| `src/ui/composer_view.rs` | The composer's text view and formatting bar |
+| `src/ui/commands.rs` | Extension command discovery, running and the form dialog |
 | `data/` | Desktop entry, AppStream metadata, icon |

@@ -193,6 +193,7 @@ impl NotificationOutboxStore {
                     push_store,
                     &candidate.recipient_bare_jid,
                     first_party_service_jid,
+                    self.remote_publisher.get().is_some(),
                 )
                 .await?;
                 target_cache.insert(recipient_key.clone(), resolved);
@@ -278,6 +279,7 @@ pub(super) async fn resolve_first_party_targets(
     push_store: &dyn PushSubscriptionStore,
     recipient: &BareJid,
     first_party_service_jid: &BareJid,
+    include_remote: bool,
 ) -> Result<Vec<NotificationOutboxTarget>, NotificationOutboxError> {
     let registrations = push_store
         .get_for_user(&recipient.to_string())
@@ -286,11 +288,14 @@ pub(super) async fn resolve_first_party_targets(
     let first_party_service = first_party_service_jid.to_string();
     let mut targets = Vec::new();
     for registration in registrations {
-        if registration.service_jid != first_party_service {
+        let first_party = registration.service_jid == first_party_service;
+        if !first_party && !include_remote {
             continue;
         }
         match target_from_subscription(&registration) {
-            Ok(Some(target)) if target.push_service_jid() == first_party_service_jid => {
+            Ok(Some(target))
+                if !first_party || target.push_service_jid() == first_party_service_jid =>
+            {
                 targets.push(target);
             }
             Ok(Some(_)) => {

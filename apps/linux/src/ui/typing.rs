@@ -33,9 +33,10 @@ impl WaddleWindow {
         imp.link.typing_label.replace(Some(label));
 
         let window = self.downgrade();
-        imp.composer_entry.connect_changed(move |entry| {
+        imp.composer_entry.buffer().connect_changed(move |buffer| {
             if let Some(window) = window.upgrade() {
-                window.on_composer_edited(entry.text().as_str());
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                window.on_composer_edited(text.as_str());
             }
         });
     }

@@ -47,6 +47,7 @@ mod local_spaces;
 mod occupancy;
 mod placement;
 mod principal;
+mod publications;
 mod reach;
 mod replies;
 mod room_delivery;
@@ -77,6 +78,10 @@ pub use occupancy::{
     RoomVerdict, SqlRemoteRoomStore, MAX_JOIN_ID_BYTES, MAX_OCCUPANCY_ADDRESS_BYTES,
 };
 pub use principal::{CarriedPrincipal, PrincipalError, RemotePrincipal};
+pub use publications::{
+    id as publication_id, job_of as publication_job, PublicationAnswer, PublicationAnswers,
+    PublicationOutcome, PUBLICATION_ID_PREFIX,
+};
 pub use reach::{
     reach, InboundReach, LocalTarget, Reachable, Refusal, RoomOperation, SpaceOperation,
 };

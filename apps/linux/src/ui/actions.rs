@@ -6,18 +6,20 @@
 //! send fails.
 
 use adw::prelude::{
-    AdwDialogExt, AlertDialogExt, AlertDialogExtManual, BoxExt, ButtonExt, CastNone, EditableExt,
-    FileExt, FileExtManual, ListItemExt, ListModelExtManual, ObjectExt, PopoverExt, StaticType,
-    WidgetExt,
+    AdwDialogExt, AlertDialogExt, AlertDialogExtManual, BoxExt, ButtonExt, CastNone, FileExt,
+    FileExtManual, ListItemExt, ListModelExtManual, ObjectExt, PopoverExt, StaticType, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gdk, gio, glib};
 use waddle_client_session::{Delivery, IncomingMessage, LocalEcho, ReplyTo, TimelineItem};
 
+use super::composer_view::ComposerText;
 use super::conversation::Row;
 use super::WaddleWindow;
 use crate::attachments::MAX_UPLOAD_BYTES;
 use crate::composer::{self, CommandAction};
+use crate::extension_commands;
+use crate::markup::{self, Format, Span};
 use crate::message_actions::{MessageAction, QUICK_REACTIONS};
 use crate::session::{Draft, Kind, Outgoing, Quote};
 
@@ -34,24 +36,46 @@ pub enum Compose {
         correction_id: String,
         /// The row as it was, to restore if the correction fails.
         original: Box<TimelineItem>,
+        /// The row's XEP-0394 spans, which the composer shows as markers.
+        markup: Vec<Span>,
     },
 }
 
 impl WaddleWindow {
     pub(super) fn setup_composer(&self) {
         self.setup_suggestions();
-        // Capture: the entry's text widget would otherwise act on Enter and
-        // Tab before an open suggestion list could.
+        self.setup_composer_view();
+        // Capture: the text view would otherwise act on Enter and Tab
+        // before an open suggestion list could.
         let keys = gtk::EventControllerKey::builder()
             .propagation_phase(gtk::PropagationPhase::Capture)
             .build();
         let window = self.downgrade();
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, state| {
             let Some(window) = window.upgrade() else {
                 return glib::Propagation::Proceed;
             };
             if window.suggestion_key(key) {
                 return glib::Propagation::Stop;
+            }
+            let shortcut = state.contains(gdk::ModifierType::CONTROL_MASK);
+            match key {
+                // Enter sends; Shift+Enter is the text view's own newline.
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter
+                    if !state.contains(gdk::ModifierType::SHIFT_MASK) =>
+                {
+                    window.send_current();
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::b | gdk::Key::B if shortcut => {
+                    window.apply_format(Format::Bold);
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::i | gdk::Key::I if shortcut => {
+                    window.apply_format(Format::Italic);
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
             }
             if key == gdk::Key::Escape
                 && !matches!(*window.imp().compose.borrow(), Compose::Message)
@@ -132,7 +156,9 @@ impl WaddleWindow {
         }
         imp.uploading.set(true);
         let generation = imp.generation.get();
-        let caption = imp.composer_entry.text().trim().to_string();
+        let typed = imp.composer_entry.text().trim().to_string();
+        let composed = markup::compose(&typed);
+        let caption = composed.body;
         let quote = match imp.compose.replace(Compose::Message) {
             Compose::Reply(quote) => Some(quote),
             Compose::Message | Compose::Edit { .. } => None,
@@ -165,7 +191,7 @@ impl WaddleWindow {
                     // moved on to another conversation or started typing.
                     let same = imp.current.borrow().as_deref() == Some(conversation.key().as_str());
                     if same && imp.composer_entry.text().is_empty() {
-                        imp.composer_entry.set_text(&caption);
+                        imp.composer_entry.set_text(&typed);
                         if let Some(quote) = quote {
                             window.set_compose(Compose::Reply(quote));
                         }
@@ -175,6 +201,13 @@ impl WaddleWindow {
             };
             let origin = uuid::Uuid::new_v4().to_string();
             let nick = session.me.nick.clone();
+            markup::record(
+                &conversation.jid,
+                &[&origin],
+                &caption,
+                &composed.spans,
+                false,
+            );
             let echo = LocalEcho {
                 origin_id: origin.clone(),
                 sender: nick,
@@ -203,6 +236,7 @@ impl WaddleWindow {
                 files: wire,
                 // Occupants as of now, not when the upload began.
                 mentionable: window.mention_targets(&conversation),
+                markup: composed.spans,
                 sticker: None,
             };
             let sent = session
@@ -288,8 +322,15 @@ impl WaddleWindow {
         let label = match &compose {
             Compose::Message => None,
             Compose::Reply(quote) => Some(format!("Replying to {}", quote.sender)),
-            Compose::Edit { original, .. } => {
-                imp.composer_entry.set_text(&original.body);
+            Compose::Edit {
+                original,
+                markup: spans,
+                ..
+            } => {
+                // Markers that re-create the row's spans, so an unchanged
+                // correction re-sends its markup.
+                imp.composer_entry
+                    .set_text(&markup::editable(&original.body, spans));
                 Some("Editing message".to_string())
             }
         };
@@ -312,8 +353,9 @@ impl WaddleWindow {
         };
         // A correction replaces a body as written; only a new message runs
         // a command.
-        let command = composer::command_action(&body)
-            .filter(|_| !matches!(*imp.compose.borrow(), Compose::Edit { .. }));
+        let editing = matches!(*imp.compose.borrow(), Compose::Edit { .. });
+        let command = composer::command_action(&body).filter(|_| !editing);
+        let built_in = command.is_some();
         match command {
             Some((_, CommandAction::Send(text))) => body = text,
             Some((command, CommandAction::Incomplete)) => {
@@ -327,6 +369,29 @@ impl WaddleWindow {
             }
             None => {}
         }
+        // A server's extension command (XEP-0050), when no built-in took it.
+        if !built_in && !editing {
+            let resolved = extension_commands::resolve(
+                &body,
+                &imp.extension_commands.borrow(),
+                conversation.kind == Kind::Room,
+            )
+            .map(|(command, trailing)| (command.clone(), trailing));
+            if let Some((command, trailing)) = resolved {
+                if !self.can_send(&conversation) {
+                    self.toast("Wait until this conversation is connected before sending.");
+                    return;
+                }
+                self.hide_suggestions();
+                imp.composer_entry.set_text("");
+                self.run_extension_command(command, trailing, &conversation);
+                return;
+            }
+        }
+        // Markdown markers become XEP-0394 spans over a clean body.
+        let composed = markup::compose(&body);
+        let body = composed.body;
+        let spans = composed.spans;
         if !self.can_send(&conversation) {
             self.ensure_room_joined(&conversation);
             self.toast("Wait until this conversation is connected before sending.");
@@ -342,11 +407,15 @@ impl WaddleWindow {
         if let Compose::Edit {
             correction_id,
             original,
+            markup: original_spans,
         } = compose
         {
-            if body.is_empty() || body == original.body {
+            if body.is_empty()
+                || (body == original.body && markup::same_spans(&spans, &original_spans))
+            {
                 return;
             }
+            markup::record(&conversation.jid, &[&correction_id], &body, &spans, true);
             let jid = conversation.key();
             self.edit_conversation(&jid, |timeline| {
                 timeline.apply_live(IncomingMessage {
@@ -365,13 +434,21 @@ impl WaddleWindow {
                     .correct(
                         &conversation.jid,
                         conversation.kind,
-                        correction_id,
+                        correction_id.clone(),
                         body,
                         &mentionable,
+                        &spans,
                     )
                     .await
                     && window.imp().generation.get() == generation
                 {
+                    markup::record(
+                        &conversation.jid,
+                        &[&correction_id],
+                        &original.body,
+                        &original_spans,
+                        true,
+                    );
                     window.edit_conversation(&jid, |timeline| timeline.restore(&original));
                     window.toast("The edit could not be sent.");
                 }
@@ -390,6 +467,7 @@ impl WaddleWindow {
         imp.outbound
             .borrow_mut()
             .insert(origin.clone(), conversation.clone());
+        markup::record(&conversation.jid, &[&origin], &body, &spans, false);
         let echo = LocalEcho {
             origin_id: origin.clone(),
             sender: nick,
@@ -417,6 +495,7 @@ impl WaddleWindow {
                 thread: conversation.thread.clone(),
                 files: Vec::new(),
                 mentionable,
+                markup: spans,
                 sticker: None,
             };
             // Queued on disk, written, and its row kept up to date.
@@ -487,9 +566,11 @@ impl WaddleWindow {
         let Some(correction_id) = item.correction_id.clone() else {
             return;
         };
+        let markup = super::composer_view::spans_of(self, item);
         self.set_compose(Compose::Edit {
             correction_id,
             original: Box::new(item.clone()),
+            markup,
         });
     }
 

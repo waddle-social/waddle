@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use waddle_client_session::Delivery;
 
 use crate::composer::Mentionable;
+use crate::markup::{Span, Style};
 use crate::session::{Draft, Kind, Quote};
 use crate::threads::Thread;
 
@@ -58,6 +59,40 @@ pub struct MentionRecord {
     pub display_name: Option<String>,
 }
 
+/// A XEP-0394 formatting span of the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanRecord {
+    pub style: String,
+    pub start: usize,
+    pub end: usize,
+    pub uri: Option<String>,
+}
+
+fn style_name(style: Style) -> &'static str {
+    match style {
+        Style::Bold => "bold",
+        Style::Italic => "italic",
+        Style::Strikethrough => "strikethrough",
+        Style::Code => "code",
+        Style::CodeBlock => "code_block",
+        Style::Blockquote => "blockquote",
+        Style::Link => "link",
+    }
+}
+
+fn style_of(name: &str) -> Option<Style> {
+    Some(match name {
+        "bold" => Style::Bold,
+        "italic" => Style::Italic,
+        "strikethrough" => Style::Strikethrough,
+        "code" => Style::Code,
+        "code_block" => Style::CodeBlock,
+        "blockquote" => Style::Blockquote,
+        "link" => Style::Link,
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: String,
@@ -78,6 +113,8 @@ pub struct Pending {
     pub body: String,
     pub quote: Option<QuoteRecord>,
     pub mentions: Vec<MentionRecord>,
+    #[serde(default)]
+    pub markup: Vec<SpanRecord>,
     pub created_ms: i64,
     pub state: EntryState,
     /// Writes tried so far.
@@ -116,6 +153,16 @@ impl Pending {
                     nick: mention.nick.clone(),
                     jid: mention.jid.clone(),
                     display_name: mention.display_name.clone(),
+                })
+                .collect(),
+            markup: draft
+                .markup
+                .iter()
+                .map(|span| SpanRecord {
+                    style: style_name(span.style).to_string(),
+                    start: span.start,
+                    end: span.end,
+                    uri: span.uri.clone(),
                 })
                 .collect(),
             created_ms,
@@ -157,6 +204,18 @@ impl Pending {
                 id: thread.id.clone(),
                 parent: thread.parent.clone(),
             }),
+            markup: self
+                .markup
+                .iter()
+                .filter_map(|span| {
+                    Some(Span {
+                        style: style_of(&span.style)?,
+                        start: span.start,
+                        end: span.end,
+                        uri: span.uri.clone(),
+                    })
+                })
+                .collect(),
             sticker: None,
         }
     }
@@ -496,6 +555,12 @@ mod tests {
                 id: "t1".into(),
                 parent: None,
             }),
+            markup: vec![Span {
+                style: Style::Bold,
+                start: 0,
+                end: 2,
+                uri: None,
+            }],
             sticker: None,
         }
     }
@@ -610,6 +675,8 @@ mod tests {
         assert_eq!(again.thread.unwrap().id, "t1");
         assert_eq!(again.mentionable[0].jid, "ann@example.com");
         assert_eq!(again.files.len(), 0);
+        assert_eq!(again.markup.len(), 1);
+        assert_eq!(again.markup[0].style, Style::Bold);
 
         let mut loaded = loaded;
         assert!(loaded.acknowledged("o2"));
