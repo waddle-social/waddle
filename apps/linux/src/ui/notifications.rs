@@ -143,7 +143,7 @@ impl WaddleWindow {
             .map(|known| known.name.clone())
             .unwrap_or_else(|| conversation.name.clone());
         let notification = gio::Notification::new(&notify::title(conversation.kind, sender, &room));
-        notification.set_body(Some(body));
+        notification.set_body(Some(&crate::message_text::preview(sender, body)));
         let target = key.to_variant();
         notification.set_default_action_and_target_value("app.open-conversation", Some(&target));
         notification.add_button_with_target_value("Reply", "app.reply-conversation", Some(&target));

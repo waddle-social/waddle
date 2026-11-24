@@ -18,36 +18,11 @@ use super::conversation::Row;
 use super::WaddleWindow;
 use crate::attachments::MAX_UPLOAD_BYTES;
 use crate::composer::{self, Availability, CommandAction};
+use crate::message_actions::{MessageAction, QUICK_REACTIONS};
 use crate::session::{Draft, Kind, Outgoing, Quote};
 
 /// Files in one message.
 const MAX_FILES_PER_MESSAGE: usize = 10;
-
-/// One tap away in the message menu.
-const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "🎉", "😮", "😢"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MessageAction {
-    Reply,
-    OpenThread,
-    Subthread,
-    Copy,
-    Edit,
-    Delete,
-}
-
-impl MessageAction {
-    fn presentation(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Reply => ("mail-reply-sender-symbolic", "Reply"),
-            Self::OpenThread => ("chat-bubbles-text-symbolic", "Open Thread"),
-            Self::Subthread => ("chat-bubbles-text-symbolic", "Start Subthread"),
-            Self::Copy => ("edit-copy-symbolic", "Copy Text"),
-            Self::Edit => ("document-edit-symbolic", "Edit"),
-            Self::Delete => ("user-trash-symbolic", "Delete"),
-        }
-    }
-}
 
 /// What the composer's next send does.
 #[derive(Debug, Clone, Default)]
@@ -592,7 +567,7 @@ impl WaddleWindow {
         });
     }
 
-    /// The message menu: quick reactions, then what the user may do.
+    /// The message menu for the row of `list_item`, at a point in it.
     pub(super) fn show_message_actions(&self, list_item: &gtk::ListItem, x: f64, y: f64) {
         let (Some(anchor), Some(object)) = (
             list_item.child(),
@@ -601,18 +576,70 @@ impl WaddleWindow {
             return;
         };
         let item = object.borrow::<Row>().item.clone();
-        if item.retracted {
+        self.present_menu(&anchor, gdk::Rectangle::new(x as i32, y as i32, 1, 1), item);
+    }
+
+    /// Do one of a message's actions. `anchor` and `rect` say where a
+    /// picker opens.
+    pub(super) fn perform_action(
+        &self,
+        action: MessageAction,
+        item: &TimelineItem,
+        anchor: &gtk::Widget,
+        rect: gdk::Rectangle,
+    ) {
+        match action {
+            MessageAction::AddReaction => {
+                if let Some(reference) = item.reference_id.clone() {
+                    self.pick_reaction(anchor, rect, reference);
+                }
+            }
+            MessageAction::Reply => self.reply_to(item),
+            MessageAction::OpenThread => self.open_message_thread(item, false),
+            MessageAction::Subthread => self.open_message_thread(item, true),
+            MessageAction::Pin | MessageAction::Unpin => {
+                if let (Some(conversation), Some(target)) = (
+                    self.current_conversation(),
+                    crate::message_actions::pin_target(item),
+                ) {
+                    self.set_pinned(
+                        &conversation,
+                        target.to_string(),
+                        action == MessageAction::Pin,
+                    );
+                }
+            }
+            MessageAction::Copy => self.clipboard().set_text(&item.body),
+            MessageAction::Edit => self.edit(item),
+            MessageAction::Delete => self.confirm_delete(item),
+            MessageAction::Remove => self.confirm_remove(item),
+        }
+    }
+
+    /// The message menu: quick reactions, then what the user may do.
+    pub(super) fn present_menu(
+        &self,
+        anchor: &gtk::Widget,
+        rect: gdk::Rectangle,
+        item: TimelineItem,
+    ) {
+        let actions = self.actions_for(&item);
+        if actions.is_empty() {
             return;
         }
         let popover = gtk::Popover::builder().has_arrow(true).build();
-        popover.set_parent(&anchor);
-        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.set_parent(anchor);
+        popover.set_pointing_to(Some(&rect));
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
             .build();
 
-        if let Some(reference) = item.reference_id.clone() {
+        if let Some(reference) = item
+            .reference_id
+            .clone()
+            .filter(|_| actions.contains(&MessageAction::AddReaction))
+        {
             let own = self
                 .current_conversation()
                 .and_then(|conversation| {
@@ -640,24 +667,6 @@ impl WaddleWindow {
             content.append(&emojis);
         }
 
-        let mut actions = Vec::new();
-        if item.reference_id.is_some() {
-            actions.push(MessageAction::Reply);
-            actions.push(MessageAction::OpenThread);
-            if self
-                .current_conversation()
-                .is_some_and(|conversation| conversation.thread.is_some())
-            {
-                actions.push(MessageAction::Subthread);
-            }
-        }
-        actions.push(MessageAction::Copy);
-        if item.own && item.correction_id.is_some() && item.delivery != Delivery::Failed {
-            actions.push(MessageAction::Edit);
-        }
-        if item.own && item.reference_id.is_some() {
-            actions.push(MessageAction::Delete);
-        }
         for action in actions {
             let (icon, label) = action.presentation();
             let button = gtk::Button::builder()
@@ -670,20 +679,14 @@ impl WaddleWindow {
                 )
                 .build();
             button.add_css_class("flat");
-            if action == MessageAction::Delete {
+            if action.destructive() {
                 button.add_css_class("error");
             }
-            let (window, popover, item) = (self.clone(), popover.clone(), item.clone());
+            let (window, popover, item, anchor) =
+                (self.clone(), popover.clone(), item.clone(), anchor.clone());
             button.connect_clicked(move |_| {
                 popover.popdown();
-                match action {
-                    MessageAction::Reply => window.reply_to(&item),
-                    MessageAction::OpenThread => window.open_message_thread(&item, false),
-                    MessageAction::Subthread => window.open_message_thread(&item, true),
-                    MessageAction::Copy => window.clipboard().set_text(&item.body),
-                    MessageAction::Edit => window.edit(&item),
-                    MessageAction::Delete => window.confirm_delete(&item),
-                }
+                window.perform_action(action, &item, &anchor, rect);
             });
             content.append(&button);
         }

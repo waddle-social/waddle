@@ -212,7 +212,7 @@ impl WaddleEventListener for Forwarder {
 
 #[derive(Clone)]
 pub struct Session {
-    client: Arc<WaddleClient>,
+    pub(crate) client: Arc<WaddleClient>,
     /// For XEP-0363 uploads and fetching shared files.
     transfers: attachments::Transfers,
     pub me: Me,
@@ -1053,7 +1053,7 @@ fn timestamp_ms(raw: Option<&str>) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn me() -> Me {
@@ -1088,7 +1088,7 @@ mod tests {
         }
     }
 
-    fn wire(from: &str, kind: &str, body: &str) -> WaddleMessage {
+    pub(crate) fn wire(from: &str, kind: &str, body: &str) -> WaddleMessage {
         WaddleMessage {
             id: Some("m1".into()),
             from: Some(from.into()),

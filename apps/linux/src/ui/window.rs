@@ -79,6 +79,18 @@ mod imp {
         #[template_child]
         pub timeline_view: TemplateChild<gtk::ListView>,
         #[template_child]
+        pub pins_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub search_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub search_bar: TemplateChild<gtk::SearchBar>,
+        #[template_child]
+        pub search_entry: TemplateChild<gtk::SearchEntry>,
+        #[template_child]
+        pub search_results_scroller: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub search_results: TemplateChild<gtk::ListBox>,
+        #[template_child]
         pub composer: TemplateChild<gtk::Box>,
         #[template_child]
         pub composer_entry: TemplateChild<gtk::Entry>,
@@ -142,6 +154,8 @@ mod imp {
         /// Conversations with a history page in flight.
         pub loading_history: RefCell<HashSet<String>>,
         pub rows: RefCell<Option<gio::ListStore>>,
+        /// Pins, search and jumps (see ui/message_tools.rs).
+        pub tools: RefCell<crate::ui::message_tools::ToolsState>,
     }
 
     #[glib::object_subclass]
