@@ -388,11 +388,13 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
         };
         assert_eq!(delivered.to, Some(recipient.clone().into()));
         assert_eq!(delivered.bodies, message.bodies);
+        // XEP-0313 4.1.1: the sender's archive stamp is not delivered to the
+        // recipient; only the recipient's own stamp is.
         assert!(waddle_xmpp_core::xep0359::extract_stanza_id_by(
             &delivered,
             &sender.to_bare().into()
         )
-        .is_some());
+        .is_none());
         // Sender and recipient archives commit before the processed copy is sent.
         assert_eq!(fixture.count("mam_messages").await, 2);
         assert!(waddle_xmpp_core::xep0359::extract_stanza_id_by(

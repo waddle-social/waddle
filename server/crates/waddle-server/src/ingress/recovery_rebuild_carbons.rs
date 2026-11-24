@@ -80,6 +80,7 @@ fn carbon_message(
     // XEP-0280 forwards the original message. In particular a sent carbon's
     // inner `to` must remain the correspondent, never the carbon owner.
     let mut message = input.envelope.message().clone();
+    super::recorded::withhold_sender_archive_stamp(&mut message, owner);
     let mut dependencies = Vec::new();
     for intent in input.recorded {
         if let IngressEffectIntent::ArchiveAuthoritative {

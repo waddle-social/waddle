@@ -191,12 +191,28 @@ pub(in crate::ingress) fn prepared_direct_message<'a>(
     .then_some(message)
 }
 
+/// XEP-0313 section 4.1.1: a copy for an account other than the sender does not
+/// carry the sender's archive `<stanza-id/>`. The canonical envelope keeps that
+/// stamp for the sender's archive row and sent carbons, so every rebuild of a
+/// copy for `owner` removes it first.
+pub(in crate::ingress) fn withhold_sender_archive_stamp(
+    message: &mut xmpp_parsers::message::Message,
+    owner: &jid::BareJid,
+) {
+    if let Some(sender) = message.from.as_ref().map(jid::Jid::to_bare) {
+        if sender != *owner {
+            waddle_xmpp_core::xep0359::remove_stanza_ids_by(message, &sender.into());
+        }
+    }
+}
+
 pub(in crate::ingress) fn delivery_message(
     envelope: &MessageEnvelope,
     recipient: &jid::BareJid,
     intents: &[IngressEffectIntent],
 ) -> xmpp_parsers::message::Message {
     let mut message = envelope.message().clone();
+    withhold_sender_archive_stamp(&mut message, recipient);
     // A bare-target message remains bare even when today's route is live;
     // full-target messages retain the canonical requested resource.
     if message

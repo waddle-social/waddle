@@ -134,6 +134,7 @@ pub(super) async fn authorize(
         return Err(AppendAuthorityRejection::CarbonObligationMismatch);
     }
     let mut expected = envelope.message().clone();
+    super::recorded::withhold_sender_archive_stamp(&mut expected, &carbon.owner);
     let mut archived_owner = false;
     for intent in &intents {
         if let IngressEffectIntent::ArchiveAuthoritative {

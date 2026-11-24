@@ -50,3 +50,4 @@ pub use implementation::restore_delivery_payloads;
 pub use implementation::restore_room_observer_envelope;
 pub use implementation::restore_subject_rejection_replies;
 pub use implementation::room_canonical_envelope;
+pub(super) use implementation::withhold_sender_archive_stamp;
