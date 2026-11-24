@@ -395,6 +395,7 @@ impl Fixture {
                     gate_schema_identity,
                 ))),
             }),
+            remote_publisher: Default::default(),
         };
         let pooled_schema_check = pooled_store.verify_owner_transaction(&mut pooled_tx).await;
         pooled_tx.rollback().await?;

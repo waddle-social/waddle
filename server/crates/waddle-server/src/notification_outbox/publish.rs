@@ -363,7 +363,9 @@ impl NotificationOutboxStore {
             }
         }
 
-        if job.push_service_jid() != first_party_service_jid {
+        let remote_target = job.push_service_jid() != first_party_service_jid;
+        let remote_publisher = self.remote_publisher.get().cloned();
+        if remote_target && remote_publisher.is_none() {
             if self
                 .mark_job_failed_with_failure(job, PublishFailureClass::InvalidTarget)
                 .await?
@@ -482,6 +484,22 @@ impl NotificationOutboxStore {
                 job_id: job.job_id.clone(),
             });
         };
+        if remote_target {
+            let Some(publisher) = remote_publisher else {
+                return self
+                    .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::InvalidTarget)
+                    .await;
+            };
+            return self
+                .publish_remote_job(
+                    job,
+                    publisher.as_ref(),
+                    item,
+                    publish_options,
+                    prior_acceptance_may_exist,
+                )
+                .await;
+        }
         match push_service
             .enqueue_registered_notification_from_user_server_with_publish_options(
                 &job.push_service_jid,
@@ -547,6 +565,55 @@ impl NotificationOutboxStore {
                     PublishFailureClass::QueueUnknown.with_error(&error),
                 )
                 .await
+            }
+        }
+    }
+
+    /// Publish a frozen notification to a remote Push Service over S2S
+    /// (XEP-0357 §5). Acceptance is the route taking the IQ; whether the
+    /// service keeps the registration enabled is decided later by its answer.
+    async fn publish_remote_job(
+        &self,
+        job: &NotificationOutboxJob,
+        publisher: &dyn super::RemotePushPublisher,
+        item: PubSubItem,
+        publish_options: Option<Element>,
+        prior_acceptance_may_exist: bool,
+    ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        let delivery = uuid::Uuid::parse_str(job.job_id.as_str())
+            .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
+        let outcome = publisher
+            .publish(super::RemotePushPublication {
+                service: job.push_service_jid.clone(),
+                node: job.node.clone(),
+                job: delivery,
+                attempt: u32::try_from(job.attempt_count).unwrap_or(u32::MAX),
+                item,
+                publish_options,
+            })
+            .await;
+        match outcome {
+            super::RemotePushPublishOutcome::Accepted => {
+                if !self.mark_job_published(job).await? {
+                    return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                        job_id: job.job_id.clone(),
+                    });
+                }
+                Ok(NotificationOutboxPublishOutcome::Published {
+                    job_id: job.job_id.clone(),
+                    item_id: job.job_id.as_str().to_string(),
+                })
+            }
+            super::RemotePushPublishOutcome::Refused => {
+                self.record_known_queue_refusal(job, prior_acceptance_may_exist)
+                    .await?;
+                tracing::warn!(
+                    job_id = job.job_id.as_str(),
+                    failure = "queue_refused",
+                    "remote push publication was not accepted by the S2S route"
+                );
+                self.retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::QueueRefused)
+                    .await
             }
         }
     }
