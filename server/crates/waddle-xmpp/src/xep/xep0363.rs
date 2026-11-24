@@ -301,9 +301,43 @@ fn upload_error_payload(original_iq: &Iq) -> Option<Element> {
     }
 }
 
+/// Maximum stored filename length in bytes. Kept well below the 255-byte
+/// filesystem component limit so backends can append suffixes such as
+/// `.meta` to the blob key.
+const MAX_FILENAME_BYTES: usize = 200;
+
+/// Longest extension (including the dot) that is preserved when truncating.
+const MAX_EXTENSION_BYTES: usize = 32;
+
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn truncate_keeping_extension(name: &str, max_bytes: usize) -> String {
+    if name.len() <= max_bytes {
+        return name.to_string();
+    }
+    if let Some(dot) = name.rfind('.') {
+        let ext = &name[dot..];
+        if dot > 0 && ext.len() <= MAX_EXTENSION_BYTES {
+            let stem = truncate_to_char_boundary(&name[..dot], max_bytes - ext.len());
+            return format!("{stem}{ext}");
+        }
+    }
+    truncate_to_char_boundary(name, max_bytes).to_string()
+}
+
 /// Sanitize filename for use in URLs and storage.
 ///
-/// Removes path components, replaces unsafe characters, and limits length.
+/// Removes path components, replaces unsafe characters, and limits length to
+/// 200 bytes (on a char boundary, preserving the extension).
 pub fn sanitize_filename(filename: &str) -> String {
     // Extract just the filename (remove any path components)
     let name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
@@ -320,12 +354,10 @@ pub fn sanitize_filename(filename: &str) -> String {
         })
         .collect();
 
-    // Limit length (max 255 chars)
-    let truncated = if sanitized.len() > 255 {
-        sanitized[..255].to_string()
-    } else {
-        sanitized
-    };
+    // Limit length to 200 bytes on char boundaries, keeping the file ending
+    // intact (XEP-0363 §4: the service SHOULD keep the file name and
+    // especially the file ending intact).
+    let truncated = truncate_keeping_extension(&sanitized, MAX_FILENAME_BYTES);
 
     // Ensure we have a valid filename
     if truncated.is_empty() || truncated == "." || truncated == ".." {

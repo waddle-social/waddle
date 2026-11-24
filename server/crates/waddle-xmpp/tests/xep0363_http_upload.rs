@@ -489,7 +489,27 @@ fn xep0363_sanitize_filename_replaces_problematic_chars() {
 fn xep0363_sanitize_filename_caps_length_at_255() {
     let long = "a".repeat(500);
     let sanitized = sanitize_filename(&long);
-    assert!(sanitized.len() <= 255);
+    assert!(sanitized.len() <= 200);
+}
+
+#[test]
+fn xep0363_sanitize_filename_multibyte_long_name_does_not_panic_and_keeps_extension() {
+    // 128 two-byte chars = 256 bytes: the old byte slice at 255 split a char.
+    let name = format!("{}.png", "\u{e9}".repeat(200));
+    let sanitized = sanitize_filename(&name);
+    assert!(sanitized.len() <= 200, "len {}", sanitized.len());
+    assert!(sanitized.ends_with(".png"), "{sanitized}");
+    assert!(sanitized.starts_with('\u{e9}'));
+
+    // Four-byte chars with no extension.
+    let emoji = "\u{1F600}".repeat(100);
+    let sanitized = sanitize_filename(&emoji);
+    assert!(sanitized.len() <= 200);
+    assert!(!sanitized.is_empty());
+
+    // Pathologically long extension is truncated, never panics.
+    let ext = format!("a.{}", "\u{e9}".repeat(300));
+    assert!(sanitize_filename(&ext).len() <= 200);
 }
 
 #[test]

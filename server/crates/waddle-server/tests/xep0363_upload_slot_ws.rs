@@ -50,3 +50,153 @@ async fn slot_put_headers_are_limited_to_allowed_names() {
         );
     }
 }
+
+/// Request a slot, PUT `body`, and return the GET response.
+async fn upload_and_download(
+    server: &TestServer,
+    client: &mut WsXmppClient,
+    filename: &str,
+    content_type: &str,
+    body: &[u8],
+) -> reqwest::Response {
+    let id = format!("slot-{}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<iq type="get" id="{id}" to="upload.{DOMAIN}"><request xmlns="{NS_UPLOAD}" filename="{filename}" size="{}" content-type="{content_type}"/></iq>"#,
+            body.len()
+        ))
+        .await
+        .expect("send slot request");
+    let reply = client
+        .recv_matching(|frame| frame.contains(&id))
+        .await
+        .expect("slot response");
+    let iq: Element = reply.parse().expect("typed slot response");
+    let slot = iq
+        .get_child("slot", NS_UPLOAD)
+        .unwrap_or_else(|| panic!("slot element: {reply}"));
+    let path_of = |url: &str| {
+        let rest = url.split_once("://").expect("absolute url").1;
+        format!(
+            "{}{}",
+            server.http_base_url(),
+            &rest[rest.find('/').unwrap()..]
+        )
+    };
+    let put_url = path_of(
+        slot.get_child("put", NS_UPLOAD)
+            .unwrap()
+            .attr("url")
+            .unwrap(),
+    );
+    let get_url = path_of(
+        slot.get_child("get", NS_UPLOAD)
+            .unwrap()
+            .attr("url")
+            .unwrap(),
+    );
+    let http = reqwest::Client::new();
+    let put = http
+        .put(&put_url)
+        .header("Content-Type", content_type)
+        .body(body.to_vec())
+        .send()
+        .await
+        .expect("PUT upload");
+    assert!(put.status().is_success(), "PUT status {}", put.status());
+    http.get(&get_url).send().await.expect("GET download")
+}
+
+async fn connect(server: &TestServer) -> WsXmppClient {
+    let password = server.fixed_account_password().to_string();
+    WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &password,
+        &format!("xep0363-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("connect and auth")
+}
+
+fn header<'a>(resp: &'a reqwest::Response, name: &str) -> &'a str {
+    resp.headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("missing {name} header"))
+        .to_str()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn dangerous_uploads_are_served_as_sandboxed_attachments() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = connect(&server).await;
+
+    for (name, ctype, body) in [
+        ("x.html", "text/html", &b"<script>alert(1)</script>"[..]),
+        (
+            "x.svg",
+            "image/svg+xml",
+            &b"<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'/>"[..],
+        ),
+        ("x.xml", "application/xhtml+xml", &b"<html/>"[..]),
+    ] {
+        let resp = upload_and_download(&server, &mut client, name, ctype, body).await;
+        assert_eq!(resp.status(), 200, "{name}");
+        assert!(
+            header(&resp, "content-disposition").starts_with("attachment;"),
+            "{name}"
+        );
+        assert_eq!(
+            header(&resp, "content-type"),
+            "application/octet-stream",
+            "{name}"
+        );
+        assert_eq!(header(&resp, "x-content-type-options"), "nosniff");
+        let csp = header(&resp, "content-security-policy");
+        assert!(
+            csp.contains("default-src 'none'") && csp.contains("sandbox"),
+            "{csp}"
+        );
+        assert_eq!(resp.bytes().await.unwrap().as_ref(), body);
+    }
+}
+
+#[tokio::test]
+async fn passive_media_uploads_stay_inline_with_hardening_headers() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = connect(&server).await;
+
+    let resp = upload_and_download(
+        &server,
+        &mut client,
+        "pic.png",
+        "image/png",
+        b"\x89PNG\r\n\x1a\n",
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert!(header(&resp, "content-disposition").starts_with("inline;"));
+    assert_eq!(header(&resp, "content-type"), "image/png");
+    assert_eq!(header(&resp, "x-content-type-options"), "nosniff");
+    assert!(header(&resp, "content-security-policy").contains("default-src 'none'"));
+}
+
+#[tokio::test]
+async fn long_multibyte_filename_gets_a_slot_and_keeps_extension() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut client = connect(&server).await;
+
+    let filename = format!("{}.png", "\u{e9}".repeat(200));
+    let resp = upload_and_download(&server, &mut client, &filename, "image/png", b"png").await;
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.url().path().ends_with(".png"),
+        "extension kept: {}",
+        resp.url()
+    );
+}

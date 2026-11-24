@@ -96,25 +96,17 @@ pub(super) async fn download_handler(
     };
 
     // Build response with appropriate headers
-    let mut headers = HeaderMap::new();
-
     // Use content-type from blob metadata (authoritative), fall back to DB
     let content_type = if blob_meta.content_type != "application/octet-stream" {
         blob_meta.content_type
     } else {
         slot.content_type
     };
-    if let Ok(ct) = content_type.parse() {
-        headers.insert(header::CONTENT_TYPE, ct);
-    }
+
+    let mut headers = download_headers(&content_type, &slot.filename);
 
     if let Ok(content_length) = file_contents.len().to_string().parse() {
         headers.insert(header::CONTENT_LENGTH, content_length);
-    }
-
-    let disposition = format!("inline; filename='{}'", slot.filename);
-    if let Ok(disp) = disposition.parse() {
-        headers.insert(header::CONTENT_DISPOSITION, disp);
     }
 
     if let Ok(cache) = "public, max-age=31536000, immutable".parse() {
@@ -128,4 +120,85 @@ pub(super) async fn download_handler(
     );
 
     (StatusCode::OK, headers, file_contents).into_response()
+}
+
+/// Media types that are safe to render inline from the server origin.
+///
+/// Anything else (HTML, SVG, XML, scripts, PDF, unknown types) is forced to
+/// download so user-supplied content can never execute in the server origin
+/// (XEP-0363 security considerations: isolate GET content, use CSP).
+fn is_safe_inline_type(essence: &str) -> bool {
+    matches!(
+        essence,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp"
+    ) || essence.starts_with("audio/")
+        || essence.starts_with("video/")
+}
+
+fn is_plain_filename_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')
+}
+
+/// RFC 6266 Content-Disposition value with an ASCII fallback and `filename*`.
+fn content_disposition(kind: &str, filename: &str) -> String {
+    let fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && is_plain_filename_byte(c as u8) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::with_capacity(filename.len());
+    for b in filename.bytes() {
+        if is_plain_filename_byte(b) {
+            encoded.push(char::from(b));
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("{kind}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
+/// Build the security-relevant response headers for a file download.
+///
+/// Every response carries `nosniff` and a locked-down CSP. Only an allowlist
+/// of passive media types is served inline with its own Content-Type; every
+/// other type is sent as `application/octet-stream` with `attachment`.
+pub(super) fn download_headers(content_type: &str, filename: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let inline = is_safe_inline_type(&essence);
+
+    let served_type = if inline {
+        content_type
+    } else {
+        "application/octet-stream"
+    };
+    headers.insert(
+        header::CONTENT_TYPE,
+        served_type
+            .parse()
+            .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream")),
+    );
+    let kind = if inline { "inline" } else { "attachment" };
+    if let Ok(disp) = content_disposition(kind, filename).parse() {
+        headers.insert(header::CONTENT_DISPOSITION, disp);
+    }
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+    );
+    headers
 }
