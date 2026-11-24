@@ -453,7 +453,6 @@ removals without respawning; it is not a restart count.
 | `waddle.state.caps.caps_cache` | i64_gauge | `{entry}` | Cached XEP-0115 disco#info bodies (LRU-bounded). | `waddle-server/src/server/state_inventory_metrics.rs` |
 | `waddle.state.caps.pending_resolutions` | i64_gauge | `{entry}` | Outstanding XEP-0115 disco#info resolutions awaiting client reply. | `waddle-server/src/server/state_inventory_metrics.rs` |
 | `waddle.state.connections.full_jid_connections` | i64_gauge | `{entry}` | Live full-JID WebSocket connections registered with the server. | `waddle-server/src/server/state_inventory_metrics.rs` |
-| `waddle.state.connections.last_activity` | i64_gauge | `{entry}` | Bare JIDs with recorded XEP-0012 last-activity timestamps. | `waddle-server/src/server/state_inventory_metrics.rs` |
 | `waddle.state.connections.pending_subscription_stanzas` | i64_gauge | `{entry}` | Bare JIDs holding queued XEP-0162 subscription stanzas for offline peers. | `waddle-server/src/server/state_inventory_metrics.rs` |
 | `waddle.state.connections.presence_states` | i64_gauge | `{entry}` | Bare JIDs with tracked presence state. | `waddle-server/src/server/state_inventory_metrics.rs` |
 | `waddle.state.profile.avatar_source_locks` | i64_gauge | `{entry}` | Per-BareJid avatar-publish mutexes currently held or waiting. | `waddle-server/src/server/state_inventory_metrics.rs` |

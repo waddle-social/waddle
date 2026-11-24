@@ -52,7 +52,7 @@ pub use sending::{
     PendingFlushReserveError, StaleBinding, WriteAcceptanceEnqueueOutcome,
     WriteAcceptanceEnqueueRejection,
 };
-pub use state::{LastActivityState, PresenceState};
+pub use state::PresenceState;
 pub use write_interruption::SocketWriteInterruption;
 
 /// Delivery to full JIDs no connection of this deployment can hold: the
@@ -91,8 +91,6 @@ pub struct ConnectionRegistry {
     pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
     /// Per-resource presence state (show/status/priority) for probe responses.
     presence_states: Arc<DashMap<FullJid, PresenceState>>,
-    /// Last recorded offline activity for each bare JID.
-    last_activity: DashMap<BareJid, LastActivityState>,
     /// Server start time used for XEP-0012 uptime responses.
     started_at: Instant,
     /// Reverse index from XEP-0198 SM stream id to its publishing full JID
@@ -117,7 +115,6 @@ impl ConnectionRegistry {
             connections: Arc::new(DashMap::new()),
             pending_subscription_stanzas: DashMap::new(),
             presence_states: Arc::new(DashMap::new()),
-            last_activity: DashMap::new(),
             started_at: Instant::now(),
             sm_stream_owners: Arc::new(DashMap::new()),
             foreign: OnceLock::new(),
@@ -266,12 +263,6 @@ impl ConnectionRegistry {
     /// server's `/debug/state-inventory` endpoint.
     pub fn presence_state_count(&self) -> usize {
         self.presence_states.len()
-    }
-
-    /// Number of bare JIDs with recorded last-activity timestamps.
-    /// Used by the server's `/debug/state-inventory` endpoint.
-    pub fn last_activity_count(&self) -> usize {
-        self.last_activity.len()
     }
 }
 

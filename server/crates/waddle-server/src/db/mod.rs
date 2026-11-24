@@ -9,6 +9,7 @@ pub mod blocking;
 pub mod bootstrap;
 mod catalog_fence;
 pub(crate) use catalog_fence::{try_catalog_fence_lock, CatalogFenceLock};
+pub(crate) mod last_activity;
 pub mod lineage;
 pub mod local_space_subscriptions;
 mod migrations;

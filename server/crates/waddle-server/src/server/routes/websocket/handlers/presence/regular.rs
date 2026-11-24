@@ -70,16 +70,11 @@ pub(super) async fn handle_regular_presence_update(
                 .protocol
                 .connection_registry
                 .update_presence_if_owner_transition(sender_jid, owner, available, priority)
-                .map(|was_available| (owner, was_available))
+                .map(|(was_available, previous_priority)| (owner, was_available, previous_priority))
         })
     };
     if available {
-        if let Some((owner, was_available)) = availability_transition(true) {
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .clear_last_activity(&sender_jid.to_bare());
+        if let Some((owner, was_available, previous_priority)) = availability_transition(true) {
             if !was_available {
                 // A new availability period: the caps advertised now are
                 // fresh interest, not a continuation of an earlier session.
@@ -108,8 +103,13 @@ pub(super) async fn handle_regular_presence_update(
             // claim-race semantics are unchanged; the actual row pushing is
             // handed to a spawned task below so a backlog larger than the
             // outbound mpsc can't self-deadlock this connection (issue #1220).
+            // RFC 6121 §8.5.2.1.1 / XEP-0160 §3: a message stored while the
+            // session was unavailable or had a negative priority is delivered
+            // when it next sends non-negative available presence, so that
+            // transition re-arms the flush even after the first one.
+            let rearm = !was_available || previous_priority < 0;
             let flush_plan = if priority >= 0 {
-                plan_offline_flush(state, sender_jid, owner).await
+                plan_offline_flush(state, sender_jid, owner, rearm).await
             } else {
                 None
             };
@@ -154,21 +154,31 @@ pub(super) async fn handle_regular_presence_update(
                 "Skipping presence registry writes: connection does not own its registry slot"
             );
         }
-    } else if let Some((owner, _was_available)) = availability_transition(false) {
+    } else if let Some((owner, _was_available, _previous_priority)) = availability_transition(false)
+    {
         state
             .deps
             .protocol
             .connection_registry
             .clear_presence_state_if_owner(sender_jid, owner);
         mirror_remote_presence_update(state, sender_jid, owner, false, priority, None).await;
-        state
+        // XEP-0012: the last logout is durable, so every node answers the
+        // same and a restart keeps it.
+        let account = sender_jid.to_bare();
+        if let Err(error) = state
             .deps
-            .protocol
-            .connection_registry
-            .record_last_activity(
-                &sender_jid.to_bare(),
-                presence.statuses.values().next().cloned(),
-            );
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(crate::db::last_activity::record(
+                &account,
+                chrono::Utc::now().timestamp_millis(),
+                presence.statuses.values().next().map(String::as_str),
+            ))
+            .await
+        {
+            warn!(jid = %account, error = %error, "Failed to record last activity");
+        }
     } else {
         debug!(
             jid = %sender_jid,
@@ -328,6 +338,7 @@ async fn plan_offline_flush(
     state: &WebSocketState,
     sender_jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    rearm: bool,
 ) -> Option<OfflineFlushPlan> {
     let entry = state
         .deps
@@ -335,7 +346,15 @@ async fn plan_offline_flush(
         .connection_registry
         .entry_if_owner(sender_jid, owner)?;
     if !entry.claim_offline_flush() {
-        return None;
+        // The session already flushed once. Re-flush only when it returns
+        // to non-negative availability (`rearm`): messages stored while it
+        // was unavailable or negative are still pending. `claim_for_session`
+        // tags each row for one session, so a re-flush cannot deliver a
+        // row twice, and the account authority's once-per-binding record
+        // (which guards resumed sessions) does not apply to a live session.
+        return rearm.then(|| OfflineFlushPlan {
+            sm_session: entry.sm_stream_id(),
+        });
     }
     // The selected account authority records the flush before it runs. A
     // resumed session, whose earlier binding already received its backlog,

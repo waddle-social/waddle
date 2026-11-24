@@ -75,20 +75,49 @@ pub(super) async fn handle_last_activity_iq(
                 return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
             }
 
-            if let Some(last_activity) = state
+            let record = match state
                 .deps
-                .protocol
-                .connection_registry
-                .last_activity(&target_bare)
+                .app_state
+                .db_pool
+                .global_actor()
+                .ask(crate::db::last_activity::lookup(&target_bare))
+                .await
             {
-                let seconds = chrono::Utc::now()
-                    .signed_duration_since(last_activity.timestamp)
-                    .num_seconds()
-                    .max(0) as u64;
-                let response =
-                    build_last_activity_response(iq, seconds, last_activity.status.as_deref());
-                return vec![iq_to_xml(response)];
-            }
+                Ok(row) => row
+                    .map(|row| crate::db::last_activity::decode(&row))
+                    .transpose()
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            return match record {
+                Ok(Some((logged_out_at_ms, status))) => {
+                    let seconds =
+                        (chrono::Utc::now().timestamp_millis() - logged_out_at_ms).max(0) / 1000;
+                    vec![iq_to_xml(build_last_activity_response(
+                        iq,
+                        seconds as u64,
+                        status.as_deref(),
+                    ))]
+                }
+                // The account has never logged out, so the server has no
+                // last presence activity to report. The requester is
+                // authorized, so this is not `forbidden`.
+                Ok(None) => vec![build_iq_error_xml_typed(
+                    iq.id(),
+                    response_from,
+                    response_to,
+                    service_unavailable_iq_error("No last activity recorded for this account."),
+                )],
+                Err(error) => {
+                    warn!(error = %error, target = %target_bare, "Failed to read last activity");
+                    vec![build_iq_error_xml_typed(
+                        iq.id(),
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                }
+            };
         }
 
         let Some(node) = target_bare.node() else {

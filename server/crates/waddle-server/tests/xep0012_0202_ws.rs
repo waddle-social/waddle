@@ -2,6 +2,7 @@
 
 use waddle_ws_test_support as ws_common;
 
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -380,6 +381,120 @@ async fn websocket_last_activity_subscribed_contact_receives_activity() {
         "expected last status text: {offline}"
     );
 
+    let _ = bob.close().await;
+}
+
+/// Start a persistent server holding alice and bob on `database_url`.
+async fn start_persistent_alice_bob(
+    database_url: &str,
+    alice_password: &str,
+    bob_password: &str,
+) -> (TestServer, WsXmppClient, WsXmppClient) {
+    let server = TestServer::start_persistent_with_extra_accounts(
+        database_url,
+        &[("alice", alice_password), ("bob", bob_password)],
+    );
+    let alice = connect_user(&server, "alice", alice_password).await;
+    let bob = connect_user(&server, "bob", bob_password).await;
+    (server, alice, bob)
+}
+
+/// XEP-0012 "Offline User Query": the last logout is durable, so an
+/// authorized contact still gets "seconds" and the status text after the
+/// server restarts (and from any other node sharing the database).
+#[tokio::test]
+async fn websocket_last_activity_survives_server_restart() {
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("xep0012-restart.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+
+    let (server, mut alice, mut bob) =
+        start_persistent_alice_bob(&database_url, &alice_password, &bob_password).await;
+    bob_subscribes_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(
+            r#"<presence xmlns="jabber:client" type="unavailable"><status>Heading Home</status></presence>"#,
+        )
+        .await
+        .expect("alice unavailable");
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(server);
+
+    let server = TestServer::start_persistent_with_extra_accounts(
+        &database_url,
+        &[("alice", &alice_password), ("bob", &bob_password)],
+    );
+    let mut bob = connect_user(&server, "bob", &bob_password).await;
+    let response = last_activity_query(&mut bob, "alice@localhost", "ws-last-restart")
+        .await
+        .expect("last activity response");
+    assert!(
+        response.contains("type='result'"),
+        "expected a result after restart: {response}"
+    );
+    assert!(
+        response.contains("seconds="),
+        "expected seconds: {response}"
+    );
+    assert!(
+        response.contains("Heading Home"),
+        "expected the last status text after restart: {response}"
+    );
+    let _ = bob.close().await;
+}
+
+/// An authorized requester is never told it is unauthorized: when the
+/// account has no last-logout record the answer is `service-unavailable`
+/// (there is no last activity to report), not `forbidden`.
+#[tokio::test]
+async fn websocket_last_activity_authorized_without_record_is_not_forbidden() {
+    let db_dir = tempfile::tempdir().expect("temp db dir");
+    let db_path = db_dir.path().join("xep0012-norecord.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+
+    let (_server, mut alice, mut bob) =
+        start_persistent_alice_bob(&database_url, &alice_password, &bob_password).await;
+    bob_subscribes_to_alice(&mut alice, &mut bob).await;
+    alice
+        .send(r#"<presence xmlns="jabber:client" type="unavailable"/>"#)
+        .await
+        .expect("alice unavailable");
+    let _ = alice.close().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let options = SqliteConnectOptions::from_str(&database_url)
+        .expect("parse sqlite url")
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open sqlite db");
+    let deleted = sqlx::query("DELETE FROM account_last_activity WHERE account_jid = ?")
+        .bind("alice@localhost")
+        .execute(&pool)
+        .await
+        .expect("delete last activity record");
+    assert_eq!(deleted.rows_affected(), 1, "logout must have been recorded");
+    pool.close().await;
+
+    let response = last_activity_query(&mut bob, "alice@localhost", "ws-last-norecord")
+        .await
+        .expect("last activity response");
+    assert!(
+        response.contains("service-unavailable"),
+        "expected service-unavailable: {response}"
+    );
+    assert!(
+        !response.contains("forbidden"),
+        "an authorized requester must not get forbidden: {response}"
+    );
     let _ = bob.close().await;
 }
 

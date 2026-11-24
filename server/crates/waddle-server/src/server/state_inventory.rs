@@ -70,7 +70,6 @@ pub struct ConnectionInventory {
     pub full_jid_connections: usize,
     pub pending_subscription_stanzas: usize,
     pub presence_states: usize,
-    pub last_activity: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,7 +170,6 @@ pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
             full_jid_connections: protocol.connection_registry.connection_count(),
             pending_subscription_stanzas: protocol.connection_registry.pending_subscription_count(),
             presence_states: protocol.connection_registry.presence_state_count(),
-            last_activity: protocol.connection_registry.last_activity_count(),
         },
         rooms: RoomInventory {
             total: rooms_total,

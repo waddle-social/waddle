@@ -1,8 +1,7 @@
 use super::{
-    debug, info, BareJid, ConnectionRegistry, FullJid, LastActivityState, LocalConnectionBindingId,
-    Ordering, PresenceState,
+    debug, info, BareJid, ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering,
+    PresenceState,
 };
-use chrono::Utc;
 
 impl ConnectionRegistry {
     /// Update presence state for a connected resource.
@@ -41,8 +40,8 @@ impl ConnectionRegistry {
             .is_some()
     }
 
-    /// Owner-gated presence availability write returning `Some(was_available)`
-    /// on success, or `None` when the registry slot is absent or superseded.
+    /// Owner-gated presence availability write returning
+    /// `Some((was_available, previous_priority))` on success, or `None` when the registry slot is absent or superseded.
     ///
     /// Uses an atomic swap on `presence_available` under the entry guard so
     /// callers can distinguish the initial transition from unavailable to
@@ -54,7 +53,7 @@ impl ConnectionRegistry {
         owner: &LocalConnectionBindingId,
         available: bool,
         priority: i8,
-    ) -> Option<bool> {
+    ) -> Option<(bool, i8)> {
         let entry = self.connections.get(jid)?;
         if entry.value().binding_id() != *owner {
             return None;
@@ -63,11 +62,11 @@ impl ConnectionRegistry {
             .value()
             .presence_available
             .swap(available, Ordering::AcqRel);
-        entry
+        let previous_priority = entry
             .value()
             .presence_priority
-            .store(priority, Ordering::Relaxed);
-        Some(was_available)
+            .swap(priority, Ordering::Relaxed);
+        Some((was_available, previous_priority))
     }
 
     /// Owner-gated [`Self::update_presence_state`]: writes the JID-keyed
@@ -165,29 +164,6 @@ impl ConnectionRegistry {
         }
         self.presence_states.remove(jid);
         true
-    }
-
-    /// Record last offline activity for a bare JID.
-    pub fn record_last_activity(&self, bare_jid: &BareJid, status: Option<String>) {
-        self.last_activity.insert(
-            bare_jid.clone(),
-            LastActivityState {
-                timestamp: Utc::now(),
-                status,
-            },
-        );
-    }
-
-    /// Get the last recorded offline activity for a bare JID.
-    pub fn last_activity(&self, bare_jid: &BareJid) -> Option<LastActivityState> {
-        self.last_activity
-            .get(bare_jid)
-            .map(|entry| entry.value().clone())
-    }
-
-    /// Clear the last recorded offline activity for a bare JID.
-    pub fn clear_last_activity(&self, bare_jid: &BareJid) {
-        self.last_activity.remove(bare_jid);
     }
 
     /// Return the current server uptime in whole seconds.

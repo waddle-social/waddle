@@ -324,6 +324,7 @@ async fn retire_in(
         "DELETE FROM s2s_pending_subscriptions WHERE account_jid = ?",
         "DELETE FROM s2s_remote_pubsub_subscriptions WHERE account_jid = ?",
         "DELETE FROM s2s_remote_offline_admissions WHERE account_jid = ?",
+        "DELETE FROM account_last_activity WHERE account_jid = ?",
     ] {
         tx.execute(statement, crate::db_params![canonical.as_str()])
             .await?;

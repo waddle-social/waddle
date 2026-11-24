@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use minidom::Element;
 
 /// Presence state for a connected resource (show, status, priority, idle).
@@ -15,13 +14,4 @@ pub struct PresenceState {
     /// on probe/subscription delivery so the contact's own advertisements are
     /// never replaced by server-rebuilt ones (issue #1101).
     pub payloads: Vec<Element>,
-}
-
-/// Last recorded offline activity for a bare JID.
-#[derive(Debug, Clone)]
-pub struct LastActivityState {
-    /// Timestamp when the user last became offline.
-    pub timestamp: DateTime<Utc>,
-    /// Optional status text from the last unavailable presence.
-    pub status: Option<String>,
 }

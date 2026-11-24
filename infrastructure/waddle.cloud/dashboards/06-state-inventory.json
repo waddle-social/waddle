@@ -60,8 +60,7 @@
       "targets": [
         { "expr": "waddle_state_connections_full_jid_connections", "legendFormat": "connections" },
         { "expr": "waddle_state_connections_pending_subscription_stanzas", "legendFormat": "pending_subs" },
-        { "expr": "waddle_state_connections_presence_states", "legendFormat": "presence_states" },
-        { "expr": "waddle_state_connections_last_activity", "legendFormat": "last_activity" }
+        { "expr": "waddle_state_connections_presence_states", "legendFormat": "presence_states" }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
     },
