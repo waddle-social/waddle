@@ -25,6 +25,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var isCameraOn = false
     private(set) var isMicrophoneBlocked = false
     private(set) var isCameraBlocked = false
+    /// Counted so that a notice someone put away comes back when the device is refused again.
+    private(set) var mediaRefusals: [CallMediaIssue.Kind: Int] = [:]
     private(set) var isScreenShareOn = false
     private(set) var isScreenShareBlocked = false
     /// Our own shared screen, for the notice that shows us what everyone sees.
@@ -547,6 +549,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let found = await capturableContent() else {
             // Refused, or not yet answered: either way there is nothing to pick from.
             isScreenShareBlocked = !CGPreflightScreenCaptureAccess()
+            if isScreenShareBlocked { mediaRefusals[.screen, default: 0] += 1 }
             return isScreenShareBlocked ? nil : CallScreenSources(CallScreenCandidates(), ownBundleID: nil)
         }
         if isScreenShareBlocked { isScreenShareBlocked = false }
@@ -594,6 +597,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             if self.room === room, generation == screenShareGeneration {
                 wantsScreenShare = false
                 didScreenShareFail = true
+                mediaRefusals[.screen, default: 0] += 1
             }
             return
         }
@@ -639,6 +643,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenCaptureWatcher = nil
             wantsScreenShare = false
             didScreenShareFail = true
+            mediaRefusals[.screen, default: 0] += 1
             refreshTracks()
             return
         }
@@ -740,6 +745,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let isAllowed = await AVCaptureDevice.requestAccess(for: kind)
         // Kept for the dock, which says why the control does nothing.
         if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
+        if !isAllowed { mediaRefusals[kind == .audio ? .microphone : .camera, default: 0] += 1 }
         return isAllowed && self.room === room
     }
 
@@ -751,6 +757,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
+        // What a call could not use was that call's: the next has not been
+        // asked for a camera yet, and may be allowed one by now.
+        if isMicrophoneBlocked { isMicrophoneBlocked = false }
+        if isCameraBlocked { isCameraBlocked = false }
+        if !mediaRefusals.isEmpty { mediaRefusals = [:] }
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }

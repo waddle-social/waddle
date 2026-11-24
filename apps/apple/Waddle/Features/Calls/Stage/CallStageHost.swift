@@ -107,6 +107,8 @@ struct CallStageHost: View {
     /// What can be shared, while the person is picking.
     @State private var screenPicker: CallScreenSources?
     @State private var showsSettings = false
+    /// The devices being checked again, so their notice's button says so.
+    @State private var checkingIssues: Set<CallMediaIssue.Kind> = []
 
     var body: some View {
         let state = session.calls.state
@@ -183,7 +185,8 @@ struct CallStageHost: View {
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
-            notice: media?.deviceNotice,
+            issues: media.map { CallMediaIssues.shown(for: $0.mediaReport, dismissed: memory.dismissedMediaIssues) } ?? [],
+            checkingIssues: checkingIssues,
             connection: media?.connectionQuality,
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
@@ -228,6 +231,32 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
+            retryMediaIssue: { [media, session] kind in
+                // For the call the notice is about, while it is still a call.
+                guard let media, !checkingIssues.contains(kind), session.calls.state.sid == sid,
+                      session.calls.state.isEstablished else { return }
+                // Before the task: two taps in a row are one check.
+                checkingIssues.insert(kind)
+                Task {
+                    defer { checkingIssues.remove(kind) }
+                    switch kind {
+                    case .microphone: await media.setMicrophone(true)
+                    case .camera: await media.setCamera(true)
+                    case .screen:
+                        let sources = await media.screenSources()
+                        if session.calls.state.sid == sid { screenPicker = sources }
+                    }
+                    // The system answers a refusal at once: the button would
+                    // flicker and look as if nothing had been asked.
+                    try? await Task.sleep(for: .milliseconds(600))
+                }
+            },
+            // Put away until its device is refused once more, whichever surface asks (`CallMediaIssues.Dismissals`).
+            dismissMediaIssue: { [model, media] kind in
+                guard let report = media?.mediaReport else { return }
+                model.update(sid) { $0.dismissedMediaIssues.dismiss(kind, in: report) }
+            },
+            openSystemSettings: { kind in CallSystemSettings.open(for: kind) },
             toggleScreenShare: { [media, session] in
                 guard let media else { return }
                 Task {

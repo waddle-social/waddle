@@ -8,6 +8,8 @@ public struct CallStageMemory: Equatable, Sendable {
         didSet { if size == .split { showsParticipants = false } }
     }
     public private(set) var showsParticipants = false
+    /// The notices about our own devices the person put away for this call.
+    public var dismissedMediaIssues = CallMediaIssues.Dismissals()
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
 
