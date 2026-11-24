@@ -24,6 +24,7 @@ use super::{avatar, WaddleWindow};
 use crate::attachments;
 use crate::auth::store::StoredAccount;
 use crate::session::{self, Arrival, Conversation, Flavor, Kind, Session, SessionEvent};
+use crate::settings::MessageOrder;
 
 /// One row in the list: the core's item plus where it sits.
 #[derive(Clone)]
@@ -120,19 +121,19 @@ impl WaddleWindow {
                 super::message_media::bind_cards(&parts.cards, &[], true);
             }
         });
-        imp.timeline_view
-            .set_model(Some(&gtk::NoSelection::new(Some(rows.clone()))));
         imp.timeline_view.set_factory(Some(&factory));
         imp.rows.replace(Some(rows));
+        // Chat or Social order (see ui/order.rs).
+        self.apply_message_order();
 
         // Page older history in when the user nears the top.
         let window = self.clone();
         imp.timeline_scroller
             .vadjustment()
-            .connect_value_changed(move |adjustment| {
+            .connect_value_changed(move |_| {
                 // Thread filtering may skip many pages. Its bounded
                 // batches resume only through the Load Earlier button.
-                if adjustment.value() < 200.0
+                if window.near_oldest()
                     && window
                         .current_conversation()
                         .is_some_and(|conversation| conversation.thread.is_none())
@@ -415,7 +416,7 @@ impl WaddleWindow {
             .any(|diff| matches!(diff, TimelineDiff::Append { .. }));
 
         if imp.current.borrow().as_deref() == Some(conversation.as_str()) {
-            let stick = self.near_bottom();
+            let stick = self.near_newest();
             self.apply(&diffs);
             if stick {
                 self.scroll_to_end();
@@ -818,7 +819,11 @@ impl WaddleWindow {
             if initial {
                 window.scroll_to_end();
             } else if let Some(pushed) = pushed {
-                window.scroll_to(pushed);
+                // Older rows go above the view in Chat order and below it in
+                // Social, where nothing moves.
+                if window.message_order() == MessageOrder::Chat {
+                    window.scroll_to(pushed);
+                }
             }
             // Skip a bounded batch of irrelevant pages. The explicit
             // Load Earlier button resumes once that budget is exhausted.
@@ -938,7 +943,7 @@ impl WaddleWindow {
         }
     }
 
-    fn rebuild_rows(&self) {
+    pub(super) fn rebuild_rows(&self) {
         let imp = self.imp();
         let Some(rows) = imp.rows.borrow().clone() else {
             return;
@@ -960,11 +965,6 @@ impl WaddleWindow {
         rows.extend_from_slice(&objects);
     }
 
-    fn near_bottom(&self) -> bool {
-        let adjustment = self.imp().timeline_scroller.vadjustment();
-        adjustment.upper() - adjustment.page_size() - adjustment.value() < 120.0
-    }
-
     pub(super) fn scroll_to_end(&self) {
         let imp = self.imp();
         let count = imp
@@ -973,11 +973,19 @@ impl WaddleWindow {
             .as_ref()
             .map_or(0, |rows| rows.n_items() as usize);
         if count > 0 {
+            // The newest message: the last store row, or the top in Social.
             self.scroll_to(count - 1);
         }
     }
 
     pub(super) fn scroll_to(&self, index: usize) {
+        let count = self
+            .imp()
+            .rows
+            .borrow()
+            .as_ref()
+            .map_or(0, |rows| rows.n_items() as usize);
+        let index = super::order::display_index(self.message_order(), count, index);
         let Ok(index) = u32::try_from(index) else {
             return;
         };
@@ -1321,7 +1329,18 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         return;
     };
     let item = &row.item;
-    let Layout { header, day } = row.layout;
+    // Newest first reads each message on its own: the group start and the
+    // day divider are positions in oldest-first order, so every message
+    // names its sender and its own day instead.
+    let social = crate::settings::get().message_order == MessageOrder::Social;
+    let Layout { header, day } = if social {
+        Layout {
+            header: true,
+            day: false,
+        }
+    } else {
+        row.layout
+    };
     parts.day.set_visible(day);
     if day {
         parts.day_label.set_label(&format_day(item.timestamp_ms));
@@ -1342,7 +1361,11 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     if let Some(window) = window.upgrade() {
         window.decorate_author(&parts.avatar, &parts.sender, item);
     }
-    parts.time.set_label(&time);
+    if social {
+        parts.time.set_label(&stamp(item.timestamp_ms));
+    } else {
+        parts.time.set_label(&time);
+    }
 
     match &item.reply {
         Some(reply) => {
@@ -1660,7 +1683,7 @@ impl WaddleWindow {
             return;
         };
         // An image landing at the bottom grows its row: stay at the end.
-        let stick = self.near_bottom();
+        let stick = self.near_newest();
         for position in 0..rows.n_items() {
             let Some(object) = rows.item(position).and_downcast::<glib::BoxedAnyObject>() else {
                 continue;
@@ -1721,6 +1744,15 @@ fn format_time(ms: i64) -> String {
         .and_then(|at| at.format("%H:%M"))
         .map(|text| text.to_string())
         .unwrap_or_default()
+}
+
+/// A message's time, with its day unless it is from today.
+fn stamp(ms: i64) -> String {
+    let time = format_time(ms);
+    match format_day(ms).as_str() {
+        "Today" | "" => time,
+        day => format!("{day} {time}"),
+    }
 }
 
 /// "Today", "Yesterday", the weekday this week, else the date.

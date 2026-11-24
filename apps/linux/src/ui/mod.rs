@@ -12,9 +12,11 @@ mod membership;
 mod message_media;
 mod message_tools;
 mod notifications;
+mod order;
 mod people;
 mod person;
 mod pictures;
+mod preferences;
 mod profile;
 mod rooms;
 mod status;
@@ -22,4 +24,5 @@ mod suggestions;
 mod threads;
 mod window;
 
+pub use preferences::apply_appearance;
 pub use window::WaddleWindow;

@@ -30,6 +30,7 @@ mod session_media;
 mod session_profile;
 mod session_rooms;
 mod session_tools;
+mod settings;
 mod stickers;
 mod thread_updates;
 mod threads;
