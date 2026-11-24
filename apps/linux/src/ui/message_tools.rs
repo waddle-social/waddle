@@ -284,6 +284,7 @@ impl WaddleWindow {
             in_thread: conversation.thread.is_some(),
             can_pin: ready && message_actions::may_pin(room, permission, standing),
             can_moderate: ready && message_actions::may_moderate(room, standing),
+            can_retry: false,
         }
     }
 
@@ -293,7 +294,9 @@ impl WaddleWindow {
             return Vec::new();
         };
         let pinned = self.is_pinned(item);
-        message_actions::actions(item, self.action_context(&conversation), pinned)
+        let mut context = self.action_context(&conversation);
+        context.can_retry = self.can_retry(item);
+        message_actions::actions(item, context, pinned)
     }
 
     // ── Pins ─────────────────────────────────────────────────────────────

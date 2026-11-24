@@ -24,6 +24,8 @@ The native client currently supports:
 
 - **Rooms and group chats:** the `+` button above the sidebar creates a room (name, description, members only, listed, forum) or a group chat (people found in the user directory). **Room Details** in the conversation header edits an owner's room settings, lists its people with affiliation, role and hats and its bots, offers promote, demote, kick and ban to those allowed (kick and ban ask first), and leaves or, for owners, deletes the room after confirmation. A group chat's details rename it, add people and leave it. Not yet: browsing and rejoining a room you left, inviting to a regular room, forum topic posts.
 
+- **Delivery, typing and read state:** your messages show Waiting to send, Sending…, Not sent (with **Retry** and **Discard**) and Sent or Read on the newest. Text messages are kept in `$XDG_STATE_HOME/waddle/` until the server acknowledges them and are sent again, with the same id, after a dropped connection or a restart. "Name is typing…" shows under the timeline and your own typing is sent. Reading a conversation tells the other side (XEP-0333) and your other devices (XEP-0490). A banner shows when the connection is lost or the network is gone; the client reconnects with backoff, and at once when the window is focused or the network returns.
+
 - **Voice calls:** the phone button in a one-to-one conversation's header places an audio call (XEP-0353 invitations, then a XEP-0166 session with LiveKit credentials from the server, as on the Apple and web apps). An incoming call opens the call window with Answer and Decline, and posts a notification with the same actions when the app is not in front. The window shows the state, the elapsed time, a mute toggle, microphone and speaker choice, and Hang Up. Audio only for now: no video, screen share or group calls, and no ring tone. Not yet run against a live server or audio hardware.
 
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
@@ -66,6 +68,8 @@ The GTK window tests require a display and are excluded from ordinary headless r
 | `src/message_actions.rs`, `src/pins.rs`, `src/jump.rs`, `src/message_text.rs` | Message action rules, the pinned list, jump planning and body rendering, without widgets |
 | `src/session_tools.rs`, `src/ui/message_tools.rs` | Pin, search and moderation verbs; header buttons, search bar, hover toolbar |
 | `src/rooms.rs`, `src/session_rooms.rs`, `src/ui/rooms.rs` | Room rules (addresses, setting changes, who may moderate whom, member list, group DM members), the room and group DM verbs, and the dialogs |
+| `src/delivery.rs`, `src/typing.rs`, `src/read_sync.rs`, `src/reconnect.rs` | The unsent queue and delivery states, chat states, read markers and cursors, and the reconnect state machine: no widgets, with tests |
+| `src/session_link.rs`, `src/ui/delivery.rs`, `typing.rs`, `read_markers.rs`, `connection.rs` | Their session verbs and window glue: the queue, typing line, marker dispatch, banner, focus and network triggers |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/markup.rs` | XEP-0394: markdown markers to spans, spans to markers, the formatting bar's edits, the span index |
 | `src/extension_commands.rs` | XEP-0050 slash commands and XEP-0004 form rules |

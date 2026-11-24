@@ -52,14 +52,19 @@ export function extractDroppedFiles(event: DragEvent): File[] {
 /** XEP-0363 §4: the only headers a slot's put may ask the client to send. */
 const ALLOWED_PUT_HEADERS = new Set(["authorization", "cookie", "expires"]);
 
+/** XEP-0363 §4: header names and values MUST have newlines stripped before the PUT. */
+function stripNewlines(value: string): string {
+  return value.replace(/[\r\n]/g, "");
+}
+
 function parseSlotResponse(response: WasmUploadSlot): SlotInfo {
   if (!response.put_url || !response.get_url) throw new Error("Upload slot missing PUT or GET URL");
   return {
     putUrl: response.put_url,
     getUrl: response.get_url,
     putHeaders: (response.put_headers ?? [])
-      .filter((header) => header.name && header.value && ALLOWED_PUT_HEADERS.has(header.name.toLowerCase()))
-      .map((header) => [header.name, header.value]),
+      .map((header): [string, string] => [stripNewlines(header.name ?? ""), stripNewlines(header.value ?? "")])
+      .filter(([name, value]) => name && value && ALLOWED_PUT_HEADERS.has(name.toLowerCase())),
   };
 }
 

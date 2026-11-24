@@ -33,6 +33,27 @@ final class InboundBridgeTests: XCTestCase {
         XCTAssertNil(try channel(nil).pinPermission)
     }
 
+    /// XEP-0363 §4: a header name may repeat and the order of its values
+    /// survives the bridge and the allowlist; newlines are stripped.
+    func testRepeatedSlotHeadersKeepTheirOrder() throws {
+        let slot = try XCTUnwrap(FFIInbound.uploadSlot(WaddleUploadSlot(
+            putUrl: "https://up.waddle.test/put", getUrl: "https://up.waddle.test/get",
+            putHeaders: [
+                WaddleUploadHeader(name: "Cookie", value: "a=1"),
+                WaddleUploadHeader(name: "X-Other", value: "dropped"),
+                WaddleUploadHeader(name: "Authorization", value: "Bearer x"),
+                WaddleUploadHeader(name: "Cookie", value: "b=\r\n2"),
+            ])))
+        XCTAssertEqual(slot.headers.count, 4)
+        XCTAssertEqual(
+            AttachmentPolicy.uploadHeaders(slot.headers),
+            [
+                UploadHeader(name: "Cookie", value: "a=1"),
+                UploadHeader(name: "Authorization", value: "Bearer x"),
+                UploadHeader(name: "Cookie", value: "b=2"),
+            ])
+    }
+
     func testAnOrdinaryLeaveIsNoDestruction() throws {
         let presence = try XCTUnwrap(FFIInbound.wirePresence(roomPresence(statusCodes: [110], destroyed: false)))
         XCTAssertEqual(presence.occupant?.roomDestroyed, false)

@@ -135,7 +135,9 @@ mod imp {
         pub outbound: RefCell<OutboundSends>,
         /// XEP-0055 lookups for mentioning people not in a room.
         pub directory_search: RefCell<DirectorySearch>,
-        pub reconnect_attempt: Cell<u32>,
+        /// Reconnecting, the unsent queue, typing and read markers (see
+        /// ui/connection.rs).
+        pub link: crate::ui::connection::LinkState,
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,
         pub unread: RefCell<HashMap<String, u32>>,
