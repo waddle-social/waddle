@@ -195,7 +195,7 @@ async fn seed_initial_xmpp_topology(
     // `community_feed()`: anyone can subscribe and read, and any
     // authenticated member may publish (`publish_model: Open`), per
     // XEP-0472 §"Replying to a Post". Stories use the same member-postable
-    // access shape below; calendar keeps `spaces_public()` plus an RSVP carve-out.
+    // access shape below; calendar keeps `community_calendar()` plus an RSVP carve-out.
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
         .await
@@ -242,7 +242,7 @@ async fn seed_initial_xmpp_topology(
         .update_node_config(
             &community_jid,
             waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS,
-            &NodeConfig::spaces_public(),
+            &NodeConfig::community_calendar(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure calendar node: {error}"))?;

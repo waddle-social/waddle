@@ -312,6 +312,7 @@ async fn ensure_extension_pubsub_node(
 
 fn extension_pubsub_node_config() -> NodeConfig {
     let mut config = NodeConfig::spaces_private();
+    config.node_type = None;
     config.max_items = MAX_EXTENSION_PUBSUB_ITEMS;
     config
 }

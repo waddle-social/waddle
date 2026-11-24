@@ -367,6 +367,21 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
     if let Some(node_type) = config.node_type {
         form_builder = form_builder.append(field("pubsub#type", node_type.as_str()));
     }
+    // XEP-0060 §8.2.4: the service never purges a node when its publisher
+    // goes offline, which XEP-0503 requires of every Space.
+    form_builder = form_builder.append(
+        Element::builder("field", "jabber:x:data")
+            .attr(
+                minidom::rxml::xml_ncname!("var").to_owned(),
+                "pubsub#purge_offline",
+            )
+            .append(
+                Element::builder("value", "jabber:x:data")
+                    .append("0")
+                    .build(),
+            )
+            .build(),
+    );
     // XEP-0060 §16.4.4 list-multi: one <value/> per allowed roster group.
     // Offered for the `roster` model (or when a list is stored) so the
     // field never appears on nodes it cannot apply to.

@@ -409,6 +409,7 @@ pub(super) async fn handle_room_pubsub(
                 return error(iq, PubSubError::InternalServerError);
             }
             let mut config = NodeConfig::spaces_private();
+            config.node_type = None;
             config.send_last_published_item = SendLastPublishedItem::Never;
             config.deliver_payloads = false;
             config.notify_retract = false;

@@ -520,7 +520,8 @@ fn matches_protected_owner_configuration(iq: &minidom::Element, node: &str) -> b
                 "pubsub#persist_items"
                 | "pubsub#deliver_payloads"
                 | "pubsub#notify_retract"
-                | "pubsub#notify_delete" => matches!(value.as_str(), "0" | "1"),
+                | "pubsub#notify_delete"
+                | "pubsub#purge_offline" => matches!(value.as_str(), "0" | "1"),
                 _ => false,
             }
     }) && names.contains("FORM_TYPE")

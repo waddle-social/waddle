@@ -1721,3 +1721,127 @@ async fn spaces_delete_takes_a_spaces_image_with_it() {
     let _ = admin.close().await;
     pool.close().await;
 }
+
+const NS_XDATA_FORM: &str = "jabber:x:data";
+
+fn configure_form_get(node: &str) -> Element {
+    Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(
+            Element::builder("configure", NS_PUBSUB_OWNER)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .build(),
+        )
+        .build()
+}
+
+fn configure_submit(node: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_XDATA_FORM)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+    for (var, value) in fields {
+        form = form.append(
+            Element::builder("field", NS_XDATA_FORM)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var)
+                .append(
+                    Element::builder("value", NS_XDATA_FORM)
+                        .append(*value)
+                        .build(),
+                )
+                .build(),
+        );
+    }
+    Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(
+            Element::builder("configure", NS_PUBSUB_OWNER)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(form.build())
+                .build(),
+        )
+        .build()
+}
+
+/// The value of form field `var` in a configure-form result, if present.
+fn config_field(frame: &str, var: &str) -> Option<String> {
+    let iq = frame.parse::<Element>().ok()?;
+    let pubsub = iq.get_child("pubsub", NS_PUBSUB_OWNER)?;
+    let form = pubsub
+        .get_child("configure", NS_PUBSUB_OWNER)?
+        .get_child("x", NS_XDATA_FORM)?;
+    form.children()
+        .find(|field| field.attr("var") == Some(var))
+        .and_then(|field| field.get_child("value", NS_XDATA_FORM))
+        .map(|value| value.text())
+}
+
+/// XEP-0503 "Node Configuration": a Space MUST be configured with
+/// `pubsub#type` = `urn:xmpp:spaces:0` and `pubsub#purge_offline` = false,
+/// whether it was seeded, created through PubSub, or reconfigured, and a
+/// configure form cannot retype it or turn purging on.
+#[tokio::test]
+async fn a_space_node_is_configured_with_the_spaces_type_and_no_offline_purge() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "xep0503-node-config").await;
+    create_space_node(&mut admin, "typed").await;
+
+    for node in ["general", "typed"] {
+        let form = iq_get_to(
+            &mut admin,
+            &format!("config-{node}"),
+            "spaces.localhost",
+            configure_form_get(node),
+        )
+        .await;
+        assert_eq!(
+            config_field(&form, "pubsub#type").as_deref(),
+            Some("urn:xmpp:spaces:0"),
+            "{node}: {form}"
+        );
+        assert_eq!(
+            config_field(&form, "pubsub#purge_offline").as_deref(),
+            Some("0"),
+            "{node}: {form}"
+        );
+    }
+
+    let retyped = iq_set_to(
+        &mut admin,
+        "retype",
+        "spaces.localhost",
+        configure_submit(
+            "typed",
+            &[
+                ("pubsub#type", "urn:xmpp:pubsub-social-feed:1"),
+                ("pubsub#access_model", "whitelist"),
+            ],
+        ),
+    )
+    .await;
+    assert!(is_result(&retyped), "{retyped}");
+    let form = iq_get_to(
+        &mut admin,
+        "config-retyped",
+        "spaces.localhost",
+        configure_form_get("typed"),
+    )
+    .await;
+    assert_eq!(
+        config_field(&form, "pubsub#type").as_deref(),
+        Some("urn:xmpp:spaces:0"),
+        "a Space stays a Space: {form}"
+    );
+    assert_eq!(
+        config_field(&form, "pubsub#access_model").as_deref(),
+        Some("whitelist"),
+        "{form}"
+    );
+
+    let purging = iq_set_to(
+        &mut admin,
+        "purge-on",
+        "spaces.localhost",
+        configure_submit("typed", &[("pubsub#purge_offline", "1")]),
+    )
+    .await;
+    assert!(is_bad_request_error(&purging), "{purging}");
+    let _ = admin.close().await;
+}

@@ -1054,6 +1054,7 @@ fn normalize_spaces_node_config(
     if !preserve_submitted_max_items {
         config.max_items = u32::MAX;
     }
+    config.node_type = Some(waddle_xmpp_core::pubsub::PubSubNodeType::Space);
     config.publish_model = waddle_xmpp::pubsub::PublishModel::Publishers;
     config.persist_items = true;
     config.deliver_payloads = true;
