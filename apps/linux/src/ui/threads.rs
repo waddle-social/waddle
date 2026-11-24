@@ -18,6 +18,7 @@ impl WaddleWindow {
         entry: &waddle_xmpp_client_ffi::WaddleInboxEntry,
         from_snapshot: bool,
     ) {
+        self.inbox_note(entry);
         if entry.kind == "direct" {
             self.ensure_direct(&entry.partner);
         }

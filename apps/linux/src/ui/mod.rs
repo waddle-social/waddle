@@ -4,6 +4,7 @@ mod conversation;
 mod directory;
 mod identity;
 mod images;
+mod inbox;
 mod judgments;
 mod media;
 mod membership;

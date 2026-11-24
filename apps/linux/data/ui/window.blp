@@ -204,6 +204,16 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 }
               }
 
+              [top]
+              ListBox inbox_list {
+                row-activated => $on_inbox_activated() swapped;
+                margin-top: 6;
+
+                styles [
+                  "navigation-sidebar",
+                ]
+              }
+
               content: ScrolledWindow {
                 hscrollbar-policy: never;
 
@@ -376,6 +386,55 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   child: Adw.StatusPage account_status {
                     icon-name: "chat-bubbles-text-symbolic";
                     title: _("Connecting…");
+                  };
+                }
+
+                StackPage {
+                  name: "inbox";
+
+                  child: Box {
+                    orientation: vertical;
+
+                    Box {
+                      margin-start: 16;
+                      margin-end: 16;
+                      margin-top: 12;
+                      spacing: 12;
+
+                      Label {
+                        label: _("Unread");
+                        hexpand: true;
+                        xalign: 0;
+
+                        styles [
+                          "title-2",
+                        ]
+                      }
+
+                      Button inbox_mark_all {
+                        label: _("Mark All Read");
+                        valign: center;
+                        clicked => $on_inbox_mark_all() swapped;
+                      }
+                    }
+
+                    ScrolledWindow {
+                      hscrollbar-policy: never;
+                      vexpand: true;
+
+                      child: Adw.Clamp {
+                        maximum-size: 720;
+
+                        child: Box inbox_cards {
+                          orientation: vertical;
+                          spacing: 12;
+                          margin-start: 16;
+                          margin-end: 16;
+                          margin-top: 12;
+                          margin-bottom: 16;
+                        };
+                      };
+                    }
                   };
                 }
 
