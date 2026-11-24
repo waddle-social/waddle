@@ -50,12 +50,12 @@ pub const FIELD_MODERATED_ROOM: &str = "muc#roomconfig_moderatedroom";
 /// registrar prefix for a Waddle-specific semantic (the server reads
 /// it in `muc_owner_config.rs`). Carried verbatim for parity — do not
 /// extend the pattern to new fields.
-pub const FIELD_FORUM_MODE: &str = "muc#roomconfig_forum";
+pub const FIELD_FORUM_MODE: &str = "{urn:waddle:roomconfig}forum";
 /// Waddle-private pin-permission policy field (correct custom-field
 /// pattern: custom `urn:waddle:*` var inside the official form).
-pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
+pub const FIELD_PIN_PERMISSION: &str = "{urn:waddle:roomconfig}pinpermission";
 
-/// `urn:waddle:roomconfig:pinpermission` values. Wire values mirror
+/// `{urn:waddle:roomconfig}pinpermission` values. Wire values mirror
 /// `waddle_xmpp::muc::PinPermission` server-side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -382,7 +382,7 @@ mod tests {
                 <field var='muc#roomconfig_roomname' type='text-single'>
                   <value>General</value>
                 </field>
-                <field var='urn:waddle:roomconfig:pinpermission' type='list-single'>
+                <field var='{urn:waddle:roomconfig}pinpermission' type='list-single'>
                   <value>admins-only</value>
                   <option label='Admins only'><value>admins-only</value></option>
                   <option label='Anyone'><value>anyone</value></option>

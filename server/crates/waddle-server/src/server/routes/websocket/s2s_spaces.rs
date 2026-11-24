@@ -97,7 +97,7 @@ use crate::space_identity::SpaceNode;
 /// The field of a Space's configuration form that says whether accounts at
 /// other servers may reach the Space: a boolean, off unless its owner turns
 /// it on.
-pub const FIELD_SPACE_FEDERATED: &str = "urn:waddle:spaces:federated";
+pub const FIELD_SPACE_FEDERATED: &str = "{urn:waddle:spaces}federated";
 
 /// The most Spaces one `disco#items` answer lists to a remote asker.
 const MAX_LISTED_SPACES: usize = 256;

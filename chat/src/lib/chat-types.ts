@@ -25,7 +25,7 @@ export interface ChannelSummary {
   created_at?: string;
   updated_at?: string | null;
   /** #415: per-room pin permission. Mirrors the server's
-   * `urn:waddle:roomconfig:pinpermission` field. Default
+   * `{urn:waddle:roomconfig}pinpermission` field. Default
    * `admins-only`. */
   pinPermission?: PinPermission;
   /** Canonical domain of the server hosting the room, for a room outside this deployment. */
@@ -44,7 +44,7 @@ export interface GroupDmSummary {
   mentionCount?: number;
 }
 
-/** #415: wire values for the `urn:waddle:roomconfig:pinpermission`
+/** #415: wire values for the `{urn:waddle:roomconfig}pinpermission`
  * MUC config field. The TypeScript canonical name is the same union
  * that travels over the wire, so consumers can compare directly
  * without translation. */

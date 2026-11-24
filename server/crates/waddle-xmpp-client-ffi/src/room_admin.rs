@@ -54,7 +54,7 @@ pub struct WaddleRoomBot {
     pub name: Option<String>,
 }
 
-/// `urn:waddle:roomconfig:pinpermission` policy values.
+/// `{urn:waddle:roomconfig}pinpermission` policy values.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaddlePinPermission {
     AdminsOnly,
@@ -81,7 +81,7 @@ pub struct WaddleRoomConfig {
     pub members_only: Option<bool>,
     pub public_room: Option<bool>,
     pub moderated: Option<bool>,
-    /// Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+    /// Waddle forum-mode flag (`{urn:waddle:roomconfig}forum`, pre-existing
     /// registrar-prefix debt carried for parity).
     pub forum: Option<bool>,
     pub pin_permission: Option<WaddlePinPermission>,

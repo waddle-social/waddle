@@ -668,10 +668,10 @@ pub fn not_federating(spec: &mut Spec) {
 }
 
 /// An owner's configuration submission (XEP-0045 §10.2) that sets the
-/// room's `urn:waddle:roomconfig:federated` field.
+/// room's `{urn:waddle:roomconfig}federated` field.
 pub fn federated_form(federated: bool) -> Element {
     owner_form(&[(
-        "urn:waddle:roomconfig:federated",
+        "{urn:waddle:roomconfig}federated",
         if federated { "1" } else { "0" },
     )])
 }

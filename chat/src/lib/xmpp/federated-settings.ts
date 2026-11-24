@@ -5,9 +5,9 @@
 // default and is one switch for every server this deployment federates
 // with. Each lives in the owner's configuration form:
 //
-// - rooms: `urn:waddle:roomconfig:federated` in the XEP-0045 `muc#owner`
+// - rooms: `{urn:waddle:roomconfig}federated` in the XEP-0045 `muc#owner`
 //   form (written through `configureMucRoom`);
-// - Spaces: `urn:waddle:spaces:federated` in the XEP-0060 `pubsub#owner`
+// - Spaces: `{urn:waddle:spaces}federated` in the XEP-0060 `pubsub#owner`
 //   configure form of the Spaces service.
 //
 // A server that does not offer the field leaves it out of the form; the
@@ -24,7 +24,7 @@ import {
   type RawIqClient,
 } from "./xml-stanza";
 
-export const FIELD_SPACE_FEDERATED = "urn:waddle:spaces:federated";
+export const FIELD_SPACE_FEDERATED = "{urn:waddle:spaces}federated";
 
 const NS_DATAFORM = "jabber:x:data";
 const NS_MUC_OWNER = "http://jabber.org/protocol/muc#owner";

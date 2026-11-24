@@ -588,9 +588,10 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
         Err(error) => return *bad_request(error),
     };
     match run_list(&state, &args, &ctx.from.to_bare()).await {
-        Ok(result) => CommandResult::Completed {
+        Ok(result) => CommandResult::CompletedPage {
             session_id: None,
-            form: Some(build_list_form(&result)),
+            form: build_list_form(&result),
+            next_cursor: result.next_cursor.clone(),
             notes: vec![],
         },
         Err(result) => *result,
@@ -754,9 +755,10 @@ async fn handle_occupants(ctx: CommandContext, state: Arc<AppState>) -> CommandR
         Err(error) => return *bad_request(error),
     };
     match run_occupants(&state, &args).await {
-        Ok(result) => CommandResult::Completed {
+        Ok(result) => CommandResult::CompletedPage {
             session_id: None,
-            form: Some(build_occupants_form(&result)),
+            form: build_occupants_form(&result),
+            next_cursor: result.next_cursor.clone(),
             notes: vec![],
         },
         Err(result) => *result,
@@ -772,9 +774,10 @@ async fn handle_affiliations(ctx: CommandContext, state: Arc<AppState>) -> Comma
         Err(error) => return *bad_request(error),
     };
     match run_affiliations(&state, &args).await {
-        Ok(result) => CommandResult::Completed {
+        Ok(result) => CommandResult::CompletedPage {
             session_id: None,
-            form: Some(build_affiliations_form(&result)),
+            form: build_affiliations_form(&result),
+            next_cursor: result.next_cursor.clone(),
             notes: vec![],
         },
         Err(result) => *result,
@@ -5646,7 +5649,6 @@ fn bool_str(b: bool) -> &'static str {
 
 pub fn build_list_form(result: &ChannelsListResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_LIST))
         .add_reported(Field::new("channel_jid", FieldType::JidSingle).with_label("Channel JID"))
         .add_reported(Field::new("name", FieldType::TextSingle).with_label("Name"))
         .add_reported(Field::new("topic", FieldType::TextSingle).with_label("Topic"))
@@ -5681,9 +5683,6 @@ pub fn build_list_form(result: &ChannelsListResult) -> DataForm {
                 .with_value(entry.affiliation_outcast_count.to_string()),
         ];
         form = form.add_item(row);
-    }
-    if let Some(cursor) = result.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
     }
     form
 }
@@ -5755,7 +5754,6 @@ pub fn build_group_dm_rename_form(result: &GroupDmRenameResult) -> DataForm {
 
 pub fn build_occupants_form(result: &ChannelsOccupantsResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_OCCUPANTS))
         .add_reported(Field::new("nick", FieldType::TextSingle).with_label("Nick"))
         .add_reported(Field::new("real_jid", FieldType::JidSingle).with_label("Real JID"))
         .add_reported(Field::new("role", FieldType::TextSingle).with_label("Role"))
@@ -5770,15 +5768,11 @@ pub fn build_occupants_form(result: &ChannelsOccupantsResult) -> DataForm {
         ];
         form = form.add_item(row);
     }
-    if let Some(cursor) = result.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
-    }
     form
 }
 
 pub fn build_affiliations_form(result: &ChannelsAffiliationsResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_AFFILIATIONS))
         .add_reported(Field::new("jid", FieldType::JidSingle).with_label("JID"))
         .add_reported(Field::new("affiliation", FieldType::TextSingle).with_label("Affiliation"))
         .add_reported(Field::new("reason", FieldType::TextSingle).with_label("Reason"));
@@ -5791,9 +5785,6 @@ pub fn build_affiliations_form(result: &ChannelsAffiliationsResult) -> DataForm 
                 .with_value(entry.reason.clone().unwrap_or_default()),
         ];
         form = form.add_item(row);
-    }
-    if let Some(cursor) = result.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
     }
     form
 }

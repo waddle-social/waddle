@@ -110,7 +110,7 @@ pub struct RoomConfig {
     pub occupants_may_change_subject: bool,
     /// #415: who may pin/unpin messages in this room. Default is
     /// `admins-only`; when set to `anyone`, any current occupant may
-    /// pin. Set via the `urn:waddle:roomconfig:pinpermission` field on
+    /// pin. Set via the `{urn:waddle:roomconfig}pinpermission` field on
     /// the standard XEP-0045 owner-config form.
     #[serde(default)]
     pub pin_permission: PinPermission,
@@ -127,7 +127,7 @@ pub struct RoomConfig {
     /// Whether accounts at other servers may reach the room over
     /// server-to-server streams: discover it, enter it and read its
     /// archive, each still subject to the room's own admission. Off unless
-    /// an owner turns it on (the `urn:waddle:roomconfig:federated` field of
+    /// an owner turns it on (the `{urn:waddle:roomconfig}federated` field of
     /// the owner-config form) or the deployment creates rooms with it on; a
     /// configuration stored before the field existed reads as off.
     #[serde(default)]

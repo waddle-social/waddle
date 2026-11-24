@@ -127,7 +127,7 @@ pub fn actions(item: &TimelineItem, context: Context, pinned: bool) -> Vec<Messa
     list
 }
 
-/// The room's `urn:waddle:roomconfig:pinpermission` setting.
+/// The room's `{urn:waddle:roomconfig}pinpermission` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinPermission {
     Anyone,

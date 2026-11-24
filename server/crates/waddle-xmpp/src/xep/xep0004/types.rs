@@ -385,6 +385,15 @@ impl DataForm {
         self
     }
 
+    /// Whether this is a multi-item result form (XEP-0004 §3.4), i.e. it
+    /// carries `<reported/>` columns or `<item/>` rows. Such a form
+    /// serializes only its title, instructions, `<reported/>` and `<item/>`
+    /// children: top-level fields (including `FORM_TYPE`) are never emitted
+    /// because the specification forbids them.
+    pub fn is_multi_item(&self) -> bool {
+        !self.reported.is_empty() || !self.items.is_empty()
+    }
+
     /// Get the `FORM_TYPE` value, if present.
     pub fn form_type_value(&self) -> Option<&str> {
         self.fields

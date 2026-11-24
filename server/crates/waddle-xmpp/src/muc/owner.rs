@@ -18,11 +18,11 @@ use super::RoomConfig;
 
 /// XEP-0045 owner-config form field var for the per-room pin
 /// permission policy (#415).
-pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
+pub const FIELD_PIN_PERMISSION: &str = "{urn:waddle:roomconfig}pinpermission";
 
 /// XEP-0045 owner-config form field var for whether accounts at other
 /// servers may reach the room ([`super::RoomConfig::federated`]).
-pub const FIELD_FEDERATED: &str = "urn:waddle:roomconfig:federated";
+pub const FIELD_FEDERATED: &str = "{urn:waddle:roomconfig}federated";
 
 use crate::xep::xep0004::{self, DataForm, Field, FieldOption, FieldType, FormType, ToElement};
 use crate::xep::FIELD_FORUM_MODE;

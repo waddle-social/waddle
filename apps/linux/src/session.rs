@@ -67,7 +67,7 @@ impl Kind {
 pub enum Flavor {
     #[default]
     Plain,
-    /// A forum room (`muc#roomconfig_forum`).
+    /// A forum room (`{urn:waddle:roomconfig}forum`).
     Forum,
     /// A group DM: a hidden members-only room, listed with the DMs.
     Group,

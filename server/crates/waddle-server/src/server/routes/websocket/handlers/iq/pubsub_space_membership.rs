@@ -220,7 +220,9 @@ pub(super) async fn configure_enrolled_space(
     };
     let deliver_payloads = match configuration_payload_setting(payload, configure, &current) {
         Some(PayloadSetting::Change(value)) => value,
-        Some(PayloadSetting::Cancel) => return ordinary(build_pubsub_success(iq)),
+        Some(PayloadSetting::Cancel | PayloadSetting::Unchanged) => {
+            return ordinary(build_pubsub_success(iq))
+        }
         None => {
             use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
             return ordinary(error(
@@ -337,90 +339,88 @@ pub(super) async fn delete_enrolled_space(
 enum PayloadSetting {
     Cancel,
     Change(bool),
+    /// A valid submission that changes nothing: the omitted settings keep
+    /// their current value (XEP-0004 §3.5).
+    Unchanged,
 }
 
+/// Reads an owner `pubsub#node_config` submission for a Space.
+///
+/// The form is parsed once into the typed XEP-0004 model. Fields the service
+/// does not understand are ignored (XEP-0004 §3.1), as are field `type` and
+/// `label` attributes. A Space lets its owner change only
+/// `pubsub#deliver_payloads`; every other node option Waddle knows must be
+/// re-submitted at its current value, because a changed value cannot be
+/// processed. Omitted fields keep their current value (XEP-0004 §3.5), so a
+/// submission without `pubsub#deliver_payloads` changes nothing.
+///
+/// `None` means the request cannot be processed (`not-acceptable`).
 fn configuration_payload_setting(
     payload: &Element,
     configure: &Element,
     current: &waddle_xmpp::pubsub::NodeConfig,
 ) -> Option<PayloadSetting> {
-    const DATA_FORMS: &str = "jabber:x:data";
-    let form = configure.get_child("x", DATA_FORMS)?;
+    use waddle_xmpp::xep::xep0004::{DataForm, FormType, FromElement};
+
     if !payload.attrs().is_empty()
         || !payload.text().trim().is_empty()
         || payload.children().count() != 1
         || configure.attrs().len() != 1
         || !configure.text().trim().is_empty()
         || configure.children().count() != 1
-        || form.attrs().len() != 1
-        || !form.text().trim().is_empty()
     {
         return None;
     }
-    if form.attr("type") == Some("cancel") && form.children().next().is_none() {
-        return Some(PayloadSetting::Cancel);
+    let form = DataForm::from_element(configure.children().next()?).ok()?;
+    match form.form_type {
+        FormType::Cancel => return Some(PayloadSetting::Cancel),
+        FormType::Submit => {}
+        FormType::Form | FormType::Result => return None,
     }
-    if form.attr("type") != Some("submit") || !(2..=10).contains(&form.children().count()) {
+    if form.form_type_value() != Some("http://jabber.org/protocol/pubsub#node_config") {
         return None;
     }
-    let mut form_type = false;
     let mut deliver_payloads = None;
-    let mut seen = std::collections::BTreeSet::new();
-    for field in form.children() {
-        let value = field.get_child("value", DATA_FORMS)?;
-        if !field.is("field", DATA_FORMS)
-            || field.children().count() != 1
-            || !field.text().trim().is_empty()
-            || !value.attrs().is_empty()
-            || value.children().next().is_some()
-        {
-            return None;
-        }
-        let field_type = field.attr("type");
-        if field.attrs().len() != 1 + usize::from(field_type.is_some()) {
-            return None;
-        }
-        let name = field.attr("var")?;
-        if !seen.insert(name) {
-            return None;
-        }
-        match (name, field_type, value.text().as_str()) {
-            (
-                "FORM_TYPE",
-                None | Some("hidden"),
-                "http://jabber.org/protocol/pubsub#node_config",
-            ) if !form_type => form_type = true,
-            ("pubsub#deliver_payloads", None | Some("boolean"), "1" | "true")
-                if deliver_payloads.is_none() =>
+    for field in &form.fields {
+        let (Some(name), Some(value)) = (field.var.as_deref(), field.value()) else {
+            continue;
+        };
+        match name {
+            "pubsub#deliver_payloads" => {
+                deliver_payloads = Some(match value {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => return None,
+                });
+            }
+            "pubsub#access_model" if value != current.access_model.to_string() => return None,
+            "pubsub#publish_model" if value != current.publish_model.to_string() => return None,
+            "pubsub#type" if !current.node_type.is_some_and(|kind| kind.as_str() == value) => {
+                return None
+            }
+            "pubsub#max_items" if value.parse::<u32>().ok() != Some(current.max_items) => {
+                return None
+            }
+            "pubsub#persist_items" if !setting_matches(value, current.persist_items) => {
+                return None
+            }
+            "pubsub#notify_retract" if !setting_matches(value, current.notify_retract) => {
+                return None
+            }
+            "pubsub#notify_delete" if !setting_matches(value, current.notify_delete) => {
+                return None
+            }
+            "pubsub#send_last_published_item"
+                if value != current.send_last_published_item.to_string() =>
             {
-                deliver_payloads = Some(true)
+                return None
             }
-            ("pubsub#deliver_payloads", None | Some("boolean"), "0" | "false")
-                if deliver_payloads.is_none() =>
-            {
-                deliver_payloads = Some(false)
-            }
-            ("pubsub#access_model", None, value) if value == current.access_model.to_string() => {}
-            ("pubsub#publish_model", None, value) if value == current.publish_model.to_string() => {
-            }
-            ("pubsub#type", None, value)
-                if current.node_type.is_some_and(|kind| kind.as_str() == value) => {}
-            ("pubsub#max_items", None, value)
-                if value.parse::<u32>().ok() == Some(current.max_items) => {}
-            ("pubsub#persist_items", None | Some("boolean"), value)
-                if setting_matches(value, current.persist_items) => {}
-            ("pubsub#notify_retract", None | Some("boolean"), value)
-                if setting_matches(value, current.notify_retract) => {}
-            ("pubsub#notify_delete", None | Some("boolean"), value)
-                if setting_matches(value, current.notify_delete) => {}
-            ("pubsub#send_last_published_item", None, value)
-                if value == current.send_last_published_item.to_string() => {}
-            _ => return None,
+            // Understood but not settable through this path.
+            crate::server::routes::websocket::s2s_spaces::FIELD_SPACE_FEDERATED => return None,
+            _ => {}
         }
     }
-    deliver_payloads
-        .filter(|_| form_type)
-        .map(PayloadSetting::Change)
+    Some(deliver_payloads.map_or(PayloadSetting::Unchanged, PayloadSetting::Change))
 }
 
 fn setting_matches(value: &str, enabled: bool) -> bool {

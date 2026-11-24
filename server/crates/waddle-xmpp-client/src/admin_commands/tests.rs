@@ -28,6 +28,15 @@ fn wrap_response(node: &str, form_inner: &str) -> Element {
     raw.parse().expect("parse iq")
 }
 
+/// A paged multi-item result: the form carries only `<item/>` rows (XEP-0004
+/// §3.4) and the continuation token is the XEP-0059 `<last/>` beside it.
+fn wrap_page_response(node: &str, rows: &str, cursor: &str) -> Element {
+    let raw = format!(
+        r#"<iq xmlns='jabber:client' type='result' id='test'><command xmlns='http://jabber.org/protocol/commands' node='{node}' status='completed'><x xmlns='jabber:x:data' type='result'>{rows}</x><set xmlns='http://jabber.org/protocol/rsm'><last>{cursor}</last></set></command></iq>"#
+    );
+    raw.parse().expect("parse iq")
+}
+
 fn form_of(iq: &Element) -> &Element {
     iq.get_child("command", NS_COMMANDS)
         .and_then(|command| command.get_child("x", NS_DATA_FORMS))
@@ -157,9 +166,8 @@ fn parse_users_single_entry_with_cursor() {
             <field var="jid"><value>alice@localhost</value></field>
             <field var="display_name"><value>Alice</value></field>
             <field var="has_owner_hat"><value>0</value></field>
-        </item>
-        <field var="next_cursor" type="text-single"><value>alice</value></field>"#;
-    let iq = wrap_response(NODE_ADMIN_USERS_LIST, item);
+        </item>"#;
+    let iq = wrap_page_response(NODE_ADMIN_USERS_LIST, item, "alice");
     let page = parse_admin_users_list_result(&iq).expect("ok");
     assert_eq!(page.entries.len(), 1);
     let entry = &page.entries[0];
@@ -218,8 +226,7 @@ fn parse_spaces_list_extracts_counts_and_cursor() {
             <field var="channel_count"><value>3</value></field>
             <field var="member_count"><value>5</value></field>
         </item>"#;
-    let cursor = r#"<field var="next_cursor" type="text-single"><value>eng@spaces.localhost</value></field>"#;
-    let iq = wrap_response(NODE_ADMIN_SPACES_LIST, &format!("{item}{cursor}"));
+    let iq = wrap_page_response(NODE_ADMIN_SPACES_LIST, item, "eng@spaces.localhost");
     let result = parse_admin_spaces_list_result(&iq).expect("ok");
     assert_eq!(result.entries.len(), 1);
     let entry = &result.entries[0];

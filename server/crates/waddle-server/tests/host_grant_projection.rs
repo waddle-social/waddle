@@ -1263,6 +1263,67 @@ async fn exercise_protected_space(exercise: SpaceExercise) {
         .await,
         "1",
     );
+    // XEP-0004 §3.1 / §3.5: unknown fields are ignored, field `type` and
+    // `label` attributes are accepted, and omitted fields keep their value.
+    let submit = |id, fields: Vec<Element>| {
+        let mut form = Element::builder("x", DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+        for field in fields {
+            form = form.append(field);
+        }
+        set(id, service.as_str(), configuration(Some(form.build())))
+    };
+    let field = |name: &str, kind: Option<&str>, value: &str| {
+        let mut field = Element::builder("field", DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), name);
+        if let Some(kind) = kind {
+            field = field.attr(minidom::rxml::xml_ncname!("type").to_owned(), kind);
+        }
+        field
+            .append(Element::builder("value", DATA_FORMS).append(value).build())
+            .build()
+    };
+    let form_type = || field("FORM_TYPE", Some("hidden"), NODE_CONFIG_FORM);
+    let form_type_only = round_trip(
+        &mut owner,
+        submit("space-owner-form-type-only", vec![form_type()]),
+    )
+    .await;
+    assert!(is_result(&form_type_only), "{form_type_only:?}");
+    let echoed = round_trip(
+        &mut owner,
+        submit(
+            "space-owner-echo-and-unknown",
+            vec![
+                form_type(),
+                field("pubsub#access_model", Some("list-single"), "whitelist"),
+                field("pubsub#title", Some("text-single"), "Ignored title"),
+                field("{urn:example:unknown}setting", None, "x"),
+            ],
+        ),
+    )
+    .await;
+    assert!(is_result(&echoed), "{echoed:?}");
+    let changed_access = round_trip(
+        &mut owner,
+        submit(
+            "space-owner-change-access-model",
+            vec![form_type(), field("pubsub#access_model", None, "open")],
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&changed_access, DefinedCondition::NotAcceptable),
+        "{changed_access:?}"
+    );
+    assert_configuration(
+        round_trip(
+            &mut owner,
+            get_configuration("space-owner-configuration-after-noops"),
+        )
+        .await,
+        "1",
+    );
     let changed = round_trip(
         &mut owner,
         disable_payloads("space-owner-disable-event-payloads"),

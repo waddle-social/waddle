@@ -1,6 +1,7 @@
 use minidom::Element;
 
 use crate::xep::xep0004::{DataForm, FromElement, ToElement, NS_DATA_FORMS};
+use crate::xep::xep0059::{build_rsm_response_element, extract_rsm_response};
 
 use super::{Action, AllowedActions, Command, CommandError, Note, NoteType, Status, NS_COMMANDS};
 
@@ -123,6 +124,8 @@ impl FromElement for Command {
             .map(DataForm::from_element)
             .transpose()?;
 
+        let result_set = extract_rsm_response(elem).and_then(Result::ok);
+
         Ok(Self {
             node,
             session_id,
@@ -131,6 +134,7 @@ impl FromElement for Command {
             actions,
             notes,
             form,
+            result_set,
         })
     }
 }
@@ -168,6 +172,10 @@ impl ToElement for Command {
 
         if let Some(ref form) = self.form {
             builder = builder.append(form.to_element());
+        }
+
+        if let Some(ref result_set) = self.result_set {
+            builder = builder.append(build_rsm_response_element(result_set));
         }
 
         builder.build()
