@@ -345,9 +345,10 @@ async fn handle_list(ctx: CommandContext, state: Arc<AppState>) -> CommandResult
         Err(error) => return *bad_request(error),
     };
     match run_list(&state, &args).await {
-        Ok(result) => CommandResult::Completed {
+        Ok(result) => CommandResult::CompletedPage {
             session_id: None,
-            form: Some(build_list_form(&result)),
+            form: build_list_form(&result),
+            next_cursor: result.next_cursor.clone(),
             notes: vec![],
         },
         Err(result) => *result,
@@ -425,9 +426,10 @@ async fn handle_members(ctx: CommandContext, state: Arc<AppState>) -> CommandRes
         Err(error) => return *bad_request(error),
     };
     match run_members(&state, &args).await {
-        Ok(result) => CommandResult::Completed {
+        Ok(result) => CommandResult::CompletedPage {
             session_id: None,
-            form: Some(build_members_form(&result)),
+            form: build_members_form(&result),
+            next_cursor: result.next_cursor.clone(),
             notes: vec![],
         },
         Err(result) => *result,
@@ -1909,7 +1911,6 @@ async fn run_set_role(
 
 pub fn build_list_form(result: &SpacesListResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_LIST))
         .add_reported(Field::new("space_jid", FieldType::JidSingle).with_label("Space JID"))
         .add_reported(Field::new("space_node", FieldType::TextSingle).with_label("Space Node"))
         .add_reported(Field::new("name", FieldType::TextSingle).with_label("Name"))
@@ -1933,9 +1934,6 @@ pub fn build_list_form(result: &SpacesListResult) -> DataForm {
                 .with_value(entry.member_count.to_string()),
         ];
         form = form.add_item(row);
-    }
-    if let Some(cursor) = result.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
     }
     form
 }
@@ -1962,7 +1960,6 @@ pub fn build_space_form(form_type: &str, space: &SpaceRef) -> DataForm {
 
 pub fn build_members_form(result: &SpacesMembersResult) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(NODE_MEMBERS))
         .add_reported(Field::new("jid", FieldType::JidSingle).with_label("JID"))
         .add_reported(Field::new("role", FieldType::TextSingle).with_label("Role"));
     for entry in &result.entries {
@@ -1971,9 +1968,6 @@ pub fn build_members_form(result: &SpacesMembersResult) -> DataForm {
             Field::new("role", FieldType::TextSingle).with_value(entry.role.as_wire().to_string()),
         ];
         form = form.add_item(row);
-    }
-    if let Some(cursor) = result.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
     }
     form
 }
@@ -2125,7 +2119,10 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 7);
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.value("next_cursor"), Some("eng"));
+        assert!(
+            form.fields.is_empty(),
+            "multi-item result carries no top-level fields"
+        );
     }
 
     #[test]

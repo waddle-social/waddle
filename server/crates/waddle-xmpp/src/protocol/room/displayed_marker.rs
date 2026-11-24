@@ -1,15 +1,16 @@
-//! XEP-0333 displayed-marker → inbox mark-read for the room handler chain.
+//! XEP-0333 chat marker → inbox mark-read for the room handler chain.
 //!
 //! The chat client sends a `<message type='groupchat'>` containing a
-//! `<displayed xmlns='urn:xmpp:chat-markers:0' id='…'/>` element when
-//! the user has displayed a room message. The room reflects the marker
-//! to every occupant per XEP-0333 §3.4 (existing
+//! `<displayed xmlns='urn:xmpp:chat-markers:0' id='…'/>` (or
+//! `<acknowledged/>`) element when the user has read a room message. The
+//! room reflects the marker to every occupant per XEP-0333 §3.4 (existing
 //! [`super::reflector::ReflectorHandler`] behaviour); this handler runs
 //! the **sender-side** side-effect: emit
-//! [`super::super::event::OutboundEvent::MarkInboxReadFromDisplayed`]
-//! so the interpreter clears the sender's inbox unread for the
-//! channel-level row and — when the displayed message belongs to a
-//! thread — the thread-level row too.
+//! [`super::super::event::OutboundEvent::MarkInboxReadFromMarker`]
+//! so the interpreter moves the sender's read position for the
+//! channel-level row — and, when the marked message belongs to a thread,
+//! the thread-level row too — through the marked message (XEP-0430
+//! §"Unread Messages").
 //!
 //! Only the sender's mark-read is emitted. A recipient observing a
 //! reflected marker is observing *somebody else's* read state, which
@@ -18,13 +19,13 @@
 //! in MAM — so the interpreter performs the lookup and applies the
 //! mark-read on both rows.
 
-use super::super::event::OutboundEvent;
+use super::super::event::{MarkerConversation, OutboundEvent};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
-use crate::xep::xep0333::{extract_marker_from_message, Marker};
+use crate::xep::xep0333::extract_marker_from_message;
 use xmpp_parsers::message::Message;
 
-/// XEP-0333 displayed-marker handler for the room handler chain.
+/// XEP-0333 chat-marker handler for the room handler chain.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MucDisplayedMarkerHandler;
 
@@ -34,11 +35,12 @@ impl RoomHandler for MucDisplayedMarkerHandler {
     }
 
     fn handle(&self, message: &mut Message, ctx: &RoomContext<'_>) -> RoomHandlerOutcome {
-        let displayed_id = match extract_marker_from_message(message) {
-            Some(Marker::Displayed(id)) => id,
-            _ => return RoomHandlerOutcome::Continue(Vec::new()),
+        let Some(marked_id) = extract_marker_from_message(message)
+            .and_then(|marker| marker.read_through_id().map(str::to_owned))
+        else {
+            return RoomHandlerOutcome::Continue(Vec::new());
         };
-        // Sender's inbox is the only one we mark-read from a displayed
+        // Sender's inbox is the only one we mark-read from a chat
         // marker: the marker reports the sender's own read state.
         // Synthetic sends without an inbox projection also skip here.
         if !ctx.project_sender_inbox {
@@ -48,10 +50,10 @@ impl RoomHandler for MucDisplayedMarkerHandler {
             return RoomHandlerOutcome::Continue(Vec::new());
         };
         let owner = sender_snapshot.bare_jid();
-        let event = OutboundEvent::MarkInboxReadFromDisplayed {
+        let event = OutboundEvent::MarkInboxReadFromMarker {
             owner,
-            room: ctx.room.clone(),
-            displayed_message_id: displayed_id,
+            conversation: MarkerConversation::Room(ctx.room.clone()),
+            marked_message_id: marked_id,
         };
         RoomHandlerOutcome::Continue(vec![event])
     }
@@ -66,6 +68,7 @@ mod tests {
     use crate::xep::xep0333::build_displayed_element;
     use crate::xep::xep0421::OccupantIdSecret;
     use jid::{BareJid, FullJid, Jid};
+    use minidom::Element;
     use xmpp_parsers::message::{Message, MessageType};
 
     fn full(value: &str) -> FullJid {
@@ -138,17 +141,41 @@ mod tests {
 
         assert_eq!(events.len(), 1, "expected exactly one mark-read event");
         match &events[0] {
-            OutboundEvent::MarkInboxReadFromDisplayed {
+            OutboundEvent::MarkInboxReadFromMarker {
                 owner,
-                room: marked_room,
-                displayed_message_id,
+                conversation,
+                marked_message_id,
             } => {
                 assert_eq!(owner, &bare("alice@example.com"));
-                assert_eq!(marked_room, &room);
-                assert_eq!(displayed_message_id, "msg-42");
+                assert_eq!(conversation, &MarkerConversation::Room(room));
+                assert_eq!(marked_message_id, "msg-42");
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn emits_mark_read_for_sender_on_acknowledged_marker() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let occupants = vec![occupant(alice.clone(), "alice")];
+        let mut msg = Message::new(None::<Jid>);
+        msg.from = Some(Jid::from(alice.clone()));
+        msg.type_ = MessageType::Groupchat;
+        msg.payloads.push(
+            Element::builder("acknowledged", crate::xep::xep0333::NS_CHAT_MARKERS)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "msg-43")
+                .build(),
+        );
+
+        let events = run(&room, &alice, &occupants, &mut msg);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            OutboundEvent::MarkInboxReadFromMarker { marked_message_id, .. }
+                if marked_message_id == "msg-43"
+        ));
     }
 
     #[test]

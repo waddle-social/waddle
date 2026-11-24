@@ -145,7 +145,7 @@ pub(super) async fn verify(
                 "inbox_entries",
                 "user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, \
                  unread, preview, thread_title, reply_count, author, call_thread_kind, \
-                 call_thread_media, call_ended_at, call_duration",
+                 call_thread_media, call_ended_at, call_duration, read_ordinal",
             ),
             (
                 "groupchat_notification_recovery",

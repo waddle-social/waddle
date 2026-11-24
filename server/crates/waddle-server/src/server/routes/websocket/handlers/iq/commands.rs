@@ -6,6 +6,7 @@ use super::{
     GetSnapshot, Jid, Object, ObjectType, Permission, Subject, WebSocketState, XmppError,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
+use waddle_xmpp::xep::RsmResponse;
 
 /// Language of all responder-authored command text (XEP-0050 §2.4).
 const RESPONSE_LANG: &str = "en";
@@ -117,6 +118,20 @@ pub(super) async fn handle_command_iq(
             command.status = Some(CommandStatus::Completed);
             command.session_id = response_session_id.or(session_id);
             command.form = form;
+            command.notes = notes;
+            command
+        }
+        CommandResult::CompletedPage {
+            session_id: response_session_id,
+            form,
+            next_cursor,
+            notes,
+        } => {
+            let mut command = Command::new(node.clone());
+            command.status = Some(CommandStatus::Completed);
+            command.session_id = response_session_id.or(session_id);
+            command.form = Some(form);
+            command.result_set = next_cursor.map(|cursor| RsmResponse::new().with_last(cursor));
             command.notes = notes;
             command
         }

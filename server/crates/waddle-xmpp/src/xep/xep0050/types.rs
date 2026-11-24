@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::error::{StanzaErrorCondition, StanzaErrorType};
 use crate::xep::xep0004::{DataForm, DataFormError};
+use crate::xep::xep0059::RsmResponse;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -367,6 +368,10 @@ pub struct Command {
     pub notes: Vec<Note>,
     /// Embedded data form payload.
     pub form: Option<DataForm>,
+    /// XEP-0059 result-set metadata describing the page of a multi-item
+    /// result form (XEP-0004 §3.4), emitted as a `<set/>` sibling of the
+    /// form because such a form cannot carry paging fields itself.
+    pub result_set: Option<RsmResponse>,
     /// `xml:lang` of the command element. Responders SHOULD state it on
     /// every response (XEP-0050 §2.4).
     pub lang: Option<String>,
@@ -383,6 +388,7 @@ impl Command {
             actions: None,
             notes: Vec::new(),
             form: None,
+            result_set: None,
             lang: None,
         }
     }

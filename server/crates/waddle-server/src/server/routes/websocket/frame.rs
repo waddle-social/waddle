@@ -428,6 +428,18 @@ fn stream_open_error_response(
     .into()
 }
 
+fn not_well_formed_stream_error_response() -> ResponseBatch {
+    vec![
+        Element::from(StreamError {
+            condition: DefinedCondition::NotWellFormed,
+            texts: Default::default(),
+            application_specific: Vec::new(),
+        }),
+        websocket_stream_close_element(),
+    ]
+    .into()
+}
+
 fn sasl2_authentication_pending(phase: &ConnectionPhase) -> bool {
     phase.is_sasl2_oauth_error_pending() || phase.scram_pending_is_sasl2()
 }
@@ -508,6 +520,9 @@ enum ClassifiedInboundInput {
 #[derive(Debug, Clone)]
 enum MalformedInboundInput {
     Open(DefinedCondition),
+    /// The frame is not well-formed XML (RFC 6120 §4.9.3.13): a stream error
+    /// follows and the stream is closed.
+    NotWellFormed,
     Protocol {
         sasl: MalformedSaslInput,
         responses: Option<Vec<ResponseFrame>>,
@@ -552,6 +567,10 @@ impl ClassifiedInboundFrame {
                         }
                         ParseError::InvalidOpenContent => {
                             MalformedInboundInput::Open(DefinedCondition::InvalidXml)
+                        }
+                        ParseError::NotWellFormed(_) => {
+                            warn!(error = %error, len = frame.len(), "Classified frame that is not well-formed XML");
+                            MalformedInboundInput::NotWellFormed
                         }
                         _ => {
                             let sasl = if is_sasl2_response_parse_failure(frame, &error) {
@@ -681,6 +700,7 @@ async fn handle_xmpp_frame_impl(
         return ResponseBatch::default();
     }
 
+    let stream_open_committed = conn.stream_open_handled;
     let WsConnState {
         connection_ref: _,
         binding_ref,
@@ -785,6 +805,24 @@ async fn handle_xmpp_frame_impl(
             *stream_open_from = None;
             conn.begin_server_stream_open_response();
             return stream_open_error_response(domain, None, condition);
+        }
+        ClassifiedInboundInput::Malformed(MalformedInboundInput::NotWellFormed) => {
+            // RFC 6120 §4.9.3.13 and RFC 7395 §3.3: answer with a
+            // <not-well-formed/> stream error and close the stream. A SASL
+            // exchange in flight ends with it.
+            clear_sasl2_authentication_pending(phase, AuthFailure::ScramMalformed);
+            if phase.scram_pending_username().is_some() {
+                record_scram_failure(AuthFailure::ScramMalformed, None);
+                let _ = phase.take_scram_pending();
+            }
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            if stream_open_committed {
+                conn.reset_stream_open_for_xmpp_lifecycle();
+                return not_well_formed_stream_error_response();
+            }
+            *stream_open_from = None;
+            conn.begin_server_stream_open_response();
+            return stream_open_error_response(domain, None, DefinedCondition::NotWellFormed);
         }
         ClassifiedInboundInput::Malformed(MalformedInboundInput::Protocol {
             sasl,

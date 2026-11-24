@@ -62,6 +62,14 @@ protocol CallMediaControls: AnyObject, Observable {
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async
     /// How good our own connection to the call is; unknown until the server has measured it.
     var connectionQuality: CallConnectionQuality { get }
+    /// One more, or one fewer, is looking at the call's video figures. The media engine measures
+    /// the streams while anyone is; measuring costs a little, so it stops with the last of them.
+    func setMeasuresVideo(_ on: Bool) async
+    /// The latest reading of each video stream we send or receive; empty unless measuring.
+    /// A stream that appeared since the last reading is measured from this one on.
+    func videoSamples() async -> [CallVideoSample]
+    /// How many times each of our devices has been tried and refused or failed in this call.
+    var mediaRefusals: [CallMediaIssue.Kind: Int] { get }
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.

@@ -176,6 +176,23 @@ impl InboxStorage for PoisonInbox {
     ) -> Result<Option<InboxEntry>, InboxStorageError> {
         panic!("planning wrote InboxStorage::mark_read")
     }
+    async fn read_position(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<Option<waddle_xmpp::mam::ArchiveOrdinal>, InboxStorageError> {
+        self.0.read_position(user, partner, thread_id).await
+    }
+    async fn mark_read_through(
+        &self,
+        _user: &BareJid,
+        _partner: &BareJid,
+        _thread_id: Option<&str>,
+        _through: waddle_xmpp::inbox::ReadThrough,
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
+        panic!("planning wrote InboxStorage::mark_read_through")
+    }
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError> {
         self.0.total_unread(user).await
     }

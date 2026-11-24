@@ -162,3 +162,110 @@ fn build_inbox_push_emits_headline_with_waddle_push_payload() {
         .expect("push carries Waddle metadata separately");
     assert_eq!(metadata.attr("preview"), Some("hi"));
 }
+
+// ---------------------------------------------------------------------------
+// Chat-marker read position (XEP-0430 §Unread Messages, XEP-0333 §Business Rules)
+// ---------------------------------------------------------------------------
+
+fn through(ordinal: i64, unread_cleared: u32) -> waddle_xmpp::inbox::ReadThrough {
+    waddle_xmpp::inbox::ReadThrough {
+        ordinal: waddle_xmpp::mam::ArchiveOrdinal::from_storage(ordinal).expect("ordinal"),
+        unread_cleared,
+    }
+}
+
+async fn seeded(unread: usize) -> (InMemoryInboxStorage, BareJid, BareJid) {
+    let store = InMemoryInboxStorage::new();
+    let me = jid("me@example.com");
+    let alice = jid("alice@example.com");
+    for _ in 0..unread {
+        store
+            .upsert(
+                &me,
+                InboxEntry::new(alice.clone(), ConversationKind::Direct, "sid", 100),
+                true,
+            )
+            .await
+            .expect("upsert");
+    }
+    (store, me, alice)
+}
+
+#[tokio::test]
+async fn read_through_clears_only_messages_up_to_the_marker() {
+    let (store, me, alice) = seeded(5).await;
+
+    let updated = store
+        .mark_read_through(&me, &alice, None, through(2, 2))
+        .await
+        .expect("mark_read_through ok")
+        .expect("entry returned for fan-out");
+
+    assert_eq!(updated.unread, 3, "messages after the marker stay unread");
+    assert_eq!(
+        store.read_position(&me, &alice, None).await.expect("read"),
+        Some(waddle_xmpp::mam::ArchiveOrdinal::from_storage(2).expect("ordinal"))
+    );
+}
+
+#[tokio::test]
+async fn read_position_only_moves_forward() {
+    let (store, me, alice) = seeded(5).await;
+    store
+        .mark_read_through(&me, &alice, None, through(4, 4))
+        .await
+        .expect("advance");
+
+    // A marker for an older message, or the same one again, is ignored.
+    for ordinal in [2, 4] {
+        let stale = store
+            .mark_read_through(&me, &alice, None, through(ordinal, 2))
+            .await
+            .expect("stale ok");
+        assert!(stale.is_none(), "marker at {ordinal} must be ignored");
+    }
+    assert_eq!(store.total_unread(&me).await.expect("total"), 1);
+    assert_eq!(
+        store.read_position(&me, &alice, None).await.expect("read"),
+        Some(waddle_xmpp::mam::ArchiveOrdinal::from_storage(4).expect("ordinal"))
+    );
+}
+
+#[tokio::test]
+async fn read_through_keeps_messages_that_arrive_after_it_was_computed() {
+    let (store, me, alice) = seeded(3).await;
+    // A fourth message lands before the marker is applied.
+    store
+        .upsert(
+            &me,
+            InboxEntry::new(alice.clone(), ConversationKind::Direct, "sid-4", 101),
+            true,
+        )
+        .await
+        .expect("upsert");
+
+    let updated = store
+        .mark_read_through(&me, &alice, None, through(2, 2))
+        .await
+        .expect("mark_read_through ok")
+        .expect("entry");
+
+    assert_eq!(updated.unread, 2);
+}
+
+#[tokio::test]
+async fn read_through_without_a_row_is_a_no_op() {
+    let store = InMemoryInboxStorage::new();
+    let me = jid("me@example.com");
+    let alice = jid("alice@example.com");
+
+    assert!(store
+        .mark_read_through(&me, &alice, None, through(1, 1))
+        .await
+        .expect("ok")
+        .is_none());
+    assert_eq!(
+        store.read_position(&me, &alice, None).await.expect("read"),
+        None
+    );
+}

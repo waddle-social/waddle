@@ -10,9 +10,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
+use waddle_xmpp_core::mam::ArchiveOrdinal;
 use waddle_xmpp_core::xep0359::StanzaId;
 
-use super::{InboxEntry, InboxKey, InboxView};
+use super::{InboxEntry, InboxKey, InboxView, ReadThrough};
 use crate::ingress::MessageKey;
 use crate::xep::CallThreadDuration;
 
@@ -193,6 +194,30 @@ pub trait InboxStorage: Send + Sync {
         thread_id: Option<&str>,
     ) -> Result<Option<InboxEntry>, InboxStorageError>;
 
+    /// Archive position the conversation has been read through by chat
+    /// markers, or `None` when no marker has advanced it yet.
+    async fn read_position(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<Option<ArchiveOrdinal>, InboxStorageError>;
+
+    /// Apply a chat-marker read cursor (XEP-0430 §"Unread Messages",
+    /// XEP-0333 §"Business Rules"): subtract `through.unread_cleared` from the
+    /// unread counter and advance the stored position to `through.ordinal`.
+    ///
+    /// Markers only move forward: a cursor at or behind the stored position
+    /// is ignored. Returns the post-update entry, or `None` when no row
+    /// matched or the cursor was not ahead of the stored position.
+    async fn mark_read_through(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+        through: ReadThrough,
+    ) -> Result<Option<InboxEntry>, InboxStorageError>;
+
     /// Return the total unread count for the user (channel-level only).
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError>;
 
@@ -225,6 +250,13 @@ pub trait InboxStorage: Send + Sync {
         ended: DateTime<Utc>,
         duration: &CallThreadDuration,
     ) -> Result<(), InboxStorageError>;
+}
+
+fn inbox_key(partner: &BareJid, thread_id: Option<&str>) -> InboxKey {
+    match thread_id {
+        Some(thread_id) => InboxKey::thread(partner.clone(), thread_id),
+        None => InboxKey::channel(partner.clone()),
+    }
 }
 
 /// In-memory implementation used for tests and as the storage fake for
@@ -445,6 +477,37 @@ impl InboxStorage for InMemoryInboxStorage {
             None => InboxKey::channel(partner.clone()),
         };
         Ok(view.mark_read_by_key(&key))
+    }
+
+    async fn read_position(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+    ) -> Result<Option<ArchiveOrdinal>, InboxStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .get(user)
+            .and_then(|view| view.read_position(&inbox_key(partner, thread_id))))
+    }
+
+    async fn mark_read_through(
+        &self,
+        user: &BareJid,
+        partner: &BareJid,
+        thread_id: Option<&str>,
+        through: ReadThrough,
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
+        let mut guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .get_mut(user)
+            .and_then(|view| view.mark_read_through(&inbox_key(partner, thread_id), through)))
     }
 
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError> {

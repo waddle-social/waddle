@@ -13,7 +13,7 @@
 //!    pin events), archived in MAM and fanned out to occupants.
 //!
 //! Authorization is **hard-coded** to admins/owners in this handler;
-//! per-room configurable `urn:waddle:roomconfig:pinpermission` ships
+//! per-room configurable `{urn:waddle:roomconfig}pinpermission` ships
 //! in #415 and will replace the hard-coded gate.
 //!
 //! The handler runs after `MucCanonicalizeHandler` so the in-flight

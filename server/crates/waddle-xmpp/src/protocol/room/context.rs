@@ -110,7 +110,7 @@ pub struct RoomContext<'a> {
     /// gate can apply XEP-0492's private/public group defaults from the
     /// same frozen room snapshot.
     pub room_members_only: bool,
-    /// #415: per-room pin permission policy (`urn:waddle:roomconfig:pinpermission`).
+    /// #415: per-room pin permission policy (`{urn:waddle:roomconfig}pinpermission`).
     /// Frozen at dispatch start from `RoomConfig.pin_permission`; the
     /// `MucPinHandler` reads this to decide whether non-admin members
     /// may pin/unpin.

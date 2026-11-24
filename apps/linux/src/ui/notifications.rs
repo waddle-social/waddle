@@ -37,6 +37,10 @@ impl WaddleWindow {
             window.choose_notify_mode(mode);
         });
         self.add_action(&action);
+        self.imp()
+            .notifications
+            .borrow_mut()
+            .set_rooms_mentions_only(crate::settings::get().rooms_mentions_only);
     }
 
     /// The conversation a mode applies to: a thread uses its room's.
@@ -124,10 +128,11 @@ impl WaddleWindow {
         body: &str,
     ) {
         let imp = self.imp();
-        if !imp
-            .notifications
-            .borrow()
-            .wants(conversation.kind, &conversation.jid, mentions_me)
+        if !crate::settings::get().notifications
+            || !imp
+                .notifications
+                .borrow()
+                .wants(conversation.kind, &conversation.jid, mentions_me)
         {
             return;
         }
@@ -155,6 +160,27 @@ impl WaddleWindow {
         // The same id replaces the previous notification of this conversation.
         app.send_notification(Some(&notification_id(&key)), &notification);
         imp.notifications.borrow_mut().shown(&key);
+    }
+
+    /// Take the notification preferences into account: the room default
+    /// follows the setting, and turning notifications off withdraws what is
+    /// on screen.
+    pub(super) fn apply_notification_settings(&self) {
+        let settings = crate::settings::get();
+        let imp = self.imp();
+        imp.notifications
+            .borrow_mut()
+            .set_rooms_mentions_only(settings.rooms_mentions_only);
+        if !settings.notifications {
+            let shown = imp.notifications.borrow_mut().take_shown();
+            if let Some(app) = self.application() {
+                for key in shown {
+                    app.withdraw_notification(&notification_id(&key));
+                }
+            }
+        }
+        self.refresh_notify_button();
+        self.render_conversations();
     }
 
     /// Withdraw the notifications of conversations that are no longer unread.

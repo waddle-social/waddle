@@ -80,6 +80,7 @@ impl WaddleWindow {
             imp.content_stack.set_visible_child_name("empty");
         }
         self.leave_inbox();
+        self.reset_feed();
         self.refresh_inbox_badge(0);
         while let Some(child) = imp.inbox_cards.first_child() {
             imp.inbox_cards.remove(&child);
@@ -157,6 +158,9 @@ impl WaddleWindow {
 
     pub(super) fn show_inbox(&self) {
         let imp = self.imp();
+        self.leave_feed();
+        self.leave_admin();
+        self.leave_calendar();
         {
             let mut state = imp.inbox.borrow_mut();
             state.open = true;
@@ -188,6 +192,7 @@ impl WaddleWindow {
     /// A conversation is opening: the overview gives way to it.
     pub(super) fn leave_inbox(&self) {
         let imp = self.imp();
+        self.leave_feed();
         let was_open = std::mem::take(&mut imp.inbox.borrow_mut().open);
         if !was_open {
             return;

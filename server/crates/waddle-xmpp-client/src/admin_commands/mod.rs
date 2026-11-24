@@ -11,8 +11,9 @@
 //! `FORM_TYPE` (XEP-0068) mirrors the command node. Completed
 //! responses carry `status='completed'` plus a `jabber:x:data`
 //! result form: list-style results put rows in `<item/>` children
-//! (XEP-0004 §3.4 multiple-items shape) with `next_cursor` as a
-//! top-level field; single-entity results carry top-level fields
+//! (XEP-0004 §3.4 multiple-items shape, no top-level fields) with the
+//! continuation token as the XEP-0059 `<last/>` of a `<set/>` beside the
+//! form; single-entity results carry top-level fields
 //! only.
 //!
 //! The command nodes are legitimately custom (`urn:waddle:*`): no XEP

@@ -67,7 +67,7 @@ impl Kind {
 pub enum Flavor {
     #[default]
     Plain,
-    /// A forum room (`muc#roomconfig_forum`).
+    /// A forum room (`{urn:waddle:roomconfig}forum`).
     Forum,
     /// A group DM: a hidden members-only room, listed with the DMs.
     Group,
@@ -250,7 +250,7 @@ pub struct Session {
     /// Also used by the profile verbs (`session_profile.rs`).
     pub(crate) client: Arc<WaddleClient>,
     /// For XEP-0363 uploads and fetching shared files.
-    transfers: attachments::Transfers,
+    pub(crate) transfers: attachments::Transfers,
     pub me: Me,
 }
 

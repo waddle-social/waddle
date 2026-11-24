@@ -39,6 +39,7 @@ mod imp {
     impl ApplicationImpl for WaddleApplication {
         fn startup(&self) {
             self.parent_startup();
+            crate::ui::apply_appearance();
             let provider = gtk::CssProvider::new();
             provider.load_from_string(include_str!("../data/style.css"));
             if let Some(display) = gtk::gdk::Display::default() {
@@ -108,8 +109,16 @@ impl WaddleApplication {
                 }
             })
             .build();
-        self.add_action_entries([about, quit, open, reply, mark_read]);
+        let preferences = gio::ActionEntry::builder("preferences")
+            .activate(|app: &Self, _, _| {
+                let window = app.window();
+                window.present();
+                window.show_preferences();
+            })
+            .build();
+        self.add_action_entries([about, quit, open, reply, mark_read, preferences]);
         self.set_accels_for_action("app.quit", &["<Control>q"]);
+        self.set_accels_for_action("app.preferences", &["<Control>comma"]);
     }
 
     /// The one window, made on first use. It hides on close, so it

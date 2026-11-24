@@ -112,6 +112,9 @@ pub(super) async fn handle_account_disco_info<'a>(
             Feature::disco_info(),
             Feature::fulltext_mam(),
             Feature::threads_query(),
+            // XEP-0430 §"Discovering Support": the inbox is queried at the
+            // user's own bare JID, so that is where it is advertised.
+            Feature::new(waddle_xmpp::xep::NS_INBOX),
         ];
         features.extend(pep_features());
         let response = build_disco_info_response(req.request_iq, &identities, &features, None);

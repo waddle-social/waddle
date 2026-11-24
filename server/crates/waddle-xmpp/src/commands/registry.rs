@@ -48,6 +48,16 @@ pub enum CommandResult {
         form: Option<DataForm>,
         notes: Vec<Note>,
     },
+    /// Command completed with a multi-item result form (XEP-0004 §3.4) that
+    /// is one page of a larger set. The form cannot carry paging fields, so
+    /// the continuation token travels as the XEP-0059 `<last/>` of a
+    /// `<set/>` beside the form; it is absent on the final page.
+    CompletedPage {
+        session_id: Option<String>,
+        form: DataForm,
+        next_cursor: Option<String>,
+        notes: Vec<Note>,
+    },
     /// Command was canceled.
     Canceled {
         session_id: Option<String>,
@@ -413,6 +423,7 @@ impl CommandRegistry {
             // open so the requester can resubmit with the same sessionid.
             CommandResult::Error(error) if continuing_session && is_correctable(error) => {}
             CommandResult::Completed { .. }
+            | CommandResult::CompletedPage { .. }
             | CommandResult::Canceled { .. }
             | CommandResult::Error(_) => {
                 if let Some(session_id) = active_session_id {

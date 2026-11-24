@@ -18,14 +18,14 @@ describe("pinPermissionFromDiscoFields (#422)", () => {
     const fields = new Map([
       ["FORM_TYPE", "urn:waddle:room:0"],
       ["waddle#channel_type", "text"],
-      ["urn:waddle:roomconfig:pinpermission", "anyone"],
+      ["{urn:waddle:roomconfig}pinpermission", "anyone"],
     ]);
     expect(pinPermissionFromDiscoFields(fields)).toBe("anyone");
   });
 
   test("extracts 'admins-only' when the disco field carries that value", () => {
     const fields = new Map([
-      ["urn:waddle:roomconfig:pinpermission", "admins-only"],
+      ["{urn:waddle:roomconfig}pinpermission", "admins-only"],
     ]);
     expect(pinPermissionFromDiscoFields(fields)).toBe("admins-only");
   });
@@ -40,14 +40,14 @@ describe("pinPermissionFromDiscoFields (#422)", () => {
 
   test("returns undefined when the field carries an unknown value", () => {
     const fields = new Map([
-      ["urn:waddle:roomconfig:pinpermission", "open-house"],
+      ["{urn:waddle:roomconfig}pinpermission", "open-house"],
     ]);
     expect(pinPermissionFromDiscoFields(fields)).toBeUndefined();
   });
 
   test("returns undefined when the field is empty", () => {
     const fields = new Map([
-      ["urn:waddle:roomconfig:pinpermission", ""],
+      ["{urn:waddle:roomconfig}pinpermission", ""],
     ]);
     expect(pinPermissionFromDiscoFields(fields)).toBeUndefined();
   });
@@ -76,7 +76,7 @@ describe("applyDiscoInfoToChannel pinPermission (#422)", () => {
       fields: new Map([
         ["FORM_TYPE", "urn:waddle:room:0"],
         ["waddle#channel_type", "text"],
-        ["urn:waddle:roomconfig:pinpermission", value],
+        ["{urn:waddle:roomconfig}pinpermission", value],
       ]),
     };
   }

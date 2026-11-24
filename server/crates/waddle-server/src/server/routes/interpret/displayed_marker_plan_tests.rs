@@ -14,7 +14,7 @@ use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::ingress::WireHandledCount;
 use waddle_xmpp::mam::{ArchivedMessage, MamStorage, SqlxMamStorage};
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::protocol::OutboundEvent;
+use waddle_xmpp::protocol::{MarkerConversation, OutboundEvent};
 use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn plan_marker(submission: &mut IngressSubmission, deps: &Deps<'_>, room: &jid::BareJid) {
@@ -22,10 +22,10 @@ async fn plan_marker(submission: &mut IngressSubmission, deps: &Deps<'_>, room: 
     let capture = IngressEffectCapture::new();
     let planned = build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
     interpret(
-        vec![OutboundEvent::MarkInboxReadFromDisplayed {
+        vec![OutboundEvent::MarkInboxReadFromMarker {
             owner: submission.sender.to_bare(),
-            room: room.clone(),
-            displayed_message_id: "displayed-target".into(),
+            conversation: MarkerConversation::Room(room.clone()),
+            marked_message_id: "displayed-target".into(),
         }],
         &planned,
     )

@@ -245,6 +245,7 @@ async fn prepare_postgres_schema(
            unread INTEGER NOT NULL DEFAULT 0, preview TEXT, thread_title TEXT, \
            reply_count INTEGER NOT NULL DEFAULT 0, author TEXT, call_thread_kind TEXT, \
            call_thread_media TEXT, call_ended_at BIGINT, call_duration TEXT, \
+           read_ordinal BIGINT, \
            PRIMARY KEY (user_jid, partner_jid, thread_id))"
         ),
     )
@@ -299,6 +300,7 @@ async fn prepare_postgres_schema(
         ("call_thread_media", "TEXT"),
         ("call_ended_at", "BIGINT"),
         ("call_duration", "TEXT"),
+        ("read_ordinal", "BIGINT"),
     ] {
         postgres_execute(
             connection,
@@ -402,6 +404,7 @@ async fn initialize_sqlite(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStora
                 call_thread_media TEXT,
                 call_ended_at INTEGER,
                 call_duration TEXT,
+                read_ordinal INTEGER,
                 PRIMARY KEY (user_jid, partner_jid, thread_id)
             );
             INSERT INTO inbox_entries_new (user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated, unread, preview)
@@ -434,6 +437,7 @@ async fn initialize_sqlite(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStora
                 call_thread_media TEXT,
                 call_ended_at {i64_type},
                 call_duration TEXT,
+                read_ordinal {i64_type},
                 PRIMARY KEY (user_jid, partner_jid, thread_id)
             );
             "#,
@@ -619,11 +623,14 @@ async fn migrate_inbox_call_thread_columns(
 ) -> Result<(), InboxStorageError> {
     let i64_type = crate::db::i64_sql_type(storage.db.driver());
     // (column, SQL type) for the four call-thread columns.
-    let columns: [(&str, &str); 4] = [
+    let columns: [(&str, &str); 5] = [
         ("call_thread_kind", "TEXT"),
         ("call_thread_media", "TEXT"),
         ("call_ended_at", i64_type),
         ("call_duration", "TEXT"),
+        // Chat-marker read position; not a call-thread column but added the
+        // same way for tables that pre-date it.
+        ("read_ordinal", i64_type),
     ];
     for (column, sql_type) in columns {
         if !column_present_sqlite(storage, "inbox_entries", column).await? {

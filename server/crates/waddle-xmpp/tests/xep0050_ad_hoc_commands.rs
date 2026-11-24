@@ -221,6 +221,43 @@ fn xep0050_command_round_trip_preserves_all_fields() {
     assert_eq!(parsed.notes[1].note_type, CommandNoteType::Warn);
 }
 
+// ── paged multi-item results (XEP-0004 §3.4 + XEP-0059) ─────────────
+
+#[test]
+fn xep0050_paged_result_carries_the_cursor_as_a_result_set_beside_the_form() {
+    use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
+    use waddle_xmpp::xep::{RsmResponse, NS_RSM};
+
+    let mut command = Command::new("urn:example:list");
+    command.status = Some(CommandStatus::Completed);
+    command.form = Some(
+        DataForm::new(FormType::Result)
+            .add_reported(Field::new("jid", FieldType::JidSingle))
+            .add_item(vec![Field::text_single("jid", "juliet@capulet.com")]),
+    );
+    command.result_set = Some(RsmResponse::new().with_last("juliet"));
+
+    let element = command.to_element();
+    let form = element
+        .get_child("x", "jabber:x:data")
+        .expect("result form present");
+    assert!(
+        form.children().all(|c| c.name() != "field"),
+        "a multi-item result has no top-level fields"
+    );
+    let last = element
+        .get_child("set", NS_RSM)
+        .and_then(|set| set.get_child("last", NS_RSM))
+        .expect("<set><last/></set> beside the form");
+    assert_eq!(last.text(), "juliet");
+
+    let reparsed = Command::from_element(&element).expect("reparse");
+    assert_eq!(
+        reparsed.result_set.and_then(|rsm| rsm.last).as_deref(),
+        Some("juliet")
+    );
+}
+
 // ── §2.4 request parsing, execute resolution, sessions, lang ────────
 
 mod session_flow {

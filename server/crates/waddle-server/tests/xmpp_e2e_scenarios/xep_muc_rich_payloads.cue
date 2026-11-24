@@ -222,6 +222,14 @@ scenario: #Scenario & {
 			bodyAbsent: true
 			contains:   ["urn:xmpp:receipts", "urn:xmpp:chat-markers:0", "cue-receipt-request"]
 		},
+		// The displayed marker reads bob's one unread message from admin
+		// (1 -> 0), so the server pushes the changed XEP-0430 inbox entry to
+		// bob's resources.
+		#ExpectMessage & {
+			target:     bobPhone
+			bodyAbsent: true
+			contains:   ["urn:waddle:inbox:0", "urn:xmpp:inbox:1", "unread='0'", "please ack this"]
+		},
 		#SendMessage & {
 			from: adminPhone
 			toJid: roomJid

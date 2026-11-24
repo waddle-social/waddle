@@ -509,7 +509,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 }
             };
             // Whether the Space is open to other servers is its owner's to
-            // set, in the same form (`urn:waddle:spaces:federated`). The
+            // set, in the same form (`{urn:waddle:spaces}federated`). The
             // submitted value is read before anything is written, and
             // applied once the configuration is; a request without a
             // session is a remote principal's and never changes it.

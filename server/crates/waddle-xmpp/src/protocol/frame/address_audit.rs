@@ -46,7 +46,7 @@ pub fn inspect_stanza_addresses(frame: &str) -> Result<StanzaAddressAudit, Parse
         return Err(ParseError::Empty);
     }
     let kind = peek_root_name(frame)
-        .ok_or_else(|| ParseError::InvalidXml("missing root element".to_owned()))?;
+        .ok_or_else(|| ParseError::NotWellFormed("missing root element".to_owned()))?;
     if !matches!(kind, "iq" | "message" | "presence") {
         return Err(ParseError::UnknownRoot(kind.to_owned()));
     }

@@ -13,7 +13,10 @@
 //! - XEP-0334 `<no-copy xmlns='urn:xmpp:hints'/>` MUST suppress carbons.
 //! - `type='chat'` messages remain eligible even without a `<body/>` (§6.1).
 //! - Body-less XEP-0085 / XEP-0184 / XEP-0333 payloads remain eligible (§6.1).
-//! - Error stanzas are not carboned.
+//! - Invitation messages (XEP-0249 direct, XEP-0045 mediated) remain
+//!   eligible without a body (§6.1).
+//! - Error stanzas are eligible when they answer an eligible message
+//!   (§6.1); the echoed content stands in for the original's type.
 //!
 //! Locality / `kind` mapping:
 //!
@@ -286,12 +289,44 @@ mod tests {
     }
 
     #[test]
-    fn xep_0280_error_message_is_not_carboned() {
+    fn xep_0280_error_reply_to_eligible_message_is_carboned() {
         let local = full("alice@example.com/web");
-        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "boom");
+        let mut msg = chat_with_body("bob@example.com/phone", "alice@example.com/web", "boom");
+        msg.type_ = MessageType::Error;
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Received);
+    }
+
+    #[test]
+    fn xep_0280_error_without_echoed_im_content_is_not_carboned() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("alice@example.com/web".parse().expect("jid")));
+        msg.from = Some("bob@example.com/phone".parse().expect("jid"));
         msg.type_ = MessageType::Error;
         let outcome = run(&local, CarbonsState::Enabled, &mut msg);
         assert!(extract_carbons(&outcome).is_empty());
+    }
+
+    #[test]
+    fn xep_0280_bodyless_direct_invitation_is_carboned() {
+        let local = full("alice@example.com/web");
+        let mut msg = Message::new(Some("bob@example.com".parse().expect("jid")));
+        msg.from = Some("alice@example.com/web".parse().expect("jid"));
+        msg.type_ = MessageType::Normal;
+        msg.payloads.push(
+            Element::builder("x", "jabber:x:conference")
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    "room@conf.example.com",
+                )
+                .build(),
+        );
+        let outcome = run(&local, CarbonsState::Enabled, &mut msg);
+        let carbons = extract_carbons(&outcome);
+        assert_eq!(carbons.len(), 1);
+        assert_eq!(carbons[0].1, CarbonKind::Sent);
     }
 
     #[test]

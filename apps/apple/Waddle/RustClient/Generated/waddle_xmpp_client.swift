@@ -12077,7 +12077,7 @@ public struct WaddleRoomConfig: Equatable, Hashable {
     public var publicRoom: Bool?
     public var moderated: Bool?
     /**
-     * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+     * Waddle forum-mode flag (`{urn:waddle:roomconfig}forum`, pre-existing
      * registrar-prefix debt carried for parity).
      */
     public var forum: Bool?
@@ -12087,7 +12087,7 @@ public struct WaddleRoomConfig: Equatable, Hashable {
     // declare one manually.
     public init(name: String?, description: String?, membersOnly: Bool?, publicRoom: Bool?, moderated: Bool?,
         /**
-         * Waddle forum-mode flag (`muc#roomconfig_forum`, pre-existing
+         * Waddle forum-mode flag (`{urn:waddle:roomconfig}forum`, pre-existing
          * registrar-prefix debt carried for parity).
          */forum: Bool?, pinPermission: WaddlePinPermission?) {
         self.name = name
@@ -17505,7 +17505,7 @@ public func FfiConverterTypeWaddlePinAction_lower(_ value: WaddlePinAction) -> R
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
- * `urn:waddle:roomconfig:pinpermission` policy values.
+ * `{urn:waddle:roomconfig}pinpermission` policy values.
  */
 
 public enum WaddlePinPermission: Equatable, Hashable {

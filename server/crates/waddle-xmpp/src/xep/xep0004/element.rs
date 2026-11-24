@@ -227,8 +227,12 @@ impl ToElement for DataForm {
             );
         }
 
-        for field in &self.fields {
-            builder = builder.append(field.to_element());
+        // XEP-0004 §3.4: a multi-item result form MUST NOT contain any
+        // top-level fields other than `<reported/>` and `<item/>`.
+        if !self.is_multi_item() {
+            for field in &self.fields {
+                builder = builder.append(field.to_element());
+            }
         }
 
         if !self.reported.is_empty() {

@@ -43,9 +43,7 @@ use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::minidom::Element;
 
-use crate::server::routes::websocket::handlers::iq::errors::{
-    feature_not_implemented_iq_error, not_authorized_iq_error,
-};
+use crate::server::routes::websocket::handlers::iq::errors::not_authorized_iq_error;
 
 use waddle_extensions::ExtensionManager;
 

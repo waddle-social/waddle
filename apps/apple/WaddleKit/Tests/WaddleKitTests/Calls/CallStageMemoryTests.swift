@@ -105,4 +105,15 @@ import Testing
         memory.follow(call: "b")
         #expect(!memory.showsParticipants)
     }
+
+    @Test func aNoticePutAwayStaysAwayForItsCallOnly() {
+        let report = CallMediaIssues.Report(isCameraBlocked: true, refusals: [.camera: 1])
+        var memory = CallStageMemory()
+        memory.follow(call: "a")
+        memory.dismissedMediaIssues.dismiss(.camera, in: report)
+        memory.follow(call: "a")
+        #expect(memory.dismissedMediaIssues.hides(.camera, in: report))
+        memory.follow(call: "b")
+        #expect(!memory.dismissedMediaIssues.hides(.camera, in: report))
+    }
 }

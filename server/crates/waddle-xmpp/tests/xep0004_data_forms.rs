@@ -206,3 +206,32 @@ fn xep0004_fixed_field_needs_no_var() {
     assert!(parsed.fields[0].var.is_none());
     assert_eq!(parsed.fields[0].value(), Some("Section header"));
 }
+
+#[test]
+fn xep0004_multi_item_result_serializes_no_top_level_fields() {
+    // §3.4: a form with <reported/> and <item/> MUST NOT contain any
+    // top-level fields, FORM_TYPE included.
+    let form = DataForm::new(FormType::Result)
+        .add_field(Field::form_type("urn:example:list"))
+        .add_field(Field::text_single("next_cursor", "abc"))
+        .add_reported(Field::new("jid", FieldType::JidSingle))
+        .add_item(vec![Field::text_single("jid", "juliet@capulet.com")]);
+    assert!(form.is_multi_item());
+
+    let elem = form.to_element();
+    let children: Vec<&str> = elem.children().map(|c| c.name()).collect();
+    assert_eq!(children, vec!["reported", "item"]);
+    assert!(DataForm::from_element(&reparse(&elem))
+        .expect("reparse")
+        .fields
+        .is_empty());
+}
+
+#[test]
+fn xep0004_single_item_result_keeps_top_level_fields() {
+    let form = DataForm::new(FormType::Result)
+        .add_field(Field::form_type("urn:example:one"))
+        .add_field(Field::text_single("name", "Juliet"));
+    assert!(!form.is_multi_item());
+    assert_eq!(form.to_element().children().count(), 2);
+}
