@@ -65,6 +65,15 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // XEP-0308 §Discovering support: MUST for clients implementing
         // correction.
         NS_MESSAGE_CORRECT,
+        // XEP-0461 §Discovering support: "If a client implements message
+        // replies, it MUST specify the 'urn:xmpp:reply:0' feature". Replies
+        // are built and parsed in xep/reply.rs.
+        crate::xep::reply::NS_REPLY,
+        // NOTE: no feature is advertised for XEP-0353 Jingle Message
+        // Initiation (the XEP intentionally defines no discovery), XEP-0272
+        // Muji (no disco clause), XEP-0447 file sharing, XEP-0449 stickers,
+        // XEP-0334 hints or XEP-0428 fallback (no client-side disco clause),
+        // and XEP-0184 receipts (not implemented by this client).
         // XEP-0359 §Business Rules: entities supporting stanza-id
         // SHOULD announce it.
         crate::messaging::NS_STANZA_ID,
@@ -222,6 +231,7 @@ mod tests {
         let features = client_caps_features();
         assert!(features.contains(&NS_MESSAGE_RETRACT), "XEP-0424");
         assert!(features.contains(&NS_REACTIONS), "XEP-0444");
+        assert!(features.contains(&crate::xep::reply::NS_REPLY), "XEP-0461");
         assert!(features.contains(&NS_MESSAGE_CORRECT), "XEP-0308");
         assert!(
             features.contains(&crate::messaging::NS_STANZA_ID),
@@ -299,13 +309,14 @@ mod tests {
                 NS_MESSAGE_CORRECT,
                 NS_MESSAGE_RETRACT,
                 NS_REACTIONS,
+                crate::xep::reply::NS_REPLY,
                 crate::messaging::NS_STANZA_ID,
             ],
             "the golden hash is valid only for this exact concrete feature set"
         );
         assert_eq!(
             client_caps_verification_string(),
-            "SVrhAOqEhFd07Ny32eTXE/9Ht2k="
+            "SEOIzts8nvglx2+mDLiZsscdBMY="
         );
     }
 
