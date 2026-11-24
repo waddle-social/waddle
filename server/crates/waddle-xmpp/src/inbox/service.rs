@@ -369,6 +369,19 @@ impl InboxView {
         }
     }
 
+    /// Inbox-wide counts across channel-level conversations (excludes thread entries).
+    pub fn counts(&self) -> super::storage::InboxCounts {
+        let mut counts = super::storage::InboxCounts::default();
+        for entry in self.entries.values().filter(|e| e.thread_id.is_none()) {
+            counts.conversations += 1;
+            if entry.unread > 0 {
+                counts.unread_conversations += 1;
+            }
+            counts.unread_messages += u64::from(entry.unread);
+        }
+        counts
+    }
+
     /// Total unread across channel-level conversations (excludes thread entries).
     pub fn total_unread(&self) -> u64 {
         self.entries

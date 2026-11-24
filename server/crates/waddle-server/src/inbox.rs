@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use jid::BareJid;
 use tracing::{info, instrument};
 use waddle_xmpp::inbox::storage::{
-    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxStorage,
+    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxCounts, InboxStorage,
     InboxStorageError,
 };
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};

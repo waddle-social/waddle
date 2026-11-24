@@ -578,16 +578,14 @@ async fn handle_inbox_query_iq(
         }
     };
 
-    let all_unread_total = match state
-        .deps
-        .protocol
-        .inbox_storage
-        .total_unread(&user_jid)
-        .await
-    {
-        Ok(total) => total,
+    // XEP-0430 `<fin/>` counts are inbox-wide ("a total count of
+    // conversation entries within the inbox, a count of conversations with
+    // unread messages, and a total count of unread messages"), independent
+    // of `unread-only` and of the requested RSM page. Aggregate in storage.
+    let inbox_counts = match state.deps.protocol.inbox_storage.counts(&user_jid).await {
+        Ok(counts) => counts,
         Err(error) => {
-            warn!(error = %error, jid = %user_jid, "Failed to count inbox unread");
+            warn!(error = %error, jid = %user_jid, "Failed to count inbox");
             return vec![build_iq_error_xml_typed(
                 id,
                 None,
@@ -632,13 +630,7 @@ async fn handle_inbox_query_iq(
     };
 
     let mut responses: Vec<String> = Vec::with_capacity(page.len() + 1);
-    let mut page_unread = 0u32;
-    let mut page_unread_sum: u32 = 0;
     for entry in &page {
-        if entry.unread > 0 {
-            page_unread = page_unread.saturating_add(1);
-            page_unread_sum = page_unread_sum.saturating_add(entry.unread);
-        }
         let last_message = if query.messages {
             inbox_last_message_for_entry(state, &user_jid, entry).await
         } else {
@@ -662,11 +654,9 @@ async fn handle_inbox_query_iq(
     }
 
     let counts = InboxFinCounts {
-        total: u32::try_from(page.len()).unwrap_or(u32::MAX),
-        unread: page_unread,
-        all_unread: u32::try_from(all_unread_total)
-            .unwrap_or(u32::MAX)
-            .max(page_unread_sum),
+        total: u32::try_from(inbox_counts.conversations).unwrap_or(u32::MAX),
+        unread: u32::try_from(inbox_counts.unread_conversations).unwrap_or(u32::MAX),
+        all_unread: u32::try_from(inbox_counts.unread_messages).unwrap_or(u32::MAX),
     };
     let fin = build_inbox_fin_iq(iq, counts, rsm_response);
     responses.push(iq_to_xml(fin));
