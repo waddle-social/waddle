@@ -8,7 +8,8 @@ use sha1::{Digest, Sha1};
 
 use crate::discovery::DISCO_INFO_NS;
 use crate::messaging::{
-    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_JINGLE, NS_JINGLE_RTP, NS_JINGLE_RTP_AUDIO,
+    NS_JINGLE_RTP_VIDEO, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
 };
 
 /// Protocol token `http://jabber.org/protocol/caps`.
@@ -67,6 +68,20 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // XEP-0359 §Business Rules: entities supporting stanza-id
         // SHOULD announce it.
         crate::messaging::NS_STANZA_ID,
+        //
+        // XEP-0166 Jingle session control: the client parses and builds
+        // session-initiate/accept/terminate IQs (messaging/call.rs).
+        NS_JINGLE,
+        //
+        // XEP-0167 §11 (Determining Support): an entity MUST return the
+        // URN of each RTP description version it supports and the URN of
+        // each media type it supports. The client reads and emits
+        // `<description xmlns='urn:xmpp:jingle:apps:rtp:1'>` for both audio
+        // and video (CallMedia). No ice-udp or DTLS transport feature is
+        // advertised: media is carried over the Waddle LiveKit transport.
+        NS_JINGLE_RTP,
+        NS_JINGLE_RTP_AUDIO,
+        NS_JINGLE_RTP_VIDEO,
     ]
 }
 
@@ -227,6 +242,35 @@ mod tests {
         assert_eq!(count, 1, "XEP-0085 chatstates feature cardinality");
     }
 
+    /// XEP-0167 §11: the client MUST advertise the RTP description URN and
+    /// each supported media type, plus XEP-0166 Jingle. It implements no
+    /// ICE-UDP or DTLS transport, so those must stay absent.
+    #[test]
+    fn caps_advertise_jingle_rtp_features() {
+        let features = client_caps_features();
+        assert!(features.contains(&"urn:xmpp:jingle:1"));
+        assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:1"));
+        assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:audio"));
+        assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:video"));
+        assert!(!features.contains(&"urn:xmpp:jingle:transports:ice-udp:1"));
+        assert!(!features.contains(&"urn:xmpp:jingle:apps:dtls:0"));
+    }
+
+    /// XEP-0167 §11: the advertised URNs are the ones the call builders use.
+    #[test]
+    fn jingle_rtp_constants_match_call_builders() {
+        assert_eq!(NS_JINGLE_RTP, "urn:xmpp:jingle:apps:rtp:1");
+        let description =
+            crate::messaging::build_muji_element(crate::messaging::MujiElementOptions {
+                preparing: false,
+                audio: true,
+                video: true,
+            });
+        assert!(description
+            .children()
+            .all(|c| c.children().all(|d| d.ns() == NS_JINGLE_RTP)));
+    }
+
     /// XEP-0115 §5.1 golden vector for Waddle's concrete client identity and
     /// feature set. The expected SHA-1/Base64 value was calculated outside
     /// this implementation from the byte-sorted verification string using
@@ -247,6 +291,10 @@ mod tests {
                 crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
                 NS_AVATAR_METADATA_NOTIFY,
                 NS_CHAT_MARKERS,
+                NS_JINGLE,
+                NS_JINGLE_RTP,
+                NS_JINGLE_RTP_AUDIO,
+                NS_JINGLE_RTP_VIDEO,
                 crate::mds::NS_MDS_NOTIFY,
                 NS_MESSAGE_CORRECT,
                 NS_MESSAGE_RETRACT,
@@ -257,7 +305,7 @@ mod tests {
         );
         assert_eq!(
             client_caps_verification_string(),
-            "3JxBttV3VjZcCeN5hRcehLf0Cq0="
+            "SVrhAOqEhFd07Ny32eTXE/9Ht2k="
         );
     }
 

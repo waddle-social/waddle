@@ -67,6 +67,12 @@ pub const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 /// `urn:xmpp:jingle:apps:rtp:1` — XEP-0167 RTP description namespace,
 /// used inside Muji content declarations.
 pub const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
+/// `urn:xmpp:jingle:1` — XEP-0166 Jingle session control namespace.
+pub const NS_JINGLE: &str = "urn:xmpp:jingle:1";
+/// `urn:xmpp:jingle:apps:rtp:audio` — XEP-0167 §11 audio media-type feature.
+pub const NS_JINGLE_RTP_AUDIO: &str = "urn:xmpp:jingle:apps:rtp:audio";
+/// `urn:xmpp:jingle:apps:rtp:video` — XEP-0167 §11 video media-type feature.
+pub const NS_JINGLE_RTP_VIDEO: &str = "urn:xmpp:jingle:apps:rtp:video";
 /// Named inputs for [`build_muji_element`].
 ///
 /// The fields stay booleans because each one is an independent presence
