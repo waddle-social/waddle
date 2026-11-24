@@ -67,6 +67,7 @@ private struct SignedInRoot: View {
         .background(Theme.Colors.bg)
         .environment(session.coordinator)
         .environment(session.navigation)
+        .environment(session.callStage)
         .environment(\.callMediaControls, session.callMedia)
         .advertisingSelfMute(
             calls: session.coordinator.calls, media: session.callMedia,

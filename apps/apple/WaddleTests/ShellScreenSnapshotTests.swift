@@ -37,5 +37,19 @@ final class ShellScreenSnapshotTests: XCTestCase {
         sample.navigation.show(.inbox)
         try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
     }
+
+    /// A call in session takes a stage beside its own conversation, and the
+    /// dock above the shell leaves the call to it.
+    func testSplitCallBesideItsConversation() async throws {
+        let sample = SampleSession(account: SampleSession.anaOnThisMac)
+        await sample.answerCall(from: SampleSession.priya, video: true)
+        XCTAssertEqual(sample.coordinator.calls.state.sessionConversation, .direct(SampleSession.priya))
+        sample.navigation.selection = .direct(SampleSession.priya)
+        let screen = VStack(spacing: 0) {
+            CallDock()
+            SplitShell()
+        }
+        try await assertScreenSnapshot(of: sample.host(screen), size: .callDesktop)
+    }
     #endif
 }

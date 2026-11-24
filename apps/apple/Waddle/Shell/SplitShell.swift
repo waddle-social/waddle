@@ -2,7 +2,7 @@ import SwiftUI
 import WaddleKit
 
 /// iPad and Mac: sidebar, conversation, and an inspector for threads,
-/// details and pins.
+/// details and pins. A call in session takes a stage beside its conversation.
 struct SplitShell: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -15,7 +15,7 @@ struct SplitShell: View {
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
             NavigationStack {
-                detail
+                CallSplitHost { detail }
                     .background(Theme.Colors.bg)
                     #if os(macOS)
                     // The title bar continues the page ground instead of the system grey.

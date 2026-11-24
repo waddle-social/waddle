@@ -123,11 +123,17 @@ credentials in the Jingle transport and publishes the microphone and camera.
 WaddleKit checks the token's grant and maps the server's XEP-0215 services to
 ICE servers before it connects; it never imports the SDK.
 
-`Features/Calls/CallDock.swift` is the one call surface on every platform: a
+`Features/Calls/CallDock.swift` is the call surface on every platform: a
 card above the signed-in shell, from the first ring to the reason the call
 ended. It derives what to show from the call slot and the media phase
 (`CallStage` in WaddleKit); `CallDockView` draws each stage without a session,
 so the snapshot tests cover them all.
+
+On Mac, and iPad at regular width, a call in session whose conversation is
+open leaves the dock for a stage beside it. `CallSurface` in WaddleKit says
+which surface has the call and what a dock still draws; `Shell/` mounts
+`Features/Calls/Stage/CallSplitHost`, and `CallStageHost` feeds the pure
+`CallStageView` (tiles from `CallStageTiles`, laid out by `CallStageLayout`).
 
 Outside the dock a call is heard and seen through the platform. `CallAlert`
 in WaddleKit says what the call slot asks for: a ring for a call coming in
