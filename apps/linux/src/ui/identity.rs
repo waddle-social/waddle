@@ -226,6 +226,7 @@ mod tests {
             name: "ann".into(),
             kind: Kind::Direct,
             autojoin: false,
+            flavor: Default::default(),
             thread: None,
         };
         imp.conversations.borrow_mut().push(peer.clone());

@@ -188,6 +188,13 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   clicked => $on_people() swapped;
                 }
 
+                [start]
+                MenuButton {
+                  icon-name: "list-add-symbolic";
+                  tooltip-text: _("New Conversation");
+                  menu-model: new_menu;
+                }
+
                 [end]
                 MenuButton {
                   icon-name: "open-menu-symbolic";
@@ -294,6 +301,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   icon-name: "go-previous-symbolic";
                   tooltip-text: _("Back to conversation");
                   clicked => $on_thread_back() swapped;
+                }
+
+                [end]
+                Button details_button {
+                  visible: false;
+                  icon-name: "dialog-information-symbolic";
+                  tooltip-text: _("Room Details");
+                  action-name: "win.room-details";
                 }
 
                 [end]
@@ -545,6 +560,20 @@ menu primary_menu {
     item {
       label: _("Quit");
       action: "app.quit";
+    }
+  }
+}
+
+menu new_menu {
+  section {
+    item {
+      label: _("New Room…");
+      action: "win.new-room";
+    }
+
+    item {
+      label: _("New Group Chat…");
+      action: "win.new-group-dm";
     }
   }
 }

@@ -16,6 +16,7 @@ mod people;
 mod person;
 mod pictures;
 mod profile;
+mod rooms;
 mod status;
 mod suggestions;
 mod threads;

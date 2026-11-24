@@ -60,6 +60,17 @@ impl Kind {
     }
 }
 
+/// What kind of room a [`Kind::Room`] conversation is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Flavor {
+    #[default]
+    Plain,
+    /// A forum room (`muc#roomconfig_forum`).
+    Forum,
+    /// A group DM: a hidden members-only room, listed with the DMs.
+    Group,
+}
+
 /// A room or DM in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conversation {
@@ -68,6 +79,7 @@ pub struct Conversation {
     pub name: String,
     pub kind: Kind,
     pub autojoin: bool,
+    pub flavor: Flavor,
     /// The selected XEP-0201 thread, or the room/DM's main timeline.
     pub thread: Option<Thread>,
 }
@@ -697,28 +709,51 @@ pub fn reconnect_delay(attempt: u32, unit_random: f64) -> Duration {
     Duration::from_secs_f64(seconds)
 }
 
-/// Rooms for the sidebar: channels, not group DMs, in catalogue order.
+/// Rooms for the sidebar: channels in catalogue order, then group DMs.
+/// Rooms the user left are not listed.
 pub fn rooms_from(topology: WaddleTopology) -> Vec<Conversation> {
     let mut channels: Vec<WaddleChannel> = topology
         .channels
         .into_iter()
-        .filter(|channel| !channel.is_group_dm)
+        .filter(|channel| !channel.has_left)
         .collect();
     channels.sort_by(|a, b| {
-        (a.space_id.as_str(), a.position, a.name.as_str()).cmp(&(
-            b.space_id.as_str(),
-            b.position,
-            b.name.as_str(),
-        ))
+        (
+            a.is_group_dm,
+            a.space_id.as_str(),
+            a.position,
+            a.name.as_str(),
+        )
+            .cmp(&(
+                b.is_group_dm,
+                b.space_id.as_str(),
+                b.position,
+                b.name.as_str(),
+            ))
     });
     channels
         .into_iter()
-        .map(|channel| Conversation {
-            name: channel.bookmark_name.unwrap_or(channel.name),
-            jid: channel.room_jid,
-            kind: Kind::Room,
-            autojoin: channel.autojoin,
-            thread: None,
+        .map(|channel| {
+            let flavor = if channel.is_group_dm {
+                Flavor::Group
+            } else if channel.channel_type == "forum" {
+                Flavor::Forum
+            } else {
+                Flavor::Plain
+            };
+            let name = channel.bookmark_name.unwrap_or(channel.name);
+            Conversation {
+                name: if flavor == Flavor::Group && name.trim().is_empty() {
+                    "Group chat".to_string()
+                } else {
+                    name
+                },
+                jid: channel.room_jid,
+                kind: Kind::Room,
+                autojoin: channel.autojoin,
+                flavor,
+                thread: None,
+            }
         })
         .collect()
 }
@@ -744,6 +779,7 @@ pub fn direct_conversation(peer: &str) -> Option<Conversation> {
         jid: bare.to_string(),
         kind: Kind::Direct,
         autojoin: false,
+        flavor: Flavor::Plain,
         thread: None,
     })
 }
@@ -1230,19 +1266,42 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rooms_are_channels_in_catalogue_order() {
+    fn rooms_are_channels_in_catalogue_order_then_group_dms() {
+        let mut left = channel("old", 3, false);
+        left.has_left = true;
+        let mut forum = channel("ideas", 4, false);
+        forum.channel_type = "forum".into();
         let rooms = rooms_from(WaddleTopology {
             spaces: Vec::new(),
             channels: vec![
                 channel("random", 2, false),
                 channel("dm-ann-bob", 0, true),
+                left,
                 channel("general", 1, false),
+                forum,
             ],
             bookmarks_loaded: true,
         });
         let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
-        assert_eq!(names, ["general", "random"]);
+        assert_eq!(names, ["general", "random", "ideas", "dm-ann-bob"]);
         assert_eq!(rooms[0].jid, "general@muc.waddle.social");
+        let flavors: Vec<Flavor> = rooms.iter().map(|room| room.flavor).collect();
+        assert_eq!(
+            flavors,
+            [Flavor::Plain, Flavor::Plain, Flavor::Forum, Flavor::Group]
+        );
+    }
+
+    #[test]
+    fn an_unnamed_group_dm_is_called_a_group_chat() {
+        let mut group = channel("", 0, true);
+        group.room_jid = "g1@muc.waddle.social".into();
+        let rooms = rooms_from(WaddleTopology {
+            spaces: Vec::new(),
+            channels: vec![group],
+            bookmarks_loaded: true,
+        });
+        assert_eq!(rooms[0].name, "Group chat");
     }
 
     #[test]

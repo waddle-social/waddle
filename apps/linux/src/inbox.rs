@@ -433,6 +433,7 @@ mod tests {
             name: jid.split('@').next().unwrap_or(jid).into(),
             kind: Kind::Room,
             autojoin: false,
+            flavor: Default::default(),
             thread: None,
         }
     }
