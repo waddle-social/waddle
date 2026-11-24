@@ -22,6 +22,47 @@ final class LiveKitCallMediaTests: XCTestCase {
         return defaults
     }
 
+    func testAudioProcessingIsAllOnUntilChosenAndIsKept() async {
+        let defaults = makeDefaults()
+        let media = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(media.audioProcessing, CallAudioProcessing())
+        await media.setAudioProcessing(CallAudioProcessing(noiseSuppression: false, autoGainControl: false))
+
+        let next = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(next.audioProcessing, CallAudioProcessing(noiseSuppression: false, echoCancellation: true, autoGainControl: false))
+    }
+
+    /// The microphone's own track takes a change: the same publication, on
+    /// or muted, with nothing for the others to miss.
+    func testAChangeOfProcessingIsTakenByTheMicrophonesTrackInPlace() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = makeController()
+        try await alice.connect(
+            join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: CallMedia(audio: true, video: false),
+            iceServers: []
+        )
+        try await until { alice.isMicrophoneOn }
+        let publication = try XCTUnwrap(alice.microphonePublicationID)
+        // The track was made with the choice, and took it again as it came on.
+        try await until { alice.appliedAudioProcessing == CallAudioProcessing() }
+
+        let quiet = CallAudioProcessing(noiseSuppression: false, autoGainControl: false)
+        await alice.setAudioProcessing(quiet)
+        XCTAssertEqual(alice.appliedAudioProcessing, quiet, "the SDK accepted the options on the live track")
+        XCTAssertEqual(alice.microphonePublicationID, publication, "the microphone was not republished")
+        XCTAssertTrue(alice.isMicrophoneOn)
+
+        await alice.setMicrophone(false)
+        try await until { !alice.isMicrophoneOn }
+        await alice.setAudioProcessing(CallAudioProcessing())
+        XCTAssertEqual(alice.appliedAudioProcessing, CallAudioProcessing(), "a muted microphone's track takes a change too")
+        XCTAssertEqual(alice.microphonePublicationID, publication)
+        XCTAssertFalse(alice.isMicrophoneOn, "a change never turns on a microphone that is off")
+        await alice.disconnect()
+        XCTAssertNil(alice.appliedAudioProcessing)
+    }
+
     func testADeviceChoiceIsKeptForTheNextSessionAndCanBeCleared() async {
         let defaults = makeDefaults()
         let media = LiveKitCallMediaController(defaults: defaults)

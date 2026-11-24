@@ -9,6 +9,8 @@ struct CallSettingsView: View {
     let devices: CallDevices
     /// The kinds this device lets an app choose; the others follow the system.
     var kinds: [CallDeviceKind] = CallDeviceKind.allCases
+    var audioProcessing = CallAudioProcessing()
+    var setAudioProcessing: @MainActor (CallAudioProcessing) -> Void = { _ in /* a sheet without it */ }
     let choose: @MainActor (CallDeviceKind, String?) -> Void
     let done: @MainActor () -> Void
 
@@ -24,7 +26,10 @@ struct CallSettingsView: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.l) {
                 ForEach(kinds, id: \.self) { kind in
                     section(kind, devices[kind])
+                    // The web lists it under the microphone; where the microphone cannot be chosen it stands alone.
+                    if kind == .microphone { processing }
                 }
+                if !kinds.contains(.microphone) { processing }
             }
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.bottom, Theme.Spacing.l)
@@ -76,6 +81,33 @@ struct CallSettingsView: View {
         }
     }
 
+    /// What is done to our voice before it is sent (web "Requested audio processing").
+    private var processing: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Text("Audio processing")
+                .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.sm))
+                .foregroundStyle(Theme.Colors.fg)
+            toggle("Noise suppression", \.noiseSuppression)
+            toggle("Echo cancellation", \.echoCancellation)
+            toggle("Automatic gain control", \.autoGainControl)
+        }
+    }
+
+    private func toggle(_ title: String, _ setting: WritableKeyPath<CallAudioProcessing, Bool>) -> some View {
+        Toggle(title, isOn: Binding(
+            get: { audioProcessing[keyPath: setting] },
+            set: { isOn in
+                var next = audioProcessing
+                next[keyPath: setting] = isOn
+                setAudioProcessing(next)
+            }
+        ))
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .huddleText(Theme.Typography.body.sized(WaddleTokens.FontSize.sm))
+        .foregroundStyle(Theme.Colors.fg)
+    }
+
     private static func title(_ kind: CallDeviceKind) -> String {
         switch kind {
         case .microphone: "Microphone"
@@ -121,7 +153,10 @@ struct CallSettingsSheet: ViewModifier {
     func body(content: Content) -> some View {
         content.sheet(isPresented: $isPresented) {
             if let media {
-                CallSettingsView(devices: media.devices, kinds: media.choosableDeviceKinds) { kind, id in
+                CallSettingsView(
+                    devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
+                    setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } }
+                ) { kind, id in
                     Task { await media.chooseDevice(kind, id: id) }
                 } done: {
                     isPresented = false

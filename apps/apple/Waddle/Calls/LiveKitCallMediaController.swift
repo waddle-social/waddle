@@ -112,10 +112,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private var devicePreferences: CallDevicePreferences
     @ObservationIgnored private let defaults: UserDefaults
     private static let devicePreferencesKey = "callDevicePreferences"
+    private static let audioProcessingKey = "callAudioProcessing"
+    private(set) var audioProcessing = CallAudioProcessing()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
+        audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
         #if os(macOS)
         // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
         AudioManager.shared.onDeviceUpdate = { [weak self] _ in
@@ -166,6 +169,73 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
         await refreshDevices()
         if kind == .camera { await applyCameraChoice() }
+    }
+
+    // MARK: - Audio processing
+
+    func setAudioProcessing(_ processing: CallAudioProcessing) async {
+        guard processing != audioProcessing else { return }
+        audioProcessing = processing
+        defaults.set(processing.stored, forKey: Self.audioProcessingKey)
+        await applyAudioProcessing()
+    }
+
+    private var audioCaptureOptions: AudioCaptureOptions {
+        AudioCaptureOptions(
+            echoCancellation: audioProcessing.echoCancellation, autoGainControl: audioProcessing.autoGainControl,
+            noiseSuppression: audioProcessing.noiseSuppression
+        )
+    }
+
+    /// Gives the processing chosen to the microphone's track as it is, on
+    /// or muted: the SDK changes it in place, with no new track and no gap
+    /// in what others hear. A track keeps the options it was made with for
+    /// its own restarts, so this runs again after a reconnect.
+    private func applyAudioProcessing() async {
+        guard let room else { return }
+        let wanted = audioProcessing
+        let options = AudioProcessingOptions(
+            echoCancellation: wanted.echoCancellation, autoGainControl: wanted.autoGainControl,
+            noiseSuppression: wanted.noiseSuppression
+        )
+        let published = publications(of: .audio, in: room)
+        let tracks = published.compactMap { $0.track as? LocalAudioTrack }
+        let publicationIDs = Set(published.map(\.sid.stringValue))
+        guard !tracks.isEmpty else { return }
+        // The SDK waits on WebRTC's signalling thread for each write, so
+        // they leave the main thread; one queue keeps them in the order asked.
+        let accepted = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
+            Self.audioProcessingWrites.async {
+                let results = tracks.map { (try? $0.setAudioProcessingOptions(options)) != nil }
+                done.resume(returning: !results.contains(false))
+            }
+        }
+        // The latest choice may have moved on while this one was written; its own write follows.
+        if accepted, wanted == audioProcessing {
+            appliedAudioProcessing = wanted
+            audioProcessingPublications = publicationIDs
+        }
+    }
+
+    /// The microphone publications that have the choice. A reconnect takes
+    /// the publication away and publishes the track again, restarted with
+    /// the options it was made with, so one that is not here has yet to be given it.
+    @ObservationIgnored private var audioProcessingPublications: Set<String> = []
+
+    /// Gives the choice to a microphone publication that has not had it: one
+    /// that came back after a reconnect, or appeared while a change found none.
+    private func giveAudioProcessingToNewPublications(in room: Room) {
+        let current = Set(publications(of: .audio, in: room).map(\.sid.stringValue))
+        guard !current.isEmpty, current != audioProcessingPublications || appliedAudioProcessing != audioProcessing else { return }
+        Task { await applyAudioProcessing() }
+    }
+
+    private static let audioProcessingWrites = DispatchQueue(label: "waddle.call-audio-processing", qos: .userInitiated)
+    /// The processing the microphone's track last took, for tests: `nil` until one has.
+    @ObservationIgnored private(set) var appliedAudioProcessing: CallAudioProcessing?
+    /// The microphone's publication, for tests: a change of processing must not replace it.
+    var microphonePublicationID: String? {
+        room.flatMap { publications(of: .audio, in: $0).first?.sid.stringValue }
     }
 
     /// Moves a camera that is on to the one that should be in use. A camera
@@ -470,7 +540,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // The person changed their mind while a prompt or a start was pending.
         if enabled, captureChoices[kind] == false { return }
         if kind == .audio {
-            _ = try? await room.localParticipant.setMicrophone(enabled: enabled)
+            _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? audioCaptureOptions : nil)
         } else {
             _ = try? await room.localParticipant.setCamera(enabled: enabled, captureOptions: enabled ? cameraCaptureOptions() : nil)
         }
@@ -491,6 +561,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // The camera was started with the choice as it was when it was asked
         // for; a choice made while it was starting applies now that it is on.
         if kind == .video, enabled { await applyCameraChoice(droppingIdleTracks: false) }
+        // Likewise a change to the processing made while the microphone was starting.
+        if kind == .audio, enabled { await applyAudioProcessing() }
     }
 
     /// Asks for the permission, but only for a call that still owns `room`,
@@ -515,6 +587,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }
+        appliedAudioProcessing = nil
+        audioProcessingPublications = []
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
         wantsScreenShare = false
@@ -542,6 +616,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             phase = .connected
             mediaUpSince = .now
             reconcileTracks(in: changed, restoringVolumes: true)
+            // A reconnect restarts the microphone's track with the options it was made with.
+            Task { await applyAudioProcessing() }
         case .tracks:
             reconcileTracks(in: changed)
         case .participants:
@@ -553,6 +629,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
+        giveAudioProcessingToNewPublications(in: room)
         #if os(macOS)
         // A full reconnect republishes what it had: not a screen the person has stopped sharing since.
         if !wantsScreenShare, room.localParticipant.localVideoTracks.contains(where: { $0.source == .screenShareVideo }) {

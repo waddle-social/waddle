@@ -58,4 +58,22 @@ import Testing
         #expect(devices[.microphone].devices == [Self.builtIn])
         #expect(devices[.camera].devices.isEmpty)
     }
+
+    // MARK: - Audio processing
+
+    @Test func allProcessingIsOnUntilTurnedOff() {
+        #expect(CallAudioProcessing() == CallAudioProcessing(noiseSuppression: true, echoCancellation: true, autoGainControl: true))
+        #expect(CallAudioProcessing(stored: nil) == CallAudioProcessing())
+    }
+
+    @Test func aProcessingChoiceSurvivesStorage() {
+        let chosen = CallAudioProcessing(noiseSuppression: false, echoCancellation: true, autoGainControl: false)
+        #expect(CallAudioProcessing(stored: chosen.stored) == chosen)
+    }
+
+    @Test func halfAStoredChoiceIsTheDefaults() {
+        #expect(CallAudioProcessing(stored: ["noiseSuppression": false]) == CallAudioProcessing())
+        #expect(CallAudioProcessing(stored: ["noiseSuppression": false, "echoCancellation": "no", "autoGainControl": true]) == CallAudioProcessing())
+        #expect(CallAudioProcessing(stored: "nonsense") == CallAudioProcessing())
+    }
 }

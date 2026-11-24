@@ -60,6 +60,36 @@ public struct CallDevices: Equatable, Sendable {
     }
 }
 
+/// What is done to the microphone's sound before it is sent (web `AudioProcessingPrefs`). All on unless turned off.
+public struct CallAudioProcessing: Equatable, Sendable {
+    public var noiseSuppression = true
+    public var echoCancellation = true
+    public var autoGainControl = true
+
+    public init(noiseSuppression: Bool = true, echoCancellation: Bool = true, autoGainControl: Bool = true) {
+        self.noiseSuppression = noiseSuppression
+        self.echoCancellation = echoCancellation
+        self.autoGainControl = autoGainControl
+    }
+
+    /// As stored. Anything short of three yes-or-no answers is the defaults,
+    /// as the web reads it: half a setting is not somebody's choice.
+    public init(stored: Any?) {
+        guard let stored = stored as? [String: Any],
+              let noise = stored["noiseSuppression"] as? Bool, let echo = stored["echoCancellation"] as? Bool,
+              let gain = stored["autoGainControl"] as? Bool
+        else {
+            self.init()
+            return
+        }
+        self.init(noiseSuppression: noise, echoCancellation: echo, autoGainControl: gain)
+    }
+
+    public var stored: [String: Bool] {
+        ["noiseSuppression": noiseSuppression, "echoCancellation": echoCancellation, "autoGainControl": autoGainControl]
+    }
+}
+
 /// Which devices the person chose for calls, kept on this device (web `device-prefs`).
 public struct CallDevicePreferences: Equatable, Sendable {
     private var chosen: [CallDeviceKind: String] = [:]
