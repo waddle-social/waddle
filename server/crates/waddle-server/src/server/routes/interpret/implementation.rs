@@ -20,6 +20,8 @@ use super::room_system_message;
 use super::route_to_connection;
 use super::send_carbons;
 use super::ArchiveGroupchatEventOutcome;
+use super::CarbonKind;
+use super::ConnectionRegistry;
 
 use super::InboundEvent;
 use super::IngressEffectIntent;
@@ -292,9 +294,16 @@ pub(in crate::server::routes::interpret) async fn interpret_with_depth(
                 call_setup,
             } => {
                 outcome.route_to_connection_events += 1;
+                let routed = match stanza.as_ref() {
+                    Stanza::Message(message) => Some(message.clone()),
+                    _ => None,
+                };
                 for stanza in
                     route_to_connection(deps, jid, stanza, recursion_depth, call_setup).await
                 {
+                    if let Some(routed) = routed.as_ref() {
+                        carbon_copy_bounce(registry, deps, routed, &stanza).await;
+                    }
                     emit_frame(deps, &mut outcome, stanza);
                 }
             }
@@ -697,6 +706,48 @@ pub(in crate::server::routes::interpret) async fn interpret_with_depth(
 
     outcome.archive_id_rewrites = archive_id_rewrites;
     outcome
+}
+
+/// XEP-0280 §6.1: an error "sent in response to a MESSAGE that was eligible
+/// for carbons delivery" is itself eligible. `bounce` is a server-built reply
+/// to the sender of `routed` (undeliverable full JID, rejected account); the
+/// sender's other Carbons-enabled resources receive it as a `<received/>`
+/// carbon so none of them is left believing the message was delivered. The
+/// resource that sent `routed` receives the error itself and is excluded.
+async fn carbon_copy_bounce(
+    registry: &ConnectionRegistry,
+    deps: &Deps<'_>,
+    routed: &Message,
+    bounce: &Stanza,
+) {
+    let Stanza::Message(reply) = bounce else {
+        return;
+    };
+    if routed.type_ == XmppMessageType::Error
+        || reply.type_ != XmppMessageType::Error
+        || reply.from != routed.to
+        || reply.to != routed.from
+        || !waddle_xmpp_core::carbons::should_copy_message(routed)
+        || !waddle_xmpp_core::carbons::should_copy_message(reply)
+    {
+        return;
+    }
+    let Some(sender) = reply
+        .to
+        .as_ref()
+        .and_then(|recipient| recipient.try_as_full().ok())
+    else {
+        return;
+    };
+    send_carbons(
+        registry,
+        deps,
+        sender.to_bare(),
+        Box::new(reply.clone()),
+        CarbonKind::Received,
+        vec![sender.clone()],
+    )
+    .await;
 }
 
 /// Sender output remains typed throughout planning; immediate dispatch serializes

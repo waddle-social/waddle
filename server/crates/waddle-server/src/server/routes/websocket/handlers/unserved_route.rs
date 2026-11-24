@@ -25,7 +25,7 @@ use jid::{FullJid, Jid};
 use tracing::debug;
 use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
 use waddle_xmpp::Stanza;
-use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::message::Message;
 
 use super::super::interpret_loop::build_interpret_deps;
 use super::super::transport_xml::stanza_to_xml;
@@ -108,45 +108,20 @@ pub(crate) async fn route_unserved_message(
 /// `chat`, a `normal` message with a body, or one with an instant-messaging
 /// payload, which covers a private message to a room occupant; never a
 /// `groupchat` message or one carrying `<private/>` or a full-JID
-/// `<no-copy/>` hint. §6.1 also makes a message carrying a mediated
-/// invitation or a XEP-0249 direct invitation eligible, with or without a
-/// body.
+/// `<no-copy/>` hint. A message carrying a mediated invitation or a XEP-0249
+/// direct invitation is eligible with or without a body.
 ///
 /// The copy goes to every other Carbons-enabled resource of the sender,
 /// not only to those sharing the sender's nickname in the room: §6.1 puts
 /// that limit in a footnote as a SHOULD and asks clients that are not in
 /// the room to ignore such a copy or offer to join first.
 fn sent_carbon_copy(message: &Message, remote: &RemoteDestination) -> Option<Message> {
-    if !(waddle_xmpp::carbons::should_copy_message(message) || is_eligible_invitation(message)) {
+    if !waddle_xmpp::carbons::should_copy_message(message) {
         return None;
     }
     let mut copy = message.clone();
     copy.to = Some(remote.address().clone());
     Some(copy)
-}
-
-/// Whether `message` carries a XEP-0045 mediated invitation or a XEP-0249
-/// direct invitation and nothing that withholds carbons from it.
-fn is_eligible_invitation(message: &Message) -> bool {
-    use waddle_xmpp::carbons::CARBONS_NS;
-    use waddle_xmpp::muc::presence::NS_MUC_USER;
-
-    if matches!(message.type_, MessageType::Groupchat | MessageType::Error) {
-        return false;
-    }
-    if message
-        .payloads
-        .iter()
-        .any(|payload| payload.is("private", CARBONS_NS))
-        || waddle_xmpp::xep::xep0334::should_skip_carbons(message)
-    {
-        return false;
-    }
-    let mediated = message
-        .payloads
-        .iter()
-        .any(|payload| payload.is("x", NS_MUC_USER) && payload.has_child("invite", NS_MUC_USER));
-    mediated || waddle_xmpp::xep::xep0249::message_has_direct_invite(message)
 }
 
 /// Copy `carbon`, a message `sender` sent that the remote route accepted,

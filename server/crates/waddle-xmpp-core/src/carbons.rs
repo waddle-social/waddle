@@ -20,6 +20,7 @@ const HINTS_NS: &str = "urn:xmpp:hints";
 const CHAT_STATES_NS: &str = "http://jabber.org/protocol/chatstates";
 const RECEIPTS_NS: &str = "urn:xmpp:receipts";
 const CHAT_MARKERS_NS: &str = "urn:xmpp:chat-markers:0";
+const CONFERENCE_NS: &str = "jabber:x:conference";
 
 fn is_instant_messaging_payload(payload: &Element) -> bool {
     matches!(
@@ -33,6 +34,25 @@ fn is_instant_messaging_payload(payload: &Element) -> bool {
                 "markable" | "received" | "displayed" | "acknowledged"
             )
     )
+}
+
+/// XEP-0249 direct invitation or XEP-0045 mediated invitation payload.
+fn is_invitation_payload(payload: &Element) -> bool {
+    use crate::mam::MUC_USER_NS;
+
+    payload.is("x", CONFERENCE_NS)
+        || (payload.is("x", MUC_USER_NS) && payload.has_child("invite", MUC_USER_NS))
+}
+
+/// Whether a message carries content that makes a non-error message of
+/// some type eligible on its own: a body, an instant-messaging payload,
+/// or an invitation.
+fn carries_eligible_content(msg: &Message) -> bool {
+    !msg.bodies.is_empty()
+        || msg
+            .payloads
+            .iter()
+            .any(|payload| is_instant_messaging_payload(payload) || is_invitation_payload(payload))
 }
 
 fn has_no_copy_hint(msg: &Message) -> bool {
@@ -93,9 +113,25 @@ pub fn should_copy_message(msg: &Message) -> bool {
         return false;
     }
 
-    if matches!(msg.type_, MessageType::Groupchat | MessageType::Error) {
+    if matches!(msg.type_, MessageType::Groupchat) {
         debug!("Message type is not eligible for carbons");
         return false;
+    }
+
+    // XEP-0280 §6.1: a message of type "error" is eligible when it "was
+    // sent in response to a MESSAGE that was eligible for carbons
+    // delivery". An error reply carries the bounced stanza's content
+    // (RFC 6121 §8.5.2.1.1), but not its type, so the original's
+    // eligibility is read from that echoed content: a body, an
+    // instant-messaging payload or an invitation.
+    if matches!(msg.type_, MessageType::Error) {
+        return carries_eligible_content(msg);
+    }
+
+    // XEP-0280 §6.1: a message containing a XEP-0249 direct invitation or a
+    // XEP-0045 mediated invitation is eligible, with or without a body.
+    if msg.payloads.iter().any(is_invitation_payload) {
+        return true;
     }
 
     if matches!(msg.type_, MessageType::Chat) {

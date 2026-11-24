@@ -31,7 +31,8 @@
 //! workspace.
 
 use super::errors::{message_error_reply, outgoing_block_error_reply, send_message_error};
-use crate::protocol::event::OutboundEvent;
+use crate::carbons::should_copy_message;
+use crate::protocol::event::{CarbonKind, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
@@ -64,7 +65,22 @@ impl MessageHandler for BlockingFilterHandler {
                             return HandlerOutcome::Halt(Vec::new());
                         }
                         let reply = outgoing_block_error_reply(message);
-                        return HandlerOutcome::Halt(vec![send_message_error(reply)]);
+                        let mut events = Vec::with_capacity(2);
+                        // XEP-0280 §6.1: an error sent in response to a
+                        // carbons-eligible message is itself eligible, so
+                        // the sender's other resources learn the message
+                        // bounced. The sending resource gets the error on
+                        // its own wire.
+                        if should_copy_message(message) {
+                            events.push(OutboundEvent::SendCarbons {
+                                owner: ctx.full_jid.to_bare(),
+                                message: Box::new(reply.clone()),
+                                kind: CarbonKind::Received,
+                                exclude: vec![ctx.full_jid.clone()],
+                            });
+                        }
+                        events.push(send_message_error(reply));
+                        return HandlerOutcome::Halt(events);
                     }
                 }
                 if matches!(ctx.locality, Locality::Both) {
@@ -187,11 +203,13 @@ mod tests {
             HandlerOutcome::Halt(events) => events,
             other => panic!("expected Halt with reply, got {other:?}"),
         };
-        assert_eq!(events.len(), 1);
-        let stanza = match &events[0] {
-            OutboundEvent::SendStanza(s) => s,
-            other => panic!("expected SendStanza, got {other:?}"),
-        };
+        let stanza = events
+            .iter()
+            .find_map(|event| match event {
+                OutboundEvent::SendStanza(s) => Some(s),
+                _ => None,
+            })
+            .expect("SendStanza error reply");
         let msg = match stanza.as_ref() {
             Stanza::Message(m) => m,
             other => panic!("expected Message stanza, got {other:?}"),
@@ -239,6 +257,51 @@ mod tests {
             parsed.defined_condition,
             DefinedCondition::ServiceUnavailable
         );
+    }
+
+    // -----------------------------------------------------------------
+    // XEP-0280 §6.1 — the outgoing-block error is carbon-copied
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn xep_0280_outgoing_block_error_is_received_carbon_for_other_resources() {
+        let local = full("alice@example.com/web");
+        let bl = Blocklist::new([bare("bob@example.com")]);
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
+        let (outcome, _) = run(&local, &bl, &mut msg);
+        let HandlerOutcome::Halt(events) = outcome else {
+            panic!("expected Halt");
+        };
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            OutboundEvent::SendCarbons {
+                owner,
+                message,
+                kind,
+                exclude,
+            } => {
+                assert_eq!(owner, &bare("alice@example.com"));
+                assert_eq!(message.type_, MessageType::Error);
+                assert_eq!(*kind, crate::protocol::event::CarbonKind::Received);
+                assert_eq!(exclude, &vec![full("alice@example.com/web")]);
+            }
+            other => panic!("expected SendCarbons, got {other:?}"),
+        }
+        assert!(matches!(&events[1], OutboundEvent::SendStanza(_)));
+    }
+
+    #[test]
+    fn xep_0280_outgoing_block_error_for_ineligible_message_is_not_carboned() {
+        let local = full("alice@example.com/web");
+        let bl = Blocklist::new([bare("bob@example.com")]);
+        let mut msg = chat_msg("alice@example.com/web", "bob@example.com");
+        msg.type_ = MessageType::Normal;
+        let (outcome, _) = run(&local, &bl, &mut msg);
+        let HandlerOutcome::Halt(events) = outcome else {
+            panic!("expected Halt");
+        };
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], OutboundEvent::SendStanza(_)));
     }
 
     // -----------------------------------------------------------------

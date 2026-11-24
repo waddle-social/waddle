@@ -60,6 +60,97 @@ fn xep0280_bodyless_chat_marker_is_eligible_for_carbons() {
     assert!(should_copy_message(&msg));
 }
 
+fn conference_invite() -> Element {
+    Element::builder("x", "jabber:x:conference")
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            "room@conf.localhost",
+        )
+        .build()
+}
+
+fn mediated_invite() -> Element {
+    Element::builder("x", "http://jabber.org/protocol/muc#user")
+        .append(
+            Element::builder("invite", "http://jabber.org/protocol/muc#user")
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    "hecate@localhost",
+                )
+                .build(),
+        )
+        .build()
+}
+
+#[test]
+fn xep0280_bodyless_direct_invitation_is_eligible_for_carbons() {
+    let mut msg = message_of_type(MessageType::Normal);
+    msg.payloads.push(conference_invite());
+    assert!(should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_bodyless_mediated_invitation_is_eligible_for_carbons() {
+    let mut msg = message_of_type(MessageType::Normal);
+    msg.payloads.push(mediated_invite());
+    assert!(should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_muc_user_without_invite_is_not_an_invitation() {
+    let mut msg = message_of_type(MessageType::Normal);
+    msg.payloads
+        .push(Element::builder("x", "http://jabber.org/protocol/muc#user").build());
+    assert!(!should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_private_suppresses_invitation_carbons() {
+    let mut msg = message_of_type(MessageType::Normal);
+    msg.payloads.push(conference_invite());
+    msg.payloads
+        .push(Element::builder("private", "urn:xmpp:carbons:2").build());
+    assert!(!should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_groupchat_invitation_is_not_eligible() {
+    let mut msg = message_of_type(MessageType::Groupchat);
+    msg.payloads.push(mediated_invite());
+    assert!(!should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_error_echoing_a_body_is_eligible_for_carbons() {
+    let mut msg = message_of_type(MessageType::Error);
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+    assert!(should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_error_echoing_an_invitation_is_eligible_for_carbons() {
+    let mut msg = message_of_type(MessageType::Error);
+    msg.payloads.push(conference_invite());
+    assert!(should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_error_without_echoed_im_content_is_not_eligible() {
+    let msg = message_of_type(MessageType::Error);
+    assert!(!should_copy_message(&msg));
+}
+
+#[test]
+fn xep0280_private_suppresses_error_carbons() {
+    let mut msg = message_of_type(MessageType::Error);
+    msg.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "hello".to_string());
+    msg.payloads
+        .push(Element::builder("private", "urn:xmpp:carbons:2").build());
+    assert!(!should_copy_message(&msg));
+}
+
 // ---------------------------------------------------------------------
 // #1106 / XEP-0280 §6.3 — the whole RFC 6121 §8.5.2.1.1 delivery set is
 // the carbon exclusion set: "The receiving server MUST NOT send a
