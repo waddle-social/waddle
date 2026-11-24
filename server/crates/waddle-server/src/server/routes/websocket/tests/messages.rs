@@ -5203,9 +5203,13 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
     let unread_only_fin = unread_only_responses
         .last()
         .expect("unread-only response ends with fin IQ");
+    // XEP-0430 fin counts cover the whole inbox, not the filtered page:
+    // the conversation still exists, but nothing is unread after mark-read.
     assert!(
-        unread_only_fin.contains("total='0'"),
-        "mark-read clears unread, fin should report no matches: {unread_only_fin}"
+        unread_only_fin.contains("total='1'")
+            && unread_only_fin.contains(" unread='0'")
+            && unread_only_fin.contains("all-unread='0'"),
+        "mark-read clears unread, fin should report inbox-wide counts: {unread_only_fin}"
     );
     assert!(
         unread_only_responses
