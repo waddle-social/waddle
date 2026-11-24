@@ -714,7 +714,7 @@ pub(in crate::server::routes::interpret) async fn interpret_with_depth(
 /// sender's other Carbons-enabled resources receive it as a `<received/>`
 /// carbon so none of them is left believing the message was delivered. The
 /// resource that sent `routed` receives the error itself and is excluded.
-pub(in crate::server::routes::interpret) async fn carbon_copy_bounce(
+async fn carbon_copy_bounce(
     registry: &ConnectionRegistry,
     deps: &Deps<'_>,
     routed: &Message,

@@ -113,51 +113,30 @@ pub(in crate::server::routes::interpret) async fn remote_owner(
     }
 }
 
-fn nonexistent_error() -> StanzaError {
-    StanzaError::new(
-        ErrorType::Cancel,
-        DefinedCondition::ServiceUnavailable,
-        "en",
-        "Service unavailable at this address.",
-    )
-}
-
-fn account_lookup_failed_error() -> StanzaError {
-    StanzaError::new(
-        ErrorType::Wait,
-        DefinedCondition::InternalServerError,
-        "en",
-        "Account lookup is temporarily unavailable.",
-    )
-}
-
 pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
-    bounce_account_rejection(deps, stanza, nonexistent_error())
+    bounce_account_rejection(
+        deps,
+        stanza,
+        StanzaError::new(
+            ErrorType::Cancel,
+            DefinedCondition::ServiceUnavailable,
+            "en",
+            "Service unavailable at this address.",
+        ),
+    )
 }
 
 pub(super) fn bounce_account_lookup_failed(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
-    bounce_account_rejection(deps, stanza, account_lookup_failed_error())
-}
-
-/// While planning, the bounce is recorded as an effect instead of being
-/// returned to the interpret loop, so the loop cannot carbon-copy it
-/// (XEP-0280 §6.1: an error answering an eligible message is eligible).
-/// Plan the received carbons for the same reply here.
-pub(super) async fn plan_bounce_carbons(deps: &Deps<'_>, stanza: &Stanza, lookup_failed: bool) {
-    if !deps.effects.is_planning() {
-        return;
-    }
-    let Stanza::Message(routed) = stanza else {
-        return;
-    };
-    let error = if lookup_failed {
-        account_lookup_failed_error()
-    } else {
-        nonexistent_error()
-    };
-    for reply in bounce_for_account_rejection(stanza, None, error) {
-        super::super::carbon_copy_bounce(deps.connection_registry, deps, routed, &reply).await;
-    }
+    bounce_account_rejection(
+        deps,
+        stanza,
+        StanzaError::new(
+            ErrorType::Wait,
+            DefinedCondition::InternalServerError,
+            "en",
+            "Account lookup is temporarily unavailable.",
+        ),
+    )
 }
 
 /// Bounce generation may revoke a Jingle token, so defer the whole obligation.
