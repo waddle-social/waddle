@@ -38,12 +38,12 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | XEP  | Title                                                | Namespace                          | Adv | Impl | Tests | Status     | Notes / PR |
 |------|------------------------------------------------------|------------------------------------|-----|------|-------|------------|------------|
 | 0004 | Data Forms                                           | jabber:x:data                      |  -  |  Y   |   ?   | unaudited  | Building block, used by many. |
-| 0012 | Last Activity                                        | jabber:iq:last                     |  Y  |  Y   |   Y   | unaudited  | |
-| 0030 | Service Discovery                                    | http://jabber.org/protocol/disco#* |  Y  |  Y   |   Y   | unaudited  | disco/info.rs. Extension bots (`<plugin>@extensions.<domain>`, bare or `/bot`) answer as `client/bot` with no items; other extensions-domain addresses return item-not-found. A room's extension bots are listed under disco#items node `urn:waddle:room:bots:0` (empty for users who can't read the room). Any unhandled disco#items node returns item-not-found. |
+| 0012 | Last Activity                                        | jabber:iq:last                     |  Y  |  Y   |   Y   | fixed      | Last-activity queries require presence authorization (#2670). |
+| 0030 | Service Discovery                                    | http://jabber.org/protocol/disco#* |  Y  |  Y   |   Y   | fixed      | disco/info.rs. Extension bots (`<plugin>@extensions.<domain>`, bare or `/bot`) answer as `client/bot` with no items; other extensions-domain addresses return item-not-found. A room's extension bots are listed under disco#items node `urn:waddle:room:bots:0` (empty for users who can't read the room). Any unhandled disco#items node returns item-not-found. Account disco#info now requires presence authorization and returns `service-unavailable` for missing or unauthorized accounts (#2667). Unknown server disco#info nodes return `item-not-found` (#2672). Evidence: `xep0030_account_disco_privacy_ws.rs`, `xep0030_unknown_node_ws.rs`. |
 | 0045 | Multi-User Chat                                      | http://jabber.org/protocol/muc     |  Y  |  Y   |   Y   | unaudited  | muc_* feature family |
 | 0047 | In-Band Bytestreams                                  | http://jabber.org/protocol/ibb     |  -  |  Y   |   -   | unaudited  | Impl exists, no advert? |
-| 0048 | Bookmarks (legacy)                                   | storage:bookmarks                  |  -  |  Y   |   -   | unaudited  | Superseded by 0402 |
-| 0049 | Private XML Storage                                  | jabber:iq:private                  |  Y  |  Y   |   ?   | unaudited  | Shared test xep0054_0049_0191 |
+| 0048 | Bookmarks (legacy)                                   | storage:bookmarks                  |  -  |  Y   |   -   | fixed      | Superseded by 0402. Legacy Private XML bridge replaces the PEP bookmark set on set (dropped bookmarks are retracted) and returns `internal-server-error` on storage errors instead of success (#2674). |
+| 0049 | Private XML Storage                                  | jabber:iq:private                  |  Y  |  Y   |   ?   | fixed      | Shared test xep0054_0049_0191. Legacy bookmark set now replaces instead of merging, and bridge storage errors surface (#2674). |
 | 0050 | Ad-Hoc Commands                                      | http://jabber.org/protocol/commands|  Y  |  Y   |   -   | unaudited  | |
 | 0054 | vcard-temp                                           | vcard-temp                         |  Y  |  Y   |   Y   | unaudited  | |
 | 0059 | Result Set Management                                | http://jabber.org/protocol/rsm     |  -  |  Y   |   -   | unaudited  | Helper for MAM etc. |
@@ -53,16 +53,17 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0080 | User Location                                        | http://jabber.org/protocol/geoloc  |  -  |  Y   |   Y   | unaudited  | PEP node |
 | 0082 | XMPP Date and Time Profiles                          | (profiles only)                    |  -  |  Y   |   -   | unaudited  | Profile usage, no advert |
 | 0084 | User Avatar                                          | urn:xmpp:avatar:metadata           |  Y  |  Y   |   Y   | unaudited  | PEP node + notify; avatar nodes default `open` (not XEP-0163 `presence`) so non-roster peers resolve avatars; legacy `presence` avatar nodes without an owner-configure marker are reopened at startup/publish (pre-marker explicit `presence` choices are indistinguishable and are reset) |
-| 0085 | Chat State Notifications                             | http://jabber.org/protocol/chatstates |  Y |  Y   |   Y   | unaudited  | |
+| 0085 | Chat State Notifications                             | http://jabber.org/protocol/chatstates |  Y |  Y   |   Y   | fixed      | Web (#2676) and Apple (#2677) clients now have a setting to disable chat-state notifications (§ MUST). |
 | 0092 | Software Version                                     | jabber:iq:version                  |  Y  |  Y   |   Y   | unaudited  | |
 | 0106 | JID Escaping                                         | (no namespace, escape rules)       |  -  |  Y   |   -   | unaudited  | |
 | 0107 | User Mood                                            | http://jabber.org/protocol/mood    |  -  |  Y   |   Y   | unaudited  | PEP node |
 | 0108 | User Activity                                        | http://jabber.org/protocol/activity |  - |  Y   |   Y   | unaudited  | PEP node |
-| 0115 | Entity Capabilities                                  | http://jabber.org/protocol/caps    |  Y  |  Y   |   Y   | unaudited  | |
+| 0115 | Entity Capabilities                                  | http://jabber.org/protocol/caps    |  Y  |  Y   |   Y   | fixed      | Disco#info identity `xml:lang` is read from the XML namespace so the verification hash matches (#2666). |
 | 0118 | User Tune                                            | http://jabber.org/protocol/tune    |  -  |  Y   |   Y   | unaudited  | PEP node |
 | 0153 | vCard-Based Avatars                                  | vcard-temp:x:update                |  -  |  Y   |   -   | unaudited  | |
 | 0160 | Best Practices for Handling Offline Messages         | msgoffline                         |  Y  |  ?   |   Y   | unaudited  | |
-| 0163 | Personal Eventing Protocol                           | http://jabber.org/protocol/pubsub#pep |  Y |  Y   |   Y   | unaudited  | |
+| 0163 | Personal Eventing Protocol                           | http://jabber.org/protocol/pubsub#pep |  Y |  Y   |   Y   | fixed      | Last published item is sent to newly-available resources on presence (#2668). Contacts can read presence- and roster-model nodes they are authorized for (#2673). Notifications reach all of the owner's connected resources with `+notify`, including the publishing resource (#2684). |
+| 0167 | Jingle RTP Sessions                                  | urn:xmpp:jingle:apps:rtp:1         |  Y  |  Y   |   -   | fixed      | Server `calls.<domain>` mixer advertises RTP features. Rust client (used by Apple/Android) advertises `urn:xmpp:jingle:1`, `urn:xmpp:jingle:apps:rtp:1` and the audio/video media types (#2681); no ICE-UDP/DTLS features, since media uses the LiveKit transport. |
 | 0172 | User Nickname                                        | http://jabber.org/protocol/nick    |  -  |  Y   |   Y   | unaudited  | PEP node |
 | 0184 | Message Delivery Receipts                            | urn:xmpp:receipts                  |  Y  |  Y   |   Y   | unaudited  | |
 | 0191 | Blocking Command                                     | urn:xmpp:blocking                  |  Y  |  Y   |   Y   | unaudited  | |
@@ -76,7 +77,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0249 | Direct MUC Invitations                               | jabber:x:conference                |  -  |  Y   |   -   | unaudited  | |
 | 0277 | Microblogging over XMPP                              | urn:xmpp:microblog:0               |  -  |  ?   |   Y   | unaudited  | Test exists, impl path unclear |
 | 0280 | Message Carbons                                      | urn:xmpp:carbons:2 + rules:0       |  Y  |  Y   |   Y   | unaudited  | |
-| 0292 | vCard4 over XMPP                                     | urn:xmpp:vcard4 + +notify          |  Y  |  Y   |   Y   | gap (partial) | §6.1 canonical `access_model=open` wired through `NodeConfig::pep_for_node(PEP_NODE_VCARD4)` + reconcile-on-publish for legacy `presence`-access nodes in **PR #669**. Dedicated suite: `crates/waddle-xmpp/tests/xep0292_vcard4.rs` + `crates/waddle-server/tests/xep0292_vcard4_ws.rs`. |
+| 0292 | vCard4 over XMPP                                     | urn:xmpp:vcard4 + +notify          |  Y  |  Y   |   Y   | fixed      | §6.1 canonical `access_model=open` wired through `NodeConfig::pep_for_node(PEP_NODE_VCARD4)` + reconcile-on-publish for legacy `presence`-access nodes in **PR #669**. Dedicated suite: `crates/waddle-xmpp/tests/xep0292_vcard4.rs` + `crates/waddle-server/tests/xep0292_vcard4_ws.rs`. `urn:xmpp:contacts` node defaults to `whitelist` (#2679). |
 | 0297 | Stanza Forwarding                                    | urn:xmpp:forward:0                 |  -  |  Y   |   -   | unaudited  | Used by carbons / MAM |
 | 0300 | Use of Cryptographic Hash Functions in XMPP          | urn:xmpp:hashes:2                  |  -  |  Y   |   -   | unaudited  | |
 | 0308 | Last Message Correction                              | urn:xmpp:message-correct:0         |  Y  |  Y   |   Y   | unaudited  | |
@@ -88,27 +89,27 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0352 | Client State Indication                              | urn:xmpp:csi:0                     |  Y  |  ?   |   -   | unaudited  | Feature::csi exists, impl path? |
 | 0357 | Push Notifications                                   | urn:xmpp:push:0                    |  Y  |  Y   |   Y   | unaudited  | |
 | 0359 | Unique and Stable Stanza IDs                         | urn:xmpp:sid:0                     |  Y  |  Y   |   Y   | unaudited  | |
-| 0363 | HTTP File Upload                                     | urn:xmpp:http:upload:0             |  Y  |  Y   |   -   | unaudited  | |
+| 0363 | HTTP File Upload                                     | urn:xmpp:http:upload:0             |  Y  |  Y   |   -   | fixed      | Slot `<put/>` headers are limited to Authorization, Cookie and Expires; `Content-Type` is no longer sent (#2680). |
 | 0372 | References                                           | urn:xmpp:reference:0               |  Y  |  Y   |   Y   | unaudited  | |
 | 0377 | Spam Reporting                                       | urn:xmpp:reporting:1               |  -  |  Y   |   -   | unaudited  | |
 | 0392 | Consistent Color Generation                          | (no namespace, algorithm)          |  -  |  Y   |   -   | unaudited  | |
 | 0393 | Message Styling                                      | urn:xmpp:styling:0                 |  -  |  Y   |   -   | unaudited  | |
 | 0401 | Easy User Onboarding                                 | urn:xmpp:invite                    |  -  |  Y   |   -   | unaudited  | |
-| 0402 | PEP Native Bookmarks                                 | urn:xmpp:bookmarks:1               |  Y  |  Y   |   -   | unaudited  | bookmarks2 + compat |
+| 0402 | PEP Native Bookmarks                                 | urn:xmpp:bookmarks:1               |  Y  |  Y   |   -   | fixed      | bookmarks2. `#compat-pep` is no longer advertised, since there is no PEP `storage:bookmarks` bridge (#2675). |
 | 0410 | MUC Self-Ping (Schrödinger's Chat)                   | (uses ping, optimization advert)   |  Y  |  Y   |   -   | unaudited  | |
 | 0421 | Anonymous unique occupant identifiers for MUCs       | urn:xmpp:occupant-id:0             |  Y  |  Y   |   Y   | unaudited  | |
-| 0424 | Message Retraction                                   | urn:xmpp:message-retract:1         |  Y  |  Y   |   Y   | unaudited  | |
+| 0424 | Message Retraction                                   | urn:xmpp:message-retract:1         |  Y  |  Y   |   Y   | fixed      | Retraction tombstones the message and its XEP-0308 corrections in MAM, keeping `<replace/>` and copying the retraction `<reason/>` (#2671). |
 | 0425 | Message Moderation                                   | urn:xmpp:message-moderate:1        |  Y  |  Y   |   Y   | unaudited  | |
 | 0428 | Fallback Indication                                  | urn:xmpp:fallback:0                |  Y  |  Y   |   -   | unaudited  | |
-| 0430 | Inbox                                                | urn:xmpp:inbox:1                   |  Y  |  Y   |   Y   | conformant | Streaming `<message><entry/></message>` per conversation + closing `<iq type='result'><fin/></iq>` with `total`/`unread`/`all-unread`. Supports `unread-only` + `messages` filters, RSM `<max/>` paging, XEP-0333 displayed-marker → unread decrement. Mark-read remains a Waddle-private `urn:waddle:inbox:0` IQ-set until XEP-0333 covers 1:1 DMs end-to-end. ESL `erlang-solutions.com:xmpp:inbox:0` compat dropped (no active consumers). Tests: `server/crates/waddle-server/tests/xep0430_inbox_ws.rs`. PR #693. |
+| 0430 | Inbox                                                | urn:xmpp:inbox:1                   |  Y  |  Y   |   Y   | fixed      | Streaming `<message><entry/></message>` per conversation + closing `<iq type='result'><fin/></iq>` with `total`/`unread`/`all-unread`. Supports `unread-only` + `messages` filters, RSM `<max/>` paging, XEP-0333 displayed-marker → unread decrement. Mark-read remains a Waddle-private `urn:waddle:inbox:0` IQ-set until XEP-0333 covers 1:1 DMs end-to-end. ESL `erlang-solutions.com:xmpp:inbox:0` compat dropped (no active consumers). Tests: `server/crates/waddle-server/tests/xep0430_inbox_ws.rs`. PR #693. `<fin/>` `total`/`unread`/`all-unread` are inbox-wide, independent of filters and paging (#2678). |
 | 0431 | -                                                    | (assigned)                         |  -  |  Y   |   -   | unaudited  | Verify XEP number |
-| 0433 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
+| 0433 | Extended Channel Search                              | urn:xmpp:channel-search:0          |  -  |  Y   |   Y   | fixed      | Search lists only public rooms (#2669). Tests: `crates/waddle-server/tests/xep0433_channel_search_ws.rs`, `crates/waddle-xmpp/tests/xep0433_extended_channel_search.rs`. |
 | 0437 | Room Activity Indicators                             | urn:xmpp:rai:0                     |  -  |  Y   |   -   | unaudited  | |
 | 0444 | Message Reactions                                    | urn:xmpp:reactions:0               |  Y  |  Y   |   Y   | unaudited  | |
 | 0445 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0446 | File Metadata Element                                | urn:xmpp:file:metadata:0           |  -  |  Y   |   -   | unaudited  | |
 | 0447 | Stateless File Sharing                               | urn:xmpp:sfs:0                     |  -  |  Y   |   -   | unaudited  | |
-| 0448 | Encryption for stateless file sharing                | urn:xmpp:esfs:2                    |  -  |  Y   |   -   | unaudited  | |
+| 0448 | Encryption for stateless file sharing                | urn:xmpp:esfs:2                    |  -  |  Y   |   -   | fixed      | Encrypted shares require the plaintext `<size/>`: the client builder, FFI and WASM boundaries refuse to send one without it, and the parser ignores shares that lack it (#2682). |
 | 0449 | Stickers                                             | urn:xmpp:stickers:0                |  -  |  Y   |   -   | unaudited  | |
 | 0452 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0461 | Message Replies                                      | urn:xmpp:reply:0                   |  Y  |  Y   |   Y   | unaudited  | |
@@ -125,7 +126,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0502 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
 | 0503 | Spaces                                               | urn:xmpp:spaces:0                  |  Y  |  Y   |   Y   | unaudited  | Advert gated until owner subs done |
 | 0508 | -                                                    |                                    |  -  |  Y   |   -   | unaudited  | Verify XEP number |
-| 0513 | Explicit Mentions                                    | urn:xmpp:mentions:0                |  Y  |  Y   |   Y   | unaudited  | Plus `#channel` profile |
+| 0513 | Explicit Mentions                                    | urn:xmpp:mentions:0                |  Y  |  Y   |   Y   | fixed      | Plus `#channel` profile. Mentions are carried as `<mention type target active/>` inside XEP-0394 `<markup><span start end>`; Waddle-only `jid`/`uri`/`noping` moved to a sibling `urn:waddle:mentions:0` element (#2683). |
 | —    | (Waddle) Threads view                                | urn:waddle:threads:0               |  Y  |  Y   |   Y   | fixed      | Waddle-namespaced (no XEP equivalent — Fluux made the same call for their custom conversation list). Server reads `inbox_entries WHERE thread_id != ''`; chat client renders a two-section view (Unread / Following). PR #671. |
 | —    | (Waddle) Call lifecycle reports                      | urn:waddle:call-lifecycle:0        |  Y  |  Y   |   Y   | fixed      | Closed-set client operational reports; counted and acknowledged without call-state changes. Dedicated `xep_waddle_call_lifecycle` and `calls_e2e_ws` coverage. |
 
