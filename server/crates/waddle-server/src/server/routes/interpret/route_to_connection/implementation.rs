@@ -1069,13 +1069,17 @@ pub(in crate::server::routes::interpret::route_to_connection) async fn reject_un
     let actor = state.deps.app_state.db_pool.global_actor();
     match crate::auth::local_account_exists(actor, node.as_str(), bare.domain().as_str()).await {
         Ok(true) => None,
-        Ok(false) => Some(plan::bounce_nonexistent(deps, stanza)),
+        Ok(false) => {
+            plan::plan_bounce_carbons(deps, stanza, false).await;
+            Some(plan::bounce_nonexistent(deps, stanza))
+        }
         Err(error) => {
             warn!(
                 bare_jid = %bare,
                 %error,
                 "RouteToConnection: account lookup failed; rejecting offline delivery"
             );
+            plan::plan_bounce_carbons(deps, stanza, true).await;
             Some(plan::bounce_account_lookup_failed(deps, stanza))
         }
     }
