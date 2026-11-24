@@ -8,6 +8,7 @@ struct CallStageActions {
     let toggleHand: @MainActor () -> Void
     let setViewMode: @MainActor (CallStagePresentation.ViewMode) -> Void
     let toggleSelfView: @MainActor () -> Void
+    var setSize: @MainActor (CallSurface.Size) -> Void = { _ in /* a stage of one size */ }
     let hangUp: @MainActor () -> Void
 }
 
@@ -24,6 +25,9 @@ struct CallControlBar: View {
     var isHandRaised: Bool?
     var viewMode = CallStagePresentation.ViewMode.gallery
     var isSelfViewHidden = false
+    var size = CallSurface.Size.split
+    /// Off while something else on screen has a use for Escape.
+    var escapeStepsDown = true
     let actions: CallStageActions
 
     var body: some View {
@@ -63,7 +67,33 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
+        sizeSteps
         more
+    }
+
+    // MARK: - Split, expanded, full screen
+
+    /// One step at a time, as on the web: split and expanded swap, and full
+    /// screen is offered from expanded and offers only its way back. Escape
+    /// takes the step down unless something else on screen wants it.
+    @ViewBuilder
+    private var sizeSteps: some View {
+        if size != .immersive {
+            let isExpanded = size == .expanded
+            CallControlButton(
+                title: isExpanded ? "Collapse call" : "Expand call",
+                symbol: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
+            ) { actions.setSize(isExpanded ? .split : .expanded) }
+            .keyboardShortcut(isExpanded && escapeStepsDown ? .cancelAction : nil)
+        }
+        if size != .split {
+            let isFullScreen = size == .immersive
+            CallControlButton(
+                title: isFullScreen ? "Exit full screen" : "Full screen",
+                symbol: isFullScreen ? "arrow.down.right.and.arrow.up.left.rectangle" : "arrow.up.left.and.arrow.down.right.rectangle"
+            ) { actions.setSize(isFullScreen ? .expanded : .immersive) }
+            .keyboardShortcut(isFullScreen && escapeStepsDown ? .cancelAction : nil)
+        }
     }
 
     // MARK: - Gallery or speaker

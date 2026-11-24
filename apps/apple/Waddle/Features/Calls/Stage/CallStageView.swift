@@ -23,6 +23,9 @@ struct CallStageView: View {
     var presentation = CallStagePresentation()
     /// Who the speaker view shows large.
     var promotedSpeaker: String?
+    /// How much of the window the stage has, for the buttons that change it.
+    var size = CallSurface.Size.split
+    var escapeStepsDown = true
     var isMicrophoneOn = false
     var isCameraOn = false
     /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
@@ -55,7 +58,7 @@ struct CallStageView: View {
             CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
-                isSelfViewHidden: presentation.isSelfViewHidden, actions: actions
+                isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)

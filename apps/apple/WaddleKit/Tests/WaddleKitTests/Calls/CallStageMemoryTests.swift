@@ -75,4 +75,15 @@ import Testing
         memory.tilesChanged([Self.own, Self.linus], rosterIsAvailable: true)
         #expect(memory == before)
     }
+
+    @Test func aStageKeepsItsSizeForItsCallOnly() {
+        var memory = CallStageMemory()
+        memory.follow(call: "a")
+        #expect(memory.size == .split)
+        memory.size = memory.size.steppedUp
+        memory.follow(call: "a")
+        #expect(memory.size == .expanded)
+        memory.follow(call: "b")
+        #expect(memory.size == .split)
+    }
 }

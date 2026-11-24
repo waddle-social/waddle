@@ -11,9 +11,16 @@ final class CallStageModel {
     /// laid it out: the dock and the stage both place the call by it.
     var pane: CGSize?
     @ObservationIgnored private(set) var tileSource = CallTileSource(video: { _ in nil }, togglePin: { _ in /* no call yet */ })
+    /// The share of the pane each conversation's stage was dragged to, kept
+    /// on this device (web keeps it per room in local storage).
+    private var splitPercents: [String: Double]
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let splitPercentsKey = "callSplitPercents"
 
     /// - Parameter media: where tiles get their pictures; `nil` draws avatars only.
-    init(calls: CallStore, media: (any CallMediaControls)?) {
+    init(calls: CallStore, media: (any CallMediaControls)?, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        splitPercents = defaults.dictionary(forKey: Self.splitPercentsKey)?.compactMapValues { $0 as? Double } ?? [:]
         tileSource = CallTileSource(
             video: { [weak media] tile in media?.video(of: tile.identity, source: tile.source) },
             // A pin is for whatever call is on the stage when the tile is clicked.
@@ -31,6 +38,29 @@ final class CallStageModel {
         return memory
     }
 
+    /// Where the slot's call shows while `selection` is the open conversation.
+    func surface(of state: CallState, open selection: ConversationID?, platform: CallSurface.Platform) -> CallSurface {
+        CallSurface.placement(
+            of: state, open: selection, platform: platform, pane: pane,
+            size: state.sid.map { stage(of: $0).size } ?? .defaultSize
+        )
+    }
+
+    func splitPercent(for conversation: ConversationID) -> Double? {
+        splitPercents[conversation.description]
+    }
+
+    func setSplitPercent(_ percent: Double, for conversation: ConversationID) {
+        let percent = CallSurface.clampSplitPercent(percent)
+        guard splitPercents[conversation.description] != percent else { return }
+        splitPercents[conversation.description] = percent
+    }
+
+    /// Once a drag is over, not on each point of it.
+    func saveSplitPercents() {
+        defaults.set(splitPercents, forKey: Self.splitPercentsKey)
+    }
+
     /// Writes only a change, so an update that changes nothing redraws nothing.
     func update(_ sid: String, _ change: (inout CallStageMemory) -> Void) {
         var next = memory
@@ -46,6 +76,7 @@ final class CallStageModel {
 struct CallStageHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(CallStageModel.self) private var model
+    @Environment(NavigationModel.self) private var navigation
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
 
@@ -90,6 +121,9 @@ struct CallStageHost: View {
             tiles: tiles,
             presentation: memory.presentation,
             promotedSpeaker: memory.promotedSpeaker,
+            size: memory.size,
+            // An open inspector has a composer whose Escape cancels a reply or an edit.
+            escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
@@ -123,6 +157,7 @@ struct CallStageHost: View {
             toggleHand: commands.toggleHand,
             setViewMode: { [model] mode in model.update(sid) { $0.presentation.viewMode = mode } },
             toggleSelfView: { [model] in model.update(sid) { $0.presentation.isSelfViewHidden.toggle() } },
+            setSize: { [model] size in model.update(sid) { $0.size = size } },
             hangUp: commands.hangUp
         )
     }

@@ -6,11 +6,19 @@ import WaddleKit
 struct SplitShell: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
+    @Environment(CallStageModel.self) private var callStage
+    @CallPlatform private var callPlatform
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+
+    /// A full-screen call has the window to itself: no sidebar, toolbar or inspector.
+    private var isCallFullScreen: Bool {
+        callStage.surface(of: session.calls.state, open: navigation.selection, platform: callPlatform) == .fullscreen
+    }
 
     var body: some View {
         @Bindable var navigation = navigation
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        let isCallFullScreen = isCallFullScreen
+        NavigationSplitView(columnVisibility: columnBinding(hidingSidebar: isCallFullScreen)) {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
         } detail: {
@@ -21,10 +29,24 @@ struct SplitShell: View {
                     // The title bar continues the page ground instead of the system grey.
                     .toolbarBackground(Theme.Colors.bg, for: .windowToolbar)
                     .toolbarBackground(.visible, for: .windowToolbar)
+                    .toolbar(isCallFullScreen ? .hidden : .automatic, for: .windowToolbar)
+                    #else
+                    .toolbar(isCallFullScreen ? .hidden : .automatic, for: .navigationBar)
                     #endif
             }
         }
         .tint(Theme.Colors.action)
+        .onChange(of: isCallFullScreen) { _, isFullScreen in
+            // Full screen is asked for each time: a call that lost it, as by
+            // opening another conversation, comes back expanded.
+            guard !isFullScreen, let sid = session.calls.state.sid else { return }
+            callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
+        }
+        .callFullScreen(isCallFullScreen) {
+            // The window left full screen by its own button: the call steps down with it.
+            guard let sid = session.calls.state.sid else { return }
+            callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
+        }
         .inspector(isPresented: inspectorBinding) {
             inspectorContent
                 .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
@@ -79,9 +101,17 @@ struct SplitShell: View {
         }
     }
 
+    /// The person's own choice of columns comes back when the call steps down.
+    private func columnBinding(hidingSidebar: Bool) -> Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { hidingSidebar ? .detailOnly : columnVisibility },
+            set: { if !hidingSidebar { columnVisibility = $0 } }
+        )
+    }
+
     private var inspectorBinding: Binding<Bool> {
         Binding(
-            get: { navigation.inspector != nil && navigation.selection != nil },
+            get: { navigation.inspector != nil && navigation.selection != nil && !isCallFullScreen },
             set: { if !$0 { navigation.inspector = nil } }
         )
     }

@@ -142,6 +142,57 @@ import Testing
         #expect(CallSurface.splitArrangement(in: CGSize(width: 500, height: 0)) == nil)
     }
 
+    @Test func aDraggedSplitGivesTheStageItsShareOfThePane() {
+        // Beside: the share is of the width, never under the column and never squeezing the conversation.
+        let wide = CGSize(width: 1400, height: 700)
+        #expect(CallSurface.splitArrangement(in: wide, percent: 50) == .beside(width: 700))
+        #expect(CallSurface.splitArrangement(in: wide, percent: 25) == .beside(width: 400))
+        #expect(CallSurface.splitArrangement(in: wide, percent: 75) == .beside(width: 920))
+        #expect(CallSurface.splitArrangement(in: wide, percent: 900) == .beside(width: 920))
+        // Above: the share is of the height, never under a usable stage.
+        let narrow = CGSize(width: 600, height: 1000)
+        #expect(CallSurface.splitArrangement(in: narrow, percent: 60) == .above(height: 600))
+        #expect(CallSurface.splitArrangement(in: narrow, percent: 25) == .above(height: CallSurface.minimumStageHeight))
+        #expect(CallSurface.splitArrangement(in: narrow, percent: 75) == .above(height: 750))
+    }
+
+    @Test func aDragNeverCostsAPaneItsStage() {
+        let least = CallSurface.minimumStageHeight
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 600, height: 2 * least), percent: 25) == .above(height: least))
+        #expect(CallSurface.splitArrangement(in: CGSize(width: 600, height: 2 * least - 1), percent: 75) == nil)
+    }
+
+    @Test func aDragIsReadAsAShareOfThePane() {
+        #expect(CallSurface.splitPercent(stage: 300, of: 1000) == 30)
+        #expect(CallSurface.splitPercent(stage: 100, of: 1000) == 25)
+        #expect(CallSurface.splitPercent(stage: 990, of: 1000) == 75)
+        #expect(CallSurface.splitPercent(stage: 10, of: 0) == CallSurface.defaultSplitPercent)
+    }
+
+    @Test(arguments: [CallSurface.Size.expanded, .immersive])
+    func aLargerStageFillsItsPane(size: CallSurface.Size) {
+        let least = CallSurface.minimumStageHeight
+        #expect(CallSurface.stageArrangement(for: size, in: CGSize(width: 500, height: least), splitPercent: 30) == .filling)
+        #expect(CallSurface.stageArrangement(for: size, in: CGSize(width: 1400, height: least - 1), splitPercent: nil) == nil)
+    }
+
+    @Test func aSplitStageIsArrangedByTheSplit() {
+        let pane = CGSize(width: 1400, height: 700)
+        #expect(CallSurface.stageArrangement(for: .split, in: pane, splitPercent: nil) == .beside(width: 400))
+        #expect(CallSurface.stageArrangement(for: .split, in: pane, splitPercent: 50) == .beside(width: 700))
+    }
+
+    @Test func anExpandedCallNeedsOnlyTheHeightOfAStage() {
+        let join = CallJoin(url: "wss://sfu.waddle.test", room: "r", identity: "ada@waddle.test/mac", token: "t")
+        let state = CallState.active(ActiveCall(peer: Self.peer, sid: "c1", media: Self.media, join: join))
+        // Too short to share with a conversation above, tall enough alone.
+        let pane = CGSize(width: 600, height: CallSurface.minimumStageHeight)
+        let open = ConversationID.direct(Self.peer.bare)
+        #expect(CallSurface.placement(of: state, open: open, platform: .regularWidth, pane: pane) == .dock)
+        #expect(CallSurface.placement(of: state, open: open, platform: .regularWidth, pane: pane, size: .expanded) == .expanded)
+        #expect(CallSurface.placement(of: state, open: open, platform: .regularWidth, pane: pane, size: .immersive) == .fullscreen)
+    }
+
     @Test func aCallWithNoRoomForAStageStaysInTheDock() {
         let join = CallJoin(url: "wss://sfu.waddle.test", room: "r", identity: "ada@waddle.test/mac", token: "t")
         let active = CallState.active(ActiveCall(peer: Self.peer, sid: "c1", media: Self.media, join: join))

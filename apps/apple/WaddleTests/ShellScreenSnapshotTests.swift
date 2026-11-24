@@ -51,5 +51,19 @@ final class ShellScreenSnapshotTests: XCTestCase {
         }
         try await assertScreenSnapshot(of: sample.host(screen), size: .callDesktop)
     }
+
+    /// Expanded, the stage takes the conversation's pane and the sidebar stays.
+    func testExpandedCallOverItsConversation() async throws {
+        let sample = SampleSession(account: SampleSession.anaOnThisMac)
+        await sample.answerCall(from: SampleSession.priya, video: true)
+        let sid = try XCTUnwrap(sample.coordinator.calls.state.sid)
+        sample.callStage.update(sid) { $0.size = .expanded }
+        sample.navigation.selection = .direct(SampleSession.priya)
+        let screen = VStack(spacing: 0) {
+            CallDock()
+            SplitShell()
+        }
+        try await assertScreenSnapshot(of: sample.host(screen), size: .callDesktop)
+    }
     #endif
 }

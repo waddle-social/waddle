@@ -27,7 +27,10 @@ final class SampleSession {
     /// - Parameter account: Ana, unless the test needs her on a named device.
     init(account: AccountIdentity? = nil) {
         coordinator = SessionCoordinator(account: account ?? Self.ana, port: port)
-        callStage = CallStageModel(calls: coordinator.calls, media: nil)
+        // A store of its own: a split dragged in the running app must not move a golden.
+        callStage = CallStageModel(
+            calls: coordinator.calls, media: nil, defaults: UserDefaults(suiteName: "SampleSession.\(UUID().uuidString)") ?? .standard
+        )
         coordinator.status.connection = .online
 
         coordinator.directory.apply(Topology(
