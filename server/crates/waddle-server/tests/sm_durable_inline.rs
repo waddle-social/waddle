@@ -321,6 +321,7 @@ async fn a_failed_inline_resume_reports_failed_and_falls_back_to_bind2() {
             commit: &new_commit,
             resumable: enable.resume,
         }),
+        archive_metadata: None,
     })
     .expect("inline results");
     assert!(matches!(
@@ -347,6 +348,7 @@ async fn a_failed_inline_resume_reports_failed_and_falls_back_to_bind2() {
             commit: &new_commit,
             resumable: false,
         }),
+        archive_metadata: None,
     })
     .expect("inline results");
     match results.bound.and_then(|bound| bound.stream_management) {

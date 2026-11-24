@@ -64,12 +64,13 @@ pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     }
 }
 
-/// Build the XEP-0313 §7 archive metadata result.
+/// Build the XEP-0313 §7 `<metadata/>` element describing an archive.
 ///
 /// A non-empty archive reports `<start/>` and `<end/>`; an empty one gets
-/// an empty `<metadata/>`.
+/// an empty `<metadata/>`. XEP-0386 carries the same element inside
+/// `<bound/>`.
 #[must_use]
-pub fn build_metadata_iq(original_iq: &Iq, bounds: Option<&ArchiveBounds>) -> Iq {
+pub fn build_metadata_element(bounds: Option<&ArchiveBounds>) -> Element {
     let edge = |name: &str, edge: &ArchiveEdge| {
         Element::builder(name, MAM_NS)
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), &edge.id)
@@ -86,11 +87,20 @@ pub fn build_metadata_iq(original_iq: &Iq, bounds: Option<&ArchiveBounds>) -> Iq
             .append(edge("start", &bounds.start))
             .append(edge("end", &bounds.end));
     }
+    metadata.build()
+}
+
+/// Build the XEP-0313 §7 archive metadata result.
+///
+/// A non-empty archive reports `<start/>` and `<end/>`; an empty one gets
+/// an empty `<metadata/>`.
+#[must_use]
+pub fn build_metadata_iq(original_iq: &Iq, bounds: Option<&ArchiveBounds>) -> Iq {
     Iq::Result {
         from: original_iq.to().cloned(),
         to: original_iq.from().cloned(),
         id: original_iq.id().to_string(),
-        payload: Some(metadata.build()),
+        payload: Some(build_metadata_element(bounds)),
     }
 }
 

@@ -15,7 +15,8 @@ use waddle_xmpp::auth::OAuthBearerParseError;
 use waddle_xmpp::identity::CanonicalBareJid;
 use waddle_xmpp::telemetry::attributes::AuthStage;
 use waddle_xmpp_core::xep0388_inline::{
-    Sasl2InlineRequests, Sasl2InlineResults, SmInlineEnable, SmInlineFailed, SmInlineResumeResult,
+    Bind2Request, Bind2Tag, Sasl2InlineRequests, Sasl2InlineResults, SmInlineEnable,
+    SmInlineFailed, SmInlineResumeResult, UserAgentId,
 };
 
 fn oauth_failure(
@@ -510,17 +511,84 @@ pub(super) async fn handle_sasl_scram_response(
     }
 }
 
+/// What a SASL2 `<authenticate/>` asks of the connection besides
+/// authentication: its inline requests, and the client installation it names
+/// in its `<user-agent/>`.
+#[derive(Default)]
+pub(super) struct Sasl2InlineExchange {
+    requests: Sasl2InlineRequests,
+    user_agent: Option<UserAgentId>,
+}
+
+/// What a Bind 2 request asks for besides a resource.
+struct Bind2Plan {
+    tag: Option<Bind2Tag>,
+    /// A XEP-0280 `<enable/>` was requested: carbons are on from the start
+    /// of the session.
+    carbons: bool,
+}
+
+impl Bind2Plan {
+    /// The plan for `request`, or `None` if it asks for a feature the server
+    /// does not offer inline: Bind 2 advertises XEP-0280 and XEP-0198 only.
+    fn of(request: &Bind2Request) -> Option<Self> {
+        let mut carbons = false;
+        for feature in &request.other_features {
+            let is_carbons_enable = feature.is("enable", waddle_xmpp_core::carbons::CARBONS_NS)
+                && feature.attrs().is_empty()
+                && feature.nodes().next().is_none();
+            if !is_carbons_enable || carbons {
+                return None;
+            }
+            carbons = true;
+        }
+        Some(Self {
+            tag: request.tag.clone(),
+            carbons,
+        })
+    }
+}
+
+/// What the server offers inside the SASL2 feature of a connection, `None`
+/// where SASL2 is not negotiated.
+///
+/// The inline extensions are offered where they are processed: where the
+/// durable session authority is selected (see [`sasl2_inline_requests`]).
+/// Bind 2 lists the session features it enables inline: Message Carbons and
+/// stream management.
+pub(super) fn sasl2_offer(state: &WebSocketState) -> Option<super::transport_xml::Sasl2Offer> {
+    use waddle_xmpp_core::disco::Feature;
+    use waddle_xmpp_core::xep0388_inline::{Bind2Feature, Sasl2InlineOffer, NS_SM};
+
+    if !state.sasl2_negotiation_enabled() {
+        return None;
+    }
+    let inline = super::stream_management::selected_store(state)
+        .is_some()
+        .then(|| Sasl2InlineOffer {
+            stream_resumption: true,
+            bind2: Some(Bind2Feature {
+                inline_features: vec![
+                    Feature::new(waddle_xmpp_core::carbons::CARBONS_NS),
+                    Feature::new(NS_SM),
+                ],
+            }),
+        });
+    Some(super::transport_xml::Sasl2Offer { inline })
+}
+
 /// The XEP-0198 and XEP-0386 requests of a SASL2 `<authenticate/>`, if the
 /// request is one this connection processes.
 ///
 /// Inline requests are processed only where the durable session authority is
 /// selected: an inline resume or enable is a durable operation. Elsewhere a
 /// child other than `<user-agent/>` is refused, as is a malformed or repeated
-/// inline request anywhere. `None` is a malformed request.
+/// inline request anywhere, and a Bind 2 request for a feature the server
+/// does not offer inline. `None` is a malformed request.
 pub(super) fn sasl2_inline_requests(
     state: &WebSocketState,
     request: &waddle_xmpp_core::xep0388::Sasl2Authenticate,
-) -> Option<Sasl2InlineRequests> {
+) -> Option<Sasl2InlineExchange> {
     use waddle_xmpp_core::xep0388::NS_SASL2;
     use waddle_xmpp_core::xep0388_inline::{NS_BIND2, NS_SM};
 
@@ -533,9 +601,16 @@ pub(super) fn sasl2_inline_requests(
         return None;
     }
     if !durable {
-        return Some(Sasl2InlineRequests::default());
+        return Some(Sasl2InlineExchange::default());
     }
-    Sasl2InlineRequests::from_authenticate(request).ok()
+    let requests = Sasl2InlineRequests::from_authenticate(request).ok()?;
+    if let Some(bind) = &requests.bind {
+        Bind2Plan::of(bind)?;
+    }
+    Some(Sasl2InlineExchange {
+        requests,
+        user_agent: UserAgentId::from_authenticate(request),
+    })
 }
 
 /// A SASL2 `<success/>` whose inline results are not all known yet.
@@ -548,6 +623,11 @@ pub(super) struct PendingSasl2Success {
     additional_data: Option<Vec<u8>>,
     authorization_identifier: BareJid,
     requests: Sasl2InlineRequests,
+    /// The client installation the exchange names.
+    user_agent: Option<UserAgentId>,
+    /// The XEP-0313 `<metadata/>` of the archive as the resource was bound,
+    /// for `<bound/>`.
+    archive_metadata: Option<Element>,
     progress: InlineProgress,
 }
 
@@ -589,10 +669,14 @@ enum InlineProgress {
 /// known.
 pub(super) fn sasl2_success_responses(
     staged: &mut Option<PendingSasl2Success>,
-    requests: Sasl2InlineRequests,
+    exchange: Sasl2InlineExchange,
     additional_data: Option<Vec<u8>>,
     authorization_identifier: BareJid,
 ) -> ResponseBatch {
+    let Sasl2InlineExchange {
+        requests,
+        user_agent,
+    } = exchange;
     if requests.is_empty() {
         return vec![
             sasl2_success_element(additional_data, authorization_identifier, Vec::new()),
@@ -604,6 +688,8 @@ pub(super) fn sasl2_success_responses(
         additional_data,
         authorization_identifier,
         requests,
+        user_agent,
+        archive_metadata: None,
         progress: InlineProgress::Requested,
     });
     ResponseBatch::default()
@@ -680,8 +766,12 @@ pub(super) async fn advance_sasl2_inline(state: &WebSocketState, conn: &mut WsCo
         }
     };
     let outcome = resume_failed.map(InlineResumeOutcome::Failed);
-    let enable = match decide_bind2(plan_inline(&pending.requests), outcome.as_ref()) {
-        Ok(Bind2Decision::Bind { enable, .. }) => Some(enable),
+    let bind = match decide_bind2(plan_inline(&pending.requests), outcome.as_ref()) {
+        Ok(Bind2Decision::Bind { request, enable }) => {
+            // Requests for features the server does not offer were refused
+            // when the exchange began.
+            Bind2Plan::of(request).map(|plan| (plan, enable))
+        }
         Ok(Bind2Decision::NotRequested | Bind2Decision::SkippedForResume) => None,
         Err(InlineOutcomeUnknown) => {
             pending.progress = InlineProgress::ResumeHeld;
@@ -693,11 +783,18 @@ pub(super) async fn advance_sasl2_inline(state: &WebSocketState, conn: &mut WsCo
         Some(InlineResumeOutcome::Failed(failed)) => Some(failed),
         _ => None,
     };
-    pending.progress = match enable {
-        Some(enable) if bind2_resource(conn) => InlineProgress::Binding {
-            enable,
-            resume_failed,
-        },
+    let bound = match &bind {
+        Some((plan, _)) => bind2_resource(state, conn, plan).await,
+        None => None,
+    };
+    pending.progress = match (bind, bound) {
+        (Some((_, enable)), Some(archive_metadata)) => {
+            pending.archive_metadata = archive_metadata;
+            InlineProgress::Binding {
+                enable,
+                resume_failed,
+            }
+        }
         // No bind was requested, or the connection cannot bind now: the
         // client is told of the resume failure, if any, and binds itself.
         _ => InlineProgress::Ready {
@@ -711,21 +808,133 @@ pub(super) async fn advance_sasl2_inline(state: &WebSocketState, conn: &mut WsCo
     conn.sasl2_success = Some(pending);
 }
 
-/// Bind a server-generated resource for Bind 2. Registration publishes it
-/// in the same turn.
-fn bind2_resource(conn: &mut WsConnState) -> bool {
+/// The resource identifier Bind 2 generates (XEP-0386, "Resource identifier
+/// generation"): `[client tag]/[server generated identifier]`, the tag
+/// included as-is. A tag that is not a valid resource part, or none, leaves
+/// the server's identifier alone.
+fn bind2_full_jid(bare_jid: &BareJid, tag: Option<&Bind2Tag>) -> Option<FullJid> {
+    let server_id = format!("ws-{}", uuid::Uuid::new_v4());
+    tag.map(Bind2Tag::as_str)
+        .filter(|tag| !tag.is_empty())
+        .and_then(|tag| {
+            bare_jid
+                .with_resource_str(&format!("{tag}/{server_id}"))
+                .ok()
+        })
+        .or_else(|| bare_jid.with_resource_str(&server_id).ok())
+}
+
+/// Bind a server-generated resource for Bind 2 and perform what XEP-0386
+/// requires of the bind: enable the features asked for, clear the offline
+/// messages the archive provides, and read the archive's state. Registration
+/// publishes the resource in the same turn.
+///
+/// `None` if the connection cannot bind now; otherwise the `<metadata/>` of
+/// the archive as of the bind, if it could be read.
+async fn bind2_resource(
+    state: &WebSocketState,
+    conn: &mut WsConnState,
+    plan: &Bind2Plan,
+) -> Option<Option<Element>> {
     if conn.resume_endpoint_handoff_blocked || !conn.phase.allows_resource_binding() {
-        return false;
+        return None;
     }
-    let Some(bare_jid) = conn.phase.authenticated_bare_jid() else {
-        return false;
-    };
-    let Ok(full_jid) = bare_jid.with_resource_str(&format!("ws-{}", uuid::Uuid::new_v4())) else {
-        return false;
-    };
+    let bare_jid = conn.phase.authenticated_bare_jid()?.clone();
+    let full_jid = bind2_full_jid(&bare_jid, plan.tag.as_ref())?;
     info!(jid = %full_jid, "Resource bound by Bind 2");
     conn.phase = ConnectionPhase::ready(full_jid, false);
-    true
+    // XEP-0386: "Message Carbons MUST be enabled at this point." Registration
+    // publishes the flag with the resource, so the session starts with it.
+    conn.carbons_enabled = plan.carbons;
+    clear_offline_messages(state, &bare_jid).await;
+    Some(archive_metadata(state, &bare_jid).await)
+}
+
+/// XEP-0386: "Clear the offline messages for this user, if any, without
+/// sending them (as they will be provided by MAM)."
+///
+/// A stored row that refers to the archive is cleared: the client catches up
+/// from the archive. A message stored whole is in no archive, so it stays and
+/// is delivered by the XEP-0160 flush at initial presence. A row a flush has
+/// already claimed is that flush's.
+async fn clear_offline_messages(state: &WebSocketState, account: &BareJid) {
+    let storage = &state.deps.protocol.pending_delivery_storage;
+    let rows = match storage.list(account).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "reading the offline store to clear it for Bind 2 failed");
+            return;
+        }
+    };
+    for row in rows {
+        if row.flushed_in_session.is_some() || !row.payload.is_archived() {
+            continue;
+        }
+        if let Err(error) = storage.delete_unclaimed_row(&row.id).await {
+            warn!(%error, "clearing an archived offline message for Bind 2 failed");
+        }
+    }
+}
+
+/// The XEP-0313 `<metadata/>` of the account's archive, which tells the
+/// client what it must synchronise. XEP-0386: "The server SHOULD include a
+/// <metadata/> element". `None` if the archive cannot be read.
+async fn archive_metadata(state: &WebSocketState, account: &BareJid) -> Option<Element> {
+    match state
+        .deps
+        .protocol
+        .mam_storage
+        .archive_bounds(account, waddle_xmpp::mam::MamArchiveKind::Personal, None)
+        .await
+    {
+        Ok(bounds) => Some(waddle_xmpp_core::mam::build_metadata_element(
+            bounds.as_ref(),
+        )),
+        Err(error) => {
+            warn!(%error, "reading the archive state for Bind 2 failed");
+            None
+        }
+    }
+}
+
+/// XEP-0386: "Upon successful binding of a resource, the server SHOULD
+/// terminate any earlier sessions from the same client (identified by the
+/// <user-agent> 'id' attribute in its SASL2 authentication request)."
+///
+/// Records the client on the new binding and ends the other live bindings of
+/// the account that were made for it, as a replacing bind does.
+fn end_earlier_client_sessions(
+    state: &WebSocketState,
+    conn: &WsConnState,
+    user_agent: Option<UserAgentId>,
+) {
+    use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachRequest};
+
+    let (Some(id), Some(jid), Some(owner)) = (
+        user_agent,
+        conn.phase.bound_jid(),
+        conn.registry_owner.as_ref(),
+    ) else {
+        return;
+    };
+    let registry = &state.deps.protocol.connection_registry;
+    let Some(entry) = registry.entry_if_owner(jid, owner) else {
+        return;
+    };
+    entry.set_user_agent_id(Some(id));
+    let account = jid.to_bare();
+    for (earlier, entry) in registry.other_resources_of_user_agent(&account, id, jid) {
+        let (ack, _ack) = tokio::sync::oneshot::channel();
+        let offered = entry.try_force_detach_and_interrupt(ForceDetachRequest {
+            origin: ForceDetachOrigin::FreshBindReplacement,
+            target_binding: entry.binding_ref().cloned(),
+            requester_bare_jid: account.clone(),
+            ack,
+        });
+        if offered.is_err() {
+            warn!(jid = %earlier, "an earlier session of the same client could not be ended");
+        }
+    }
 }
 
 /// Write a staged `<success/>` into `responses` once its inline results are
@@ -768,6 +977,7 @@ pub(super) async fn finish_sasl2_inline(
                 };
                 (results, false)
             } else {
+                end_earlier_client_sessions(state, conn, pending.user_agent);
                 let outcome = match enable {
                     Some(enable) => Some((
                         enable.resume,
@@ -800,6 +1010,7 @@ pub(super) async fn finish_sasl2_inline(
                     results_or_none(InlineSession::Bound {
                         resume_failed: resume_failed.as_ref(),
                         stream_management,
+                        archive_metadata: pending.archive_metadata.as_ref(),
                     }),
                     false,
                 )
@@ -897,6 +1108,7 @@ impl PendingSasl2Success {
                     Some(commit) => Bind2StreamManagement::Enabled { commit, resumable },
                     None => Bind2StreamManagement::Failed(&failed),
                 }),
+                archive_metadata: self.archive_metadata.as_ref(),
             }),
             resumed: false,
         };

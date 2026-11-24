@@ -1,5 +1,6 @@
 use super::{
-    BareJid, ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering, SendResult, Stanza,
+    BareJid, ConnectionEntry, ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering,
+    SendResult, Stanza,
 };
 use crate::pending_delivery::SmSessionId;
 
@@ -53,6 +54,26 @@ impl ConnectionRegistry {
                     && entry.value().roster_interested.load(Ordering::Relaxed)
             })
             .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// The other resources of `bare_jid` whose binding was made for the
+    /// client installation `id` (XEP-0386: earlier sessions of the same
+    /// client). `except` is the resource that is itself being bound.
+    pub fn other_resources_of_user_agent(
+        &self,
+        bare_jid: &BareJid,
+        id: waddle_xmpp_core::xep0388_inline::UserAgentId,
+        except: &FullJid,
+    ) -> Vec<(FullJid, ConnectionEntry)> {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.key() != except
+                    && entry.key().to_bare() == *bare_jid
+                    && entry.value().user_agent_id() == Some(id)
+            })
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 

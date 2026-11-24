@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use jid::FullJid;
+use minidom::Element;
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::ownership::BindingRef;
 use waddle_xmpp::stream_management::durable::{PrincipalStanding, ResumeDenial};
@@ -260,6 +261,8 @@ pub enum InlineSession<'a> {
         resume_failed: Option<&'a InlineResumeFailed>,
         /// The enable requested with the bind and its outcome, if any.
         stream_management: Option<Bind2StreamManagement<'a>>,
+        /// The XEP-0313 `<metadata/>` of the user's archive as of the bind.
+        archive_metadata: Option<&'a Element>,
     },
 }
 
@@ -292,6 +295,7 @@ pub fn inline_results(session: InlineSession<'_>) -> Result<Sasl2InlineResults, 
         InlineSession::Bound {
             resume_failed,
             stream_management,
+            archive_metadata,
         } => {
             results.resume =
                 resume_failed.map(|failed| SmInlineResumeResult::Failed(failed.failed.clone()));
@@ -306,7 +310,7 @@ pub fn inline_results(session: InlineSession<'_>) -> Result<Sasl2InlineResults, 
             };
             results.bound = Some(Bind2Bound {
                 stream_management,
-                other_results: Vec::new(),
+                other_results: archive_metadata.into_iter().cloned().collect(),
             });
         }
     }

@@ -466,3 +466,95 @@ fn xep0386_success_reports_failed_resume_then_bound_with_inline_enable() {
         }))
     );
 }
+
+fn authenticate_with_user_agent(
+    user_agent: Element,
+) -> waddle_xmpp_core::xep0388::Sasl2Authenticate {
+    use waddle_xmpp_core::xep0388::{Sasl2Authenticate, Sasl2Mechanism};
+    let mut request = Sasl2Authenticate::new(Sasl2Mechanism::OAuthBearer, None);
+    request
+        .push_additional_child(user_agent)
+        .expect("one user agent");
+    request
+}
+
+#[test]
+fn xep0386_user_agent_id_identifies_a_client_by_its_uuid_v4() {
+    use waddle_xmpp_core::xep0388_inline::UserAgentId;
+
+    let with_id = |id: &str| {
+        authenticate_with_user_agent(parse(&format!(
+            "<user-agent xmlns='urn:xmpp:sasl:2' id='{id}'><software>Waddle</software></user-agent>"
+        )))
+    };
+    let first = UserAgentId::from_authenticate(&with_id("d4565fa7-4d72-4749-b3d3-740edbf87770"))
+        .expect("a UUID v4 identifies a client");
+    assert_eq!(
+        UserAgentId::from_authenticate(&with_id("d4565fa7-4d72-4749-b3d3-740edbf87770")),
+        Some(first)
+    );
+    assert_ne!(
+        UserAgentId::from_authenticate(&with_id("6ba7b810-9dad-41d1-80b4-00c04fd430c8")),
+        Some(first)
+    );
+
+    // The id is RECOMMENDED, and a UUID v4 when present: anything else
+    // identifies no client.
+    assert_eq!(UserAgentId::from_authenticate(&with_id("not-a-uuid")), None);
+    assert_eq!(
+        UserAgentId::from_authenticate(&with_id("6ba7b810-9dad-11d1-80b4-00c04fd430c8")),
+        None,
+        "a UUID v1 is not a v4"
+    );
+    assert_eq!(
+        UserAgentId::from_authenticate(&authenticate_with_user_agent(parse(
+            "<user-agent xmlns='urn:xmpp:sasl:2'/>"
+        ))),
+        None
+    );
+    assert_eq!(
+        UserAgentId::from_authenticate(&waddle_xmpp_core::xep0388::Sasl2Authenticate::new(
+            waddle_xmpp_core::xep0388::Sasl2Mechanism::OAuthBearer,
+            None
+        )),
+        None
+    );
+}
+
+#[test]
+fn xep0386_bound_carries_the_xep0313_metadata_of_the_archive() {
+    use chrono::{TimeZone, Utc};
+    use waddle_xmpp_core::mam::{build_metadata_element, ArchiveBounds, ArchiveEdge};
+
+    let bounds = ArchiveBounds {
+        start: ArchiveEdge {
+            id: "YWxwaGEg".to_owned(),
+            timestamp: Utc.with_ymd_and_hms(2008, 8, 22, 21, 9, 4).unwrap(),
+        },
+        end: ArchiveEdge {
+            id: "b21lZ2Eg".to_owned(),
+            timestamp: Utc.with_ymd_and_hms(2020, 4, 20, 14, 34, 21).unwrap(),
+        },
+    };
+    let metadata = build_metadata_element(Some(&bounds));
+    assert!(metadata.is("metadata", "urn:xmpp:mam:2"));
+    let start = metadata
+        .get_child("start", "urn:xmpp:mam:2")
+        .expect("start");
+    assert_eq!(start.attr("id"), Some("YWxwaGEg"));
+    assert_eq!(start.attr("timestamp"), Some("2008-08-22T21:09:04.000Z"));
+    let end = metadata.get_child("end", "urn:xmpp:mam:2").expect("end");
+    assert_eq!(end.attr("id"), Some("b21lZ2Eg"));
+
+    let bound = Bind2Bound {
+        stream_management: None,
+        other_results: vec![metadata.clone()],
+    };
+    let wire = reparse(&bound.to_element());
+    assert_eq!(Bind2Bound::from_element(&wire), Ok(bound));
+
+    // An empty archive reports an empty `<metadata/>`.
+    let empty = build_metadata_element(None);
+    assert!(empty.is("metadata", "urn:xmpp:mam:2"));
+    assert!(empty.nodes().next().is_none());
+}
