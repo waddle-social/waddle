@@ -120,7 +120,10 @@ struct CallStageHost: View {
 
     private func stage(of call: Call) -> some View {
         let live = (media?.participants ?? []).map {
-            CallStageParticipant(identity: $0.identity, isSelf: $0.isLocal, hasCamera: $0.isCameraOn)
+            CallStageParticipant(
+                identity: $0.identity, isSelf: $0.isLocal, hasCamera: $0.isCameraOn,
+                screenPublicationID: $0.screenPublicationID
+            )
         }
         // The microphone starts a moment after media connects; until then it is not a mute.
         let isSelfMuted = call.status != .connecting && media?.isMicrophoneOn == false

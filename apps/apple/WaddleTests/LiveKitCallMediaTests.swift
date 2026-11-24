@@ -1,4 +1,6 @@
+import CoreVideo
 import CryptoKit
+import LiveKit
 import WaddleKit
 import XCTest
 @testable import Waddle
@@ -185,6 +187,49 @@ final class LiveKitCallMediaTests: XCTestCase {
         try await bob.connect(join: bobJoin, media: none, iceServers: [])
         try await until { alice.participants.last?.identity == bobJoin.identity }
         XCTAssertEqual(alice.participants.last?.volume, 1)
+        await alice.disconnect()
+        await bob.disconnect()
+    }
+
+    func testAScreenSomeoneSharesIsTheirsToShowUntilTheyStop() async throws {
+        let sfu = try testSFU()
+        let room = "waddle-test-\(UUID().uuidString)"
+        let alice = LiveKitCallMediaController()
+        let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/web")
+        // Bob is a plain SDK client, as a browser sharing its screen is.
+        let bob = Room()
+        try await bob.connect(url: bobJoin.url, token: bobJoin.token)
+        try await alice.connect(
+            join: sfu.join(room: room, identity: "alice@waddle.test/mac"), media: CallMedia(audio: false, video: false),
+            iceServers: []
+        )
+        try await until { alice.participants.last?.identity == bobJoin.identity }
+        XCTAssertNil(alice.participants.last?.screenPublicationID)
+        XCTAssertNil(alice.video(of: bobJoin.identity, source: .screen))
+
+        let screen = await LocalVideoTrack.createBufferTrack(source: .screenShareVideo)
+        let frames = Task {
+            var buffer: CVPixelBuffer?
+            CVPixelBufferCreate(nil, 640, 360, kCVPixelFormatType_32BGRA, nil, &buffer)
+            while !Task.isCancelled, let buffer {
+                (screen.capturer as? BufferCapturer)?.capture(buffer)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer { frames.cancel() }
+        let publication = try await bob.localParticipant.publish(videoTrack: screen)
+        try await until { alice.participants.last?.screenPublicationID != nil }
+        XCTAssertEqual(alice.participants.last?.screenPublicationID, publication.sid.stringValue)
+        XCTAssertNotNil(alice.video(of: bobJoin.identity, source: .screen))
+        XCTAssertEqual(alice.dockCameraIdentities.remoteScreen, bobJoin.identity)
+        // A screen is not a camera.
+        XCTAssertEqual(alice.participants.last?.isCameraOn, false)
+        XCTAssertNil(alice.video(of: bobJoin.identity, source: .camera))
+
+        try await bob.localParticipant.unpublish(publication: publication)
+        try await until { alice.participants.last?.screenPublicationID == nil }
+        XCTAssertNil(alice.video(of: bobJoin.identity, source: .screen))
+        XCTAssertNil(alice.dockCameraIdentities.remoteScreen)
         await alice.disconnect()
         await bob.disconnect()
     }

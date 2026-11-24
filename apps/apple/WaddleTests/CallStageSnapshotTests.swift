@@ -148,6 +148,18 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    /// Someone shares their screen: it takes the large tile, in gallery view too.
+    func testRoomWithASharedScreen() {
+        let screen = CallStageTile(
+            identity: Self.linus.identity, source: .screen, label: "linus's screen", hasVideo: true,
+            screenPublicationID: "TR_screen"
+        )
+        let tiles = [Self.you, Self.linus, screen, Self.grace]
+        var presentation = CallStagePresentation()
+        presentation.reconcile(with: tiles)
+        assertStage(tiles: tiles, presentation: presentation, stageSize: .expanded, size: CGSize(width: 1000, height: 640))
+    }
+
     // MARK: - Participants
 
     private static let roster: [CallStageTile] = [

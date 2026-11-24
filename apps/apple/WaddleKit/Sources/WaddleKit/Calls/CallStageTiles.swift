@@ -4,11 +4,14 @@ public struct CallStageParticipant: Equatable, Sendable {
     public let identity: String
     public let isSelf: Bool
     public let hasCamera: Bool
+    /// The publication of the screen this device is sharing, while it shares one.
+    public let screenPublicationID: String?
 
-    public init(identity: String, isSelf: Bool, hasCamera: Bool) {
+    public init(identity: String, isSelf: Bool, hasCamera: Bool, screenPublicationID: String? = nil) {
         self.identity = identity
         self.isSelf = isSelf
         self.hasCamera = hasCamera
+        self.screenPublicationID = screenPublicationID
     }
 }
 
@@ -29,14 +32,15 @@ public enum CallStageTiles {
         if !people.contains(where: { !$0.isSelf && JID(parsing: $0.identity)?.bare == peer.bare }) {
             people.append(CallStageParticipant(identity: peer.description, isSelf: false, hasCamera: false))
         }
-        return people.map { person in
+        return people.flatMap { person in
             let account = JID(parsing: person.identity)?.bare
-            return CallStageTile(
-                identity: person.identity, source: .camera,
-                label: person.isSelf ? "You" : account == peer.bare ? peerName : name(of: person.identity),
+            let name = account == peer.bare ? peerName : name(of: person.identity)
+            let camera = CallStageTile(
+                identity: person.identity, source: .camera, label: person.isSelf ? "You" : name,
                 isSelf: person.isSelf, isMuted: person.isSelf && isSelfMuted,
                 isSpeaking: account.map(speaking.contains) ?? false, hasVideo: person.hasCamera
             )
+            return [camera] + screen(of: person, name: name)
         }
     }
 
@@ -55,13 +59,14 @@ public enum CallStageTiles {
                 )
             }
         }
-        return live.map { person in
+        return live.flatMap { person in
             let account = JID(parsing: person.identity)?.bare
             let row = account.flatMap { account in rows.first { $0.jid == account } }
-            return tile(
+            let camera = tile(
                 identity: person.identity, isSelf: person.isSelf, hasCamera: person.hasCamera, row: row,
                 isSelfMuted: isSelfMuted
             )
+            return [camera] + screen(of: person, name: row?.nick ?? name(of: person.identity))
         }
     }
 
@@ -74,6 +79,16 @@ public enum CallStageTiles {
             isSelf: isSelf, isMuted: isSelf ? isSelfMuted : row?.isMuted ?? false,
             isHandRaised: row?.isHandRaised ?? false, isSpeaking: row?.isSpeaking ?? false, hasVideo: hasCamera
         )
+    }
+
+    /// The screen a device shares is a tile of its own, after its camera's
+    /// (web `buildCallTiles`). A mute, a hand and speaking stay on the person's tile.
+    private static func screen(of person: CallStageParticipant, name: String) -> [CallStageTile] {
+        guard let publication = person.screenPublicationID else { return [] }
+        return [CallStageTile(
+            identity: person.identity, source: .screen, label: person.isSelf ? "Your screen" : "\(name)'s screen",
+            isSelf: person.isSelf, hasVideo: true, screenPublicationID: publication
+        )]
     }
 
     private static func name(of identity: String) -> String {
