@@ -411,6 +411,9 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // setting is turned off.
     ("s2s_federated_spaces", READ_WRITE),
     ("s2s_space_subscriptions", READ_WRITE),
+    // XEP-0012 last logout: upserted when an account becomes unavailable.
+    // Retirement deletes the row as the owner.
+    ("account_last_activity", READ_INSERT_UPDATE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),

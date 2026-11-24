@@ -75,11 +75,6 @@ pub(super) async fn handle_regular_presence_update(
     };
     if available {
         if let Some((owner, was_available)) = availability_transition(true) {
-            state
-                .deps
-                .protocol
-                .connection_registry
-                .clear_last_activity(&sender_jid.to_bare());
             if !was_available {
                 // A new availability period: the caps advertised now are
                 // fresh interest, not a continuation of an earlier session.
@@ -161,14 +156,23 @@ pub(super) async fn handle_regular_presence_update(
             .connection_registry
             .clear_presence_state_if_owner(sender_jid, owner);
         mirror_remote_presence_update(state, sender_jid, owner, false, priority, None).await;
-        state
+        // XEP-0012: the last logout is durable, so every node answers the
+        // same and a restart keeps it.
+        let account = sender_jid.to_bare();
+        if let Err(error) = state
             .deps
-            .protocol
-            .connection_registry
-            .record_last_activity(
-                &sender_jid.to_bare(),
-                presence.statuses.values().next().cloned(),
-            );
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(crate::db::last_activity::record(
+                &account,
+                chrono::Utc::now().timestamp_millis(),
+                presence.statuses.values().next().map(String::as_str),
+            ))
+            .await
+        {
+            warn!(jid = %account, error = %error, "Failed to record last activity");
+        }
     } else {
         debug!(
             jid = %sender_jid,

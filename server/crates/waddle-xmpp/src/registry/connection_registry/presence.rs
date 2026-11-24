@@ -1,8 +1,7 @@
 use super::{
-    debug, info, BareJid, ConnectionRegistry, FullJid, LastActivityState, LocalConnectionBindingId,
-    Ordering, PresenceState,
+    debug, info, BareJid, ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering,
+    PresenceState,
 };
-use chrono::Utc;
 
 impl ConnectionRegistry {
     /// Update presence state for a connected resource.
@@ -165,29 +164,6 @@ impl ConnectionRegistry {
         }
         self.presence_states.remove(jid);
         true
-    }
-
-    /// Record last offline activity for a bare JID.
-    pub fn record_last_activity(&self, bare_jid: &BareJid, status: Option<String>) {
-        self.last_activity.insert(
-            bare_jid.clone(),
-            LastActivityState {
-                timestamp: Utc::now(),
-                status,
-            },
-        );
-    }
-
-    /// Get the last recorded offline activity for a bare JID.
-    pub fn last_activity(&self, bare_jid: &BareJid) -> Option<LastActivityState> {
-        self.last_activity
-            .get(bare_jid)
-            .map(|entry| entry.value().clone())
-    }
-
-    /// Clear the last recorded offline activity for a bare JID.
-    pub fn clear_last_activity(&self, bare_jid: &BareJid) {
-        self.last_activity.remove(bare_jid);
     }
 
     /// Return the current server uptime in whole seconds.

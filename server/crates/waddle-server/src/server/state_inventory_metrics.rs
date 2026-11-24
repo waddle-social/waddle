@@ -229,11 +229,6 @@ pub(crate) async fn publish_once(websocket_state: &WebSocketState) {
         "Bare JIDs with tracked presence state."
     )
     .record(as_i64(snapshot.connections.presence_states), labels);
-    gauge!(
-        "waddle.state.connections.last_activity",
-        "Bare JIDs with recorded XEP-0012 last-activity timestamps."
-    )
-    .record(as_i64(snapshot.connections.last_activity), labels);
 
     // MUC rooms — total and the sub-count that the dormancy janitor
     // will reclaim on its next pass.
@@ -339,7 +334,6 @@ mod tests {
             "{entry}",
         ),
         ("waddle.state.connections.presence_states", "{entry}"),
-        ("waddle.state.connections.last_activity", "{entry}"),
         ("waddle.state.rooms.total", "{entry}"),
         ("waddle.state.rooms.dormant", "{entry}"),
     ];
