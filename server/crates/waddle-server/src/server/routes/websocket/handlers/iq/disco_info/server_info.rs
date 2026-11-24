@@ -68,8 +68,14 @@ pub(super) async fn handle_server_disco_info<'a>(
     // here without drift between the two lists. Server-instance
     // additions (Spaces, jabber:iq:search) are appended below,
     // and dynamic extension namespaces extend further still.
-    let identities = vec![Identity::server(Some("Waddle"))];
+    // XEP-0223 §Determining Support: the server domain's disco#info MUST carry
+    // the pubsub/pep identity and the publish-options feature.
+    let identities = vec![
+        Identity::server(Some("Waddle")),
+        waddle_xmpp::pubsub::build_pep_identity(),
+    ];
     let mut features = waddle_xmpp::disco::info::server_features();
+    features.push(Feature::pubsub_publish_options());
     features.push(Feature::new("jabber:iq:search"));
     if req.node.is_none()
         && req.target_to.unwrap_or(req.domain) == req.domain

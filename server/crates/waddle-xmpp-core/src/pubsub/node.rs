@@ -256,6 +256,47 @@ impl NodeConfigPatch {
     }
 }
 
+impl NodeConfigPatch {
+    /// Whether every field of this patch, read as a XEP-0060 §7.1.5
+    /// publish-options precondition, holds for `config`, the configuration of
+    /// the PEP node `node`.
+    ///
+    /// `pubsub#max_items=max` is met by the largest item count the service
+    /// allows the node ([`NodeConfig::max_items_ceiling`]).
+    #[must_use]
+    pub fn met_by(&self, node: &str, config: &NodeConfig) -> bool {
+        self.access_model.is_none_or(|v| v == config.access_model)
+            && self.publish_model.is_none_or(|v| v == config.publish_model)
+            && self.node_type.is_none_or(|v| Some(v) == config.node_type)
+            && self.max_items.is_none_or(|v| {
+                v == config.max_items
+                    || (v == u32::MAX && config.max_items == NodeConfig::max_items_ceiling(node))
+            })
+            && self.persist_items.is_none_or(|v| v == config.persist_items)
+            && self
+                .deliver_payloads
+                .is_none_or(|v| v == config.deliver_payloads)
+            && self
+                .notify_retract
+                .is_none_or(|v| v == config.notify_retract)
+            && self.notify_delete.is_none_or(|v| v == config.notify_delete)
+            && self
+                .send_last_published_item
+                .is_none_or(|v| v == config.send_last_published_item)
+    }
+
+    /// Apply this patch to `base`, resolving `pubsub#max_items=max` to the
+    /// node's [`NodeConfig::max_items_ceiling`].
+    #[must_use]
+    pub fn apply_for_node(&self, node: &str, base: NodeConfig) -> NodeConfig {
+        let mut patch = self.clone();
+        if patch.max_items == Some(u32::MAX) {
+            patch.max_items = Some(NodeConfig::max_items_ceiling(node));
+        }
+        patch.apply_to(base)
+    }
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self::pep_default()
@@ -339,6 +380,21 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+        }
+    }
+
+    /// The largest `pubsub#max_items` the service allows the PEP node `node`:
+    /// the bookmark-style nodes are capped at [`PEP_BOOKMARK_MAX_ITEMS`], every
+    /// other node is unbounded.
+    #[must_use]
+    pub fn max_items_ceiling(node: &str) -> u32 {
+        if node == super::pep::PEP_NODE_BOOKMARKS
+            || node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS
+            || node == super::pep::PEP_NODE_WADDLE_JOINED_SPACES
+        {
+            PEP_BOOKMARK_MAX_ITEMS
+        } else {
+            u32::MAX
         }
     }
 
@@ -696,8 +752,7 @@ impl NodeConfig {
     ///   - `pubsub#send_last_published_item=never`
     ///
     /// We bake these into the well-known node defaults so auto-create
-    /// matches the spec without depending on the (currently unenforced)
-    /// publish-options precondition path. `max=max` maps to `u32::MAX`.
+    /// matches the spec even when a publish carries no publish-options. `max=max` maps to `u32::MAX`.
     #[must_use]
     pub fn mds_displayed() -> Self {
         Self {

@@ -508,3 +508,106 @@ fn node_deletion_event_names_the_node_and_subscriber() {
     assert_eq!(deleted.attr("node"), Some("engineering"));
     assert!(deleted.children().next().is_none());
 }
+
+fn publish_options_form(form_type: &str, fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_XDATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(
+            Element::builder("field", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+                .append(
+                    Element::builder("value", NS_XDATA)
+                        .append(form_type)
+                        .build(),
+                )
+                .build(),
+        );
+    for (var, value) in fields {
+        form = form.append(
+            Element::builder("field", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), *var)
+                .append(Element::builder("value", NS_XDATA).append(*value).build())
+                .build(),
+        );
+    }
+    form.build()
+}
+
+#[test]
+fn publish_options_form_parses_into_node_config_preconditions() {
+    use crate::pubsub::{AccessModel, NodeConfig, SendLastPublishedItem};
+
+    let form = publish_options_form(
+        PUBSUB_PUBLISH_OPTIONS_FORM_TYPE,
+        &[
+            ("pubsub#persist_items", "true"),
+            ("pubsub#access_model", "whitelist"),
+            ("pubsub#max_items", "max"),
+            ("pubsub#send_last_published_item", "never"),
+        ],
+    );
+    let patch = super::parse_publish_options_form(&form).expect("valid publish-options");
+    assert_eq!(patch.access_model, Some(AccessModel::Whitelist));
+    assert_eq!(patch.persist_items, Some(true));
+    assert_eq!(patch.max_items, Some(u32::MAX));
+    assert_eq!(
+        patch.send_last_published_item,
+        Some(SendLastPublishedItem::Never)
+    );
+
+    // `max` is met by the largest count the node allows, not by `1`.
+    let mds = NodeConfig::mds_displayed();
+    assert!(patch.met_by("urn:xmpp:mds:displayed:0", &mds));
+    let bookmarks = NodeConfig::pep_for_node("urn:xmpp:bookmarks:1");
+    assert!(patch.met_by("urn:xmpp:bookmarks:1", &bookmarks));
+    assert!(!patch.met_by("urn:example:node", &NodeConfig::pep_default()));
+}
+
+#[test]
+fn publish_options_form_rejects_unknown_field_and_wrong_form_type() {
+    let unknown = publish_options_form(
+        PUBSUB_PUBLISH_OPTIONS_FORM_TYPE,
+        &[("pubsub#no_such_option", "x")],
+    );
+    assert!(super::parse_publish_options_form(&unknown).is_err());
+
+    let wrong = publish_options_form(
+        "http://jabber.org/protocol/pubsub#node_config",
+        &[("pubsub#access_model", "whitelist")],
+    );
+    assert!(super::parse_publish_options_form(&wrong).is_err());
+}
+
+#[test]
+fn publish_without_a_data_form_in_publish_options_is_bad_request() {
+    let publish = Element::builder("publish", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n")
+        .build();
+    let options = Element::builder("publish-options", NS_PUBSUB).build();
+    let iq = iq_with_payload(
+        "p",
+        None,
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [publish, options])),
+    );
+    assert!(parse_pubsub_iq(&iq).is_err());
+}
+
+#[test]
+fn precondition_not_met_is_conflict_with_the_pubsub_error_condition() {
+    let iq = Iq::Set {
+        from: Some("alice@example.test/a".parse().expect("jid")),
+        to: None,
+        id: "p".to_string(),
+        payload: Element::builder("pubsub", NS_PUBSUB).build(),
+    };
+    let Iq::Error { error, .. } = build_pubsub_error(&iq, PubSubError::PreconditionNotMet) else {
+        panic!("expected an error IQ");
+    };
+    assert_eq!(
+        error.defined_condition,
+        xmpp_parsers::stanza_error::DefinedCondition::Conflict
+    );
+    let other = error.other.expect("pubsub-specific condition");
+    assert!(other.is("precondition-not-met", NS_PUBSUB_ERRORS));
+}

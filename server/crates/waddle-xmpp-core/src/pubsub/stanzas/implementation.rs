@@ -368,11 +368,20 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
             .get_child("item", NS_PUBSUB)
             .map(PubSubItem::from_element)
             .unwrap_or_else(|| PubSubItem::new(None, None));
-        let publish_options = pubsub_elem
-            .get_child("publish-options", NS_PUBSUB)
-            .and_then(|options| options.get_child("x", "jabber:x:data"))
-            .cloned()
-            .map(Box::new);
+        // XEP-0060 §7.1.5: <publish-options/> MUST contain a data form.
+        let publish_options = match pubsub_elem.get_child("publish-options", NS_PUBSUB) {
+            None => None,
+            Some(options) => Some(Box::new(
+                options
+                    .get_child("x", "jabber:x:data")
+                    .cloned()
+                    .ok_or_else(|| {
+                        CoreError::bad_request(Some(
+                            "publish-options must contain a data form".to_string(),
+                        ))
+                    })?,
+            )),
+        };
         return Ok(PubSubRequest::Publish {
             node,
             item,
@@ -529,6 +538,44 @@ pub(in crate::pubsub::stanzas) fn required_attr(
 pub(in crate::pubsub::stanzas) fn parse_configure_form(
     form: &Element,
 ) -> CoreResult<NodeConfigPatch> {
+    parse_node_config_fields(form, false)
+}
+
+/// FORM_TYPE of the XEP-0060 §7.1.5 publish-options data form.
+pub const PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#publish-options";
+
+/// Parse the data form of a XEP-0060 §7.1.5 `<publish-options/>` element into
+/// node-configuration preconditions.
+///
+/// The form MUST be a `submit` form whose `FORM_TYPE` is
+/// [`PUBLISH_OPTIONS_FORM_TYPE`], and a service that supports publish options
+/// MUST reject the publication on an unknown field; both surface as
+/// `<bad-request/>`.
+///
+/// # Errors
+///
+/// Returns a bad-request error for a wrong form type, a wrong `FORM_TYPE`, an
+/// unknown field or an invalid field value.
+pub fn parse_publish_options_form(form: &Element) -> CoreResult<NodeConfigPatch> {
+    if !form.is("x", "jabber:x:data") || form.attr("type") != Some("submit") {
+        return Err(CoreError::bad_request(Some(
+            "publish-options must contain a jabber:x:data form of type submit".to_string(),
+        )));
+    }
+    let form_type = form
+        .children()
+        .find(|field| field.is("field", "jabber:x:data") && field.attr("var") == Some("FORM_TYPE"))
+        .and_then(|field| field.get_child("value", "jabber:x:data"))
+        .map(|value| value.text());
+    if form_type.as_deref() != Some(PUBLISH_OPTIONS_FORM_TYPE) {
+        return Err(CoreError::bad_request(Some(format!(
+            "publish-options FORM_TYPE must be {PUBLISH_OPTIONS_FORM_TYPE}"
+        ))));
+    }
+    parse_node_config_fields(form, true)
+}
+
+fn parse_node_config_fields(form: &Element, reject_unknown: bool) -> CoreResult<NodeConfigPatch> {
     let mut config = NodeConfigPatch::default();
     for field in form.children().filter(|c| c.is("field", "jabber:x:data")) {
         let var = field.attr("var").unwrap_or("");
@@ -616,7 +663,15 @@ pub(in crate::pubsub::stanzas) fn parse_configure_form(
                     )))
                 })?);
             }
-            _ => {} // Unknown fields ignored per XEP-0060.
+            "FORM_TYPE" => {}
+            // XEP-0060 §8.2.4 ignores unknown configure-form fields; §7.1.5
+            // requires publish-options to reject them.
+            _ if reject_unknown => {
+                return Err(CoreError::bad_request(Some(format!(
+                    "unknown publish-options field: {var}"
+                ))));
+            }
+            _ => {}
         }
     }
     Ok(config)

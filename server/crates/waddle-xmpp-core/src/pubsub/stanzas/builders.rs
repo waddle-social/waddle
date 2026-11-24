@@ -178,6 +178,11 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         // <invalid-payload/> condition so clients can distinguish
         // payload-shape rejection from a generic <bad-request/>.
         stanza_error.other = Some(Element::builder("invalid-payload", NS_PUBSUB_ERRORS).build());
+    } else if let PubSubError::PreconditionNotMet = error {
+        // XEP-0060 §7.1.5: a failed publish-options precondition is a
+        // <conflict/> with the pubsub-specific <precondition-not-met/>.
+        stanza_error.other =
+            Some(Element::builder("precondition-not-met", NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::PayloadRequired = error {
         // XEP-0060 §7.1.3.3.
         stanza_error.other = Some(Element::builder("payload-required", NS_PUBSUB_ERRORS).build());

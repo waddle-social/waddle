@@ -284,7 +284,8 @@ async fn advertise_notify_caps(bob: &mut WsXmppClient, nodes: &[&str]) {
 }
 
 /// Publish-options that ask for the weakest privacy a client could
-/// request. The server must ignore the access model they name.
+/// request. The node is pinned `whitelist`, so XEP-0060 §7.1.5 requires the
+/// publish to fail with `precondition-not-met`.
 fn open_publish_options() -> PublishOptions {
     PublishOptions {
         form: Some(DataForm::new(
@@ -293,6 +294,20 @@ fn open_publish_options() -> PublishOptions {
             vec![
                 Field::text_single("pubsub#persist_items", "true"),
                 Field::text_single("pubsub#access_model", "open"),
+            ],
+        )),
+    }
+}
+
+/// XEP-0223 publish-options: a persistent `whitelist` node.
+fn whitelist_publish_options() -> PublishOptions {
+    PublishOptions {
+        form: Some(DataForm::new(
+            DataFormType::Submit,
+            NS_PUBSUB_PUBLISH_OPTIONS,
+            vec![
+                Field::text_single("pubsub#persist_items", "true"),
+                Field::text_single("pubsub#access_model", "whitelist"),
             ],
         )),
     }
@@ -328,10 +343,10 @@ fn publish_payload(
     .into()
 }
 
-/// A publish to the joined-spaces node carrying [`open_publish_options`],
+/// A publish to the joined-spaces node carrying [`whitelist_publish_options`],
 /// to the sender's own account or to `to`.
 fn publish_iq(id: &str, to: Option<&BareJid>, item_id: Option<&str>, payload: Element) -> Iq {
-    let payload = publish_payload(NODE, item_id, payload, Some(open_publish_options()));
+    let payload = publish_payload(NODE, item_id, payload, Some(whitelist_publish_options()));
     match to {
         Some(to) => Iq::Set {
             from: None,
@@ -553,8 +568,7 @@ async fn auto_created_node_is_whitelist_bounded_and_never_sends_last_item() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut alice, _bob) = connect_two_accounts().await;
 
-    // The first publish auto-creates the node; the publish-options it
-    // carries ask for `open` access and are not what the node gets.
+    // The first publish auto-creates the node with its publish-options.
     publish_space(&mut alice, "pub-auto", DEV_ITEM, "dev").await;
 
     let form = owner_configure_form(&mut alice, "cfg-auto").await;
@@ -583,7 +597,7 @@ async fn auto_created_node_is_whitelist_bounded_and_never_sends_last_item() {
 }
 
 #[tokio::test]
-async fn open_publish_options_do_not_open_the_node() {
+async fn open_publish_options_conflict_and_never_open_the_node() {
     let _guard = TEST_SERIAL.lock().await;
     let (_server, mut alice, mut bob) = connect_two_accounts().await;
 
@@ -629,7 +643,27 @@ async fn open_publish_options_do_not_open_the_node() {
         "bob must read alice's open control node: {control_read:?}"
     );
 
-    publish_space(&mut alice, "pub-open", DEV_ITEM, "dev").await;
+    // XEP-0060 §7.1.5: the `open` precondition cannot be met by this pinned
+    // node, so the publish fails and nothing is stored or created.
+    let refused = round_trip(
+        &mut alice,
+        own_set(
+            "pub-open",
+            publish_payload(
+                NODE,
+                Some(DEV_ITEM),
+                space_payload("dev"),
+                Some(open_publish_options()),
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        is_error(&refused, DefinedCondition::Conflict),
+        "an open precondition on the joined-spaces node must conflict: {refused:?}"
+    );
+
+    publish_space(&mut alice, "pub-whitelist", DEV_ITEM, "dev").await;
     let form = owner_configure_form(&mut alice, "cfg-after-open-options").await;
     assert_eq!(
         form.value("pubsub#access_model"),

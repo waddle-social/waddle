@@ -14,6 +14,7 @@ use crate::db::Database;
 mod database;
 mod item;
 mod node;
+pub(crate) use node::bounded_node_config;
 mod open;
 mod owner;
 pub(crate) mod runtime_attach;

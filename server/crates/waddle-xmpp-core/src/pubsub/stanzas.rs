@@ -22,6 +22,7 @@ pub use builders::{
 mod implementation;
 pub use implementation::is_pubsub_event;
 pub use implementation::is_pubsub_iq;
+pub use implementation::parse_publish_options_form;
 pub use implementation::parse_pubsub_event;
 pub use implementation::parse_pubsub_iq;
 pub use implementation::PubSubError;
@@ -33,6 +34,7 @@ pub use implementation::NS_PUBSUB;
 pub use implementation::NS_PUBSUB_ERRORS;
 pub use implementation::NS_PUBSUB_EVENT;
 pub use implementation::NS_PUBSUB_OWNER;
+pub use implementation::PUBLISH_OPTIONS_FORM_TYPE;
 
 /// Match a server-generated deletion notice before handing protected bytes to a transport.
 #[must_use]

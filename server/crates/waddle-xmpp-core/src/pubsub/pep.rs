@@ -215,6 +215,7 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::new("http://jabber.org/protocol/pubsub#filtered-notifications"),
         Feature::pubsub_persistent_items(),
         Feature::pubsub_publish(),
+        Feature::pubsub_publish_options(),
         Feature::pubsub_retrieve_items(),
         Feature::pubsub_subscribe(),
         Feature::mam(),
@@ -303,6 +304,13 @@ mod tests {
             "http://jabber.org/protocol/pubsub#config-node-max"
         )));
         assert!(!features.contains(&Feature::new("eu.siacs.conversations.axolotl.whitelisted")));
+    }
+
+    #[test]
+    fn pep_features_advertise_enforced_publish_options() {
+        // XEP-0223 / XEP-0402 / XEP-0490 gate their publishes on this feature;
+        // the publish path enforces the preconditions (XEP-0060 §7.1.5).
+        assert!(pep_features().contains(&Feature::pubsub_publish_options()));
     }
 
     #[test]
