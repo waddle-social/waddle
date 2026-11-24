@@ -73,6 +73,8 @@ mod imp {
         #[template_child]
         pub notify_button: TemplateChild<gtk::MenuButton>,
         #[template_child]
+        pub details_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -156,6 +158,8 @@ mod imp {
         pub rows: RefCell<Option<gio::ListStore>>,
         /// Pins, search and jumps (see ui/message_tools.rs).
         pub tools: RefCell<crate::ui::message_tools::ToolsState>,
+        /// Room rosters and the account's standing (see ui/rooms.rs).
+        pub rooms: RefCell<crate::ui::rooms::RoomsState>,
     }
 
     #[glib::object_subclass]

@@ -179,3 +179,11 @@ button.reaction:checked {
   box-shadow: none;
   border: none;
 }
+
+.role-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.1);
+  font-size: 0.8em;
+  font-weight: 700;
+}

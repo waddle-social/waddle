@@ -45,12 +45,12 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 
 | Feature | XEP(s) | Now | Closed by |
 | --- | --- | --- | --- |
-| Bookmarks and autojoin | 0402 | 🟡 | rooms |
-| Room create, edit, leave, destroy | 0045 | ❌ | rooms |
-| Members, affiliations, kick, ban, hats, bots | 0045 | ❌ | rooms |
-| Group DMs: create, rename, add, leave | 0045 | ❌ | rooms |
-| Room invites | 0045 | ❌ | rooms (needs core verb, tracked with Apple #2456) |
-| Forum rooms | | ❌ | rooms |
+| Bookmarks and autojoin | 0402 | 🟡 | A room you create is bookmarked with autojoin on, and leaving publishes the bookmark with autojoin off, so the room leaves every device's list; rooms the bookmark says were left are no longer listed. There is no way to browse and rejoin a public room you left, and a rename does not update the bookmark's name (`ui/rooms.rs`, `session_rooms.rs`) |
+| Room create, edit, leave, destroy | 0045 | 🟡 | The `+` button above the sidebar opens New Room (name, description, members only, listed, forum); the address comes from the name and is refused when it matches a listed room. Room Details (header button) lets owners edit those settings (GET-merge-SET, only what changed is sent). Leave and, for owners, Delete ask first, and a room its owner deletes elsewhere leaves the list. The pin policy is not editable. Not run against a live server |
+| Members, affiliations, kick, ban, hats, bots | 0045, 0317 | 🟡 | Room Details lists the affiliation tiers merged with who is present (role, here or away, hats as badges) and the extension bots under Bots. A person's menu offers what `rooms.rs` allows the account (owner: any affiliation; admin: member or none for people below admin; moderators: kick); kick and ban ask first, and a banned person's menu has Unban. A tier the server refuses is left out, not an error. A person without a real JID (anonymous room) can only be kicked. No profile sheet; hats are display only. Not run against a live server |
+| Group DMs: create, rename, add, leave | 0045 | 🟡 | `+` button, New Group Chat (optional name, people found by directory search); listed after the rooms with a people icon and chatted in like a room. Details: rename (empty clears), add people (found by search, not already in, with or without earlier messages), the people list, and leave after confirming. A refused invite fails later and is not shown (as on Apple, #2456). An unnamed group is created named after its members, since the verb takes a name. Not run against a live server |
+| Room invites | 0045 | ❌ | rooms (needs core verb, tracked with Apple #2456): the FFI sends only the group-DM mediated invite; it has no verb to invite to a regular room or to answer an invite |
+| Forum rooms | | 🟡 | Created and edited with the Forum switch (`muc#roomconfig_forum`) and shown with a forum icon. Topic posts (`forum_post_kind`, `forum_title`) are parsed by the core but not exposed to the Linux UI, and there is no post-title composer (as on Apple, #2456) |
 | Inbox / unread overview (`/unread`) | 0430 | 🟡 | inbox |
 | Notify modes and mute | 0492 | 🟡 | Header bell menu sets all, mentions only or mute per room and DM, stored on the account; muted rows show an icon and notify nothing. No sidebar context menu; a mode changed on another device shows here at the next reconnect |
 | Desktop notifications with reply and mark-read actions | | 🟡 | One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |

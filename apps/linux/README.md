@@ -19,6 +19,8 @@ The native client currently supports:
 - **`/me` actions (XEP-0245):** shown as italic "* Name action"; quotes and notifications show the same text.
 - **Notifications:** the bell in the conversation header sets all messages, mentions only or mute for that room or DM (XEP-0492, stored on the account and shared with its other devices); muted conversations show a bell-slash in the sidebar. Without a stored mode, DMs and members-only rooms notify for every message and other rooms for mentions. Desktop notifications are one per conversation (a newer message replaces the older), have **Reply** (opens the conversation with the composer focused; GNotification has no inline reply) and **Mark as Read** actions, and are withdrawn when the conversation is read here or on another device.
 
+- **Rooms and group chats:** the `+` button above the sidebar creates a room (name, description, members only, listed, forum) or a group chat (people found in the user directory). **Room Details** in the conversation header edits an owner's room settings, lists its people with affiliation, role and hats and its bots, offers promote, demote, kick and ban to those allowed (kick and ban ask first), and leaves or, for owners, deletes the room after confirmation. A group chat's details rename it, add people and leave it. Not yet: browsing and rejoining a room you left, inviting to a regular room, forum topic posts.
+
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
 ## Build
@@ -56,6 +58,7 @@ The GTK window tests require a display and are excluded from ordinary headless r
 | `src/runtime.rs` | tokio on its own threads; UI awaits work from the GLib main loop |
 | `src/message_actions.rs`, `src/pins.rs`, `src/jump.rs`, `src/message_text.rs` | Message action rules, the pinned list, jump planning and body rendering, without widgets |
 | `src/session_tools.rs`, `src/ui/message_tools.rs` | Pin, search and moderation verbs; header buttons, search bar, hover toolbar |
+| `src/rooms.rs`, `src/session_rooms.rs`, `src/ui/rooms.rs` | Room rules (addresses, setting changes, who may moderate whom, member list, group DM members), the room and group DM verbs, and the dialogs |
 | `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/presence.rs`, `src/avatars.rs`, `src/profile.rs`, `src/people.rs`, `src/nick_color.rs` | Presence mode and auto-away, avatar cache, profile fields and registries, the People listing, nick colors: all without widgets |
 | `src/ui/status.rs`, `pictures.rs`, `profile.rs`, `person.rs`, `people.rs`, `identity.rs` | Their windows: presence plumbing, avatar loading and publishing, your profile, someone's profile sheet, the People view, author resolution |

@@ -23,7 +23,7 @@ use super::images::{self, ImageState};
 use super::{avatar, WaddleWindow};
 use crate::attachments;
 use crate::auth::store::StoredAccount;
-use crate::session::{self, Arrival, Conversation, Kind, Session, SessionEvent};
+use crate::session::{self, Arrival, Conversation, Flavor, Kind, Session, SessionEvent};
 
 /// One row in the list: the core's item plus where it sits.
 #[derive(Clone)]
@@ -169,6 +169,7 @@ impl WaddleWindow {
         self.setup_composer();
         self.setup_presence_input();
         self.setup_message_tools();
+        self.setup_room_tools();
     }
 
     pub(super) fn start_session(&self, account: &StoredAccount) {
@@ -316,6 +317,7 @@ impl WaddleWindow {
                 if imp.profile.book.borrow_mut().apply(&presence) {
                     self.refresh_people();
                 }
+                self.note_roster(&presence);
                 self.on_room_presence(*presence);
             }
             SessionEvent::AvatarChanged { jid, avatar_id } => {
@@ -607,6 +609,7 @@ impl WaddleWindow {
         self.refresh_history_controls();
         self.refresh_thread_context();
         self.refresh_message_tools();
+        self.refresh_room_tools();
         self.scroll_to_end();
         if needs_history {
             self.load_history(conversation, None, HISTORY_SCAN_PAGES);
@@ -994,9 +997,9 @@ fn sidebar_title(conversation: &Conversation) -> String {
     if conversation.thread.is_some() {
         return format!("Thread: {}", conversation.name);
     }
-    match conversation.kind {
-        Kind::Room => format!("# {}", conversation.name),
-        Kind::Direct => conversation.name.clone(),
+    match (conversation.kind, conversation.flavor) {
+        (Kind::Room, Flavor::Plain | Flavor::Forum) => format!("# {}", conversation.name),
+        _ => conversation.name.clone(),
     }
 }
 
@@ -1017,15 +1020,7 @@ fn conversation_row(
         row.set_subtitle("Thread");
     }
     let icon: gtk::Widget = match conversation.kind {
-        Kind::Room => {
-            let tile = gtk::Label::builder()
-                .label("#")
-                .width_request(28)
-                .height_request(28)
-                .build();
-            tile.add_css_class("room-tile");
-            tile.upcast()
-        }
+        Kind::Room => super::rooms::room_tile(conversation.flavor),
         Kind::Direct => {
             let avatar = avatar::avatar(28);
             avatar::set_name(&avatar, &conversation.name);

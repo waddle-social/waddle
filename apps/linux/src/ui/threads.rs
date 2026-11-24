@@ -268,6 +268,7 @@ mod tests {
             name: "General".into(),
             kind: Kind::Room,
             autojoin: false,
+            flavor: Default::default(),
             thread: None,
         };
         window.imp().conversations.borrow_mut().push(base.clone());

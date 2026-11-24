@@ -10,7 +10,7 @@ use waddle_xmpp_client_ffi::WaddlePresence;
 
 use super::WaddleWindow;
 use crate::composer::Mentionable;
-use crate::session::{Conversation, Kind};
+use crate::session::{Conversation, Flavor, Kind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RoomState {
@@ -162,6 +162,7 @@ impl WaddleWindow {
     pub(super) fn clear_membership(&self) {
         self.imp().membership.borrow_mut().clear();
         self.imp().outbound.borrow_mut().clear();
+        self.clear_rosters();
         self.refresh_composer();
     }
 
@@ -200,7 +201,7 @@ impl WaddleWindow {
             } else if ready {
                 format!(
                     "Message {}",
-                    if conversation.kind == Kind::Room {
+                    if conversation.kind == Kind::Room && conversation.flavor != Flavor::Group {
                         format!("#{}", conversation.name)
                     } else {
                         conversation.name
@@ -371,6 +372,7 @@ mod tests {
             name: "room".into(),
             kind: Kind::Room,
             autojoin: false,
+            flavor: Default::default(),
         };
         for id in 0..=RETAINED_SENDS {
             sends.insert(id.to_string(), conversation.clone());
