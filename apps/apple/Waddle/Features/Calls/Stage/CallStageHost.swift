@@ -184,6 +184,7 @@ struct CallStageHost: View {
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             notice: media?.deviceNotice,
+            connection: media?.connectionQuality,
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
