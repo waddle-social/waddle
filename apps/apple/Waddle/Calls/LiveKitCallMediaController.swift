@@ -182,6 +182,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
                       capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
                 _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())
+                // The change stops the capture and starts it again. A camera
+                // turned off, or a call left, between the two finds nothing
+                // to stop, and the restart would then run on behind it.
+                if self.room !== room || publication.isMuted || captureChoices[.video] == false {
+                    _ = try? await capturer.stopCapture()
+                    if self.room === room, !publication.isMuted { try? await publication.mute() }
+                }
             }
         }
         if self.room === room { refreshTracks() }

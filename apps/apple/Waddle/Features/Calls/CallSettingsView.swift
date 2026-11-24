@@ -12,6 +12,8 @@ struct CallSettingsView: View {
     let choose: @MainActor (CallDeviceKind, String?) -> Void
     let done: @MainActor () -> Void
 
+    static let width: CGFloat = 420
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Call settings")
@@ -35,11 +37,14 @@ struct CallSettingsView: View {
             }
             .padding(Theme.Spacing.m)
         }
-        .frame(width: 420)
-        .background(Theme.Colors.bg)
+        // A Mac's sheet takes its size from its content; a phone's is as wide as the phone.
         #if os(macOS)
+        .frame(width: Self.width)
         .onExitCommand(perform: done)
+        #else
+        .frame(maxWidth: Self.width)
         #endif
+        .background(Theme.Colors.bg)
     }
 
     private func section(_ kind: CallDeviceKind, _ list: CallDeviceList) -> some View {
