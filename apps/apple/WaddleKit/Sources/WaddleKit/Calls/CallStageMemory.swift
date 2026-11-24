@@ -3,6 +3,8 @@
 public struct CallStageMemory: Equatable, Sendable {
     public private(set) var sid: String?
     public var presentation = CallStagePresentation()
+    /// How much of the window the stage takes.
+    public var size = CallSurface.Size.defaultSize
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
 

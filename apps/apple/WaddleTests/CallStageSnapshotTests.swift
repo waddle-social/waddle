@@ -44,14 +44,14 @@ final class CallStageSnapshotTests: XCTestCase {
         title: String = "#design", subtitle: String = "2 others in call", status: CallStageStatus = .inCall(since: nil),
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, notice: String? = nil,
-        size: CGSize = panel, testName: String = #function, line: UInt = #line
+        stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
-                promotedSpeaker: promotedSpeaker, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
+                promotedSpeaker: promotedSpeaker, size: stageSize, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
                 isHandRaised: isHandRaised, notice: notice, tileSource: Self.cameras, announcesChanges: false,
                 actions: Self.actions
             )
@@ -139,17 +139,26 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    /// Expanded over its conversation's pane: room for everyone, and the way to full screen.
+    func testRoomExpanded() {
+        assertStage(
+            subtitle: "4 others in call",
+            tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken, Self.mika],
+            stageSize: .expanded, size: CGSize(width: 1000, height: 640)
+        )
+    }
+
     // MARK: - Control bar
 
     private func assertBar(
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, hasMedia: Bool = true, isHandRaised: Bool? = nil,
-        viewMode: CallStagePresentation.ViewMode = .gallery, testName: String = #function, line: UInt = #line
+        viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split, testName: String = #function, line: UInt = #line
     ) {
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
-                viewMode: viewMode, actions: Self.actions
+                viewMode: viewMode, size: size, actions: Self.actions
             )
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
@@ -170,5 +179,13 @@ final class CallStageSnapshotTests: XCTestCase {
 
     func testControlBarRoom() {
         assertBar(isMicrophoneOn: false, isCameraOn: true, isHandRaised: true, viewMode: .speaker)
+    }
+
+    func testControlBarExpanded() {
+        assertBar(size: .expanded)
+    }
+
+    func testControlBarFullScreen() {
+        assertBar(size: .immersive)
     }
 }

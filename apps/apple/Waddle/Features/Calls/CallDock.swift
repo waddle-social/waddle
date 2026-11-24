@@ -26,8 +26,9 @@ struct CallDock: View {
         let phase = media?.phase ?? .idle
         let stage = CallStage(state: state, media: phase)
         let group = GroupCallStage(state: state, media: phase)
-        let content = CallSurface
-            .placement(of: state, open: navigation?.selection, platform: platform, pane: stageModel?.pane)
+        let surface = stageModel?.surface(of: state, open: navigation?.selection, platform: platform)
+            ?? CallSurface.placement(of: state, open: navigation?.selection, platform: platform, pane: nil)
+        let content = surface
             .dockContent(isInSession: state.sessionConversation != nil, isInSheet: isInSheet)
         let shown = content == .hidden ? nil : stage
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)

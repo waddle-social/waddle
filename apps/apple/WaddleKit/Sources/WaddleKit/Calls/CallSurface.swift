@@ -55,7 +55,7 @@ public extension CallSurface {
         case hidden
     }
 
-    /// The call has a stage of its own. Expanded and full screen draw as the split until they are built.
+    /// The call has a stage of its own.
     var showsStage: Bool {
         switch self {
         case .split, .expanded, .fullscreen: true
@@ -75,9 +75,11 @@ public extension CallSurface {
     enum SplitArrangement: Equatable, Sendable {
         case beside(width: CGFloat)
         case above(height: CGFloat)
+        /// The whole pane: the conversation waits behind an expanded or full-screen stage.
+        case filling
     }
 
-    /// The web huddle column.
+    /// The web huddle column, and the narrowest a stage beside a conversation gets.
     static let stageWidth: CGFloat = 400
     /// The narrowest conversation the stage may stand beside.
     static let minimumConversationWidth: CGFloat = 480
@@ -89,15 +91,32 @@ public extension CallSurface {
     /// Beside the conversation while that leaves it room to read; otherwise
     /// above it, sharing the height. `nil` when the pane is too short for
     /// either: a strip of a stage is worse than the dock.
-    static func splitArrangement(in pane: CGSize) -> SplitArrangement? {
-        let arrangement: SplitArrangement = pane.width - stageWidth >= minimumConversationWidth
-            ? .beside(width: stageWidth)
-            : .above(height: pane.height * defaultSplitPercent / 100)
-        let height = switch arrangement {
-        case .beside: pane.height
-        case .above(let height): height
+    ///
+    /// - Parameter percent: the share of the pane the person dragged the
+    ///   stage to, along whichever axis the two share; `nil` until they do.
+    ///   It sizes a stage and never costs a pane the one it could hold.
+    static func splitArrangement(in pane: CGSize, percent: Double? = nil) -> SplitArrangement? {
+        let share = percent.map { clampSplitPercent($0) / 100 }
+        if pane.width - stageWidth >= minimumConversationWidth {
+            guard pane.height >= minimumStageHeight else { return nil }
+            let width = share.map { min(max(pane.width * $0, stageWidth), pane.width - minimumConversationWidth) }
+            return .beside(width: width ?? stageWidth)
         }
-        return height >= minimumStageHeight ? arrangement : nil
+        guard pane.height * defaultSplitPercent / 100 >= minimumStageHeight else { return nil }
+        return .above(height: max(pane.height * (share ?? defaultSplitPercent / 100), minimumStageHeight))
+    }
+
+    /// The share of the pane a stage `extent` long takes of the `paneExtent` it is dragged along.
+    static func splitPercent(stage extent: CGFloat, of paneExtent: CGFloat) -> Double {
+        paneExtent > 0 ? clampSplitPercent(extent / paneExtent * 100) : defaultSplitPercent
+    }
+
+    /// Where a stage of `size` stands in `pane`, or `nil` when the pane cannot hold one.
+    static func stageArrangement(for size: Size, in pane: CGSize, splitPercent: Double?) -> SplitArrangement? {
+        switch size {
+        case .split: splitArrangement(in: pane, percent: splitPercent)
+        case .expanded, .immersive: pane.height >= minimumStageHeight ? .filling : nil
+        }
     }
 }
 
@@ -124,7 +143,7 @@ public extension CallSurface {
             isInSession: conversation != nil, conversationIsOpen: conversation != nil && conversation == selection,
             platform: platform, size: size
         )
-        if surface.showsStage, let pane, splitArrangement(in: pane) == nil { return .dock }
+        if surface.showsStage, let pane, stageArrangement(for: size, in: pane, splitPercent: nil) == nil { return .dock }
         return surface
     }
 }
