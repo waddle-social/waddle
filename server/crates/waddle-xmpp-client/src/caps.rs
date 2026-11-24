@@ -19,6 +19,9 @@ pub const CAPS_NODE: &str = "https://waddle.social/caps";
 /// XEP-0084 §4.1 PEP notification filter for peer avatar metadata changes.
 pub const NS_AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
 
+/// XEP-0300 §Discovering support: feature for the SHA-256 algorithm.
+pub const NS_HASH_FUNCTION_SHA256: &str = "urn:xmpp:hash-function-text-names:sha-256";
+
 const IDENTITY_CATEGORY: &str = "client";
 const IDENTITY_TYPE: &str = "pc";
 const IDENTITY_NAME: &str = "Waddle";
@@ -77,6 +80,9 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // fastening payload when received MUST specify 'urn:xmpp:fasten:0'.
         // The client parses `<apply-to/>` (xep/safety_scores.rs).
         crate::xep::safety_scores::NS_FASTEN,
+        // NOTE: mood+notify and tune+notify are not advertised: the client
+        // parses those PEP events but PepItem carries no sender and nothing
+        // downstream consumes them.
         // NOTE: no feature is advertised for XEP-0353 Jingle Message
         // Initiation (the XEP intentionally defines no discovery), XEP-0272
         // Muji (no disco clause), XEP-0447 file sharing, XEP-0449 stickers,
@@ -99,6 +105,16 @@ pub fn client_caps_features() -> Vec<&'static str> {
         NS_JINGLE_RTP,
         NS_JINGLE_RTP_AUDIO,
         NS_JINGLE_RTP_VIDEO,
+        // XEP-0166 §Determining Support: the response MUST include the
+        // transport methods supported. The only transport is Waddle's
+        // LiveKit transport (messaging/call.rs); no XEP transport exists.
+        crate::messaging::NS_WADDLE_LIVEKIT_TRANSPORT,
+        // XEP-0300 §Discovering support: urn:xmpp:hashes:2 plus one feature
+        // per supported algorithm. The client computes and verifies SHA-256
+        // (stickers.rs HashAlgo, xep/encrypted_file.rs); no other algorithm
+        // is implemented, so none is advertised.
+        crate::xep::encrypted_file::NS_HASHES,
+        NS_HASH_FUNCTION_SHA256,
     ]
 }
 
@@ -278,6 +294,7 @@ mod tests {
         assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:1"));
         assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:audio"));
         assert!(features.contains(&"urn:xmpp:jingle:apps:rtp:video"));
+        assert!(features.contains(&"urn:waddle:transports:livekit:0"));
         assert!(!features.contains(&"urn:xmpp:jingle:transports:ice-udp:1"));
         assert!(!features.contains(&"urn:xmpp:jingle:apps:dtls:0"));
     }
@@ -315,9 +332,12 @@ mod tests {
                 crate::messaging::NS_CHAT_STATES,
                 DISCO_INFO_NS,
                 crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
+                crate::messaging::NS_WADDLE_LIVEKIT_TRANSPORT,
                 NS_AVATAR_METADATA_NOTIFY,
                 NS_CHAT_MARKERS,
                 crate::xep::safety_scores::NS_FASTEN,
+                NS_HASH_FUNCTION_SHA256,
+                crate::xep::encrypted_file::NS_HASHES,
                 NS_JINGLE,
                 NS_JINGLE_RTP,
                 NS_JINGLE_RTP_AUDIO,
@@ -334,7 +354,7 @@ mod tests {
         );
         assert_eq!(
             client_caps_verification_string(),
-            "1zCJQhz3KMhqZLdRixWzDwTCp48="
+            "sd4FBsHJMqLOVGZJCBxuiwlrlMs="
         );
     }
 
