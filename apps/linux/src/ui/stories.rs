@@ -140,6 +140,7 @@ impl WaddleWindow {
         let add = gtk::Button::new();
         add.add_css_class("flat");
         add.set_tooltip_text(Some("Share a Story"));
+        super::a11y::label(&add, "Share a story");
         let circle = gtk::Box::new(gtk::Orientation::Vertical, 0);
         circle.set_halign(gtk::Align::Center);
         circle.set_valign(gtk::Align::Center);
@@ -180,13 +181,9 @@ impl WaddleWindow {
             frame.append(&picture);
             let button = gtk::Button::new();
             button.add_css_class("flat");
-            button.set_tooltip_text(Some(&format!(
-                "{name}: {}",
-                match ring.stories.len() {
-                    1 => "1 story".to_string(),
-                    count => format!("{count} stories"),
-                }
-            )));
+            let phrase = super::a11y::story_phrase(&name, ring.stories.len(), ring.unseen);
+            button.set_tooltip_text(Some(&phrase));
+            super::a11y::label(&button, &phrase);
             button.set_child(Some(&item_column(&frame, &name)));
             let author = ring.author.clone();
             button.connect_clicked({
@@ -261,6 +258,7 @@ impl WaddleWindow {
             .tooltip_text("Pause (Space)")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&pause, "Pause story");
         pause.add_css_class("flat");
         pause.add_css_class("circular");
         let close = gtk::Button::builder()
@@ -268,6 +266,7 @@ impl WaddleWindow {
             .tooltip_text("Close")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&close, "Close story viewer");
         close.add_css_class("flat");
         close.add_css_class("circular");
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -353,6 +352,7 @@ impl WaddleWindow {
             .valign(gtk::Align::Start)
             .popover(&chooser)
             .build();
+        super::a11y::label(&more, "More reactions");
         more.add_css_class("flat");
         more.add_css_class("circular");
         let reaction_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -1169,6 +1169,7 @@ fn edge_button(icon: &str, tooltip: &str, side: gtk::Align) -> gtk::Button {
         .margin_start(8)
         .margin_end(8)
         .build();
+    super::a11y::label(&button, tooltip);
     button.add_css_class("osd");
     button.add_css_class("circular");
     button

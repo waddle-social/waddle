@@ -1288,6 +1288,7 @@ fn entry_row(title: &str, text: &str) -> adw::EntryRow {
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::from_icon_name(icon);
     button.set_tooltip_text(Some(tooltip));
+    super::a11y::label(&button, tooltip);
     button.set_valign(gtk::Align::Center);
     button.add_css_class("flat");
     button

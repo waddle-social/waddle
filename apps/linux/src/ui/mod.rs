@@ -1,3 +1,4 @@
+mod a11y;
 mod actions;
 mod admin;
 mod avatar;

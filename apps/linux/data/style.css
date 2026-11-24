@@ -284,6 +284,7 @@ button.reaction:hover {
 }
 
 button.reaction:checked {
+  font-weight: 700;
   border-color: alpha(var(--accent-bg-color), 0.4);
   background-color: alpha(var(--accent-bg-color), 0.14);
   color: inherit;
@@ -359,10 +360,11 @@ button.link-card:hover {
   padding: 12px;
 }
 
+/* Unseen is a thick ring, seen a hairline: the state shows without colour. */
 .story-ring {
   padding: 3px;
   border-radius: 999px;
-  border: 2px solid transparent;
+  border: 3px solid transparent;
 }
 
 .story-ring.story-unseen {
@@ -370,7 +372,9 @@ button.link-card:hover {
 }
 
 .story-ring.story-seen {
-  border-color: alpha(currentColor, 0.25);
+  border-width: 1px;
+  padding: 5px;
+  border-color: alpha(currentColor, 0.35);
 }
 
 .story-add {

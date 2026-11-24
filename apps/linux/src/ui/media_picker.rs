@@ -129,6 +129,7 @@ impl WaddleWindow {
             .icon_name("go-previous-symbolic")
             .tooltip_text("Back")
             .build();
+        super::a11y::label(&back, "Back to the menu");
         back.add_css_class("flat");
         let stack = stack.clone();
         back.connect_clicked(move |_| stack.set_visible_child_name(MENU));

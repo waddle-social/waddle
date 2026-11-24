@@ -1217,6 +1217,7 @@ impl PeopleView {
             .tooltip_text("Actions")
             .popover(&popover)
             .build();
+        super::a11y::label(&button, "Actions for this person");
         button.add_css_class("flat");
         button
     }
@@ -1467,6 +1468,7 @@ impl Picker {
                 .valign(gtk::Align::Center)
                 .tooltip_text("Remove")
                 .build();
+            super::a11y::label(&remove, &format!("Remove {}", person.nick));
             remove.add_css_class("flat");
             let (weak, jid) = (Rc::downgrade(self), person.jid.clone());
             remove.connect_clicked(move |_| {

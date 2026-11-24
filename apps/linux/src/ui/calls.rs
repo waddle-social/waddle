@@ -692,25 +692,21 @@ impl WaddleWindow {
             .margin_start(12)
             .margin_end(12)
             .build();
-        devices.append(
-            &gtk::Label::builder()
-                .label("Microphone")
+        for (caption, dropdown) in [("Microphone", &microphones), ("Speakers", &speakers)] {
+            let heading = gtk::Label::builder()
+                .label(caption)
                 .halign(gtk::Align::Start)
-                .build(),
-        );
-        devices.append(&microphones);
-        devices.append(
-            &gtk::Label::builder()
-                .label("Speakers")
-                .halign(gtk::Align::Start)
-                .build(),
-        );
-        devices.append(&speakers);
+                .build();
+            super::a11y::labelled_by(dropdown, &heading);
+            devices.append(&heading);
+            devices.append(dropdown);
+        }
         let device_button = gtk::MenuButton::builder()
             .icon_name("audio-card-symbolic")
             .tooltip_text("Audio Devices")
             .popover(&gtk::Popover::builder().child(&devices).build())
             .build();
+        super::a11y::label(&device_button, "Audio devices");
         device_button.add_css_class("circular");
 
         let controls = gtk::Box::builder()
