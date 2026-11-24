@@ -9,23 +9,16 @@
 //! stream-management authority; a production build does neither by default.
 #![cfg(feature = "test-support")]
 
-use axum::serve::Listener;
 use chrono::Utc;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use jid::{BareJid, FullJid};
 use minidom::Element;
-use std::future;
-use std::io;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::DuplexStream;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 use waddle_server::test_support::{
-    create_test_session, router, websocket_state_with_sasl2_and_durable_sm,
+    create_test_session, websocket_state_with_sasl2_and_durable_sm,
     websocket_state_with_sasl2_without_durable_sm, WebSocketState,
 };
 use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind};
@@ -43,87 +36,17 @@ use waddle_xmpp_core::xep0388_inline::{
 };
 use xmpp_parsers::message::{Message as XmppMessage, MessageType};
 
-const TIMEOUT: Duration = Duration::from_secs(5);
-const NS_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
-const NS_STREAM: &str = "http://etherx.jabber.org/streams";
+#[path = "sasl2_ws_support/mod.rs"]
+mod support;
+
+use support::{
+    bearer, connect, connect_started, expect_post_auth_features, receive, send, start_stream, Peer,
+    NS_STREAM, TIMEOUT,
+};
+
 const NS_MAM: &str = "urn:xmpp:mam:2";
 const CLIENT_A: &str = "d4565fa7-4d72-4749-b3d3-740edbf87770";
 const CLIENT_B: &str = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
-
-type Peer = WebSocketStream<DuplexStream>;
-
-struct OneConnection(Option<DuplexStream>);
-
-impl Listener for OneConnection {
-    type Io = DuplexStream;
-    type Addr = ();
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.0.take() {
-            Some(io) => (io, ()),
-            None => future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        Ok(())
-    }
-}
-
-async fn connect(state: Arc<WebSocketState>) -> (Peer, JoinHandle<()>) {
-    let (server_io, peer_io) = tokio::io::duplex(8192);
-    let server = tokio::spawn(async move {
-        axum::serve(OneConnection(Some(server_io)), router(state))
-            .await
-            .expect("serve");
-    });
-    let (peer, response) = tokio_tungstenite::client_async("ws://localhost/ws", peer_io)
-        .await
-        .expect("websocket upgrade");
-    assert_eq!(response.status(), 101);
-    (peer, server)
-}
-
-async fn send(peer: &mut Peer, element: Element) {
-    peer.send(Message::Text(String::from(&element).into()))
-        .await
-        .expect("send frame");
-}
-
-async fn receive(peer: &mut Peer) -> Element {
-    match timeout(TIMEOUT, peer.next()).await.expect("frame timeout") {
-        Some(Ok(Message::Text(text))) => text.parse().expect("XML frame"),
-        other => panic!("expected text frame, got {other:?}"),
-    }
-}
-
-/// Open the stream and return its pre-authentication features.
-async fn start_stream(peer: &mut Peer) -> Element {
-    send(
-        peer,
-        Element::builder("open", NS_FRAMING)
-            .attr(minidom::rxml::xml_ncname!("to").to_owned(), "example.com")
-            .attr(minidom::rxml::xml_ncname!("version").to_owned(), "1.0")
-            .build(),
-    )
-    .await;
-    assert_eq!(receive(peer).await.name(), "open");
-    let features = receive(peer).await;
-    assert_eq!(
-        (features.name(), features.ns()),
-        ("features", NS_STREAM.to_owned())
-    );
-    features
-}
-
-fn bearer(token: &str) -> Vec<u8> {
-    let mut payload = b"n,,".to_vec();
-    payload.push(1);
-    payload.extend_from_slice(b"auth=Bearer ");
-    payload.extend_from_slice(token.as_bytes());
-    payload.extend_from_slice(b"\x01\x01");
-    payload
-}
 
 /// Authenticate with OAUTHBEARER, carrying `inline` and the `<user-agent/>`
 /// of the client installation `user_agent`, and return the next frame.
@@ -182,14 +105,6 @@ fn metadata_of(bound: &Bind2Bound) -> &Element {
         .iter()
         .find(|result| result.is("metadata", NS_MAM))
         .expect("<bound/> carries the XEP-0313 <metadata/>")
-}
-
-async fn expect_post_auth_features(peer: &mut Peer) {
-    let features = receive(peer).await;
-    assert_eq!(
-        (features.name(), features.ns()),
-        ("features", NS_STREAM.to_owned())
-    );
 }
 
 /// Bind with `bind`, expect `<bound/>`, and return the resource the server
@@ -283,8 +198,7 @@ async fn bind2_is_not_advertised_where_it_is_not_processed() {
 async fn bind2_enables_message_carbons_when_requested() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     let request = Bind2Request {
         other_features: vec![carbons_enable()],
@@ -308,8 +222,7 @@ async fn bind2_enables_message_carbons_when_requested() {
 async fn bind2_without_a_carbons_request_leaves_carbons_off() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     let (jid, _) = bind(
         &state,
@@ -344,8 +257,7 @@ async fn bind2_refuses_features_it_does_not_offer_inline() {
     ] {
         let state = websocket_state_with_sasl2_and_durable_sm().await;
         let session = create_test_session(&state, "alice").await;
-        let (mut peer, server) = connect(state.clone()).await;
-        start_stream(&mut peer).await;
+        let (mut peer, server) = connect_started(state.clone()).await;
 
         let request = Bind2Request {
             other_features: features.clone(),
@@ -367,8 +279,7 @@ async fn bind2_refuses_features_it_does_not_offer_inline() {
 async fn bind2_includes_the_client_tag_in_the_resource_as_a_prefix() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     let request = Bind2Request {
         tag: Some(Bind2Tag::new("AwesomeXMPP")),
@@ -388,8 +299,7 @@ async fn bind2_generates_the_resource_alone_without_a_usable_tag() {
     for tag in [None, Some(String::new()), Some(too_long)] {
         let state = websocket_state_with_sasl2_and_durable_sm().await;
         let session = create_test_session(&state, "alice").await;
-        let (mut peer, server) = connect(state.clone()).await;
-        start_stream(&mut peer).await;
+        let (mut peer, server) = connect_started(state.clone()).await;
 
         let request = Bind2Request {
             tag: tag.clone().map(Bind2Tag::new),
@@ -440,8 +350,7 @@ async fn bind2_clears_offline_messages_the_archive_provides_without_sending_them
     for row in [archived_row("a1"), archived_row("a2"), kept] {
         storage.insert(row).await.expect("store offline row");
     }
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     bind(
         &state,
@@ -478,8 +387,7 @@ async fn bound_carries_the_archive_metadata_as_of_the_bind() {
     let mam = state.deps.protocol.mam_storage.clone();
 
     // An empty archive reports an empty <metadata/>.
-    let (mut first, first_server) = connect(state.clone()).await;
-    start_stream(&mut first).await;
+    let (mut first, first_server) = connect_started(state.clone()).await;
     let (jid, bound) = bind(
         &state,
         &mut first,
@@ -510,8 +418,7 @@ async fn bound_carries_the_archive_metadata_as_of_the_bind() {
         .expect("a non-empty archive");
     assert_ne!(expected.start.id, expected.end.id);
 
-    let (mut second, second_server) = connect(state.clone()).await;
-    start_stream(&mut second).await;
+    let (mut second, second_server) = connect_started(state.clone()).await;
     let (_, bound) = bind(
         &state,
         &mut second,
@@ -552,8 +459,7 @@ async fn bind2_ends_the_earlier_sessions_of_the_same_client() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
 
-    let (mut earlier, earlier_server) = connect(state.clone()).await;
-    start_stream(&mut earlier).await;
+    let (mut earlier, earlier_server) = connect_started(state.clone()).await;
     let (earlier_jid, _) = bind(
         &state,
         &mut earlier,
@@ -564,8 +470,7 @@ async fn bind2_ends_the_earlier_sessions_of_the_same_client() {
     .await;
 
     // Another client of the same account is not the same client.
-    let (mut other, other_server) = connect(state.clone()).await;
-    start_stream(&mut other).await;
+    let (mut other, other_server) = connect_started(state.clone()).await;
     let (other_jid, _) = bind(
         &state,
         &mut other,
@@ -578,8 +483,7 @@ async fn bind2_ends_the_earlier_sessions_of_the_same_client() {
 
     // The same client binds again: its earlier session ends, and no
     // other does.
-    let (mut later, later_server) = connect(state.clone()).await;
-    start_stream(&mut later).await;
+    let (mut later, later_server) = connect_started(state.clone()).await;
     let (later_jid, _) = bind(
         &state,
         &mut later,
@@ -605,8 +509,7 @@ async fn bind2_without_a_user_agent_id_ends_no_session() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
 
-    let (mut first, first_server) = connect(state.clone()).await;
-    start_stream(&mut first).await;
+    let (mut first, first_server) = connect_started(state.clone()).await;
     let (first_jid, _) = bind(
         &state,
         &mut first,
@@ -615,8 +518,7 @@ async fn bind2_without_a_user_agent_id_ends_no_session() {
         None,
     )
     .await;
-    let (mut second, second_server) = connect(state.clone()).await;
-    start_stream(&mut second).await;
+    let (mut second, second_server) = connect_started(state.clone()).await;
     let (second_jid, _) = bind(
         &state,
         &mut second,
