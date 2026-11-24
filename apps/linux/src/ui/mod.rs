@@ -2,6 +2,8 @@ mod actions;
 mod avatar;
 mod conversation;
 mod directory;
+mod event_form;
+mod events;
 mod identity;
 mod images;
 mod inbox;

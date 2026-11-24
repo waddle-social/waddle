@@ -9,6 +9,7 @@ mod attachments;
 mod auth;
 mod avatars;
 mod composer;
+mod events;
 mod gifs;
 mod inbox;
 mod judgments;

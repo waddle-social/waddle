@@ -229,6 +229,7 @@ impl WaddleWindow {
         self.reset_message_tools();
         self.refresh_message_tools();
         self.reset_inbox();
+        self.reset_calendar();
         self.cancel_compose();
         imp.profile.reset();
         self.refresh_account_row();
@@ -504,7 +505,7 @@ impl WaddleWindow {
                 .or_else(|| imp.current.borrow().clone())
                 .or_else(|| {
                     // The overview stays up across a reconnect.
-                    (!window.inbox_open())
+                    (!window.inbox_open() && !window.calendar_open())
                         .then(|| imp.conversations.borrow().first().map(Conversation::key))
                         .flatten()
                 });
@@ -600,6 +601,7 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         self.leave_inbox();
+        self.leave_calendar();
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
