@@ -785,6 +785,7 @@ fn builds_fin_iq_with_rsm_metadata() {
         first_id: Some("msg-1".to_string()),
         last_id: Some("msg-2".to_string()),
         count: Some(2),
+        first_index: None,
     };
 
     let fin = build_fin_iq(&original, &result);
@@ -1277,4 +1278,228 @@ fn typed_fallback_omits_muc_identity_for_non_groupchat_rows() {
             .any(|c| c.ns() == OCCUPANT_ID_NS || c.ns() == MUC_USER_NS),
         "1:1 rows must not emit MUC identity payloads"
     );
+}
+
+use super::{is_mam_query, MamQuery};
+
+fn mam_set_iq(children: Vec<Element>) -> Iq {
+    Iq::Set {
+        from: None,
+        to: None,
+        id: "mam-rsm".to_string(),
+        payload: Element::builder("query", MAM_NS)
+            .append_all(children)
+            .build(),
+    }
+}
+
+fn rsm_set(children: &[(&str, &str)]) -> Element {
+    Element::builder("set", RSM_NS)
+        .append_all(
+            children
+                .iter()
+                .map(|(name, text)| Element::builder(*name, RSM_NS).append(*text).build()),
+        )
+        .build()
+}
+
+// XEP-0313 §4.3.3: <flip-page/> asks for the page in reverse order.
+#[test]
+fn parses_flip_page_element() {
+    let flipped = mam_set_iq(vec![
+        rsm_set(&[("max", "10"), ("after", "abc")]),
+        Element::builder("flip-page", MAM_NS).build(),
+    ]);
+    let (_, query) = parse_mam_query(&flipped).expect("flipped query");
+    assert!(query.flip_page);
+    assert_eq!(query.max, Some(10));
+    assert_eq!(query.after_id.as_deref(), Some("abc"));
+
+    let (_, plain) = parse_mam_query(&mam_set_iq(Vec::new())).expect("plain query");
+    assert!(!plain.flip_page);
+
+    // An element of another namespace is not the flip request.
+    let foreign = mam_set_iq(vec![
+        Element::builder("flip-page", "urn:example:other").build()
+    ]);
+    assert!(!parse_mam_query(&foreign).expect("foreign").1.flip_page);
+}
+
+#[test]
+fn arranging_a_flipped_page_reverses_only_the_transmission_order() {
+    let message = |id: &str| ArchivedMessage {
+        id: id.to_string(),
+        ..ArchivedMessage::for_test(jid("a@example.com/x"), jid("b@example.com"))
+    };
+    let mut result = MamResult {
+        messages: vec![message("1"), message("2"), message("3")],
+        complete: true,
+        first_id: Some("1".to_string()),
+        last_id: Some("3".to_string()),
+        count: Some(3),
+        first_index: Some(0),
+    };
+    result.arrange_for_transmission(&MamQuery::default());
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2", "3"]
+    );
+    result.arrange_for_transmission(&MamQuery {
+        flip_page: true,
+        ..MamQuery::default()
+    });
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["3", "2", "1"]
+    );
+    assert_eq!(result.first_id.as_deref(), Some("1"));
+    assert_eq!(result.last_id.as_deref(), Some("3"));
+}
+
+// XEP-0059 §2.6: <index/> selects the page by position.
+#[test]
+fn parses_rsm_index_and_rejects_bad_or_conflicting_values() {
+    let (_, query) = parse_mam_query(&mam_set_iq(vec![rsm_set(&[
+        ("max", "5"),
+        ("index", "371"),
+    ])]))
+    .expect("index query");
+    assert_eq!(query.index, Some(371));
+    assert_eq!(query.max, Some(5));
+
+    for children in [
+        vec![("index", "abc")],
+        vec![("index", "-1")],
+        vec![("index", "")],
+        vec![("index", "3"), ("after", "x")],
+        vec![("index", "3"), ("before", "")],
+    ] {
+        let err = parse_mam_query(&mam_set_iq(vec![rsm_set(&children)]))
+            .expect_err("invalid index request");
+        assert!(matches!(err, CoreError::BadRequest(_)), "{children:?}");
+    }
+}
+
+#[test]
+fn rsm_children_are_matched_by_namespace() {
+    let foreign = Element::builder("set", RSM_NS)
+        .append(
+            Element::builder("index", "urn:example:other")
+                .append("9")
+                .build(),
+        )
+        .append(
+            Element::builder("after", "urn:example:other")
+                .append("x")
+                .build(),
+        )
+        .append(
+            Element::builder("max", "urn:example:other")
+                .append("9")
+                .build(),
+        )
+        .build();
+    let (_, query) = parse_mam_query(&mam_set_iq(vec![foreign])).expect("foreign children");
+    assert_eq!(query.index, None);
+    assert_eq!(query.after_id, None);
+    assert_eq!(query.max, None);
+}
+
+// XEP-0059 §2.1: <first/> SHOULD carry the position of the first item.
+#[test]
+fn fin_first_carries_index_when_known() {
+    let request = mam_set_iq(Vec::new());
+    let mut result = MamResult {
+        messages: Vec::new(),
+        complete: true,
+        first_id: Some("id-3".to_string()),
+        last_id: Some("id-4".to_string()),
+        count: Some(8),
+        first_index: Some(3),
+    };
+    let rsm_of = |result: &MamResult| {
+        let Iq::Result {
+            payload: Some(fin), ..
+        } = build_fin_iq(&request, result)
+        else {
+            panic!("fin result");
+        };
+        fin.get_child("set", RSM_NS).expect("rsm set").clone()
+    };
+    let first = rsm_of(&result)
+        .get_child("first", RSM_NS)
+        .expect("first")
+        .clone();
+    assert_eq!(first.attr("index"), Some("3"));
+    assert_eq!(first.text(), "id-3");
+
+    result.first_index = None;
+    let first = rsm_of(&result)
+        .get_child("first", RSM_NS)
+        .expect("first")
+        .clone();
+    assert_eq!(first.attr("index"), None);
+}
+
+// XEP-0313 §7: archive metadata.
+#[test]
+fn builds_archive_metadata_results() {
+    use super::{build_metadata_iq, is_mam_metadata_query, ArchiveBounds, ArchiveEdge};
+    let request = Iq::Get {
+        from: Some(jid("juliet@example.com/balcony")),
+        to: None,
+        id: "meta".to_string(),
+        payload: Element::builder("metadata", MAM_NS).build(),
+    };
+    assert!(is_mam_metadata_query(&request));
+    assert!(!is_mam_query(&request));
+    let set = Iq::Set {
+        from: None,
+        to: None,
+        id: "meta".to_string(),
+        payload: Element::builder("metadata", MAM_NS).build(),
+    };
+    assert!(!is_mam_metadata_query(&set));
+
+    let Iq::Result {
+        payload: Some(empty),
+        id,
+        ..
+    } = build_metadata_iq(&request, None)
+    else {
+        panic!("metadata result");
+    };
+    assert_eq!(id, "meta");
+    assert!(empty.is("metadata", MAM_NS));
+    assert_eq!(empty.children().count(), 0);
+
+    let edge = |id: &str, secs: i64| ArchiveEdge {
+        id: id.to_string(),
+        timestamp: chrono::DateTime::from_timestamp(secs, 0).expect("timestamp"),
+    };
+    let bounds = ArchiveBounds {
+        start: edge("YWxwaGEg", 1_219_439_344),
+        end: edge("b21lZ2Eg", 1_587_393_261),
+    };
+    let Iq::Result {
+        payload: Some(full),
+        ..
+    } = build_metadata_iq(&request, Some(&bounds))
+    else {
+        panic!("metadata result");
+    };
+    let start = full.get_child("start", MAM_NS).expect("start");
+    assert_eq!(start.attr("id"), Some("YWxwaGEg"));
+    assert_eq!(start.attr("timestamp"), Some("2008-08-22T21:09:04.000Z"));
+    let end = full.get_child("end", MAM_NS).expect("end");
+    assert_eq!(end.attr("id"), Some("b21lZ2Eg"));
+    assert_eq!(end.attr("timestamp"), Some("2020-04-20T14:34:21.000Z"));
 }

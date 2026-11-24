@@ -164,16 +164,52 @@ pub(super) async fn query_postgres_connection(
     });
     page.push(" LIMIT ")
         .push_bind(i64::from(query.max.unwrap_or(100).min(500)) + 1);
+    // XEP-0059 §2.6: start the page at an index of the filtered set.
+    if let Some(index) = query.index {
+        page.push(" OFFSET ").push_bind(i64::from(index));
+    }
     let rows = page.build().fetch_all(&mut *conn).await?;
     let messages = rows
         .iter()
         .map(decode_postgres_message_row)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(finalize_result(
+    let mut result = finalize_result(
         messages,
         query,
         Some(u32::try_from(count).unwrap_or(u32::MAX)),
-    ))
+    );
+    if let Some(first) = result.messages.first() {
+        // XEP-0059 §2.1: `first index` is the page's position in the
+        // filtered set, which a requested index fixes by definition.
+        result.first_index = match query.index {
+            Some(index) => Some(index),
+            None => {
+                let ordinal = first
+                    .ordinal
+                    .ok_or_else(|| MamStorageError::MissingOrdinal(first.id.clone()))?;
+                let mut before = QueryBuilder::<Postgres>::new(format!(
+                    "SELECT COUNT(*) FROM {relation} WHERE room_jid = "
+                ));
+                push_postgres_mam_filters(
+                    &mut before,
+                    &archive_jid,
+                    query,
+                    with_filter.as_ref(),
+                    filter_before,
+                    filter_after,
+                );
+                before
+                    .push(" AND archive_seq < ")
+                    .push_bind(ordinal.to_storage());
+                let before = before
+                    .build_query_scalar::<i64>()
+                    .fetch_one(&mut *conn)
+                    .await?;
+                Some(u32::try_from(before).unwrap_or(u32::MAX))
+            }
+        };
+    }
+    Ok(result)
 }
 
 pub(super) async fn query_sqlite_connection(
@@ -241,16 +277,52 @@ pub(super) async fn query_sqlite_connection(
     });
     page.push(" LIMIT ")
         .push_bind(i64::from(query.max.unwrap_or(100).min(500)) + 1);
+    // XEP-0059 §2.6: start the page at an index of the filtered set.
+    if let Some(index) = query.index {
+        page.push(" OFFSET ").push_bind(i64::from(index));
+    }
     let rows = page.build().fetch_all(&mut *conn).await?;
     let messages = rows
         .iter()
         .map(decode_sqlite_message_row)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(finalize_result(
+    let mut result = finalize_result(
         messages,
         query,
         Some(u32::try_from(count).unwrap_or(u32::MAX)),
-    ))
+    );
+    if let Some(first) = result.messages.first() {
+        // XEP-0059 §2.1: `first index` is the page's position in the
+        // filtered set, which a requested index fixes by definition.
+        result.first_index = match query.index {
+            Some(index) => Some(index),
+            None => {
+                let ordinal = first
+                    .ordinal
+                    .ok_or_else(|| MamStorageError::MissingOrdinal(first.id.clone()))?;
+                let mut before = QueryBuilder::<Sqlite>::new(format!(
+                    "SELECT COUNT(*) FROM {relation} WHERE room_jid = "
+                ));
+                push_sqlite_mam_filters(
+                    &mut before,
+                    &archive_jid,
+                    query,
+                    with_filter.as_ref(),
+                    filter_before,
+                    filter_after,
+                );
+                before
+                    .push(" AND archive_seq < ")
+                    .push_bind(ordinal.to_storage());
+                let before = before
+                    .build_query_scalar::<i64>()
+                    .fetch_one(&mut *conn)
+                    .await?;
+                Some(u32::try_from(before).unwrap_or(u32::MAX))
+            }
+        };
+    }
+    Ok(result)
 }
 
 async fn cursor_postgres(

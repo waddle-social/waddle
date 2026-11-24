@@ -175,6 +175,8 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             stanza_ids: Vec::new(),
             before_id: Some(String::new()),
             after_id: None,
+            index: None,
+            flip_page: false,
         };
         let result = self
             .state

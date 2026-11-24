@@ -2338,3 +2338,164 @@ async fn ordinal_lookup_semantics_match_sqlite_and_memory() {
         assert_eq!(first.id, "id-002");
     }
 }
+
+// XEP-0059 §2.6 `<index/>` and the `index` attribute of `<first/>`.
+
+#[tokio::test]
+async fn test_sqlite_rsm_index_pages_from_position_and_reports_first_index() {
+    let storage = create_test_storage().await;
+    assert_rsm_index_pages_from_position_and_reports_first_index(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_rsm_index_pages_from_position_and_reports_first_index() {
+    let storage = InMemoryMamStorage::new();
+    assert_rsm_index_pages_from_position_and_reports_first_index(&storage).await;
+}
+
+async fn assert_rsm_index_pages_from_position_and_reports_first_index(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    store_nonlexical_archive_order_messages(storage, &archive, Utc::now()).await;
+    let page = |query: MamQuery| async {
+        storage
+            .query_messages(&archive, MamArchiveKind::Room, &query)
+            .await
+            .unwrap()
+    };
+
+    // Archive order is z-first, a-second, y-third, b-fourth, x-fifth.
+    let by_index = page(MamQuery {
+        max: Some(2),
+        index: Some(2),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(bodies(&by_index), vec!["three", "four"]);
+    assert_eq!(by_index.first_id.as_deref(), Some("y-third"));
+    assert_eq!(by_index.last_id.as_deref(), Some("b-fourth"));
+    assert_eq!(by_index.first_index, Some(2));
+    assert_eq!(by_index.count, Some(5));
+    assert!(!by_index.complete);
+
+    // The last page of the set ends at the count.
+    let tail = page(MamQuery {
+        max: Some(2),
+        index: Some(4),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(bodies(&tail), vec!["five"]);
+    assert_eq!(tail.first_index, Some(4));
+    assert!(tail.complete);
+
+    // An index at or past the count yields an empty page without first/last.
+    let past = page(MamQuery {
+        max: Some(2),
+        index: Some(5),
+        ..Default::default()
+    })
+    .await;
+    assert!(past.messages.is_empty());
+    assert!(past.complete);
+    assert_eq!(past.first_id, None);
+    assert_eq!(past.first_index, None);
+    assert_eq!(past.count, Some(5));
+
+    // Index 0 is the first item of the full set.
+    let head = page(MamQuery {
+        max: Some(1),
+        index: Some(0),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(head.first_id.as_deref(), Some("z-first"));
+    assert_eq!(head.first_index, Some(0));
+
+    // Cursor-paged pages report their position as well.
+    let after = page(MamQuery {
+        max: Some(2),
+        after_id: Some("a-second".to_string()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.first_id.as_deref(), Some("y-third"));
+    assert_eq!(after.first_index, Some(2));
+    let last_page = page(MamQuery {
+        max: Some(2),
+        before_id: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(bodies(&last_page), vec!["four", "five"]);
+    assert_eq!(last_page.first_index, Some(3));
+
+    // The index counts within the filtered set, not the whole archive.
+    let filtered = page(MamQuery {
+        max: Some(5),
+        filter_after_id: Some("a-second".to_string()),
+        index: Some(1),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(bodies(&filtered), vec!["four", "five"]);
+    assert_eq!(filtered.first_index, Some(1));
+    assert_eq!(filtered.count, Some(3));
+}
+
+#[tokio::test]
+async fn test_sqlite_archive_bounds_report_first_and_last_message() {
+    let storage = create_test_storage().await;
+    assert_archive_bounds_report_first_and_last_message(&storage).await;
+}
+
+#[tokio::test]
+async fn test_inmemory_archive_bounds_report_first_and_last_message() {
+    let storage = InMemoryMamStorage::new();
+    assert_archive_bounds_report_first_and_last_message(&storage).await;
+}
+
+async fn assert_archive_bounds_report_first_and_last_message(storage: &dyn MamStorage) {
+    let archive = bare("room@conference.example.com");
+    let base = Utc::now();
+    assert_eq!(
+        storage
+            .archive_bounds(&archive, MamArchiveKind::Room, None)
+            .await
+            .unwrap(),
+        None,
+        "an empty archive has no bounds"
+    );
+    store_nonlexical_archive_order_messages(storage, &archive, base).await;
+    let bounds = storage
+        .archive_bounds(&archive, MamArchiveKind::Room, None)
+        .await
+        .unwrap()
+        .expect("non-empty archive");
+    assert_eq!(bounds.start.id, "z-first");
+    assert_eq!(bounds.end.id, "x-fifth");
+    assert!(bounds.start.timestamp < bounds.end.timestamp);
+
+    // A requester whose view starts later sees only what it may read.
+    let restricted = storage
+        .archive_bounds(
+            &archive,
+            MamArchiveKind::Room,
+            Some(base + ChronoDuration::seconds(2)),
+        )
+        .await
+        .unwrap()
+        .expect("messages remain visible");
+    assert_eq!(restricted.start.id, "y-third");
+    assert_eq!(restricted.end.id, "x-fifth");
+    assert_eq!(
+        storage
+            .archive_bounds(
+                &archive,
+                MamArchiveKind::Room,
+                Some(base + ChronoDuration::seconds(60))
+            )
+            .await
+            .unwrap(),
+        None
+    );
+}

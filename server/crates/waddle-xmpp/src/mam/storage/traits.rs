@@ -1,6 +1,9 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};
-use waddle_xmpp_core::mam::{ArchiveOrdinal, ArchivedMessage, MamQuery, MamResult};
+use waddle_xmpp_core::mam::{
+    ArchiveBounds, ArchiveEdge, ArchiveOrdinal, ArchivedMessage, MamQuery, MamResult,
+};
 use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::muc::RoomClaimFenceContext;
@@ -123,6 +126,44 @@ pub trait MamStorage: Send + Sync {
         archive_kind: MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError>;
+
+    /// The first and last messages of an archive, for the XEP-0313 §7
+    /// metadata query; `None` when the archive holds no message.
+    ///
+    /// `not_before` hides everything received earlier from the answer, for
+    /// a requester whose view of the archive starts at that time.
+    async fn archive_bounds(
+        &self,
+        archive_jid: &BareJid,
+        archive_kind: MamArchiveKind,
+        not_before: Option<DateTime<Utc>>,
+    ) -> Result<Option<ArchiveBounds>, MamStorageError> {
+        let page = |before_id: Option<String>| MamQuery {
+            start: not_before,
+            max: Some(1),
+            before_id,
+            ..MamQuery::default()
+        };
+        let edge = |message: &ArchivedMessage| ArchiveEdge {
+            id: message.id.clone(),
+            timestamp: message.timestamp,
+        };
+        let oldest = self
+            .query_messages(archive_jid, archive_kind, &page(None))
+            .await?;
+        // XEP-0059 §2.5: an empty <before/> asks for the last page.
+        let newest = self
+            .query_messages(archive_jid, archive_kind, &page(Some(String::new())))
+            .await?;
+        Ok(oldest
+            .messages
+            .first()
+            .zip(newest.messages.last())
+            .map(|(start, end)| ArchiveBounds {
+                start: edge(start),
+                end: edge(end),
+            }))
+    }
 
     /// Get a single message by its archive ID.
     async fn get_message(

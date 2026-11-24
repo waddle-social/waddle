@@ -249,6 +249,10 @@ fn the_muc_service_is_reached_only_where_rooms_are_hosted_and_only_for_reviewed_
         (request(ping_payload()), RoomOperation::Ping),
         (request(query("urn:xmpp:mam:2")), RoomOperation::Archive),
         (set(query("urn:xmpp:mam:2")), RoomOperation::Archive),
+        (
+            request(Element::builder("metadata", "urn:xmpp:mam:2").build()),
+            RoomOperation::Archive,
+        ),
         (Stanza::Message(chat(MUC, "r")), RoomOperation::Message),
         (
             Stanza::Presence(available(MUC, "r")),

@@ -45,9 +45,20 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
     for child in query_elem.children() {
         if child.name() == "x" && child.ns() == DATA_FORMS_NS {
             parse_data_form(child, &mut mam_query)?;
-        } else if child.name() == "set" && child.ns() == RSM_NS {
+        } else if child.is("set", RSM_NS) {
             parse_rsm(child, &mut mam_query)?;
+        } else if child.is("flip-page", MAM_NS) {
+            mam_query.flip_page = true;
         }
+    }
+
+    // XEP-0059 §2.6: an index is for a client that does not know the UID
+    // before or after the page it wants, so it cannot also name one.
+    if mam_query.index.is_some() && (mam_query.before_id.is_some() || mam_query.after_id.is_some())
+    {
+        return Err(CoreError::bad_request(Some(
+            "RSM index cannot be combined with before or after".to_string(),
+        )));
     }
 
     debug!(
@@ -60,6 +71,8 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
         start = ?mam_query.start,
         end = ?mam_query.end,
         max = ?mam_query.max,
+        index = ?mam_query.index,
+        flip_page = mam_query.flip_page,
         "Parsed MAM query"
     );
 
@@ -83,6 +96,12 @@ pub fn is_mam_query(iq: &Iq) -> bool {
         Iq::Set { payload, .. } | Iq::Get { payload, .. }
             if payload.name() == "query" && payload.ns() == MAM_NS
     )
+}
+
+/// Check if an IQ is a XEP-0313 §7 archive metadata query.
+#[must_use]
+pub fn is_mam_metadata_query(iq: &Iq) -> bool {
+    matches!(iq, Iq::Get { payload, .. } if payload.is("metadata", MAM_NS))
 }
 
 /// Build the XEP-0313 supported query fields response.
@@ -268,8 +287,14 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
 }
 
 fn parse_rsm(rsm: &Element, query: &mut MamQuery) -> CoreResult<()> {
-    for child in rsm.children() {
+    for child in rsm.children().filter(|child| child.ns() == RSM_NS) {
         match child.name() {
+            "index" => {
+                let value = child.text();
+                query.index = Some(value.trim().parse().map_err(|_| {
+                    CoreError::bad_request(Some(format!("Invalid RSM index value: {value}")))
+                })?);
+            }
             "max" => {
                 let value = child.text();
                 if !value.is_empty() {

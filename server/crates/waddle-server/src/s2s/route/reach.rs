@@ -271,6 +271,8 @@ fn room(stanza: &Stanza) -> InboundReach {
             Iq::Get { payload, .. } | Iq::Set { payload, .. } if payload.is("query", NS_MAM) => {
                 RoomOperation::Archive
             }
+            // XEP-0313 §7: the metadata of the room's archive.
+            Iq::Get { payload, .. } if payload.is("metadata", NS_MAM) => RoomOperation::Archive,
             Iq::Get { payload, .. } | Iq::Set { payload, .. }
                 if payload.is("query", NS_MUC_ADMIN) =>
             {
