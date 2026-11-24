@@ -29,6 +29,8 @@ The native client currently supports:
 
 - **Delivery, typing and read state:** your messages show Waiting to send, Sending…, Not sent (with **Retry** and **Discard**) and Sent or Read on the newest. Text messages are kept in `$XDG_STATE_HOME/waddle/` until the server acknowledges them and are sent again, with the same id, after a dropped connection or a restart. "Name is typing…" shows under the timeline and your own typing is sent. Reading a conversation tells the other side (XEP-0333) and your other devices (XEP-0490). A banner shows when the connection is lost or the network is gone; the client reconnects with backoff, and at once when the window is focused or the network returns.
 
+- **Voice calls:** the phone button in a one-to-one conversation's header places an audio call (XEP-0353 invitations, then a XEP-0166 session with LiveKit credentials from the server, as on the Apple and web apps). An incoming call opens the call window with Answer and Decline, and posts a notification with the same actions when the app is not in front. The window shows the state, the elapsed time, a mute toggle, microphone and speaker choice, and Hang Up. Audio only for now: no video, screen share or group calls, and no ring tone. Not yet run against a live server or audio hardware.
+
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
 ## Build
@@ -43,6 +45,8 @@ cargo run
 
 The baseline is GNOME 48 (GTK 4.18, libadwaita 1.7).
 
+Call media links libwebrtc through the `livekit` crate. Its build script downloads a prebuilt libwebrtc archive from the `livekit/rust-sdks` GitHub releases on the first build (about 150 MB, 700 MB unpacked, kept under `target/`; set `LK_CUSTOM_WEBRTC` to use a local build), and compiles its C++ bridges against Chromium's libc++, which needs clang 21 or later as the C++ compiler. The `linux` dev shell provides it and sets `CXX`; outside it, install clang 21+ and export `CXX=clang++`. At run time libwebrtc opens PulseAudio (or PipeWire's pulse server) and ALSA.
+
 ## Checks
 
 CI runs these through `apps/linux/env.cue`:
@@ -55,7 +59,7 @@ desktop-file-validate data/social.waddle.Waddle.desktop
 appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml
 ```
 
-The GTK window tests require a display and are excluded from ordinary headless runs. GTK can start once per process, so run each separately: `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`, then the same with `profile_surfaces_open_and_resolve_authors` (the profile, People and profile-sheet dialogs, built against a session that cannot connect).
+The GTK window tests require a display and are excluded from ordinary headless runs. GTK can start once per process, so run each separately: `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`, then the same with `profile_surfaces_open_and_resolve_authors` (the profile, People and profile-sheet dialogs, built against a session that cannot connect) and `the_call_window_follows_the_slot` (the call window opening for a ringing call and closing when it is declined).
 
 ## Layout
 
@@ -75,6 +79,9 @@ The GTK window tests require a display and are excluded from ordinary headless r
 | `src/presence.rs`, `src/avatars.rs`, `src/profile.rs`, `src/people.rs`, `src/nick_color.rs` | Presence mode and auto-away, avatar cache, profile fields and registries, the People listing, nick colors: all without widgets |
 | `src/ui/status.rs`, `pictures.rs`, `profile.rs`, `person.rs`, `people.rs`, `identity.rs` | Their windows: presence plumbing, avatar loading and publishing, your profile, someone's profile sheet, the People view, author resolution |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
+| `src/call.rs`, `src/call_engine.rs`, `src/call_screen.rs` | Call states, the XEP-0353 reducer and tie-break, join-token check; the engine that decides sends, timers and media for one call slot; what the call window shows (no GTK); tests |
+| `src/call_media.rs`, `src/session_calls.rs` | The LiveKit room, microphone and speakers (libwebrtc platform audio) and ICE servers; the call verbs and event translation over the FFI |
+| `src/ui/calls.rs` | Header button, call window, incoming-call notification, and carrying out the engine's effects in order |
 | `src/notify.rs` | Notification modes, XEP-0492 defaults and the announce decision (no GTK); tests |
 | `src/ui/notifications.rs` | Header menu, sidebar mute state and GNotification actions |
 | `src/ui/suggestions.rs` | The composer's suggestion popover |

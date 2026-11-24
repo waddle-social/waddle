@@ -87,6 +87,8 @@ mod imp {
         #[template_child]
         pub notify_button: TemplateChild<gtk::MenuButton>,
         #[template_child]
+        pub call_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub details_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
@@ -186,6 +188,8 @@ mod imp {
         pub rooms: RefCell<crate::ui::rooms::RoomsState>,
         /// The unread overview (see ui/inbox.rs).
         pub inbox: RefCell<crate::ui::inbox::InboxState>,
+        /// The call slot, its media and window (see ui/calls.rs).
+        pub calls: RefCell<crate::ui::calls::CallsState>,
         /// The community feed and stories (see ui/feed.rs).
         pub feed: RefCell<crate::ui::feed::FeedState>,
         /// Community events (see ui/events.rs).

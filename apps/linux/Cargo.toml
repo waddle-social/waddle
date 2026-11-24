@@ -40,6 +40,9 @@ waddle-client-session = { path = "../../server/crates/waddle-client-session" }
 waddle-xmpp-client-ffi = { path = "../../server/crates/waddle-xmpp-client-ffi" }
 # XEP-0392 hues for nick colors; the same hash the web and phones use.
 waddle-xmpp-core = { path = "../../server/crates/waddle-xmpp-core" }
+# Call media: LiveKit (the SFU the server hands out join tokens for) with
+# libwebrtc's platform audio device for the microphone and speakers.
+livekit = { version = "0.12", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

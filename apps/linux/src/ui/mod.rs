@@ -1,6 +1,7 @@
 mod actions;
 mod admin;
 mod avatar;
+mod calls;
 mod commands;
 mod composer_view;
 mod connection;
