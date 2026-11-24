@@ -35,4 +35,38 @@ import Testing
         #expect(CallConnectionChip(quality: .poor).status == "Poor connection")
         #expect(CallConnectionChip(quality: .lost).status == "Connection lost")
     }
+
+    // MARK: - After a reconnect
+
+    @Test func aRatingFromBeforeAReconnectIsHeldBack() {
+        var gate = CallConnectionRatingGate()
+        #expect(gate.shown(.lost) == .lost)
+        gate.reconnecting()
+        #expect(gate.shown(.lost) == .unknown)
+    }
+
+    @Test func aNewRatingIsShownAtOnce() {
+        var gate = CallConnectionRatingGate()
+        gate.reconnecting()
+        gate.rated()
+        #expect(gate.shown(.good) == .good)
+    }
+
+    /// The SDK reports a rating only when it changes, so a connection as
+    /// good after a reconnect as before it would never report again.
+    @Test func anUnchangedRatingIsShownAgainOnceTheNewConnectionHasSettled() {
+        var gate = CallConnectionRatingGate()
+        gate.reconnecting()
+        #expect(gate.shown(.excellent) == .unknown)
+        gate.settled()
+        #expect(gate.shown(.excellent) == .excellent)
+    }
+
+    @Test func aSecondDropHoldsTheRatingBackAgain() {
+        var gate = CallConnectionRatingGate()
+        gate.reconnecting()
+        gate.settled()
+        gate.reconnecting()
+        #expect(gate.shown(.good) == .unknown)
+    }
 }

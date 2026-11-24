@@ -44,3 +44,27 @@ public struct CallConnectionChip: Equatable, Sendable {
         }
     }
 }
+
+/// Whether the rating the SDK holds may be shown. After a reconnect it
+/// still holds the old connection's rating, and it speaks up only when the
+/// rating changes: so the old one is held back until the server rates the
+/// new connection differently, or long enough has passed that an unchanged
+/// rating is the new connection's too.
+public struct CallConnectionRatingGate: Equatable, Sendable {
+    /// The server rates a connection every few seconds; by now it has rated the new one.
+    public static let settleTime = Duration.seconds(6)
+
+    public private(set) var isHoldingBack = false
+
+    public init() { /* A connection that has not dropped. */ }
+
+    public mutating func reconnecting() { isHoldingBack = true }
+    /// The server sent a rating that differs from the one held.
+    public mutating func rated() { isHoldingBack = false }
+    /// `settleTime` has passed since the call came back.
+    public mutating func settled() { isHoldingBack = false }
+
+    public func shown(_ held: CallConnectionQuality) -> CallConnectionQuality {
+        isHoldingBack ? .unknown : held
+    }
+}

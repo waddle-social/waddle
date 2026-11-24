@@ -46,9 +46,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
     private(set) var connectionQuality = CallConnectionQuality.unknown
-    /// A reconnect has begun and the server has not rated the new
-    /// connection yet: the SDK still holds the rating of the old one.
-    @ObservationIgnored private var awaitsConnectionRating = false
+    /// Holds back the rating of a connection that dropped (`CallConnectionRatingGate`).
+    @ObservationIgnored private var connectionRating = CallConnectionRatingGate()
+    @ObservationIgnored private var connectionSettling: Task<Void, Never>?
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
     /// The screens other people share, by who shares them.
@@ -591,7 +591,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }
-        awaitsConnectionRating = false
+        connectionSettling?.cancel()
+        connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
         audioProcessingPublications = []
         #if os(macOS)
@@ -613,7 +614,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             wasEndedByServer = endedByServer
             onFailure?()
         case .reconnecting:
-            awaitsConnectionRating = true
+            connectionSettling?.cancel()
+            connectionRating.reconnecting()
             phase = .reconnecting
             refreshParticipants()
         case .reconnected:
@@ -622,6 +624,15 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             phase = .connected
             mediaUpSince = .now
             reconcileTracks(in: changed, restoringVolumes: true)
+            // The SDK reports a rating only when it changes: one that is the
+            // same on the new connection is shown once that has settled.
+            connectionSettling?.cancel()
+            connectionSettling = Task { [weak self] in
+                try? await Task.sleep(for: CallConnectionRatingGate.settleTime)
+                guard !Task.isCancelled, let self, self.room === changed else { return }
+                self.connectionRating.settled()
+                self.refreshParticipants()
+            }
             // A reconnect restarts the microphone's track with the options it was made with.
             Task { await applyAudioProcessing() }
         case .tracks:
@@ -629,7 +640,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         case .participants:
             refreshParticipants()
         case .ownConnectionRated:
-            awaitsConnectionRating = false
+            connectionSettling?.cancel()
+            connectionRating.rated()
             refreshParticipants()
         }
     }
@@ -769,7 +781,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         case .lost: .lost
         case .unknown: .unknown
         }
-        let quality = awaitsConnectionRating ? .unknown : rated
+        let quality = connectionRating.shown(rated)
         if connectionQuality != quality { connectionQuality = quality }
         // Ours first, then everyone else in the order they joined, so the
         // roster keeps its order from one report to the next.
