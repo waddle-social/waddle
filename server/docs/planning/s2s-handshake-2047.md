@@ -150,7 +150,7 @@ independently authenticated connection. A stream authenticated from
 `home-a.test` cannot carry `muc.home-a.test` traffic even when both names occur
 in its certificate. Components need their own pairs. There is no XEP-0288,
 dialback, multiplexed domain authentication or arbitrary relay. ADR-0020 D2
-admits restricted dialback, one domain pair per stream; see the amendment
+admits restricted dialback, with multiplexed pairs accepted only on a dialback stream; see the amendment
 above.
 
 The configured endpoint selects the socket only. It never replaces the remote

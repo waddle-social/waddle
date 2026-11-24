@@ -87,9 +87,8 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     let key = uuid::Uuid::new_v4().simple().to_string();
     h.redirect.issue_key(&key);
     // redirect.test is admitted, so the refusal is not an admission
-    // outcome: home-a ends the stream with its own stream error, which it
-    // logs as the `Protocol` outcome.
-    let ended = support::LogMark::new(h, Home::A, &["s2s connection ended", "\"protocol\""]);
+    // outcome: home-a answers the key with a `not-authorized` dialback
+    // error, which is not a stream error (XEP-0220 section 2.5).
     let attempt = initiator::attempt(
         &h.pki,
         h.ports.waddle_s2s(Home::A),
@@ -97,16 +96,15 @@ pub async fn unlisted_domain(h: &mut Harness, _peer: Peer) -> Result<Outcome> {
     )
     .await?;
     let verified = verifications(&h.redirect);
-    let logged = ended.settled(h, 1).await;
     // Admitted, so the refusal comes after TLS, when dialback is offered.
     outcome.check(
-        "dialback refused after TLS by the list, before any verification",
+        "dialback refused after TLS by the list, before any verification, with a dialback error",
         attempt.stage == Stage::Authentication
-            && attempt.stream_error.as_deref() == Some("policy-violation")
-            && verified == 0
-            && logged > 0,
+            && attempt.stream_error.is_none()
+            && attempt.detail == "dialback answered error"
+            && verified == 0,
         format!(
-            "{}; verification requests to redirect.test {verified}; home-a logged {logged} connections ended with its own stream error",
+            "{}; verification requests to redirect.test {verified}",
             attempt.describe()
         ),
     );

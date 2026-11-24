@@ -73,15 +73,19 @@ fn concat(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
 }
 
-/// home-b.test serves itself, admits home-a.test and permits it dialback
-/// when `permits` says so.
+const MUC_A: &str = "muc.home-a.test";
+const MUC_B: &str = "muc.home-b.test";
+
+/// home-b.test and muc.home-b.test are served; home-a.test and
+/// muc.home-a.test are admitted to either, and permitted dialback when
+/// `permits` says so.
 struct Admission {
     permits: bool,
 }
 
 impl InboundAdmission for Admission {
     fn destination(&self, destination: &CanonicalDomain) -> DestinationStatus {
-        if destination.as_str() == HOME_B {
+        if [HOME_B, MUC_B].contains(&destination.as_str()) {
             DestinationStatus::Served
         } else {
             DestinationStatus::Unknown
@@ -89,7 +93,8 @@ impl InboundAdmission for Admission {
     }
 
     fn admits(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool {
-        source.as_str() == HOME_A && destination.as_str() == HOME_B
+        [HOME_A, MUC_A].contains(&source.as_str())
+            && [HOME_B, MUC_B].contains(&destination.as_str())
     }
 
     fn permits_dialback(&self, source: &CanonicalDomain, destination: &CanonicalDomain) -> bool {
@@ -300,6 +305,38 @@ fn dialback_element(outputs: &[Output], name: &str) -> Element {
         .unwrap_or_else(|| panic!("a <db:{name}/> in {outputs:?}"))
 }
 
+/// Assert that `outputs` carry a `<db:{name}/>` of `type='error'` from
+/// `from` to `to` with `<error type='cancel'>` holding `condition`.
+fn assert_dialback_error(outputs: &[Output], name: &str, from: &str, to: &str, condition: &str) {
+    let answer = dialback_element(outputs, name);
+    assert_eq!(answer.attr("type"), Some("error"), "{outputs:?}");
+    assert_eq!(answer.attr("from"), Some(from));
+    assert_eq!(answer.attr("to"), Some(to));
+    let error = answer
+        .children()
+        .find(|child| child.name() == "error")
+        .expect("an error child");
+    assert_eq!(error.attr("type"), Some("cancel"));
+    assert!(
+        error.children().any(|child| child.is(condition, STANZAS)),
+        "expected {condition} in {answer:?}"
+    );
+}
+
+/// The `(source, destination)` of each stream `outputs` established.
+fn established_pairs(outputs: &[Output]) -> Vec<(String, String)> {
+    outputs
+        .iter()
+        .filter_map(|output| match output {
+            Output::Established(stream) => Some((
+                stream.source.as_str().to_owned(),
+                stream.destination.as_str().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A receiving stream without a certificate whose key is awaiting
 /// verification.
 fn verifying() -> AfterTls {
@@ -410,33 +447,45 @@ fn a_key_that_could_not_be_verified_is_a_dialback_error() {
     assert!(error
         .children()
         .any(|condition| condition.is("remote-connection-failed", STANZAS)));
-    assert_eq!(close_reason(&out), Some(CloseReason::DialbackFailed));
+    // A dialback error is not fatal for the XML stream (XEP-0220 §2.5): the
+    // stream stays open and takes a further key.
+    assert_eq!(close_reason(&out), None, "{out:?}");
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, HOME_B, "4567abcd"));
+    dialback_request(&out);
+    let out = after.stream.dialback(DialbackOutcome::Valid);
+    assert!(out
+        .iter()
+        .any(|output| matches!(output, Output::Established(_))));
 }
 
 #[test]
 fn dialback_where_it_is_not_permitted_is_refused() {
-    // The Authoritative role alone: empty features, and a key is refused.
+    // The Authoritative role alone: empty features, and a key is refused
+    // with a dialback error that leaves the stream open (XEP-0220 §2.5).
     let mut after = after_tls(receiver(enabled(), false), TlsPeer::NoCertificate);
     assert!(!offers_dialback(&after.features));
     assert!(!offers_sasl(&after.features));
-    assert_stream_error(
-        &after
-            .stream
-            .receive(&result_request(HOME_A, HOME_B, "0123abcd")),
-        StreamErrorCondition::PolicyViolation,
-    );
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, HOME_B, "0123abcd"));
+    assert_dialback_error(&out, "result", HOME_B, HOME_A, "not-authorized");
+    assert_eq!(close_reason(&out), None);
+    // The stream still answers verification requests.
+    let out = after.stream.receive(&verify_request_for("s-1"));
+    assert_eq!(dialback_element(&out, "verify").attr("type"), Some("valid"));
     // A verified certificate without permission: SASL EXTERNAL only.
     let mut after = after_tls(
         receiver(enabled(), false),
         TlsPeer::Verified(domain(HOME_A)),
     );
     assert!(!offers_dialback(&after.features));
-    assert_stream_error(
-        &after
-            .stream
-            .receive(&result_request(HOME_A, HOME_B, "0123abcd")),
-        StreamErrorCondition::PolicyViolation,
-    );
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, HOME_B, "0123abcd"));
+    assert_dialback_error(&out, "result", HOME_B, HOME_A, "not-authorized");
+    assert_eq!(close_reason(&out), None);
     // No role at all: no certificate ends the stream at the header.
     let mut stream = receiver(DialbackMode::Disabled, false);
     stream.receive(INITIAL);
@@ -464,40 +513,207 @@ fn dialback_is_never_accepted_before_tls() {
 }
 
 #[test]
-fn one_key_per_stream() {
+fn one_key_is_verified_at_a_time() {
+    // A second key while one is being verified is a dialback error; the
+    // stream and the first verification are unaffected.
     let mut after = verifying();
-    assert_stream_error(
-        &after
-            .stream
-            .receive(&result_request(HOME_A, HOME_B, "4567abcd")),
-        StreamErrorCondition::PolicyViolation,
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, MUC_B, "4567abcd"));
+    assert_dialback_error(&out, "result", MUC_B, HOME_A, "resource-constraint");
+    assert_eq!(close_reason(&out), None);
+    let out = after.stream.dialback(DialbackOutcome::Valid);
+    assert_eq!(
+        established_pairs(&out),
+        vec![(HOME_A.to_owned(), HOME_B.to_owned())]
     );
-    // Nor once the stream is established.
+}
+
+#[test]
+fn an_established_dialback_stream_keeps_processing_result_elements() {
+    // XEP-0220 §2.2.1: "The Receiving Server MUST continue to accept and
+    // process stanzas for already verified domain pairs, and MUST continue
+    // to process both <db:result/> and <db:verify/> elements."
     let mut after = verifying();
     after.stream.dialback(DialbackOutcome::Valid);
+
+    // A key for another pair is verified on the same stream, whose first
+    // pair's stanzas flow meanwhile.
+    let out = after
+        .stream
+        .receive(&result_request(MUC_A, MUC_B, "4567abcd"));
+    let request = dialback_request(&out);
+    assert_eq!(request.source, domain(MUC_A));
+    assert_eq!(request.destination, domain(MUC_B));
+    assert_eq!(request.stream_id, after.stream_id);
+    assert_eq!(close_reason(&out), None);
+    let first = "<message from='alice@home-a.test' to='bob@home-b.test'/>";
+    let out = after.stream.receive(first.as_bytes());
+    assert!(
+        out.iter().any(|output| matches!(output, Output::Stanza(_))),
+        "{out:?}"
+    );
+    let out = after.stream.dialback(DialbackOutcome::Valid);
+    let result = dialback_element(&out, "result");
+    assert_eq!(result.attr("type"), Some("valid"));
+    assert_eq!(result.attr("from"), Some(MUC_B));
+    assert_eq!(result.attr("to"), Some(MUC_A));
+    assert_eq!(
+        established_pairs(&out),
+        vec![(MUC_A.to_owned(), MUC_B.to_owned())]
+    );
+    assert_eq!(close_reason(&out), None);
+
+    // Both pairs carry stanzas now.
+    for stanza in [
+        first,
+        "<message from='room@muc.home-a.test/nick' to='room@muc.home-b.test'/>",
+    ] {
+        let out = after.stream.receive(stanza.as_bytes());
+        assert!(
+            out.iter().any(|output| matches!(output, Output::Stanza(_))),
+            "{stanza}: {out:?}"
+        );
+    }
+    // A pair that was never verified does not: home-a.test to
+    // muc.home-b.test.
     assert_stream_error(
         &after
             .stream
-            .receive(&result_request(HOME_A, HOME_B, "4567abcd")),
+            .receive(b"<message from='alice@home-a.test' to='room@muc.home-b.test'/>"),
+        StreamErrorCondition::InvalidFrom,
+    );
+}
+
+#[test]
+fn an_unverified_pair_gets_no_stanzas_and_a_refused_one_stays_refused() {
+    let mut after = verifying();
+    after.stream.dialback(DialbackOutcome::Valid);
+    // A second pair whose key the Authoritative Server refuses: a
+    // `forbidden` dialback error, not the loss of the stream and the pairs
+    // it carries (XEP-0220 §2.2.1).
+    let out = after
+        .stream
+        .receive(&result_request(MUC_A, MUC_B, "4567abcd"));
+    dialback_request(&out);
+    let out = after.stream.dialback(DialbackOutcome::Invalid);
+    assert_dialback_error(&out, "result", MUC_B, MUC_A, "forbidden");
+    assert_eq!(close_reason(&out), None);
+    assert!(established_pairs(&out).is_empty());
+    assert_stream_error(
+        &after
+            .stream
+            .receive(b"<message from='room@muc.home-a.test/n' to='room@muc.home-b.test'/>"),
+        StreamErrorCondition::HostUnknown,
+    );
+}
+
+#[test]
+fn a_repeated_key_for_a_verified_pair_is_answered_valid() {
+    let mut after = verifying();
+    after.stream.dialback(DialbackOutcome::Valid);
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, HOME_B, "4567abcd"));
+    assert_eq!(dialback_element(&out, "result").attr("type"), Some("valid"));
+    assert!(!out
+        .iter()
+        .any(|output| matches!(output, Output::VerifyDialback(_))));
+    assert_eq!(close_reason(&out), None);
+}
+
+#[test]
+fn a_sasl_external_stream_never_takes_keys() {
+    let mut after = after_tls(receiver(enabled(), true), TlsPeer::Verified(domain(HOME_A)));
+    let out = after.stream.receive(AUTH_EMPTY);
+    let request = out
+        .iter()
+        .find_map(|output| match output {
+            Output::Authorize(request) => Some(request.clone()),
+            _ => None,
+        })
+        .expect("an authorization request");
+    after
+        .stream
+        .authorization(request.exchange, AuthorizationDecision::Granted);
+    after.stream.receive(INITIAL);
+    assert_stream_error(
+        &after
+            .stream
+            .receive(&result_request(HOME_A, HOME_B, "0123abcd")),
         StreamErrorCondition::PolicyViolation,
     );
 }
 
 #[test]
-fn a_stream_carries_one_domain_pair() {
+fn a_target_domain_that_is_not_served_is_a_dialback_error() {
+    // XEP-0220 §2.2.1: "If the Target Domain ... is not a configured domain
+    // of the Receiving Server, this results in a dialback error ... [that]
+    // MUST NOT result in closing of the stream".
+    let mut after = after_tls(receiver(enabled(), true), TlsPeer::NoCertificate);
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, "nowhere.home-b.test", "0123abcd"));
+    assert_dialback_error(
+        &out,
+        "result",
+        "nowhere.home-b.test",
+        HOME_A,
+        "item-not-found",
+    );
+    assert_eq!(close_reason(&out), None);
+    assert!(!out
+        .iter()
+        .any(|output| matches!(output, Output::VerifyDialback(_))));
+    // The stream goes on with a pair that is served.
+    let out = after
+        .stream
+        .receive(&result_request(HOME_A, HOME_B, "0123abcd"));
+    dialback_request(&out);
+    let out = after.stream.dialback(DialbackOutcome::Valid);
+    assert_eq!(established_pairs(&out).len(), 1);
+
+    // The same for a verification request (§2.2.2), on the Authoritative
+    // role alone, answered with the request's id.
+    let mut after = after_tls(receiver(enabled(), false), TlsPeer::NoCertificate);
+    let out = after.stream.receive(&verify_request(
+        HOME_A,
+        "nowhere.home-b.test",
+        "s-1",
+        "0123abcd",
+    ));
+    assert_dialback_error(
+        &out,
+        "verify",
+        "nowhere.home-b.test",
+        HOME_A,
+        "item-not-found",
+    );
+    assert_eq!(dialback_element(&out, "verify").attr("id"), Some("s-1"));
+    assert_eq!(close_reason(&out), None);
+    let out = after.stream.receive(&verify_request_for("s-2"));
+    assert_eq!(dialback_element(&out, "verify").attr("type"), Some("valid"));
+}
+
+#[test]
+fn a_pair_that_is_not_admitted_is_a_dialback_error() {
+    // XEP-0220 §2.4.2 and §2.5: policy refusals are dialback errors.
+    let mut after = after_tls(receiver(enabled(), true), TlsPeer::NoCertificate);
+    let out = after
+        .stream
+        .receive(&result_request("other.test", HOME_B, "0123abcd"));
+    assert_dialback_error(&out, "result", HOME_B, "other.test", "not-authorized");
+    assert_eq!(close_reason(&out), None);
+    let out = after
+        .stream
+        .receive(&verify_request("other.test", HOME_B, "s-1", "0123abcd"));
+    assert_eq!(dialback_element(&out, "verify").attr("type"), Some("error"));
+    assert_eq!(close_reason(&out), None);
+}
+
+#[test]
+fn malformed_dialback_requests_still_end_the_stream() {
     let cases = [
-        (
-            result_request("other.test", HOME_B, "0123abcd"),
-            StreamErrorCondition::InvalidFrom,
-        ),
-        (
-            result_request("muc.home-a.test", HOME_B, "0123abcd"),
-            StreamErrorCondition::InvalidFrom,
-        ),
-        (
-            result_request(HOME_A, "muc.home-b.test", "0123abcd"),
-            StreamErrorCondition::HostUnknown,
-        ),
         (
             b"<db:result to='home-b.test'>0123abcd</db:result>".to_vec(),
             StreamErrorCondition::ImproperAddressing,
@@ -511,6 +727,30 @@ fn a_stream_carries_one_domain_pair() {
         let mut after = after_tls(receiver(enabled(), true), TlsPeer::NoCertificate);
         assert_stream_error(&after.stream.receive(&element), condition);
     }
+}
+
+#[test]
+fn key_requests_are_a_bounded_rate() {
+    // Errors keep the stream open, so the requests that cause them are
+    // counted: sixteen in a minute, then the stream ends.
+    let clock = ManualClock::new();
+    let mut after = after_tls(
+        receiver_with_clock(enabled(), true, clock.clock()),
+        TlsPeer::NoCertificate,
+    );
+    for index in 0..16 {
+        let out = after
+            .stream
+            .receive(&result_request(HOME_A, "nowhere.home-b.test", "0123abcd"));
+        assert_eq!(close_reason(&out), None, "request {index}");
+        clock.advance(Duration::from_secs(1));
+    }
+    assert_stream_error(
+        &after
+            .stream
+            .receive(&result_request(HOME_A, "nowhere.home-b.test", "0123abcd")),
+        StreamErrorCondition::PolicyViolation,
+    );
 }
 
 #[test]
@@ -589,21 +829,11 @@ fn the_authoritative_server_answers_for_keys_it_issued() {
 }
 
 #[test]
-fn verification_requests_are_for_the_streams_pair_and_bounded() {
-    let cases = [
-        (
-            verify_request("other.test", HOME_B, "s-1", "0123abcd"),
-            StreamErrorCondition::InvalidFrom,
-        ),
-        (
-            verify_request(HOME_A, "muc.home-b.test", "s-1", "0123abcd"),
-            StreamErrorCondition::HostUnknown,
-        ),
-        (
-            b"<db:verify from='home-a.test' to='home-b.test'>0123abcd</db:verify>".to_vec(),
-            StreamErrorCondition::BadFormat,
-        ),
-    ];
+fn verification_requests_are_well_formed_and_bounded() {
+    let cases = [(
+        b"<db:verify from='home-a.test' to='home-b.test'>0123abcd</db:verify>".to_vec(),
+        StreamErrorCondition::BadFormat,
+    )];
     for (element, condition) in cases {
         let mut after = after_tls(receiver(enabled(), false), TlsPeer::NoCertificate);
         assert_stream_error(&after.stream.receive(&element), condition);

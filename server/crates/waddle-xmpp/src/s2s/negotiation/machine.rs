@@ -26,7 +26,7 @@ pub struct Negotiation {
 
 #[derive(Debug)]
 enum RoleMachine {
-    Receiving(Receiving),
+    Receiving(Box<Receiving>),
     Initiating(Initiating),
 }
 
@@ -34,7 +34,7 @@ impl Negotiation {
     /// A receiving-role machine awaiting the peer's initial stream header.
     pub fn receiving(config: ReceivingConfig) -> Self {
         Self {
-            role: RoleMachine::Receiving(Receiving::new(config)),
+            role: RoleMachine::Receiving(Box::new(Receiving::new(config))),
         }
     }
 

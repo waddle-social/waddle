@@ -165,9 +165,10 @@ impl fmt::Debug for DialbackKey {
 /// [`NegotiationInput::Dialback`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialbackRequest {
-    /// The Sender Domain: the stream's source.
+    /// The Sender Domain: the source of the pair the key is for.
     pub source: CanonicalDomain,
-    /// The Target Domain: the stream's destination, a local domain.
+    /// The Target Domain: the destination of the pair the key is for, a
+    /// local domain.
     pub destination: CanonicalDomain,
     /// The ID of the response stream header this server sent on the stream
     /// the key arrived on.
@@ -193,6 +194,16 @@ pub enum DialbackError {
     ResourceConstraint,
     /// The pair may not use dialback here.
     NotAuthorized,
+    /// The Target Domain is not a configured domain of this server
+    /// (XEP-0220 §2.5).
+    ItemNotFound,
+    /// A policy refuses the request, for example a TLS requirement
+    /// (XEP-0220 §2.5).
+    PolicyViolation,
+    /// The Initiating Server's key was refused for a pair on a stream that
+    /// already carries verified pairs; the stream stays open (XEP-0220
+    /// §2.2.1).
+    Forbidden,
 }
 
 impl DialbackError {
@@ -205,6 +216,9 @@ impl DialbackError {
             Self::NotAcceptable => "not-acceptable",
             Self::ResourceConstraint => "resource-constraint",
             Self::NotAuthorized => "not-authorized",
+            Self::ItemNotFound => "item-not-found",
+            Self::PolicyViolation => "policy-violation",
+            Self::Forbidden => "forbidden",
         }
     }
 }
@@ -509,7 +523,8 @@ pub enum Step {
     RestartAfterSasl,
     /// Ask the connection owner to authorise SASL EXTERNAL.
     Authorize(AuthorizationRequest),
-    /// Negotiation completed.
+    /// Negotiation completed for a domain pair; again for each further pair
+    /// a Receiving Server verifies on a stream authenticated by dialback.
     Established(NegotiatedStream),
     /// Hand an address-checked stanza from an established receiving stream
     /// to the connection owner.

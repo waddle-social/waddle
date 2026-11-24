@@ -19,8 +19,8 @@ use super::classify::{classify, Mechanism, SaslPayload, TopLevel};
 use super::dialback::{self, DialbackElement, DialbackType};
 use super::elements;
 use super::types::{
-    AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackKey,
-    DialbackOutcome, DialbackRequest, ExchangeId, NegotiatedStream, NegotiationInput,
+    AuthorizationDecision, AuthorizationRequest, CloseReason, DestinationStatus, DialbackError,
+    DialbackKey, DialbackOutcome, DialbackRequest, ExchangeId, NegotiatedStream, NegotiationInput,
     NegotiationPhase, ReceivingConfig, Role, Step, StreamAuthentication, TlsPeer,
 };
 
@@ -33,6 +33,16 @@ const MAX_VERIFY_REQUESTS: usize = 8;
 
 /// The window [`MAX_VERIFY_REQUESTS`] is counted over.
 const VERIFY_WINDOW: Duration = Duration::from_secs(60);
+
+/// Most `<db:result/>` key requests handled on one stream within
+/// [`RESULT_WINDOW`], whatever their outcome. A dialback error leaves the
+/// stream open (XEP-0220 §2.5), and a stream that carries several domain
+/// pairs sends one key for each; the rate keeps one stream from asking for
+/// verifications without end.
+const MAX_RESULT_REQUESTS: usize = 16;
+
+/// The window [`MAX_RESULT_REQUESTS`] is counted over.
+const RESULT_WINDOW: Duration = Duration::from_secs(60);
 
 /// Which stream header the receiving role awaits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +98,24 @@ pub(crate) struct Receiving {
     /// Whether the owner permits dialback for the pair, asked once TLS has
     /// completed.
     dialback_permitted: bool,
-    /// Whether a dialback key was received; one pair, one attempt.
-    dialback_used: bool,
+    /// The `(source, destination)` pair whose dialback key the owner is
+    /// verifying.
+    pending: Option<(CanonicalDomain, CanonicalDomain)>,
+    /// The state a dialback error returns the stream to: the one the key
+    /// arrived in.
+    resume: State,
+    /// The pairs this stream carries stanzas for: the stream's pair after
+    /// SASL EXTERNAL, or each pair verified by dialback (XEP-0220 §2.2.1:
+    /// one stream may multiplex several).
+    verified: Vec<(CanonicalDomain, CanonicalDomain)>,
+    /// How the first pair was authenticated.
+    authentication: Option<StreamAuthentication>,
     /// When the verification requests answered within the last
     /// [`VERIFY_WINDOW`] arrived, oldest first.
     verify_requests: VecDeque<Instant>,
+    /// When the key requests handled within the last [`RESULT_WINDOW`]
+    /// arrived, oldest first.
+    result_requests: VecDeque<Instant>,
 }
 
 impl Receiving {
@@ -110,8 +133,12 @@ impl Receiving {
             deliver: false,
             stream_id: None,
             dialback_permitted: false,
-            dialback_used: false,
+            pending: None,
+            resume: State::Closed,
+            verified: Vec::new(),
+            authentication: None,
             verify_requests: VecDeque::new(),
+            result_requests: VecDeque::new(),
         }
     }
 
@@ -129,6 +156,9 @@ impl Receiving {
             State::Sasl(Sasl::Authorizing(_)) => NegotiationPhase::SaslAuthorizing,
             State::AwaitHeader(Stage::Authenticated) => NegotiationPhase::AuthenticatedRestart,
             State::Unauthenticated => NegotiationPhase::DialbackAwaitKey,
+            // A further pair verified on an established stream does not
+            // return it to negotiation.
+            State::DialbackVerifying if !self.verified.is_empty() => NegotiationPhase::Established,
             State::DialbackVerifying => NegotiationPhase::DialbackVerifying,
             State::Established => NegotiationPhase::Established,
             State::Closed => NegotiationPhase::Closed,
@@ -193,6 +223,8 @@ impl Receiving {
             Stage::Tls => self.offer_sasl(&source, steps),
             Stage::Authenticated => {
                 steps.push(Step::Send(elements::empty_features()));
+                self.verified.push((source.clone(), destination.clone()));
+                self.authentication = Some(StreamAuthentication::SaslExternal);
                 steps.push(Step::Established(NegotiatedStream {
                     role: Role::Receiving,
                     source,
@@ -322,42 +354,40 @@ impl Receiving {
         }
     }
 
-    /// Check a dialback element's `from` and `to` against the stream's
-    /// pair: one stream carries one pair, so a dialback element for any
-    /// other pair (sender or target multiplexing) ends the stream, with the
-    /// condition a stanza for that pair would get.
-    fn check_pair(
-        &self,
+    /// Read the `from` and `to` of a dialback request. An address that is
+    /// absent or malformed, or written in a spelling the identity profile
+    /// refuses, names no domain a dialback answer could be addressed
+    /// with, so it is a stream error; anything else is the pair the
+    /// request names, which need not be the stream's own (XEP-0220 §2.2.1:
+    /// one stream may carry several domain pairs).
+    fn request_pair(
         from: &HeaderAddress,
         to: &HeaderAddress,
     ) -> Result<(CanonicalDomain, CanonicalDomain), StreamErrorCondition> {
-        let Some((source, destination)) = &self.pair else {
-            return Err(StreamErrorCondition::InternalServerError);
+        let from = match from {
+            HeaderAddress::Domain(from) => from.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::InvalidFrom),
+            HeaderAddress::Absent | HeaderAddress::Invalid => {
+                return Err(StreamErrorCondition::ImproperAddressing)
+            }
         };
-        match from {
-            HeaderAddress::Domain(from) if from == source => {}
-            HeaderAddress::Domain(_) | HeaderAddress::Refused => {
-                return Err(StreamErrorCondition::InvalidFrom)
-            }
+        let to = match to {
+            HeaderAddress::Domain(to) => to.clone(),
+            HeaderAddress::Refused => return Err(StreamErrorCondition::HostUnknown),
             HeaderAddress::Absent | HeaderAddress::Invalid => {
                 return Err(StreamErrorCondition::ImproperAddressing)
             }
-        }
-        match to {
-            HeaderAddress::Domain(to) if to == destination => {}
-            HeaderAddress::Domain(_) | HeaderAddress::Refused => {
-                return Err(StreamErrorCondition::HostUnknown)
-            }
-            HeaderAddress::Absent | HeaderAddress::Invalid => {
-                return Err(StreamErrorCondition::ImproperAddressing)
-            }
-        }
-        Ok((source.clone(), destination.clone()))
+        };
+        Ok((from, to))
     }
 
     /// A dialback key from the Initiating Server (XEP-0220 §2.2.1): only
-    /// over TLS, after the post-TLS features, where the owner permits
-    /// dialback for the pair, and once per stream. The owner verifies it.
+    /// over TLS, after the post-TLS features, for a Target Domain this
+    /// server serves and a pair its policy admits for dialback. The owner
+    /// verifies it, one key at a time. A refusal of the pair is a dialback
+    /// error, which leaves the stream open (XEP-0220 §2.2.1, §2.5), so the
+    /// stream may carry further keys and further pairs; only a malformed
+    /// element, a request out of place or too many requests end it.
     fn on_result_request(
         &mut self,
         from: &HeaderAddress,
@@ -365,21 +395,68 @@ impl Receiving {
         key: Option<DialbackKey>,
         steps: &mut Vec<Step>,
     ) {
-        let awaiting = matches!(
-            self.state,
-            State::Unauthenticated | State::Sasl(Sasl::AwaitAuth)
-        );
-        if !awaiting || !self.dialback_permitted || self.dialback_used {
+        let multiplexing = self.authentication == Some(StreamAuthentication::Dialback);
+        let awaiting = match self.state {
+            State::Unauthenticated | State::Sasl(Sasl::AwaitAuth) => true,
+            State::Established => multiplexing,
+            State::DialbackVerifying => true,
+            _ => false,
+        };
+        if !awaiting {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
-        let (source, destination) = match self.check_pair(from, to) {
+        let (source, destination) = match Self::request_pair(from, to) {
             Ok(pair) => pair,
             Err(condition) => return self.fail(steps, condition),
         };
         let (Some(key), Some(stream_id)) = (key, self.stream_id.clone()) else {
             return self.fail(steps, StreamErrorCondition::BadFormat);
         };
-        self.dialback_used = true;
+        if !self.admit_result_request() {
+            return self.fail(steps, StreamErrorCondition::PolicyViolation);
+        }
+        let refusal = if self.state == State::DialbackVerifying {
+            // One verification at a time: the owner holds one request.
+            Some(DialbackError::ResourceConstraint)
+        } else if !matches!(
+            self.config.admission.destination(&destination),
+            DestinationStatus::Served
+        ) {
+            Some(DialbackError::ItemNotFound)
+        } else if !self.config.admission.admits(&source, &destination)
+            || !self
+                .config
+                .admission
+                .permits_dialback(&source, &destination)
+        {
+            Some(DialbackError::NotAuthorized)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            // The domains are answered as the request named them, as the
+            // answer identifies the request (XEP-0220 §2.5).
+            steps.push(Step::Send(dialback::result_answer(
+                &destination,
+                &source,
+                DialbackOutcome::Error(error),
+            )));
+            return;
+        }
+        if self
+            .verified
+            .contains(&(source.clone(), destination.clone()))
+        {
+            // The pair is already verified; the answer repeats it.
+            steps.push(Step::Send(dialback::result_answer(
+                &destination,
+                &source,
+                DialbackOutcome::Valid,
+            )));
+            return;
+        }
+        self.resume = self.state;
+        self.pending = Some((source.clone(), destination.clone()));
         self.state = State::DialbackVerifying;
         steps.push(Step::VerifyDialback(DialbackRequest {
             source,
@@ -390,10 +467,12 @@ impl Receiving {
     }
 
     /// A verification request to this server as the Authoritative Server
-    /// (XEP-0220 §2.2.2): only over TLS, after the post-TLS features, from
-    /// the stream's source about a key this deployment issued to it from
-    /// the stream's destination. Keys are checked without state, so a key
-    /// issued by any replica holding the deployment's secret verifies.
+    /// (XEP-0220 §2.2.2): only over TLS, after the post-TLS features, about
+    /// a key this deployment issued from the request's Target Domain. A
+    /// domain this server does not serve, or a pair its policy refuses, is
+    /// a dialback error and the stream stays open. Keys are checked without
+    /// state, so a key issued by any replica holding the deployment's
+    /// secret verifies.
     fn on_verify_request(
         &mut self,
         from: &HeaderAddress,
@@ -412,7 +491,7 @@ impl Receiving {
         if !after_features {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
         }
-        let (receiving, originating) = match self.check_pair(from, to) {
+        let (receiving, originating) = match Self::request_pair(from, to) {
             Ok(pair) => pair,
             Err(condition) => return self.fail(steps, condition),
         };
@@ -421,6 +500,25 @@ impl Receiving {
         };
         if !self.admit_verify_request() {
             return self.fail(steps, StreamErrorCondition::PolicyViolation);
+        }
+        let refusal = if !matches!(
+            self.config.admission.destination(&originating),
+            DestinationStatus::Served
+        ) {
+            Some(DialbackError::ItemNotFound)
+        } else if !self.config.admission.admits(&receiving, &originating) {
+            Some(DialbackError::NotAuthorized)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            steps.push(Step::Send(dialback::verify_error(
+                &originating,
+                &receiving,
+                &id,
+                error,
+            )));
+            return;
         }
         let valid = keys.verify(&receiving, &originating, &id, &key);
         steps.push(Step::Send(dialback::verify_answer(
@@ -436,38 +534,56 @@ impl Receiving {
     /// were answered within the last [`VERIFY_WINDOW`].
     fn admit_verify_request(&mut self) -> bool {
         let now = self.config.clock.now();
-        while self
-            .verify_requests
-            .front()
-            .is_some_and(|answered| now.saturating_duration_since(*answered) >= VERIFY_WINDOW)
-        {
-            self.verify_requests.pop_front();
-        }
-        if self.verify_requests.len() >= MAX_VERIFY_REQUESTS {
-            return false;
-        }
-        self.verify_requests.push_back(now);
-        true
+        admit(
+            &mut self.verify_requests,
+            now,
+            VERIFY_WINDOW,
+            MAX_VERIFY_REQUESTS,
+        )
     }
 
-    /// The owner's verification of the stream's dialback key. A valid key
-    /// establishes the stream without a restart (XEP-0220 §2.2.1); an
-    /// invalid one, or one that could not be verified, is answered and the
-    /// stream closes, as it carries no other pair.
+    /// Count one more key request, unless [`MAX_RESULT_REQUESTS`] were
+    /// handled within the last [`RESULT_WINDOW`].
+    fn admit_result_request(&mut self) -> bool {
+        let now = self.config.clock.now();
+        admit(
+            &mut self.result_requests,
+            now,
+            RESULT_WINDOW,
+            MAX_RESULT_REQUESTS,
+        )
+    }
+
+    /// The owner's verification of the pending pair's dialback key. A valid
+    /// key establishes the pair without a restart (XEP-0220 §2.2.1). An
+    /// invalid key on a stream that carries no verified pair is answered
+    /// `invalid` and closes the stream, as the spec requires; on one that
+    /// carries verified pairs the answer is a `forbidden` dialback error and
+    /// the stream stays open. A key that could not be verified is a
+    /// dialback error and never closes the stream (XEP-0220 §2.5).
     fn on_dialback_outcome(&mut self, outcome: DialbackOutcome, steps: &mut Vec<Step>) {
         if self.state != State::DialbackVerifying {
             return;
         }
-        let Some((source, destination)) = self.pair.clone() else {
+        let Some((source, destination)) = self.pending.take() else {
             return self.fail(steps, StreamErrorCondition::InternalServerError);
+        };
+        let first = self.verified.is_empty();
+        let answer = match outcome {
+            DialbackOutcome::Invalid if !first => DialbackOutcome::Error(DialbackError::Forbidden),
+            other => other,
         };
         steps.push(Step::Send(dialback::result_answer(
             &destination,
             &source,
-            outcome,
+            answer,
         )));
         match outcome {
             DialbackOutcome::Valid => {
+                self.verified.push((source.clone(), destination.clone()));
+                if first {
+                    self.authentication = Some(StreamAuthentication::Dialback);
+                }
                 steps.push(Step::Established(NegotiatedStream {
                     role: Role::Receiving,
                     source,
@@ -476,8 +592,8 @@ impl Receiving {
                 }));
                 self.state = State::Established;
             }
-            DialbackOutcome::Invalid => self.close(steps, CloseReason::DialbackRefused),
-            DialbackOutcome::Error(_) => self.close(steps, CloseReason::DialbackFailed),
+            DialbackOutcome::Invalid if first => self.close(steps, CloseReason::DialbackRefused),
+            DialbackOutcome::Invalid | DialbackOutcome::Error(_) => self.state = self.resume,
         }
     }
 
@@ -491,7 +607,14 @@ impl Receiving {
 
     fn on_element(&mut self, element: Element, pipelined: bool, steps: &mut Vec<Step>) {
         let element = classify(element, self.config.sasl.max_authzid_bytes);
-        match (self.state, element) {
+        // While a further pair is verified, the stream still carries the
+        // pairs it already verified (XEP-0220 §2.2.1).
+        let state = if self.state == State::DialbackVerifying && !self.verified.is_empty() {
+            State::Established
+        } else {
+            self.state
+        };
+        match (state, element) {
             (_, TopLevel::PeerStreamError(condition)) => {
                 self.close(steps, CloseReason::PeerStreamError(condition))
             }
@@ -649,19 +772,26 @@ impl Receiving {
     /// what preparation made of them, for the connection owner to answer
     /// with a `jid-malformed` stanza error.
     fn check_stanza(&self, mut stanza: Element) -> Result<Checked, StreamErrorCondition> {
-        let Some((source, destination)) = &self.pair else {
-            return Err(StreamErrorCondition::InternalServerError);
-        };
         let (Some(to), Some(from)) = (
             stanza_address(&stanza, "to"),
             stanza_address(&stanza, "from"),
         ) else {
             return Err(StreamErrorCondition::ImproperAddressing);
         };
-        if to.address.domain().as_str() != destination.as_str() {
+        // The stream carries the pairs it verified; a stanza for any other
+        // pair is refused (RFC 6120 §4.9.3.6, §4.9.3.7 and §4.9.3.9).
+        let to_domain = to.address.domain().as_str();
+        let from_domain = from.address.domain().as_str();
+        if !self
+            .verified
+            .iter()
+            .any(|(_, destination)| destination.as_str() == to_domain)
+        {
             return Err(StreamErrorCondition::HostUnknown);
         }
-        if from.address.domain().as_str() != source.as_str() {
+        if !self.verified.iter().any(|(source, destination)| {
+            source.as_str() == from_domain && destination.as_str() == to_domain
+        }) {
             return Err(StreamErrorCondition::InvalidFrom);
         }
         let malformed = to.refused || from.refused;
@@ -710,6 +840,22 @@ impl Receiving {
         steps.push(Step::Close(reason));
         self.state = State::Closed;
     }
+}
+
+/// Count one more request in `window`, unless `limit` were counted within
+/// the last `window` before `now`.
+fn admit(requests: &mut VecDeque<Instant>, now: Instant, window: Duration, limit: usize) -> bool {
+    while requests
+        .front()
+        .is_some_and(|counted| now.saturating_duration_since(*counted) >= window)
+    {
+        requests.pop_front();
+    }
+    if requests.len() >= limit {
+        return false;
+    }
+    requests.push_back(now);
+    true
 }
 
 /// The outcome of [`Receiving::check_stanza`] for a stanza whose

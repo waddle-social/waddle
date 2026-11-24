@@ -122,10 +122,13 @@ JIDs. Both issues must be resolved before remote grants can be used.
   or unauthenticated fallback is permitted; a TLS failure never leads to a
   plaintext retry.
 - Streams are directional; XEP-0288 bidirectional streams are outside this
-  profile. Each stream carries exactly one authenticated source and target
-  domain pair. Waddle neither accepts nor initiates XEP-0220 multiplexing of
-  further sender or target domains onto a stream. Authenticating one domain, or
-  a parent domain, does not authorize another domain, subdomain or component.
+  profile. A stream authenticated by SASL EXTERNAL carries exactly one
+  authenticated source and target domain pair, and an Initiating Server never
+  multiplexes further pairs onto its stream. A Receiving Server accepts XEP-0220
+  multiplexing on a stream authenticated by dialback: each further pair is
+  admitted, verified and registered on its own, and the stream carries stanzas
+  only for the pairs it verified. Authenticating one domain, or a parent
+  domain, does not authorize another domain, subdomain or component.
 - [The handshake design](../planning/s2s-handshake-2047.md) and
   [the verifier design](../planning/s2s-verifier-2047.md) specify which
   component terminates TLS, verifies the peer and authorizes SASL, and how
@@ -276,9 +279,9 @@ JIDs. Both issues must be resolved before remote grants can be used.
 - Each stream records its authentication strength. A domain pair
   authenticated by dialback is `dialback` even if a certificate on that stream
   or on the verification connection validated; Waddle does not implement
-  dialback that skips the key check because a certificate validated. Because a
-  stream carries exactly one domain pair, the strength is a property of the
-  stream. It travels with every stanza from the stream into the remote
+  dialback that skips the key check because a certificate validated. Because
+  only a dialback stream carries more than one domain pair and all its pairs
+  are authenticated by dialback, the strength is a property of the stream. It travels with every stanza from the stream into the remote
   principal and into the protected-effect admission witness (G17). Under D8,
   privileged authority and room moderation are never honored on a
   dialback-only stream, whatever grants are stored. Host policy may
