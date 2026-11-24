@@ -61,6 +61,12 @@ mod imp {
         #[template_child]
         pub room_list: TemplateChild<gtk::ListBox>,
         #[template_child]
+        pub inbox_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub inbox_cards: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub inbox_mark_all: TemplateChild<gtk::Button>,
+        #[template_child]
         pub room_page: TemplateChild<adw::NavigationPage>,
         #[template_child]
         pub room_title: TemplateChild<adw::WindowTitle>,
@@ -156,6 +162,8 @@ mod imp {
         pub rows: RefCell<Option<gio::ListStore>>,
         /// Pins, search and jumps (see ui/message_tools.rs).
         pub tools: RefCell<crate::ui::message_tools::ToolsState>,
+        /// The unread overview (see ui/inbox.rs).
+        pub inbox: RefCell<crate::ui::inbox::InboxState>,
     }
 
     #[glib::object_subclass]
@@ -182,6 +190,7 @@ mod imp {
             self.parent_constructed();
             let window = self.obj().clone();
             window.setup_timeline();
+            window.setup_inbox();
             glib::spawn_future_local(async move { window.restore().await });
         }
 
@@ -302,6 +311,16 @@ impl WaddleWindow {
         if let Some(conversation) = self.conversation_at(row.index()) {
             self.open_conversation(&conversation.key());
         }
+    }
+
+    #[template_callback]
+    fn on_inbox_activated(&self) {
+        self.show_inbox();
+    }
+
+    #[template_callback]
+    fn on_inbox_mark_all(&self) {
+        self.mark_all_inbox_read();
     }
 
     #[template_callback]

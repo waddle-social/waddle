@@ -51,7 +51,7 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Group DMs: create, rename, add, leave | 0045 | ❌ | rooms |
 | Room invites | 0045 | ❌ | rooms (needs core verb, tracked with Apple #2456) |
 | Forum rooms | | ❌ | rooms |
-| Inbox / unread overview (`/unread`) | 0430 | 🟡 | inbox |
+| Inbox / unread overview (`/unread`) | 0430 | 🟡 | Inbox in the sidebar with a total badge: one card per room or DM, newest first, with unread messages and unread thread replies (room threads read with the Waddle MAM thread filter, sub-threads as their own rows), @ mention badges, Mark Read per card and Mark All Read, live updates. Opening a card or message jumps to it. Not run against a live server; DM threads are filtered locally, and mentions in unread history are only known for rooms |
 | Notify modes and mute | 0492 | 🟡 | Header bell menu sets all, mentions only or mute per room and DM, stored on the account; muted rows show an icon and notify nothing. No sidebar context menu; a mode changed on another device shows here at the next reconnect |
 | Desktop notifications with reply and mark-read actions | | 🟡 | One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |
 | @-mentions, slash commands, extension commands | 0372, 0050 | 🟡 | composer |

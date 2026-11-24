@@ -226,6 +226,7 @@ impl WaddleWindow {
         imp.loading_history.replace(Default::default());
         self.reset_message_tools();
         self.refresh_message_tools();
+        self.reset_inbox();
         self.cancel_compose();
         imp.profile.reset();
         self.refresh_account_row();
@@ -440,6 +441,7 @@ impl WaddleWindow {
             .borrow_mut()
             .entry(conversation.clone())
             .or_default() += 1;
+        self.inbox_arrival(&conversation, mentions_me);
         self.render_conversations();
         self.announce_arrival(&destination, mentions_me, &sender, &body);
     }
@@ -497,7 +499,12 @@ impl WaddleWindow {
                 .pending_open
                 .take()
                 .or_else(|| imp.current.borrow().clone())
-                .or_else(|| imp.conversations.borrow().first().map(Conversation::key));
+                .or_else(|| {
+                    // The overview stays up across a reconnect.
+                    (!window.inbox_open())
+                        .then(|| imp.conversations.borrow().first().map(Conversation::key))
+                        .flatten()
+                });
             if let Some(jid) = target {
                 window.open_conversation(&jid);
             }
@@ -547,6 +554,7 @@ impl WaddleWindow {
             }
         }
         self.withdraw_read_notifications();
+        self.inbox_changed();
     }
 
     pub(super) fn conversation_at(&self, index: i32) -> Option<Conversation> {
@@ -588,6 +596,7 @@ impl WaddleWindow {
         imp.room_page.set_title(&conversation.name);
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
+        self.leave_inbox();
         imp.content_stack.set_visible_child_name("timeline");
         self.ensure_room_joined(&conversation);
         self.refresh_composer();
