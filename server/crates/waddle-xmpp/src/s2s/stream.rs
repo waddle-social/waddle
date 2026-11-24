@@ -32,7 +32,9 @@ pub enum Output {
     /// Decide SASL EXTERNAL authorization and answer with
     /// [`S2sStream::authorization`].
     Authorize(AuthorizationRequest),
-    /// Negotiation completed for this directional domain pair.
+    /// Negotiation completed for this directional domain pair. An inbound
+    /// stream authenticated by dialback reports this again for each further
+    /// pair it verifies (XEP-0220 §2.2.1).
     Established(NegotiatedStream),
     /// A stanza from the established receiving stream that passed the
     /// stream's address checks, for the connection owner to accept or

@@ -179,8 +179,13 @@ pub(super) struct Session {
     /// when it arrives; this covers a stream that ends without one.
     awaiting_dialback_result: bool,
     negotiation: Option<NegotiationSlot>,
-    registered: Option<StreamSlot>,
-    peer_stream: Option<VerifiedPeerStream>,
+    /// The registered streams: an outbound connection and an inbound
+    /// SASL EXTERNAL one carry one pair, an inbound dialback connection one
+    /// for each pair it verified (XEP-0220 §2.2.1).
+    registered: Vec<StreamSlot>,
+    peer_streams: Vec<VerifiedPeerStream>,
+    /// The local and remote domain whose dialback key is being verified.
+    pending_pair: Option<(CanonicalDomain, CanonicalDomain)>,
     /// Stanzas for an established outbound stream.
     outbox: Option<OutboxReceiver>,
     tls_transport: S2sTransport,
@@ -238,8 +243,9 @@ impl Session {
             pending_dialback: None,
             awaiting_dialback_result: false,
             negotiation: None,
-            registered: None,
-            peer_stream: None,
+            registered: Vec::new(),
+            peer_streams: Vec::new(),
+            pending_pair: None,
             outbox: None,
             tls_transport: start.tls_transport,
             shutdown_sent: false,
@@ -612,15 +618,15 @@ impl Session {
             Output::VerifyVerdict(_) => Ok(Vec::new()),
             Output::Established(negotiated) => self.established(negotiated),
             Output::Stanza(stanza) => {
-                let verdict = match &self.peer_stream {
-                    Some(stream) => self.shared.sink.offer(stream, stanza),
+                let verdict = match self.stream_for(&stanza) {
+                    Some(stream) => self.shared.sink.offer(&stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
                 self.sink_verdict(verdict, Signal::PolicyViolation).await
             }
             Output::MalformedAddress(stanza) => {
-                let verdict = match &self.peer_stream {
-                    Some(stream) => self.shared.sink.offer_malformed(stream, stanza),
+                let verdict = match self.stream_for(&stanza) {
+                    Some(stream) => self.shared.sink.offer_malformed(&stream, stanza),
                     None => SinkVerdict::Refuse,
                 };
                 self.sink_verdict(verdict, Signal::ImproperAddressing).await
@@ -647,6 +653,21 @@ impl Session {
                 Err(self.close_outcome(reason))
             }
         }
+    }
+
+    /// The registered stream for the pair a stanza's addresses name: its
+    /// `to` at the stream's local domain and its `from` at the remote one.
+    /// The codec has checked both against the pairs the stream verified.
+    fn stream_for(&self, stanza: &minidom::Element) -> Option<VerifiedPeerStream> {
+        let domain = |name: &str| {
+            let address: jid::Jid = stanza.attr(name)?.parse().ok()?;
+            Some(address.domain().as_str().to_owned())
+        };
+        let (to, from) = (domain("to")?, domain("from")?);
+        self.peer_streams
+            .iter()
+            .find(|stream| stream.local().as_str() == to && stream.remote().as_str() == from)
+            .cloned()
     }
 
     /// Act on what the sink did with a stanza: a refusal closes the stream
@@ -807,11 +828,22 @@ impl Session {
         if self.direction != StreamDirection::Inbound {
             return self.stream.signal(Signal::PolicyViolation);
         }
-        if let Err(signal) = self.dialback_admissible(&request.destination, &request.source) {
-            return self.stream.signal(signal);
+        // A pair this server refuses is a dialback error, not a stream
+        // error: the stream may carry other pairs (XEP-0220 §2.5).
+        if let Err(error) = self.dialback_admissible(&request.destination, &request.source) {
+            telemetry::dialback(S2sDialbackRole::Receiving, S2sDialbackResult::Error);
+            return self.stream.dialback(DialbackOutcome::Error(error));
         }
+        self.pending_pair = Some((request.destination.clone(), request.source.clone()));
         let deadlines = self.shared.config.deadlines();
-        let deadline = (Instant::now() + deadlines.dialback).min(self.negotiation_deadline);
+        let deadline = Instant::now() + deadlines.dialback;
+        // The negotiation's own limit bounds the stream's first pair only;
+        // a further pair on an established stream has the dialback deadline.
+        let deadline = if self.peer_streams.is_empty() {
+            deadline.min(self.negotiation_deadline)
+        } else {
+            deadline
+        };
         let (sender, receiver) = oneshot::channel();
         let shared = Arc::clone(&self.shared);
         let verification = async move {
@@ -837,34 +869,35 @@ impl Session {
     /// admissible when the answer arrives; one that no longer is counts as
     /// an error, not as a valid key.
     fn dialback_verified(&mut self, outcome: DialbackOutcome) -> Vec<Output> {
+        let mut outcome = outcome;
         if outcome == DialbackOutcome::Valid {
-            let admissible = match self.pair() {
+            let admissible = match self.pending_pair.take() {
                 Some((local, remote)) => self.dialback_admissible(&local, &remote),
-                None => Err(Signal::PolicyViolation),
+                None => Err(DialbackError::NotAuthorized),
             };
-            if let Err(signal) = admissible {
-                telemetry::dialback(S2sDialbackRole::Receiving, S2sDialbackResult::Error);
-                return self.stream.signal(signal);
+            if let Err(error) = admissible {
+                outcome = DialbackOutcome::Error(error);
             }
         }
+        self.pending_pair = None;
         telemetry::dialback(S2sDialbackRole::Receiving, outcome_result(outcome));
         self.stream.dialback(outcome)
     }
 
     /// Whether an inbound stream from `remote` to `local` may still be
-    /// authenticated by dialback and registered.
+    /// authenticated by dialback and registered, or the dialback error that
+    /// refuses it.
     fn dialback_admissible(
         &mut self,
         local: &CanonicalDomain,
         remote: &CanonicalDomain,
-    ) -> Result<(), Signal> {
+    ) -> Result<(), DialbackError> {
         let config = Arc::clone(&self.shared.config);
-        if !config.is_local(local)
-            || config.admission().decide(remote).is_err()
-            || !config.permits_inbound_dialback(remote)
-        {
-            self.admission_refused = true;
-            return Err(Signal::PolicyViolation);
+        if !config.is_local(local) {
+            return Err(DialbackError::ItemNotFound);
+        }
+        if config.admission().decide(remote).is_err() || !config.permits_inbound_dialback(remote) {
+            return Err(DialbackError::NotAuthorized);
         }
         let reserved = config.admission().is_reserved_peer(remote);
         self.shared
@@ -876,7 +909,14 @@ impl Session {
                 AuthenticationStrength::Dialback,
                 reserved,
             )
-            .map_err(|refusal| self.refused(refusal))
+            .map_err(|refusal| match refusal {
+                // A stronger stream already carries the pair.
+                RegisterRefusal::Conflict => DialbackError::NotAuthorized,
+                RegisterRefusal::Full(resource) => {
+                    telemetry::capacity_refused(self.direction, resource);
+                    DialbackError::ResourceConstraint
+                }
+            })
     }
 
     /// The signal that closes a stream the registry refused.
@@ -942,9 +982,11 @@ impl Session {
         };
         match self.shared.registry.register(registration) {
             Ok(slot) => {
-                self.registered = Some(slot);
-                self.peer_stream = Some(stream);
-                self.outbox = receiver;
+                self.registered.push(slot);
+                self.peer_streams.push(stream);
+                if receiver.is_some() {
+                    self.outbox = receiver;
+                }
                 Ok(())
             }
             Err(refusal) => Err(self.refused(refusal)),
@@ -966,7 +1008,14 @@ impl Session {
             StreamDirection::Inbound => (negotiated.destination, negotiated.source),
             StreamDirection::Outbound => (negotiated.source, negotiated.destination),
         };
-        let verified = self.verified.clone();
+        // A certificate proves its own domain only: a pair that dialback
+        // authenticated for another domain (XEP-0220 §2.2.1 allows several
+        // pairs per stream) has no certificate evidence.
+        let verified = self.verified.clone().filter(|verified| {
+            strength != AuthenticationStrength::Dialback
+                || self.direction == StreamDirection::Outbound
+                || verified.domain() == &remote
+        });
         let certificate_required =
             strength == AuthenticationStrength::Pkix || self.direction == StreamDirection::Outbound;
         match &verified {
@@ -987,10 +1036,17 @@ impl Session {
                 }
             }
         }
+        // A further pair verified on an established inbound dialback
+        // stream: registered beside the first, which already did the
+        // stream-level bookkeeping.
+        let further = !self.peer_streams.is_empty();
         if let Err(signal) = self.register(local, remote, strength, verified.as_ref()) {
             return Ok(self.stream.signal(signal));
         }
-        let Some(stream) = self.peer_stream.clone() else {
+        if further {
+            return Ok(Vec::new());
+        }
+        let Some(stream) = self.peer_streams.last().cloned() else {
             return Err(S2sOutcome::Protocol);
         };
         self.negotiation = None;
@@ -1058,6 +1114,11 @@ impl Session {
         }
         let now = Instant::now();
         let deadlines = self.shared.config.deadlines();
+        if !is_dialback_exchange(phase) {
+            // The next dialback exchange, such as one that follows a
+            // dialback error, gets its own deadline.
+            self.dialback_deadline = None;
+        }
         if is_sasl(phase) {
             if self.sasl_deadline.is_none() {
                 self.sasl_deadline = Some(now + deadlines.sasl);
@@ -1131,7 +1192,8 @@ impl Session {
             CloseReason::PeerClosed => S2sOutcome::PeerClosed,
             CloseReason::SaslFailure(_) if self.admission_refused => S2sOutcome::Admission,
             CloseReason::TlsRefused => S2sOutcome::Tls,
-            CloseReason::DialbackRefused | CloseReason::DialbackFailed => S2sOutcome::Dialback,
+            CloseReason::DialbackRefused => S2sOutcome::DialbackRefused,
+            CloseReason::DialbackFailed => S2sOutcome::Dialback,
             CloseReason::VerificationComplete => S2sOutcome::Verified,
             CloseReason::SaslFailure(_)
             | CloseReason::SaslExhausted
@@ -1194,9 +1256,9 @@ impl Session {
             "s2s connection ended"
         );
         // Unregister before reporting the new stream count.
-        self.registered = None;
+        self.registered.clear();
         telemetry::stream_counts(&self.shared.registry);
-        if let Some(stream) = self.peer_stream.take() {
+        for stream in std::mem::take(&mut self.peer_streams) {
             self.shared.sink.stream_ended(
                 &stream,
                 stream_end(outcome, self.lost, self.peer_idle_close),
@@ -1231,7 +1293,8 @@ fn stream_end(outcome: S2sOutcome, lost: bool, peer_idle_close: bool) -> StreamE
         | S2sOutcome::PeerError
         | S2sOutcome::Admission
         | S2sOutcome::Certificate
-        | S2sOutcome::Dialback => StreamEnd::Lost,
+        | S2sOutcome::Dialback
+        | S2sOutcome::DialbackRefused => StreamEnd::Lost,
         S2sOutcome::Established
         | S2sOutcome::Capacity
         | S2sOutcome::Redirected
@@ -1265,6 +1328,7 @@ pub(super) fn is_peer_failure(outcome: S2sOutcome) -> bool {
         S2sOutcome::Certificate
             | S2sOutcome::Tls
             | S2sOutcome::Dialback
+            | S2sOutcome::DialbackRefused
             | S2sOutcome::Protocol
             | S2sOutcome::PeerError
             | S2sOutcome::Redirected

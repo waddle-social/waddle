@@ -17,6 +17,7 @@ use tokio_util::task::TaskTracker;
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::identity::{enforce_stanza_addresses, CanonicalDomain};
 use waddle_xmpp::s2s::into_client_content;
+use waddle_xmpp::telemetry::attributes::S2sOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::disco::{DiscoInfoResult, DiscoItemsResult, Feature, Identity};
@@ -609,6 +610,10 @@ enum Failure {
     /// A route exists but no stream could carry the request in time
     /// (RFC 6120 §10.4.3).
     Timeout,
+    /// The remote server refused this server's identity, as Server
+    /// Dialback reports it with `type='invalid'`; retrying the peer does
+    /// not help (XEP-0220 §2.1.1).
+    Refused,
     /// The same request is already pending.
     Duplicate,
     /// The request's addresses or id are too long to correlate.
@@ -628,8 +633,12 @@ impl Failure {
             ConnectError::ShuttingDown
             | ConnectError::BackingOff
             | ConnectError::InProgress
-            | ConnectError::Busy
-            | ConnectError::Failed(_) => Self::Timeout,
+            | ConnectError::Busy => Self::Timeout,
+            // The peer rejected this server's identity: the sender's
+            // request is returned with `internal-server-error`, not retried
+            // as a transient failure (XEP-0220 §2.1.1).
+            ConnectError::Failed(S2sOutcome::DialbackRefused) => Self::Refused,
+            ConnectError::Failed(_) => Self::Timeout,
             // The process's rate of new outbound connections is spent, not
             // the peer's: nothing was dialled and no backoff is recorded,
             // so the sender may try again once the rate refills.
@@ -648,6 +657,11 @@ impl Failure {
                 ErrorType::Wait,
                 DefinedCondition::RemoteServerTimeout,
                 "No stream to the remote domain could be established in time.",
+            ),
+            Self::Refused => (
+                ErrorType::Cancel,
+                DefinedCondition::InternalServerError,
+                "The remote server did not accept this server's identity.",
             ),
             Self::Duplicate => (
                 ErrorType::Modify,

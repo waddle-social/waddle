@@ -365,6 +365,18 @@ enum PostTlsOffer {
     RefusedExternal,
 }
 
+/// What the hand-written receiving server answers home-a's key with.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// Verify the key with home-a and relay the Authoritative Server's
+    /// answer.
+    Relay,
+    /// `type='invalid'`, without asking.
+    Invalid,
+    /// `type='error'` with `remote-connection-failed`, without asking.
+    Error,
+}
+
 /// A receiving server for home-b.test on `listener` that offers
 /// `post_tls` after TLS, takes home-a's dialback key, verifies it with
 /// home-a at `authoritative` on a connection without a client
@@ -375,6 +387,7 @@ fn receiving_server(
     listener: TcpListener,
     authoritative: SocketAddr,
     post_tls: PostTlsOffer,
+    verdict: Verdict,
     release: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<ReceivingServerReport> {
     let acceptor = TlsAcceptor::from(Arc::new(pki.server_config(HOME_B, &[])));
@@ -433,6 +446,29 @@ fn receiving_server(
         assert_eq!(result.attr("from"), Some(HOME_A));
         assert_eq!(result.attr("to"), Some(HOME_B));
         let key = result.text();
+
+        match verdict {
+            Verdict::Relay => {}
+            Verdict::Invalid | Verdict::Error => {
+                let answer = dialback_element("result", HOME_B, HOME_A);
+                let answer = match verdict {
+                    Verdict::Error => answer.attr(xml_ncname!("type").to_owned(), "error").append(
+                        Element::builder("error", "jabber:server")
+                            .attr(xml_ncname!("type").to_owned(), "cancel")
+                            .append(Element::builder("remote-connection-failed", STANZAS).build())
+                            .build(),
+                    ),
+                    _ => answer.attr(xml_ncname!("type").to_owned(), "invalid"),
+                };
+                write_element(&mut tls, &mut encoder, &answer.build()).await;
+                let _ = release.await;
+                drop(tls);
+                return ReceivingServerReport {
+                    verified: None,
+                    tried_external,
+                };
+            }
+        }
 
         // XEP-0220 §2.1.2: ask home-a's Authoritative Server.
         let socket = starttls(authoritative, HOME_B, HOME_A).await;
@@ -495,6 +531,7 @@ async fn a_deployment_authenticates_itself_by_dialback_where_external_is_not_off
         peer_listener,
         address_a,
         PostTlsOffer::Dialback,
+        Verdict::Relay,
         released,
     );
     let stream = tokio::time::timeout(WAIT, a.handle.connect(&domain(HOME_A), &domain(HOME_B)))
@@ -533,6 +570,7 @@ async fn a_deployment_authenticates_itself_by_dialback_after_external_is_refused
         peer_listener,
         address_a,
         PostTlsOffer::RefusedExternal,
+        Verdict::Relay,
         released,
     );
     let stream = tokio::time::timeout(WAIT, a.handle.connect(&domain(HOME_A), &domain(HOME_B)))
@@ -761,28 +799,11 @@ async fn a_dialback_stream_never_replaces_a_pkix_stream() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // A dialback attempt for the same pair is refused before any key is
-    // verified, with `conflict`, and the pkix stream stays.
+    // verified, with a `not-authorized` dialback error that leaves the
+    // stream open (XEP-0220 §2.5), and the pkix stream stays.
     let mut peer = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
-    let key = secret_key(HOME_B, HOME_A, &peer.stream_id);
-    let result = dialback_element("result", HOME_A, HOME_B)
-        .append(key)
-        .build();
-    write_element(&mut peer.tls, &mut peer.encoder, &result).await;
-    let (bytes, closed) = read_rest(&mut peer.tls, WAIT).await;
-    assert!(closed);
-    peer.decoder.push(&bytes).expect("input within the limits");
-    let mut conflict = false;
-    while let Ok(Some(item)) = peer.decoder.next_item() {
-        if let Inbound::Element(element) = item {
-            if element.is("error", STREAM) {
-                conflict = element.children().any(|child| child.name() == "conflict");
-            }
-        }
-    }
-    assert!(
-        conflict,
-        "home-b refuses the dialback stream with `conflict`"
-    );
+    let answer = send_key(&mut peer).await;
+    assert!(has_condition(&answer, "not-authorized"), "{answer:?}");
     assert_eq!(
         pkix(&b).map(|stream| stream.connection()),
         Some(kept),
@@ -824,4 +845,248 @@ async fn verifications_beyond_their_cap_are_a_resource_constraint() {
     assert!(has_condition(&answer, "resource-constraint"), "{answer:?}");
     assert!(dialback_stream(&b, HOME_A).is_none());
     held.abort();
+}
+
+/// The IQ a local resource of home-a.test sends to home-b.test.
+fn ping(id: &str) -> xmpp_parsers::iq::Iq {
+    xmpp_parsers::iq::Iq::Get {
+        from: Some("alice@home-a.test/phone".parse().expect("a JID")),
+        to: None,
+        id: id.to_owned(),
+        payload: Element::builder("ping", waddle_xmpp::xep::xep0199::NS_PING).build(),
+    }
+}
+
+/// XEP-0220 §2.1.1: after `type='invalid'` the Initiating Server "MUST
+/// return such stanzas to the respective senders at the Sender Domain with
+/// an <internal-server-error/> stanza error"; after `type='error'` with a
+/// timeout error (§2.5).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_key_returns_queued_stanzas_to_their_senders() {
+    use crate::routing_support::{correlation_database, start_routed, wait_for, ARRIVES};
+    use waddle_server::destination::IqOffer;
+    use waddle_server::s2s::route::RouterLimits;
+    use xmpp_parsers::iq::Iq;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
+
+    for (verdict, condition, type_) in [
+        (
+            Verdict::Invalid,
+            DefinedCondition::InternalServerError,
+            ErrorType::Cancel,
+        ),
+        (
+            Verdict::Error,
+            DefinedCondition::RemoteServerTimeout,
+            ErrorType::Wait,
+        ),
+    ] {
+        let pki = Pki::new();
+        let (peer_listener, peer_address) = listener().await;
+        let (listener_a, address_a) = listener().await;
+        let mut spec_a = Spec::new(HOME_A, HOME_B);
+        spec_a.endpoints = vec![(HOME_B, peer_address)];
+        spec_a.tables = outbound_dialback(&pki);
+        let a = start_routed(
+            &pki,
+            &spec_a,
+            listener_a,
+            correlation_database("xep0220-refused-key").await,
+            RouterLimits::default(),
+        )
+        .await;
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = receiving_server(
+            &pki,
+            peer_listener,
+            address_a,
+            PostTlsOffer::Dialback,
+            verdict,
+            released,
+        );
+        assert!(matches!(
+            a.offer_iq(HOME_B, ping("d1")).await,
+            IqOffer::Accepted
+        ));
+        let delivered = wait_for(ARRIVES, || a.delivery.iqs("d1").into_iter().next())
+            .await
+            .expect("the sender is answered");
+        let Iq::Error { error, .. } = &delivered.1 else {
+            panic!("an IQ error, got {:?}", delivered.1);
+        };
+        assert_eq!(error.defined_condition, condition);
+        assert_eq!(error.type_, type_);
+        let _ = release.send(());
+        let _ = server.await;
+    }
+}
+
+/// A sink that records the stanzas of every stream with the pair of the
+/// stream that carried each.
+#[derive(Default)]
+struct PairSink {
+    stanzas: std::sync::Mutex<Vec<(String, String, Element)>>,
+}
+
+impl PairSink {
+    fn pairs(&self) -> Vec<(String, String)> {
+        let stanzas = self.stanzas.lock().expect("a lock");
+        stanzas
+            .iter()
+            .map(|(local, remote, _)| (local.clone(), remote.clone()))
+            .collect()
+    }
+}
+
+impl waddle_server::s2s::conn::StanzaSink for PairSink {
+    fn offer(
+        &self,
+        stream: &VerifiedPeerStream,
+        stanza: Element,
+    ) -> waddle_server::s2s::conn::SinkVerdict {
+        self.stanzas.lock().expect("a lock").push((
+            stream.local().as_str().to_owned(),
+            stream.remote().as_str().to_owned(),
+            stanza,
+        ));
+        waddle_server::s2s::conn::SinkVerdict::Accepted
+    }
+}
+
+const MUC_A: &str = "muc.home-a.test";
+const MUC_B: &str = "muc.home-b.test";
+
+/// XEP-0220 §2.2.1: "The Receiving Server MUST continue to accept and
+/// process stanzas for already verified domain pairs, and MUST continue to
+/// process both <db:result/> and <db:verify/> elements." A peer that
+/// multiplexes a second domain pair over its dialback stream gets the pair
+/// verified and its stanzas delivered, a refused pair a dialback error, and
+/// a stanza for a pair nobody verified ends the stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_domain_pair_is_verified_on_the_same_stream() {
+    let pki = Pki::new();
+    let (listener_a, address_a) = listener().await;
+    let (listener_b, _) = listener().await;
+    let mut spec_a = Spec::new(HOME_A, HOME_B);
+    spec_a.local = vec![HOME_A, MUC_A];
+    spec_a.allow = vec![HOME_B, MUC_B];
+    spec_a.private = vec![HOME_B, MUC_B];
+    spec_a.tables = outbound_dialback(&pki);
+    let mut spec_b = Spec::new(HOME_B, HOME_A);
+    spec_b.local = vec![HOME_B, MUC_B];
+    spec_b.allow = vec![HOME_A, MUC_A];
+    spec_b.private = vec![HOME_A, MUC_A];
+    spec_b.endpoints = vec![(HOME_A, address_a), (MUC_A, address_a)];
+    spec_b.dialback = vec![HOME_A, MUC_A];
+    spec_b.tables = inbound_dialback();
+    let _a = start(&pki, &spec_a, listener_a).await;
+    let sink = Arc::new(PairSink::default());
+    let b = start_with(
+        &pki,
+        &spec_b,
+        listener_b,
+        ServiceOptions {
+            sink: sink.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut peer = without_certificate(&pki, b.address, HOME_A, HOME_B).await;
+    let answer = send_key(&mut peer).await;
+    assert_eq!(answer.attr("type"), Some("valid"));
+
+    // A key for a domain b does not serve is a dialback error; the stream
+    // stays.
+    let stray = dialback_element("result", HOME_A, "nowhere.home-b.test")
+        .append("0123abcd")
+        .build();
+    write_element(&mut peer.tls, &mut peer.encoder, &stray).await;
+    let answer = await_element(
+        &mut peer.tls,
+        &mut peer.decoder,
+        "result",
+        JABBER_SERVER_DIALBACK,
+    )
+    .await;
+    assert!(has_condition(&answer, "item-not-found"), "{answer:?}");
+    assert_eq!(answer.attr("from"), Some("nowhere.home-b.test"));
+    assert_eq!(answer.attr("to"), Some(HOME_A));
+
+    // A forged key for the second pair is refused without the stream or
+    // the first pair.
+    let forged = DialbackSecret::new(b"an impostor's secret, not home-a's at all")
+        .key(&domain(MUC_B), &domain(MUC_A), &peer.stream_id)
+        .expect("a key");
+    let result = dialback_element("result", MUC_A, MUC_B)
+        .append(forged.as_str())
+        .build();
+    write_element(&mut peer.tls, &mut peer.encoder, &result).await;
+    let answer = await_element(
+        &mut peer.tls,
+        &mut peer.decoder,
+        "result",
+        JABBER_SERVER_DIALBACK,
+    )
+    .await;
+    assert!(has_condition(&answer, "forbidden"), "{answer:?}");
+    assert!(dialback_stream(&b, MUC_A).is_none());
+
+    // The genuine key for the second pair is verified with home-a.test.
+    let key = secret_key(MUC_B, MUC_A, &peer.stream_id);
+    let result = dialback_element("result", MUC_A, MUC_B).append(key).build();
+    write_element(&mut peer.tls, &mut peer.encoder, &result).await;
+    let answer = await_element(
+        &mut peer.tls,
+        &mut peer.decoder,
+        "result",
+        JABBER_SERVER_DIALBACK,
+    )
+    .await;
+    assert_eq!(answer.attr("type"), Some("valid"), "{answer:?}");
+    assert_eq!(answer.attr("from"), Some(MUC_B));
+    assert_eq!(answer.attr("to"), Some(MUC_A));
+    assert!(eventually(WAIT, || dialback_stream(&b, MUC_A).is_some()).await);
+    assert!(
+        dialback_stream(&b, HOME_A).is_some(),
+        "the first pair stays"
+    );
+
+    // Each pair's stanzas reach the sink with their own pair's stream.
+    for (from, to) in [
+        ("alice@home-a.test", "bob@home-b.test"),
+        ("room@muc.home-a.test/nick", "room@muc.home-b.test"),
+    ] {
+        let message = Element::builder("message", "jabber:server")
+            .attr(xml_ncname!("from").to_owned(), from)
+            .attr(xml_ncname!("to").to_owned(), to)
+            .build();
+        write_element(&mut peer.tls, &mut peer.encoder, &message).await;
+    }
+    assert!(eventually(WAIT, || sink.pairs().len() == 2).await);
+    assert_eq!(
+        sink.pairs(),
+        vec![
+            (HOME_B.to_owned(), HOME_A.to_owned()),
+            (MUC_B.to_owned(), MUC_A.to_owned()),
+        ]
+    );
+
+    // A pair nobody verified: home-a.test to muc.home-b.test.
+    let message = Element::builder("message", "jabber:server")
+        .attr(xml_ncname!("from").to_owned(), "alice@home-a.test")
+        .attr(xml_ncname!("to").to_owned(), "room@muc.home-b.test")
+        .build();
+    write_element(&mut peer.tls, &mut peer.encoder, &message).await;
+    let (bytes, closed) = read_rest(&mut peer.tls, WAIT).await;
+    assert!(closed);
+    assert!(
+        elements_of(&[b"<stream:stream xmlns='jabber:server' xmlns:stream='http://etherx.jabber.org/streams'>".as_slice(), &bytes].concat())
+            .iter()
+            .any(|element| element.is("error", STREAM)
+                && element.children().any(|child| child.name() == "invalid-from")),
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(sink.pairs().len(), 2, "nothing more was delivered");
 }

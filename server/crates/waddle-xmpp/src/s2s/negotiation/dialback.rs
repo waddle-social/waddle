@@ -186,3 +186,19 @@ pub(crate) fn verdict(kind: DialbackType) -> Option<VerifyVerdict> {
         DialbackType::Request | DialbackType::Unknown => None,
     }
 }
+
+/// The Authoritative Server's dialback error for a verification request
+/// (XEP-0220 §2.2.2 and §2.5): `from` and `to` swapped from the request and
+/// its `id` copied. The stream stays open.
+pub(crate) fn verify_error(
+    from: &CanonicalDomain,
+    to: &CanonicalDomain,
+    id: &StreamId,
+    error: DialbackError,
+) -> Element {
+    builder("verify", from, to)
+        .attr(xml_ncname!("id").to_owned(), id.as_str())
+        .attr(xml_ncname!("type").to_owned(), "error")
+        .append(dialback_error(error))
+        .build()
+}

@@ -105,13 +105,24 @@ Common rules:
   Waddle never answers a verification request over a plaintext connection,
   so a peer that verifies keys without TLS, which XEP-0220 permits, cannot
   verify Waddle.
-- **One pair per stream.** A stream carries the pair its header named; a
-  dialback element naming another sender or target domain is
-  multiplexing, which Waddle neither accepts nor initiates (ADR-0020
-  transport decision), and ends the stream with `invalid-from` (another
-  sender) or `host-unknown` (another target), the conditions a stanza for
-  that pair gets. A missing or unparseable `from` or `to` is
-  `improper-addressing`.
+- **Pairs per stream.** An Initiating Server sends one key per stream, for
+  the pair its header named. A Receiving Server accepts further pairs on a
+  stream authenticated by dialback (XEP-0220 §2.2.1, multiplexing): each
+  `<db:result/>` names its own `from` and `to`, one key is verified at a
+  time, and the stream carries stanzas only for the pairs it verified; a
+  stanza for any other pair ends the stream with `host-unknown` (target
+  not carried) or `invalid-from` (pair not verified). A missing or
+  unparseable `from` or `to` is `improper-addressing`.
+- **Dialback errors are not stream errors** (XEP-0220 §2.5). A target domain
+  that is not served is `item-not-found`; a pair admission or dialback
+  policy refuses, or that a stronger stream already carries, is
+  `not-authorized`; a verification the owner cannot start for lack of
+  resources, or a second key while one is verified, is
+  `resource-constraint`; a key the Authoritative Server refused for a
+  further pair is `forbidden`. The stream stays open and takes further keys,
+  at most 16 key requests a minute, beyond which the stream ends with
+  `policy-violation`. An invalid key on a stream with no verified pair is
+  answered `invalid` and closes the stream.
 - **Unsolicited and uncorrelated elements** (XEP-0220 §4.1) end the stream
   with `policy-violation`: any `type` on an element received inbound (an
   inbound stream carries only requests), a `<db:result/>` result on an
@@ -345,7 +356,7 @@ document's review.
   is refused in every role.
 - A certificate that does not match the claimed domain is an active
   failure and never leads to dialback (D2, stricter than XEP-0178).
-- No sender or target multiplexing; no XEP-0288 bidirectionality.
+- No multiplexing by the Initiating Server; no XEP-0288 bidirectionality.
 - No periodic re-verification of a dialback stream; its maximum age ends
   it.
 

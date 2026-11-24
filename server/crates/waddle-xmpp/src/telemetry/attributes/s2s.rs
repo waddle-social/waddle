@@ -66,16 +66,19 @@ pub enum S2sOutcome {
     Shutdown,
     /// Reading from or writing to the socket failed.
     Io,
-    /// Server Dialback did not authenticate the pair: the key was refused
-    /// or could not be verified.
+    /// Server Dialback did not authenticate the pair: the key could not be
+    /// verified (`type='error'`).
     Dialback,
+    /// Server Dialback did not authenticate the pair: the Receiving Server
+    /// reported the key invalid (XEP-0220 §2.1.1, `type='invalid'`).
+    DialbackRefused,
     /// A dialback verification connection received its answer and closed.
     Verified,
 }
 
 impl S2sOutcome {
     /// Every value, for zero-registration and tests.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Established,
         Self::Capacity,
         Self::Admission,
@@ -92,6 +95,7 @@ impl S2sOutcome {
         Self::Shutdown,
         Self::Io,
         Self::Dialback,
+        Self::DialbackRefused,
         Self::Verified,
     ];
 }
@@ -120,6 +124,7 @@ impl MetricAttribute for S2sOutcome {
             Self::Shutdown => "shutdown",
             Self::Io => "io",
             Self::Dialback => "dialback",
+            Self::DialbackRefused => "dialback_refused",
             Self::Verified => "verified",
         }
     }
