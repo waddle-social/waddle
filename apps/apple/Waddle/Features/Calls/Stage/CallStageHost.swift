@@ -179,7 +179,7 @@ struct CallStageHost: View {
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             notice: media?.deviceNotice,
-            isSharingScreen: media?.canShareScreen == true ? media?.isScreenShareOn : nil,
+            isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
@@ -221,14 +221,16 @@ struct CallStageHost: View {
             toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
-            toggleScreenShare: { [media] in
+            toggleScreenShare: { [media, session] in
                 guard let media else { return }
                 Task {
-                    if media.isScreenShareOn {
+                    if media.isScreenShareOn || media.isScreenShareStarting {
                         await media.stopScreenShare()
                     } else {
                         // Refused: the stage's notice says so and there is nothing to pick.
-                        screenPicker = await media.screenSources()
+                        let sources = await media.screenSources()
+                        // The list is for the call it was asked from.
+                        if session.calls.state.sid == sid { screenPicker = sources }
                     }
                 }
             },

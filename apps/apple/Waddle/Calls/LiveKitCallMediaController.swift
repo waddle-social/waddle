@@ -29,9 +29,16 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var isScreenShareBlocked = false
     /// Our own shared screen, for the notice that shows us what everyone sees.
     private var ownScreenTrack: VideoTrack?
+    /// A pick is being published; the button already offers to stop it.
+    private(set) var isScreenShareStarting = false
+    /// The last pick could not be shared.
+    private(set) var didScreenShareFail = false
     #if os(macOS)
-    /// What the last listing found, so a pick can be handed to the capturer.
-    @ObservationIgnored private var listedScreenSources: [String: any MacOSScreenCaptureSource] = [:]
+    /// Shares and stops run one after another, in the order asked.
+    @ObservationIgnored private var screenShareWork: Task<Void, Never>?
+    /// Moves on with every ask, so a share that finishes starting can tell it is no longer wanted.
+    @ObservationIgnored private var screenShareGeneration = 0
+    @ObservationIgnored private var screenCaptureWatcher: ScreenCaptureWatcher?
     #endif
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
@@ -170,47 +177,60 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     var canShareScreen: Bool { true }
 
     func screenSources() async -> CallScreenSources? {
+        if didScreenShareFail { didScreenShareFail = false }
         // The first request shows the system's prompt and returns at once; the
         // listing below then fails until the person has allowed it.
         if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
-        do {
-            let displays = try await MacOSScreenCapturer.displaySources()
-            let windows = try await MacOSScreenCapturer.windowSources()
-            let main = CGMainDisplayID()
-            var listed: [String: any MacOSScreenCaptureSource] = [:]
-            var candidates = CallScreenCandidates()
-            for display in displays {
-                listed["screen:\(display.displayID)"] = display
-                candidates.screens.append(.init(
-                    number: display.displayID, width: display.width, height: display.height,
-                    isMain: display.displayID == main
-                ))
-            }
-            for window in windows {
-                listed["window:\(window.windowID)"] = window
-                candidates.windows.append(.init(
-                    number: window.windowID, title: window.title, application: window.owningApplication?.applicationName,
-                    bundleID: window.owningApplication?.bundleIdentifier, layer: window.windowLayer,
-                    isOnScreen: window.isOnScreen, width: window.frame.width, height: window.frame.height
-                ))
-            }
-            listedScreenSources = listed
-            if isScreenShareBlocked { isScreenShareBlocked = false }
-            return CallScreenSources(candidates, ownBundleID: Bundle.main.bundleIdentifier)
-        } catch {
-            listedScreenSources = [:]
+        guard let found = await capturableContent() else {
             // Refused, or not yet answered: either way there is nothing to pick from.
             isScreenShareBlocked = !CGPreflightScreenCaptureAccess()
             return isScreenShareBlocked ? nil : CallScreenSources(CallScreenCandidates(), ownBundleID: nil)
         }
+        if isScreenShareBlocked { isScreenShareBlocked = false }
+        return CallScreenSources(found.candidates, ownBundleID: Bundle.main.bundleIdentifier)
     }
 
     func shareScreen(_ source: CallScreenSource) async {
-        guard let room, room.connectionState == .connected, let capture = listedScreenSources[source.id] else { return }
-        await stopScreenShare()
-        guard self.room === room else { return }
+        // One at a time, in the order asked: a second pick waits for the
+        // first to be published and then replaces it.
+        screenShareGeneration += 1
+        let generation = screenShareGeneration
+        let earlier = screenShareWork
+        let work = Task { [weak self] in
+            await earlier?.value
+            await self?.startScreenShare(source, generation: generation)
+        }
+        screenShareWork = work
+        await work.value
+    }
+
+    func stopScreenShare() async {
+        // Overtakes a share that is still starting: it is taken down as soon as it is up.
+        screenShareGeneration += 1
+        let earlier = screenShareWork
+        let work = Task { [weak self] in
+            await earlier?.value
+            await self?.unpublishScreens()
+        }
+        screenShareWork = work
+        await work.value
+    }
+
+    private func startScreenShare(_ source: CallScreenSource, generation: Int) async {
+        guard generation == screenShareGeneration, let room else { return }
+        await unpublishScreens()
+        if didScreenShareFail { didScreenShareFail = false }
+        isScreenShareStarting = true
+        defer { isScreenShareStarting = false }
+        // Listed again now: the picker's list may be minutes old, and a
+        // screen is captured with the applications that exist when it is listed.
+        guard room.connectionState == .connected, let capture = await capturableContent()?.sources[source.id] else {
+            if self.room === room, generation == screenShareGeneration { didScreenShareFail = true }
+            return
+        }
         let track = await LocalVideoTrack.createMacOSScreenShareTrack(
-            source: capture, options: ScreenShareCaptureOptions(fps: Self.screenShareFPS, showCursor: true)
+            source: capture,
+            options: ScreenShareCaptureOptions(dimensions: .h1440_169, fps: Self.screenShareFPS, showCursor: true)
         )
         // As the web publishes a shared screen: VP9 with VP8 for those who
         // cannot decode it, up to 5 Mbps so dense text stays sharp, and
@@ -219,16 +239,59 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenShareEncoding: VideoEncoding(maxBitrate: 5_000_000, maxFps: Self.screenShareFPS),
             preferredCodec: .vp9, preferredBackupCodec: .vp8, degradationPreference: .maintainResolution
         )
-        _ = try? await room.localParticipant.publish(videoTrack: track, options: options)
-        if self.room === room { refreshTracks() }
+        let publication = try? await room.localParticipant.publish(videoTrack: track, options: options)
+        guard self.room === room, generation == screenShareGeneration else {
+            // The call ended, or the person stopped, while it was starting:
+            // the screen must not go on being captured for nobody.
+            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
+            _ = try? await track.stop()
+            return
+        }
+        guard publication != nil else {
+            _ = try? await track.stop()
+            didScreenShareFail = true
+            return
+        }
+        // The system, or the window closing, can end a capture without a word to the room.
+        let watcher = ScreenCaptureWatcher { [weak self] in
+            Task { @MainActor in await self?.stopScreenShare() }
+        }
+        track.capturer.delegates.add(delegate: watcher)
+        screenCaptureWatcher = watcher
+        refreshTracks()
     }
 
-    func stopScreenShare() async {
+    private func unpublishScreens() async {
+        screenCaptureWatcher = nil
         guard let room else { return }
         for publication in room.localParticipant.localVideoTracks where publication.source == .screenShareVideo {
             try? await room.localParticipant.unpublish(publication: publication)
         }
         if self.room === room { refreshTracks() }
+    }
+
+    /// What the system will let us capture now, or `nil` when it will not say.
+    private func capturableContent() async -> (candidates: CallScreenCandidates, sources: [String: any MacOSScreenCaptureSource])? {
+        guard let displays = try? await MacOSScreenCapturer.displaySources(),
+              let windows = try? await MacOSScreenCapturer.windowSources() else { return nil }
+        let main = CGMainDisplayID()
+        var sources: [String: any MacOSScreenCaptureSource] = [:]
+        var candidates = CallScreenCandidates()
+        for display in displays {
+            sources["screen:\(display.displayID)"] = display
+            candidates.screens.append(.init(
+                number: display.displayID, width: display.width, height: display.height, isMain: display.displayID == main
+            ))
+        }
+        for window in windows {
+            sources["window:\(window.windowID)"] = window
+            candidates.windows.append(.init(
+                number: window.windowID, title: window.title, application: window.owningApplication?.applicationName,
+                bundleID: window.owningApplication?.bundleIdentifier, layer: window.windowLayer,
+                isOnScreen: window.isOnScreen, width: window.frame.width, height: window.frame.height
+            ))
+        }
+        return (candidates, sources)
     }
 
     private static let screenShareFPS = 30
@@ -295,6 +358,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
+        // What was said about sharing the screen was said about that call.
+        if isScreenShareBlocked { isScreenShareBlocked = false }
+        if didScreenShareFail { didScreenShareFail = false }
+        #if os(macOS)
+        // A share still starting finds its call gone and lets the screen go.
+        screenShareGeneration += 1
+        screenCaptureWatcher = nil
+        #endif
         refreshTracks()
     }
 
@@ -475,6 +546,21 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if activeSpeakersLoudestFirst != speakers { activeSpeakersLoudestFirst = speakers }
     }
 }
+
+#if os(macOS)
+/// Tells when the capture of our shared screen stops by itself.
+private final class ScreenCaptureWatcher: NSObject, VideoCapturerDelegate, @unchecked Sendable {
+    private let stopped: @Sendable () -> Void
+
+    init(stopped: @escaping @Sendable () -> Void) {
+        self.stopped = stopped
+    }
+
+    func capturer(_: VideoCapturer, didUpdate state: VideoCapturer.CapturerState) {
+        if state == .stopped { stopped() }
+    }
+}
+#endif
 
 /// A screen someone shares: its picture, and the publication that tells one share from the next.
 private struct SharedScreen: Equatable {

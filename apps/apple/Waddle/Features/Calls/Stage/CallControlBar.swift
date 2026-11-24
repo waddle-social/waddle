@@ -53,6 +53,11 @@ struct CallControlBar: View {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
                 endButton
             }
+            // Narrower still, or with every button there is: sharing and the list of people go there too.
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
+                endButton
+            }
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
@@ -62,7 +67,7 @@ struct CallControlBar: View {
     private var toggles: some View { toggles(viewChoiceInMenu: false) }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool) -> some View {
+    private func toggles(viewChoiceInMenu: Bool, extrasInMenu: Bool = false) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -82,7 +87,8 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        if let isSharingScreen {
+        if let isSharingScreen, !extrasInMenu || isSharingScreen {
+            // A share in progress keeps its button whatever the width: stopping it must be one click away.
             CallControlButton(
                 title: isSharingScreen ? "Stop sharing" : "Share screen", symbol: "rectangle.inset.filled.and.person.filled",
                 tone: isSharingScreen ? .chosen : .plain, action: actions.toggleScreenShare
@@ -90,13 +96,15 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isSharingScreen ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        CallControlButton(
-            title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
-            tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
-        )
-        .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        if !extrasInMenu {
+            CallControlButton(
+                title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
+                tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
+            )
+            .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu)
+        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu)
     }
 
     // MARK: - Split, expanded, full screen
@@ -161,8 +169,14 @@ struct CallControlBar: View {
 
     // MARK: - More
 
-    private func more(withViewChoice: Bool) -> some View {
+    private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
         Menu {
+            if withExtras {
+                if isSharingScreen == false {
+                    Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
+                }
+                Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+            }
             if withViewChoice {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)

@@ -80,7 +80,7 @@ struct CallDock: View {
                 isCameraOn: media?.isCameraOn ?? false,
                 isHandRaised: session.calls.isHandRaised,
                 video: video,
-                notice: media?.deviceNotice,
+                notice: media?.dockNotice,
                 announcesChanges: !isInSheet,
                 actions: GroupCallDockActions(
                     leave: commands.hangUp, toggleMicrophone: commands.toggleMicrophone,
@@ -96,7 +96,7 @@ struct CallDock: View {
                 isMicrophoneOn: media?.isMicrophoneOn ?? false,
                 isCameraOn: media?.isCameraOn ?? false,
                 video: video,
-                notice: media?.deviceNotice,
+                notice: media?.dockNotice,
                 announcesChanges: !isInSheet,
                 actions: CallDockActions(
                     accept: commands.accept, decline: commands.decline, hangUp: commands.hangUp,

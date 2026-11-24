@@ -68,13 +68,6 @@ import Testing
         #expect(sources.windows.map(\.id) == ["window:5", "window:2", "window:4", "window:9"])
     }
 
-    @Test func aSourceGivesItsSystemNumberBack() {
-        #expect(CallScreenSources.number(of: "screen:42", kind: .screen) == 42)
-        #expect(CallScreenSources.number(of: "window:7", kind: .window) == 7)
-        #expect(CallScreenSources.number(of: "window:7", kind: .screen) == nil)
-        #expect(CallScreenSources.number(of: "screen:x", kind: .screen) == nil)
-    }
-
     @Test func nothingToShareIsEmpty() {
         #expect(CallScreenSources(CallScreenCandidates(), ownBundleID: nil).isEmpty)
     }

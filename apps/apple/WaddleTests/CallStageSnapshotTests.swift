@@ -286,13 +286,17 @@ final class CallStageSnapshotTests: XCTestCase {
         assertBar(size: .expanded)
     }
 
+    #if os(macOS)
+    // Only a Mac has the button.
     func testControlBarWithScreenShare() {
         assertBar(isHandRaised: false, isSharingScreen: false)
     }
 
+    /// Every button there is, in the narrowest stage: the list of people moves into More, and Stop sharing stays.
     func testControlBarWhileSharingTheScreen() {
         assertBar(isHandRaised: false, size: .expanded, isSharingScreen: true)
     }
+    #endif
 
     func testControlBarFullScreen() {
         assertBar(size: .immersive)

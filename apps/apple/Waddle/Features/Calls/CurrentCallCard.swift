@@ -14,6 +14,7 @@ struct CurrentCallCard: View {
         let expand: @MainActor () -> Void
         let toggleMicrophone: @MainActor () -> Void
         let toggleCamera: @MainActor () -> Void
+        var stopScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
         let hangUp: @MainActor () -> Void
     }
 
@@ -29,6 +30,8 @@ struct CurrentCallCard: View {
     var isCameraOn = false
     /// Something the person should know about their own devices, as when Waddle may not use one.
     var notice: String?
+    /// We are sharing our screen into this call, which goes on while we are elsewhere.
+    var isSharingScreen = false
     let actions: Actions
 
     var body: some View {
@@ -60,6 +63,23 @@ struct CurrentCallCard: View {
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warningText)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if isSharingScreen {
+                HStack(spacing: Theme.Spacing.s) {
+                    Circle()
+                        .fill(Theme.Colors.danger)
+                        .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
+                        .accessibilityHidden(true)
+                    Text("You’re sharing your screen")
+                        .huddleText(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Colors.fg)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("Stop", action: actions.stopScreenShare)
+                        .buttonStyle(.huddle(size: .small))
+                        .fixedSize()
+                        .accessibilityLabel(Text("Stop sharing your screen"))
+                }
             }
             // One row where the sidebar is wide enough; at its narrowest, and
             // with a finger's controls on an iPad, the way back and out take a row of their own.
@@ -216,6 +236,7 @@ struct CurrentCallCardHost: View {
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             notice: media?.deviceNotice,
+            isSharingScreen: media?.isScreenShareOn == true || media?.isScreenShareStarting == true,
             actions: .init(
                 returnToCall: { [model, navigation] in
                     // As the web does: back to the call as a split beside its conversation.
@@ -228,6 +249,7 @@ struct CurrentCallCardHost: View {
                 },
                 toggleMicrophone: commands.toggleMicrophone,
                 toggleCamera: commands.toggleCamera,
+                stopScreenShare: { [media] in Task { await media?.stopScreenShare() } },
                 hangUp: commands.hangUp
             )
         )

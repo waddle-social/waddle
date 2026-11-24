@@ -112,9 +112,4 @@ public struct CallScreenSources: Equatable, Sendable {
             }
     }
 
-    /// The system number behind a source's `id`, for the capturer.
-    public static func number(of id: String, kind: CallScreenSource.Kind) -> UInt32? {
-        let prefix = kind == .screen ? "screen:" : "window:"
-        return id.hasPrefix(prefix) ? UInt32(id.dropFirst(prefix.count)) : nil
-    }
 }
