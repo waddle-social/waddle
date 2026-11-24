@@ -371,11 +371,15 @@ async fn unread_only_filters_zero_unread_rows() {
         "unread-only must hide cleared conversations: {frames:?}"
     );
     let fin = parse_fin(frames.last().expect("fin"));
+    // XEP-0430 §Querying: `total` counts conversations within the inbox,
+    // not the filtered listing; the cleared conversation still counts.
     assert_eq!(
         fin.attr("total"),
-        Some("0"),
-        "unread-only filter drives total=0"
+        Some("1"),
+        "unread-only must not shrink the inbox-wide total"
     );
+    assert_eq!(fin.attr("unread"), Some("0"));
+    assert_eq!(fin.attr("all-unread"), Some("0"));
 
     let _ = primary.close().await;
     let _ = peer.close().await;
@@ -461,8 +465,8 @@ async fn rsm_max_pages_response_and_fin_carries_cursor() {
     let fin = parse_fin(frames.last().expect("fin"));
     assert_eq!(
         fin.attr("total"),
-        Some("2"),
-        "page total matches entry count"
+        Some("3"),
+        "total is inbox-wide, not the page size"
     );
     let set = fin
         .children()
@@ -473,6 +477,86 @@ async fn rsm_max_pages_response_and_fin_carries_cursor() {
             .any(|c| c.name() == "count" && c.ns() == NS_RSM),
         "RSM set has <count/>: {fin:?}"
     );
+
+    let _ = primary.close().await;
+    let _ = peer1.close().await;
+    let _ = peer2.close().await;
+    let _ = peer3.close().await;
+}
+
+#[tokio::test]
+async fn fin_counts_are_inbox_wide_regardless_of_page() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        (PEER_USER, PEER_PASSWORD),
+        ("peer2", "peer2-password"),
+        ("peer3", "peer3-password"),
+    ]);
+    let mut primary = primary_client(&server, "ib-cnt").await;
+    let mut peer1 = peer_client(&server, "ib-cnt-p1").await;
+    let mut peer2 = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "peer2",
+        "peer2-password",
+        "ib-cnt-p2",
+    )
+    .await
+    .expect("connect peer2");
+    let mut peer3 = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "peer3",
+        "peer3-password",
+        "ib-cnt-p3",
+    )
+    .await
+    .expect("connect peer3");
+
+    // peer1: 2 unread, peer2: 1 unread, peer3: 1 unread then cleared.
+    let primary_bare = format!("{PRIMARY_USER}@{DOMAIN}");
+    send_dm(&mut peer1, &mut primary, &primary_bare, "cnt-1a", "a").await;
+    send_dm(&mut peer1, &mut primary, &primary_bare, "cnt-1b", "b").await;
+    send_dm(&mut peer2, &mut primary, &primary_bare, "cnt-2a", "c").await;
+    send_dm(&mut peer3, &mut primary, &primary_bare, "cnt-3a", "d").await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    primary
+        .send(&format!(
+            r#"<iq xmlns='{CLIENT_NS}' type='set' to='{primary_bare}' id='ib-cnt-mark'>
+                <mark-read xmlns='urn:waddle:inbox:0' partner='peer3@{DOMAIN}'/>
+            </iq>"#
+        ))
+        .await
+        .expect("send mark-read");
+    primary
+        .recv_matching(|frame| frame.contains("ib-cnt-mark"))
+        .await
+        .expect("mark-read result");
+
+    // Unfiltered full listing, a page of 1, and an unread-only page of 1
+    // must all report the same inbox-wide counts: 3 conversations,
+    // 2 with unread messages, 3 unread messages.
+    let queries = [
+        ("ib-cnt-all", None, None, 3usize),
+        ("ib-cnt-p1", None, Some(1), 1),
+        ("ib-cnt-uo", Some(true), Some(1), 1),
+    ];
+    for (id, unread_only, max, expected_entries) in queries {
+        primary
+            .send(&inbox_query_iq(id, unread_only, Some(false), max))
+            .await
+            .expect("send query");
+        let frames = collect_inbox_response(&mut primary, id).await;
+        assert_eq!(
+            entries_from_response(&frames).len(),
+            expected_entries,
+            "{id}: {frames:?}"
+        );
+        let fin = parse_fin(frames.last().expect("fin"));
+        assert_eq!(fin.attr("total"), Some("3"), "{id}: total");
+        assert_eq!(fin.attr("unread"), Some("2"), "{id}: unread");
+        assert_eq!(fin.attr("all-unread"), Some("3"), "{id}: all-unread");
+    }
 
     let _ = primary.close().await;
     let _ = peer1.close().await;

@@ -179,6 +179,12 @@ impl InboxStorage for PoisonInbox {
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError> {
         self.0.total_unread(user).await
     }
+    async fn counts(
+        &self,
+        user: &BareJid,
+    ) -> Result<waddle_xmpp::inbox::storage::InboxCounts, InboxStorageError> {
+        self.0.counts(user).await
+    }
     async fn mark_call_thread_ended(
         &self,
         _room: &BareJid,

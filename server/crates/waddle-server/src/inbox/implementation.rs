@@ -19,7 +19,7 @@ use super::{info, instrument};
 use super::{DatabaseDriver, IntoParams};
 use super::{DateTime, Utc};
 use super::{
-    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxStorage,
+    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxCounts, InboxStorage,
     InboxStorageError,
 };
 
@@ -775,6 +775,37 @@ impl InboxStorage for DatabaseInboxStorage {
             .get(0)
             .map_err(|error| InboxStorageError::Other(error.to_string()))?;
         Ok(total.max(0) as u64)
+    }
+
+    #[instrument(skip(self, user), fields(user = %user))]
+    async fn counts(&self, user: &BareJid) -> Result<InboxCounts, InboxStorageError> {
+        let mut rows = self
+            .query(
+                "SELECT COUNT(*), \
+                        COALESCE(SUM(CASE WHEN unread > 0 THEN 1 ELSE 0 END), 0), \
+                        COALESCE(SUM(unread), 0) \
+                 FROM inbox_entries WHERE user_jid = ? AND thread_id = ''",
+                crate::db_params![user.to_string()],
+            )
+            .await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?
+        else {
+            return Ok(InboxCounts::default());
+        };
+        let get = |index: usize| -> Result<u64, InboxStorageError> {
+            let value: i64 = row
+                .get(index)
+                .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+            Ok(value.max(0) as u64)
+        };
+        Ok(InboxCounts {
+            conversations: get(0)?,
+            unread_conversations: get(1)?,
+            unread_messages: get(2)?,
+        })
     }
 
     #[instrument(skip(self, room), fields(room = %room, thread_id))]

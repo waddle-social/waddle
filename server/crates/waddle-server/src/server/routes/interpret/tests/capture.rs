@@ -98,6 +98,13 @@ impl InboxStorage for FailingInboxStorage {
         Ok(0)
     }
 
+    async fn counts(
+        &self,
+        _user: &jid::BareJid,
+    ) -> Result<waddle_xmpp::inbox::storage::InboxCounts, InboxStorageError> {
+        Ok(Default::default())
+    }
+
     async fn mark_call_thread_ended(
         &self,
         _room: &jid::BareJid,

@@ -16,6 +16,20 @@ use super::{InboxEntry, InboxKey, InboxView};
 use crate::ingress::MessageKey;
 use crate::xep::CallThreadDuration;
 
+/// Inbox-wide aggregate counts backing the XEP-0430 `<fin/>` attributes.
+///
+/// Counted over channel-level conversations (thread rows excluded),
+/// independent of any query filter or RSM page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InboxCounts {
+    /// Total number of conversation entries in the inbox (`total`).
+    pub conversations: u64,
+    /// Number of conversations with at least one unread message (`unread`).
+    pub unread_conversations: u64,
+    /// Total number of unread messages across all conversations (`all-unread`).
+    pub unread_messages: u64,
+}
+
 /// Durable key for one groupchat notification recovery item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupchatNotificationRecoveryKey {
@@ -181,6 +195,10 @@ pub trait InboxStorage: Send + Sync {
 
     /// Return the total unread count for the user (channel-level only).
     async fn total_unread(&self, user: &BareJid) -> Result<u64, InboxStorageError>;
+
+    /// Return inbox-wide conversation and unread counts for the user
+    /// (channel-level only), computed in the store rather than by listing.
+    async fn counts(&self, user: &BareJid) -> Result<InboxCounts, InboxStorageError>;
 
     /// Mark the call anchored to `(room, thread_id)` as ended across every
     /// user's projection of that thread. The call-end summary
@@ -435,6 +453,14 @@ impl InboxStorage for InMemoryInboxStorage {
             .lock()
             .map_err(|e| InboxStorageError::Other(e.to_string()))?;
         Ok(guard.get(user).map(|v| v.total_unread()).unwrap_or(0))
+    }
+
+    async fn counts(&self, user: &BareJid) -> Result<InboxCounts, InboxStorageError> {
+        let guard = self
+            .per_user
+            .lock()
+            .map_err(|e| InboxStorageError::Other(e.to_string()))?;
+        Ok(guard.get(user).map(|v| v.counts()).unwrap_or_default())
     }
 
     async fn mark_call_thread_ended(
