@@ -1,4 +1,5 @@
 mod actions;
+mod admin;
 mod avatar;
 mod commands;
 mod composer_view;
@@ -17,9 +18,11 @@ mod membership;
 mod message_media;
 mod message_tools;
 mod notifications;
+mod order;
 mod people;
 mod person;
 mod pictures;
+mod preferences;
 mod profile;
 mod read_markers;
 mod rooms;
@@ -30,4 +33,5 @@ mod threads;
 mod typing;
 mod window;
 
+pub use preferences::apply_appearance;
 pub use window::WaddleWindow;

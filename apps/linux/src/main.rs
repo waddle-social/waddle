@@ -4,6 +4,7 @@
 //! chat shell. Timeline and judgment state use `waddle-client-session`
 //! (ADR-0019); GTK renders conversations and separately paged threads.
 
+mod admin;
 mod application;
 mod attachments;
 mod auth;
@@ -38,6 +39,7 @@ mod session_media;
 mod session_profile;
 mod session_rooms;
 mod session_tools;
+mod settings;
 mod stickers;
 mod stories;
 mod thread_updates;
