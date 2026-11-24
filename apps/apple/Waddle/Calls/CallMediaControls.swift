@@ -43,6 +43,10 @@ protocol CallMediaControls: AnyObject, Observable {
     /// A camera is available only while its track is subscribed and unmuted.
     func video(of identity: String, source: CallVideoSource) -> AnyView?
     func setVolume(_ gain: Double, of identity: String)
+    /// Someone plays at other than their own volume, whether or not they are in the call right now.
+    var hasChangedVolumes: Bool { get }
+    /// Everyone back to their own volume, a device that has left and may return included.
+    func resetVolumes()
     func setMicrophone(_ on: Bool) async
     func setCamera(_ on: Bool) async
 }

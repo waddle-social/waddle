@@ -8,6 +8,7 @@ import WaddleKit
 /// Pure: everything it shows is passed in.
 struct CallParticipantsPanel: View {
     let rows: [CallParticipantRow]
+    var canResetVolumes = false
     let setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void
     let resetVolumes: @MainActor () -> Void
     let close: @MainActor () -> Void
@@ -30,7 +31,7 @@ struct CallParticipantsPanel: View {
             HStack {
                 Button("Reset all", action: resetVolumes)
                     .buttonStyle(.huddle(size: .small))
-                    .disabled(CallParticipantRows.changedVolumes(in: rows).isEmpty)
+                    .disabled(!canResetVolumes)
                     .help("Play everyone at their own volume")
                 Spacer()
             }

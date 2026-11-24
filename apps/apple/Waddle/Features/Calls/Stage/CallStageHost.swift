@@ -131,13 +131,14 @@ struct CallStageHost: View {
             // An open inspector has a composer whose Escape cancels a reply or an edit.
             escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
             participants: rows,
+            canResetVolumes: media?.hasChangedVolumes ?? false,
             participantsCoverTiles: (model.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             notice: media?.deviceNotice,
             tileSource: model.tileSource,
-            actions: actions(for: call.sid, volumesToReset: rows.map(CallParticipantRows.changedVolumes(in:)) ?? [])
+            actions: actions(for: call.sid)
         )
         // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.
         .onChange(
@@ -160,7 +161,7 @@ struct CallStageHost: View {
     /// A stage narrower than this gives the panel the tiles' place.
     private static let widthForTilesAndPanel: CGFloat = 720
 
-    private func actions(for sid: String, volumesToReset: [String]) -> CallStageActions {
+    private func actions(for sid: String) -> CallStageActions {
         let commands = CallCommands(calls: session.calls, media: media)
         return CallStageActions(
             toggleMicrophone: commands.toggleMicrophone,
@@ -171,7 +172,7 @@ struct CallStageHost: View {
             setSize: { [model] size in model.update(sid) { $0.size = size } },
             toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
-            resetVolumes: { [media] in volumesToReset.forEach { media?.setVolume(1, of: $0) } },
+            resetVolumes: { [media] in media?.resetVolumes() },
             hangUp: commands.hangUp
         )
     }

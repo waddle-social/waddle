@@ -156,16 +156,15 @@ private struct CallTilePicture: View, Equatable {
 /// The last cell of a full gallery: how many people have no tile (web's "+N more").
 struct CallOverflowTile: View {
     let hiddenCount: Int
-    /// `nil` while the list is already open.
-    var showParticipants: (@MainActor () -> Void)?
+    /// Opens the list of everyone, or closes it when it is open.
+    var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
 
     var body: some View {
-        Button { showParticipants?() } label: { face }
+        Button(action: toggleParticipants) { face }
             .buttonStyle(.plain)
-            .disabled(showParticipants == nil)
             .accessibilityLabel(Text(hiddenCount == 1 ? "1 more person" : "\(hiddenCount) more people"))
-            .accessibilityHint(Text("Shows everyone in the call"))
-            .help("Show everyone in the call")
+            .accessibilityHint(Text("Shows or hides everyone in the call"))
+            .help("Everyone in the call")
     }
 
     private var face: some View {

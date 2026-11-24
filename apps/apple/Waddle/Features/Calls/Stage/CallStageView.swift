@@ -28,6 +28,8 @@ struct CallStageView: View {
     var escapeStepsDown = true
     /// The participants panel's rows while it is open.
     var participants: [CallParticipantRow]?
+    /// Someone's volume has been moved, whether or not they are listed now.
+    var canResetVolumes = false
     /// The stage is too narrow for tiles and the panel side by side: the panel takes the tiles' place.
     var participantsCoverTiles = false
     var isMicrophoneOn = false
@@ -57,12 +59,12 @@ struct CallStageView: View {
                 if participants == nil || !participantsCoverTiles {
                     CallTileArea(
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
-                        showParticipants: participants == nil ? actions.toggleParticipants : nil
+                        toggleParticipants: actions.toggleParticipants
                     )
                 }
                 if let participants {
                     CallParticipantsPanel(
-                        rows: participants, setVolume: actions.setVolume, resetVolumes: actions.resetVolumes,
+                        rows: participants, canResetVolumes: canResetVolumes, setVolume: actions.setVolume, resetVolumes: actions.resetVolumes,
                         close: actions.toggleParticipants
                     )
                     .frame(width: participantsCoverTiles ? nil : CallParticipantsPanel.width)

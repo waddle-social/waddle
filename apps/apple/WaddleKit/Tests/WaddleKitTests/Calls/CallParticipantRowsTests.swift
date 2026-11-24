@@ -61,21 +61,6 @@ import Testing
         #expect(rows.count == 1)
     }
 
-    @Test func resetAllTouchesOnlyVolumesThatMoved() {
-        let rows = CallParticipantRows.make(
-            tiles: [
-                Self.tile(Self.me, label: "You", isSelf: true), Self.tile(Self.linus, label: "linus"),
-                Self.tile(Self.grace, label: "grace"),
-            ],
-            audio: [
-                CallParticipantAudio(identity: Self.me, hasMicrophone: true, volume: 1),
-                CallParticipantAudio(identity: Self.linus, hasMicrophone: true, volume: 0.3),
-                CallParticipantAudio(identity: Self.grace, hasMicrophone: true, volume: 1),
-            ]
-        )
-        #expect(CallParticipantRows.changedVolumes(in: rows) == [Self.linus])
-    }
-
     @Test func aRowSaysWhatItShows() {
         let rows = CallParticipantRows.make(
             tiles: [Self.tile(Self.linus, label: "linus", isHandRaised: true, isSpeaking: true, hasVideo: true)],

@@ -65,9 +65,4 @@ public enum CallParticipantRows {
             )
         }
     }
-
-    /// Whose volume "Reset all" has to put back.
-    public static func changedVolumes(in rows: [CallParticipantRow]) -> [String] {
-        rows.filter { $0.volume != nil && $0.volume != 1 }.map(\.id)
-    }
 }
