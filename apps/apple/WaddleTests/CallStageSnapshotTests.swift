@@ -200,6 +200,40 @@ final class CallStageSnapshotTests: XCTestCase {
     }
     #endif
 
+    // MARK: - Connection
+
+    private func assertConnection(
+        _ quality: CallConnectionQuality, testName: String = #function, line: UInt = #line
+    ) {
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: CallStageView(
+                title: "#design", subtitle: "2 others in call", status: .inCall(since: nil),
+                tiles: [Self.you, Self.linus, Self.grace], isMicrophoneOn: true, isHandRaised: false,
+                connection: quality, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+            )
+            .frame(width: 760, height: 360),
+            width: 760 + 2 * Theme.Spacing.l, testName: testName, line: line
+        )
+    }
+
+    func testAGoodConnectionIsTwoQuietBars() {
+        assertConnection(.good)
+    }
+
+    func testAPoorConnectionSaysSo() {
+        assertConnection(.poor)
+    }
+
+    func testALostConnectionSaysSo() {
+        assertConnection(.lost)
+    }
+
+    /// Before the first measurement: the bars are there, empty, and claim nothing.
+    func testAConnectionNotYetMeasured() {
+        assertConnection(.unknown)
+    }
+
     // MARK: - Participants
 
     private static let roster: [CallStageTile] = [

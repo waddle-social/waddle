@@ -45,6 +45,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     #endif
     private(set) var participants: [CallMediaParticipant] = []
     private(set) var activeSpeakersLoudestFirst: [String] = []
+    private(set) var connectionQuality = CallConnectionQuality.unknown
     private(set) var dockCameraIdentities = CallDockCameraIdentities()
     private var cameraTracks: [String: VideoTrack] = [:]
     /// The screens other people share, by who shares them.
@@ -749,8 +750,18 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let room, phase == .connected else {
             if !participants.isEmpty { participants = [] }
             if !activeSpeakersLoudestFirst.isEmpty { activeSpeakersLoudestFirst = [] }
+            // What was measured belonged to a connection that is gone or being remade.
+            if connectionQuality != .unknown { connectionQuality = .unknown }
             return
         }
+        let quality: CallConnectionQuality = switch room.localParticipant.connectionQuality {
+        case .excellent: .excellent
+        case .good: .good
+        case .poor: .poor
+        case .lost: .lost
+        case .unknown: .unknown
+        }
+        if connectionQuality != quality { connectionQuality = quality }
         // Ours first, then everyone else in the order they joined, so the
         // roster keeps its order from one report to the next.
         let remotes = room.remoteParticipants.values.sorted { lhs, rhs in
@@ -942,6 +953,10 @@ private final class RoomObserver: NSObject, RoomDelegate, Sendable {
     }
 
     func room(_ room: Room, didUpdateSpeakingParticipants _: [Participant]) {
+        forward(.participants, from: room)
+    }
+
+    func room(_ room: Room, participant _: Participant, didUpdateConnectionQuality _: ConnectionQuality) {
         forward(.participants, from: room)
     }
 }

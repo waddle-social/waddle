@@ -38,6 +38,8 @@ struct CallStageView: View {
     var isHandRaised: Bool?
     /// Something the person should know about their own devices.
     var notice: String?
+    /// How good our own connection is, once the call is live; `nil` shows no indicator.
+    var connection: CallConnectionQuality?
     /// Whether we are sharing our screen; `nil` where this device cannot.
     var isSharingScreen: Bool?
     /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
@@ -50,7 +52,7 @@ struct CallStageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CallStageHeader(title: title, subtitle: subtitle, status: status)
+            CallStageHeader(title: title, subtitle: subtitle, status: status, connection: connectionChip)
             if let notice {
                 Text(notice)
                     .huddleText(Theme.Typography.caption)
@@ -102,6 +104,17 @@ struct CallStageView: View {
         .onChange(of: announcement, initial: true) { _, text in
             if announcesChanges { AccessibilityNotification.Announcement(text).post() }
         }
+        // Only a connection that has gone wrong is spoken, and only as it
+        // does: excellent and good coming and going would be noise.
+        .onChange(of: connectionChip?.label) { _, label in
+            if announcesChanges, let label { AccessibilityNotification.Announcement(label).post() }
+        }
+    }
+
+    /// The indicator of a live call. While it reconnects, the header's own status says so.
+    private var connectionChip: CallConnectionChip? {
+        guard case .inCall = status, let connection else { return nil }
+        return CallConnectionChip(quality: connection, isReconnecting: false)
     }
 
     /// What VoiceOver says when the status changes; never the ticking clock.
@@ -114,12 +127,60 @@ struct CallStageView: View {
     }
 }
 
+/// Our own connection in a call's header (web `CallConnectionIndicator`):
+/// three rising bars, quiet while it is healthy, and a tinted pill with a
+/// label once it is not.
+struct CallConnectionIndicator: View {
+    let chip: CallConnectionChip
+
+    var body: some View {
+        HStack(spacing: WaddleTokens.Spacing.s1Half) {
+            HStack(alignment: .bottom, spacing: Metrics.gap) {
+                ForEach(1...3, id: \.self) { bar in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(bar <= chip.bars ? color : Theme.Colors.fgSoft.opacity(0.35))
+                        .frame(width: Metrics.bar, height: Metrics.step * CGFloat(bar) + Metrics.base)
+                }
+            }
+            if let label = chip.label {
+                Text(label)
+                    .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.xs))
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, chip.label == nil ? 0 : WaddleTokens.Spacing.s2Half)
+        .frame(height: Metrics.height)
+        .background { if chip.label != nil { Capsule().fill(color.opacity(0.14)) } }
+        .accessibilityElement()
+        .accessibilityLabel(Text(chip.status))
+        .help(chip.status)
+    }
+
+    private var color: Color {
+        switch chip.tone {
+        case .neutral: Theme.Colors.fgMuted
+        case .warning: Theme.Colors.warningText
+        case .danger: Theme.Colors.dangerText
+        }
+    }
+
+    private enum Metrics {
+        static let height: CGFloat = 28
+        static let bar: CGFloat = 3
+        static let gap: CGFloat = 2
+        static let base: CGFloat = 2
+        static let step: CGFloat = 3
+    }
+}
+
 /// The top of the stage (web `CallStageHeader`): a dot that turns green once
 /// the call is live, the title over its subtitle, and the status or clock.
 private struct CallStageHeader: View {
     let title: String
     let subtitle: String
     let status: CallStageStatus
+    var connection: CallConnectionChip?
 
     var body: some View {
         HStack(spacing: WaddleTokens.Spacing.s2Half) {
@@ -135,6 +196,7 @@ private struct CallStageHeader: View {
             }
             .lineLimit(1)
             Spacer(minLength: Theme.Spacing.s)
+            if let connection { CallConnectionIndicator(chip: connection) }
             statusText
                 .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.xs))
                 .monospacedDigit()
