@@ -1,9 +1,9 @@
 use super::super::HOME_FEDERATION_FEATURE;
 use super::{
     build_disco_info_response, build_disco_info_response_with_extensions, build_server_role_form,
-    command_name_by_boundary, extension_features_for_disco, server_affiliation_for_requester,
-    CommandBoundary, DiscoInfoRequest, DiscoInfoResponse, Feature, Identity, WebSocketState,
-    DATA_FORMS_NS, NODE_COMMANDS,
+    command_name_by_boundary, extension_features_for_disco, item_not_found_iq_error,
+    server_affiliation_for_requester, CommandBoundary, DiscoInfoRequest, DiscoInfoResponse,
+    Feature, Identity, WebSocketState, DATA_FORMS_NS, NODE_COMMANDS,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 
@@ -48,6 +48,19 @@ pub(super) async fn handle_server_disco_info<'a>(
     state: &WebSocketState,
     principal: Option<ResolvedPrincipal<'_>>,
 ) -> DiscoInfoResponse<'a> {
+    // XEP-0030 §3.1: a `node` the entity does not know is `item-not-found`.
+    // Every node the server answers for (ad-hoc command nodes) is answered by
+    // `handle_command_disco_info` before this fallback runs, so a node that
+    // reaches here is unknown and must not receive the root answer.
+    if req.node.is_some() {
+        return DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            item_not_found_iq_error("Unknown disco#info node."),
+        );
+    }
+
     // Disco info on server. Source the canonical feature catalogue
     // from `waddle-xmpp-core::disco::info::server_features()` so the
     // rich-message XEPs (corrections, retractions, reactions,
