@@ -429,6 +429,20 @@ async fn test_download_uploaded_file() {
         headers.get("content-type").unwrap().to_str().unwrap(),
         "text/plain"
     );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "nosniff"
+    );
+    assert!(headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("sandbox"));
 
     // Check content
     let body = download_response
