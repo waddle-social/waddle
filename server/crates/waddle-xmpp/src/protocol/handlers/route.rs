@@ -36,8 +36,6 @@ use crate::protocol::message_context::MessageContext;
 use crate::protocol::session_state::Locality;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
 use crate::Stanza;
-use jid::Jid;
-use waddle_xmpp_core::xep0359::remove_stanza_ids_by;
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Final routing handler for the user-side message pipeline.
@@ -88,23 +86,13 @@ impl MessageHandler for RouteHandler {
                 let Some(jid) = message.to.as_ref() else {
                     return HandlerOutcome::Continue(Vec::new());
                 };
-                // XEP-0313 §4.1.1: servers MUST NOT include the
-                // `<stanza-id/>` in messages addressed to JIDs without
-                // access to the archive, such as a user's outgoing
-                // messages to their contacts. The sender's archive stamp
-                // stays on the archived row and on sent carbons (both
-                // built from `message`, not from this routed copy).
-                let mut routed = message.clone();
-                if jid.to_bare() != ctx.full_jid.to_bare() {
-                    remove_stanza_ids_by(&mut routed, &Jid::from(ctx.full_jid.to_bare()));
-                }
                 // Pass the typed Jid through verbatim — full or bare.
                 // The interpreter performs resource selection per
                 // RFC 6121 §8.5 (bare → highest-priority resources;
                 // full → exact resource). No string synthesis.
                 HandlerOutcome::Continue(vec![OutboundEvent::RouteToConnection {
                     jid: jid.clone(),
-                    stanza: Box::new(Stanza::Message(routed)),
+                    stanza: Box::new(Stanza::Message(message.clone())),
                     call_setup: None,
                 }])
             }
