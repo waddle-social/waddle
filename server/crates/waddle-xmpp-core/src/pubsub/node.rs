@@ -371,6 +371,8 @@ impl NodeConfig {
             config = Self::stickers_defaults();
         } else if node == super::pep::PEP_NODE_VCARD4 {
             config = Self::vcard4_defaults();
+        } else if node == super::pep::PEP_NODE_CONTACTS {
+            config = Self::contacts_defaults();
         } else if node == super::pep::PEP_NODE_AVATAR_DATA
             || node == super::pep::PEP_NODE_AVATAR_METADATA
         {
@@ -611,6 +613,24 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             max_items: 1,
+            ..Self::pep_default()
+        }
+    }
+
+    /// XEP-0292 §5 private contacts PEP node (`urn:xmpp:contacts`) defaults.
+    ///
+    /// "this node MUST have an access type of \"whitelist\" by default"
+    /// (xep-0292.xml:390). One item per contact (ItemID = the contact's
+    /// bare JID), so the node must retain many items, under the same
+    /// finite anti-DoS cap as the bookmarks node. `never` keeps a new
+    /// subscription from receiving the contact list; `whitelist` keeps it
+    /// off the roster `+notify` fan-out and from non-owner reads.
+    #[must_use]
+    pub fn contacts_defaults() -> Self {
+        Self {
+            access_model: AccessModel::Whitelist,
+            max_items: PEP_BOOKMARK_MAX_ITEMS,
+            send_last_published_item: SendLastPublishedItem::Never,
             ..Self::pep_default()
         }
     }
@@ -1056,6 +1076,20 @@ mod tests {
         assert_eq!(config.publish_model, PublishModel::Publishers);
         assert_eq!(config.max_items, 1);
         assert!(config.persist_items);
+    }
+
+    #[test]
+    fn contacts_pep_config_is_whitelist_with_many_items() {
+        // XEP-0292 §5: urn:xmpp:contacts MUST default to whitelist and
+        // holds one item per contact, so max_items must exceed 1.
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_CONTACTS);
+        assert_eq!(config, NodeConfig::contacts_defaults());
+        assert_eq!(config.access_model, AccessModel::Whitelist);
+        assert_eq!(config.max_items, PEP_BOOKMARK_MAX_ITEMS);
+        assert!(config.persist_items);
+        assert!(NodeConfig::pins_whitelist_access(
+            super::super::pep::PEP_NODE_CONTACTS
+        ));
     }
 
     #[test]

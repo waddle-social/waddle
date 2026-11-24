@@ -104,7 +104,7 @@ pub use super::xep0203::{
 
 pub use super::xep0292::{
     build_vcard4_element, is_vcard4_element, parse_vcard4, VCard4, VCard4Error, NS_VCARD4,
-    PEP_NODE_VCARD4,
+    PEP_NODE_CONTACTS, PEP_NODE_VCARD4,
 };
 
 pub use super::xep0300::{

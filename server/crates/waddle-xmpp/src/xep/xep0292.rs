@@ -36,6 +36,9 @@ pub const NS_VCARD4: &str = "urn:ietf:params:xml:ns:vcard-4.0";
 /// PEP node for vCard4 publication.
 pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
+/// PEP node for private contact vCard4 storage (XEP-0292 §5).
+pub const PEP_NODE_CONTACTS: &str = "urn:xmpp:contacts";
+
 /// KIND value XEP-0292 §6 recommends for automated entities (RFC 6473).
 pub const KIND_APPLICATION: &str = "application";
 
@@ -421,5 +424,10 @@ mod tests {
     #[test]
     fn test_pep_node() {
         assert_eq!(PEP_NODE_VCARD4, "urn:xmpp:vcard4");
+        assert_eq!(PEP_NODE_CONTACTS, "urn:xmpp:contacts");
+        assert_eq!(
+            PEP_NODE_CONTACTS,
+            waddle_xmpp_core::pubsub::PEP_NODE_CONTACTS
+        );
     }
 }
