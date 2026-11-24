@@ -70,7 +70,9 @@ pub use super::xep0092::{
     SoftwareVersion, NS_VERSION,
 };
 
-pub use super::xep0106::{escape_node, is_escaped, needs_escaping, unescape_node, JidEscaping};
+pub use super::xep0106::{
+    escape_node, is_escaped, needs_escaping, unescape_node, EscapeError, JidEscaping,
+};
 
 pub use super::xep0107::{
     build_mood_element, build_mood_retraction, is_mood_element, parse_mood_element, Mood,

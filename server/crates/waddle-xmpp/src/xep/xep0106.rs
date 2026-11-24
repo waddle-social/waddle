@@ -25,21 +25,39 @@
 //! - `space cadet` → `space\20cadet`
 //! - `"quoted"` → `\22quoted\22`
 
+/// Error returned when a source address cannot be escaped into a valid
+/// JID localpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EscapeError {
+    /// XEP-0106 business rule 6: the sequence `\20` MUST NOT be the first
+    /// or last character of an escaped localpart, so a source address that
+    /// begins or ends with a space has no valid escaped form.
+    #[error("escaped localpart would begin or end with \\20")]
+    BoundarySpace,
+}
+
 /// Escape special characters in a JID local part per XEP-0106.
 ///
 /// Transforms characters that are forbidden or special in JID node
-/// identifiers into their `\HH` escape sequences.
-pub fn escape_node(input: &str) -> String {
+/// identifiers into their `\HH` escape sequences. A backslash that begins
+/// a character sequence matching one of the escapings (`\20`, `\22`,
+/// `\26`, `\27`, `\2f`, `\3a`, `\3c`, `\3e`, `\40`, `\5c`) is itself
+/// escaped to `\5c`; any other backslash is left as is.
+///
+/// # Errors
+///
+/// Returns [`EscapeError::BoundarySpace`] when the input starts or ends
+/// with a space, because `\20` MUST NOT be the first or last character of
+/// an escaped localpart.
+pub fn escape_node(input: &str) -> Result<String, EscapeError> {
+    if input.starts_with(' ') || input.ends_with(' ') {
+        return Err(EscapeError::BoundarySpace);
+    }
+
     let mut result = String::with_capacity(input.len());
 
-    // `char_indices()` yields `(byte_offset, char)`. Earlier revisions
-    // used `enumerate()` (which yields a CHAR index) and then sliced
-    // the string with `input[i + 1..]` — a byte-offset operation.
-    // For any input with a non-ASCII char before a backslash, char
-    // index and byte offset diverge, and the slice either reads the
-    // wrong bytes or panics by landing inside a multi-byte UTF-8
-    // sequence. Using `char_indices()` keeps both indexes in the
-    // single canonical "byte offset" space.
+    // `char_indices()` keeps the lookahead slice in byte-offset space;
+    // the backslash and the hex digits it inspects are all ASCII.
     for (byte_idx, ch) in input.char_indices() {
         match ch {
             ' ' => result.push_str("\\20"),
@@ -52,24 +70,18 @@ pub fn escape_node(input: &str) -> String {
             '>' => result.push_str("\\3e"),
             '@' => result.push_str("\\40"),
             '\\' => {
-                // Look past this backslash (one ASCII byte) to see if
-                // the next two chars are an existing `HH` escape
-                // sequence. The check stays byte-correct because the
-                // backslash + the hex digits we care about are all
-                // ASCII (one byte each).
-                let after = &input[byte_idx + 1..];
-                let next_two: String = after.chars().take(2).collect();
-                if next_two.len() == 2 && is_escape_hex(&next_two) {
+                let next_two: String = input[byte_idx + 1..].chars().take(2).collect();
+                if is_escape_hex(&next_two) {
+                    result.push_str("\\5c");
+                } else {
                     result.push('\\');
-                    continue;
                 }
-                result.push_str("\\5c");
             }
             _ => result.push(ch),
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Unescape a JID local part, reversing XEP-0106 escaping.
@@ -174,13 +186,13 @@ fn is_escape_hex(s: &str) -> bool {
 /// Trait for types that can have their node part escaped/unescaped.
 pub trait JidEscaping {
     /// The escaped form of this value.
-    fn escaped(&self) -> String;
+    fn escaped(&self) -> Result<String, EscapeError>;
     /// The unescaped form of this value.
     fn unescaped(&self) -> String;
 }
 
 impl JidEscaping for str {
-    fn escaped(&self) -> String {
+    fn escaped(&self) -> Result<String, EscapeError> {
         escape_node(self)
     }
     fn unescaped(&self) -> String {
@@ -189,7 +201,7 @@ impl JidEscaping for str {
 }
 
 impl JidEscaping for String {
-    fn escaped(&self) -> String {
+    fn escaped(&self) -> Result<String, EscapeError> {
         escape_node(self)
     }
     fn unescaped(&self) -> String {
@@ -203,66 +215,75 @@ mod tests {
 
     #[test]
     fn test_escape_space() {
-        assert_eq!(escape_node("space cadet"), "space\\20cadet");
+        assert_eq!(
+            escape_node("space cadet").expect("escapable"),
+            "space\\20cadet"
+        );
     }
 
     #[test]
     fn test_escape_at() {
-        assert_eq!(escape_node("user@host"), "user\\40host");
+        assert_eq!(escape_node("user@host").expect("escapable"), "user\\40host");
     }
 
     #[test]
     fn test_escape_quote() {
-        assert_eq!(escape_node("\"quoted\""), "\\22quoted\\22");
+        assert_eq!(
+            escape_node("\"quoted\"").expect("escapable"),
+            "\\22quoted\\22"
+        );
     }
 
     #[test]
     fn test_escape_ampersand() {
-        assert_eq!(escape_node("a&b"), "a\\26b");
+        assert_eq!(escape_node("a&b").expect("escapable"), "a\\26b");
     }
 
     #[test]
     fn test_escape_slash() {
-        assert_eq!(escape_node("a/b"), "a\\2fb");
+        assert_eq!(escape_node("a/b").expect("escapable"), "a\\2fb");
     }
 
     #[test]
     fn test_escape_colon() {
-        assert_eq!(escape_node("a:b"), "a\\3ab");
+        assert_eq!(escape_node("a:b").expect("escapable"), "a\\3ab");
     }
 
     #[test]
     fn test_escape_angle_brackets() {
-        assert_eq!(escape_node("<tag>"), "\\3ctag\\3e");
+        assert_eq!(escape_node("<tag>").expect("escapable"), "\\3ctag\\3e");
     }
 
     #[test]
     fn test_escape_apostrophe() {
-        assert_eq!(escape_node("it's"), "it\\27s");
+        assert_eq!(escape_node("it's").expect("escapable"), "it\\27s");
     }
 
     #[test]
     fn test_escape_backslash() {
-        assert_eq!(escape_node("back\\slash"), "back\\5cslash");
+        assert_eq!(
+            escape_node("back\\slash").expect("escapable"),
+            "back\\slash"
+        );
     }
 
     #[test]
     fn test_escape_no_change() {
-        assert_eq!(escape_node("simple"), "simple");
-        assert_eq!(escape_node("user123"), "user123");
+        assert_eq!(escape_node("simple").expect("escapable"), "simple");
+        assert_eq!(escape_node("user123").expect("escapable"), "user123");
     }
 
     #[test]
     fn test_escape_multiple() {
         assert_eq!(
-            escape_node("user@host/resource"),
+            escape_node("user@host/resource").expect("escapable"),
             "user\\40host\\2fresource"
         );
     }
 
     #[test]
     fn test_escape_empty() {
-        assert_eq!(escape_node(""), "");
+        assert_eq!(escape_node("").expect("escapable"), "");
     }
 
     #[test]
@@ -316,7 +337,7 @@ mod tests {
         ];
 
         for input in inputs {
-            let escaped = escape_node(input);
+            let escaped = escape_node(input).expect("escapable");
             let unescaped = unescape_node(&escaped);
             assert_eq!(
                 unescaped, input,
@@ -344,24 +365,39 @@ mod tests {
 
     #[test]
     fn test_jid_escaping_trait() {
-        assert_eq!("user@host".escaped(), "user\\40host");
+        assert_eq!("user@host".escaped(), Ok("user\\40host".to_string()));
         assert_eq!("user\\40host".unescaped(), "user@host");
 
         let s = String::from("space cadet");
-        assert_eq!(s.escaped(), "space\\20cadet");
+        assert_eq!(s.escaped(), Ok("space\\20cadet".to_string()));
     }
 
     // XEP-0106 Section 4 examples
     #[test]
     fn test_spec_examples() {
-        assert_eq!(escape_node("space cadet"), "space\\20cadet");
         assert_eq!(
-            escape_node("call me \"ishmael\""),
+            escape_node("space cadet").expect("escapable"),
+            "space\\20cadet"
+        );
+        assert_eq!(
+            escape_node("call me \"ishmael\"").expect("escapable"),
             "call\\20me\\20\\22ishmael\\22"
         );
-        assert_eq!(escape_node("at&t guy"), "at\\26t\\20guy");
-        assert_eq!(escape_node("d'artagnan"), "d\\27artagnan");
-        assert_eq!(escape_node("/.telekinesis"), "\\2f.telekinesis");
-        assert_eq!(escape_node("thing1 & thing2"), "thing1\\20\\26\\20thing2");
+        assert_eq!(
+            escape_node("at&t guy").expect("escapable"),
+            "at\\26t\\20guy"
+        );
+        assert_eq!(
+            escape_node("d'artagnan").expect("escapable"),
+            "d\\27artagnan"
+        );
+        assert_eq!(
+            escape_node("/.telekinesis").expect("escapable"),
+            "\\2f.telekinesis"
+        );
+        assert_eq!(
+            escape_node("thing1 & thing2").expect("escapable"),
+            "thing1\\20\\26\\20thing2"
+        );
     }
 }

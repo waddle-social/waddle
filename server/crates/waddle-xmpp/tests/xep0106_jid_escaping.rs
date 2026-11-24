@@ -14,7 +14,14 @@
 //!   regression tests below feed it exactly those shapes so a
 //!   future copy-paste of the buggy pattern fails CI.
 
-use waddle_xmpp::xep::xep0106::{escape_node, is_escaped, needs_escaping, unescape_node};
+use waddle_xmpp::xep::xep0106::{
+    escape_node as try_escape_node, is_escaped, needs_escaping, unescape_node, EscapeError,
+};
+
+/// Escape a localpart the test expects to be escapable.
+fn escape_node(input: &str) -> String {
+    try_escape_node(input).expect("input is escapable")
+}
 
 // ── §4 spec example table ────────────────────────────────────────────
 
@@ -36,7 +43,9 @@ fn xep0106_section_4_examples() {
 #[test]
 fn xep0106_each_special_char_maps_to_documented_sequence() {
     // Character-by-character coverage of the §4 mapping table.
-    assert_eq!(escape_node(" "), "\\20");
+    // A lone space is a boundary space and is rejected; see
+    // `xep0106_leading_or_trailing_space_is_rejected`.
+    assert_eq!(escape_node("a b"), "a\\20b");
     assert_eq!(escape_node("\""), "\\22");
     assert_eq!(escape_node("&"), "\\26");
     assert_eq!(escape_node("'"), "\\27");
@@ -45,7 +54,9 @@ fn xep0106_each_special_char_maps_to_documented_sequence() {
     assert_eq!(escape_node("<"), "\\3c");
     assert_eq!(escape_node(">"), "\\3e");
     assert_eq!(escape_node("@"), "\\40");
-    assert_eq!(escape_node("\\"), "\\5c");
+    // A backslash is only escaped when it would otherwise start an
+    // escape sequence (business rule 7); `\5c` itself comes from `\\5c`.
+    assert_eq!(escape_node("\\5c"), "\\5c5c");
 }
 
 #[test]
@@ -62,26 +73,65 @@ fn xep0106_unescape_reverses_each_documented_sequence() {
     assert_eq!(unescape_node("\\5c"), "\\");
 }
 
-// ── Backslash treatment (§4 corner case) ─────────────────────────────
+// ── Backslash treatment (business rule 7, examples 9-12) ─────────────
 
 #[test]
-fn xep0106_existing_escape_sequences_preserved_not_double_escaped() {
-    // §4: a backslash that already begins a valid escape sequence
-    // must NOT be re-escaped, otherwise round-trips through escape →
-    // unescape would lose information.
-    assert_eq!(escape_node("user\\40host"), "user\\40host");
-    assert_eq!(escape_node("a\\20b"), "a\\20b");
+fn xep0106_backslash_starting_an_escape_sequence_is_escaped_to_5c() {
+    // Business rule 7 / algorithm step 3: when the source address
+    // contains a sequence that corresponds to an escaping, the leading
+    // backslash MUST be escaped to `\5c` so it is not unescaped later.
+    assert_eq!(escape_node("user\\40host"), "user\\5c40host");
+    assert_eq!(escape_node("a\\20b"), "a\\5c20b");
+    assert_eq!(escape_node("\\27"), "\\5c27");
+    assert_eq!(escape_node("\\5c"), "\\5c5c");
+    // Every sequence in the escape table is covered.
+    for hex in ["20", "22", "26", "27", "2f", "3a", "3c", "3e", "40", "5c"] {
+        let source = format!("x\\{hex}y");
+        let escaped = escape_node(&source);
+        assert_eq!(escaped, format!("x\\5c{hex}y"));
+        assert_eq!(unescape_node(&escaped), source, "round trip for \\{hex}");
+    }
 }
 
 #[test]
-fn xep0106_lone_backslash_or_invalid_followup_is_escaped_as_5c() {
-    // A backslash not followed by a valid `HH` pair is itself a
-    // special character — escape it as `\5c`.
-    assert_eq!(escape_node("\\"), "\\5c");
-    assert_eq!(escape_node("back\\slash"), "back\\5cslash");
-    // Invalid hex pair (`zz` isn't in the §4 table) → escape the
-    // backslash and pass the rest through.
-    assert_eq!(escape_node("a\\zzb"), "a\\5czzb");
+fn xep0106_backslash_not_starting_an_escape_sequence_is_left_alone() {
+    // Exceptions: partial and unlisted sequences are not modified.
+    assert_eq!(escape_node("\\"), "\\");
+    assert_eq!(escape_node("foo\\bar"), "foo\\bar");
+    assert_eq!(escape_node("a\\zzb"), "a\\zzb");
+    assert_eq!(escape_node("\\2plus\\2is\\4"), "\\2plus\\2is\\4");
+    assert_eq!(escape_node("foob\\41r"), "foob\\41r");
+    assert_eq!(unescape_node("foob\\41r"), "foob\\41r");
+}
+
+#[test]
+fn xep0106_section_examples_9_to_12_backslash_rows() {
+    assert_eq!(escape_node("c:\\net"), "c\\3a\\net");
+    assert_eq!(escape_node("c:\\\\net"), "c\\3a\\\\net");
+    assert_eq!(escape_node("c:\\cool stuff"), "c\\3a\\cool\\20stuff");
+    assert_eq!(escape_node("c:\\5commas"), "c\\3a\\5c5commas");
+    assert_eq!(unescape_node("c\\3a\\5c5commas"), "c:\\5commas");
+    // Wireless Village example from the algorithm discussion.
+    assert_eq!(escape_node("\\3and\\2is\\5cool"), "\\5c3and\\2is\\5c5cool");
+}
+
+// ── Boundary space (business rule 6) ─────────────────────────────────
+
+#[test]
+fn xep0106_leading_or_trailing_space_is_rejected() {
+    // `\20` MUST NOT be the first or last character of an escaped
+    // localpart, so such sources have no valid escaped form.
+    for input in [" ops", "ops ", " ", "  ", " a b "] {
+        assert_eq!(
+            try_escape_node(input),
+            Err(EscapeError::BoundarySpace),
+            "{input:?}"
+        );
+    }
+    // Interior spaces are fine.
+    assert_eq!(escape_node("ops team"), "ops\\20team");
+    // A source that merely contains `\20` text is not a boundary space.
+    assert_eq!(escape_node("\\20x"), "\\5c20x");
 }
 
 // ── Unicode safety (regression: char/byte index conflation panic) ────
@@ -103,8 +153,8 @@ fn xep0106_escape_does_not_panic_with_multibyte_chars_before_backslash() {
         "non-special prefix is preserved: {result:?}"
     );
     assert!(
-        result.ends_with("\\5c"),
-        "trailing backslash with no valid followup is escaped: {result:?}"
+        result.ends_with('\\'),
+        "trailing backslash with no valid followup is left alone: {result:?}"
     );
 }
 
@@ -114,7 +164,7 @@ fn xep0106_escape_preserves_existing_escape_after_multibyte_prefix() {
     // BEFORE the backslash include multi-byte UTF-8. The previous
     // revision would misalign the lookahead slice and either panic
     // or detect the wrong "next two chars".
-    assert_eq!(escape_node("éé\\20"), "éé\\20");
+    assert_eq!(escape_node("éé\\20x"), "éé\\5c20x");
 }
 
 #[test]
@@ -123,7 +173,8 @@ fn xep0106_escape_handles_multibyte_chars_with_special_chars_intermixed() {
     // Each special character's lookahead (the backslash check) must
     // stay byte-correct regardless of where multi-byte chars fall.
     assert_eq!(escape_node("é@é"), "é\\40é");
-    assert_eq!(escape_node("é\\é"), "é\\5cé");
+    assert_eq!(escape_node("é\\é"), "é\\é");
+    assert_eq!(escape_node("é\\40é"), "é\\5c40é");
     assert_eq!(escape_node("é é"), "é\\20é");
 }
 

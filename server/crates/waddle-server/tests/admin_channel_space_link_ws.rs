@@ -446,10 +446,13 @@ async fn channels_create_and_list_accept_exact_space_node_for_escaped_projection
     // profile, Decision 2: a localpart preparation would change is
     // refused), so the projection of `music/A` is written as preparation
     // leaves it, `music\2fa`, and the exact node beside it.
-    let space_jid = format!("{}@{SPACES_JID}", escape_node(space_node))
-        .parse::<jid::BareJid>()
-        .expect("the projection is a bare JID")
-        .to_string();
+    let space_jid = format!(
+        "{}@{SPACES_JID}",
+        escape_node(space_node).expect("space node is escapable")
+    )
+    .parse::<jid::BareJid>()
+    .expect("the projection is a bare JID")
+    .to_string();
 
     let channel = create_channel_in_space_node(
         &mut admin,
