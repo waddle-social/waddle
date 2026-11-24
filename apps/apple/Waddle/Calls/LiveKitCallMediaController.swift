@@ -251,8 +251,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // The system, or the window closing, can end a capture without a word
         // to the room. Watched from before the publish, which starts the
         // capture: one that ends while it is still being published stops the share too.
+        // It speaks for this capture only: one we take down ourselves, for a
+        // stop or a newer pick, has been overtaken and must not stop what came after it.
         let watcher = ScreenCaptureWatcher { [weak self] in
-            Task { @MainActor in await self?.stopScreenShare() }
+            Task { @MainActor in
+                guard let self, self.screenShareGeneration == generation else { return }
+                await self.stopScreenShare()
+            }
         }
         track.capturer.delegates.add(delegate: watcher)
         screenCaptureWatcher = watcher
@@ -260,12 +265,15 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard self.room === room, generation == screenShareGeneration else {
             // The call ended, or the person or the system stopped, while it
             // was starting: the screen must not go on being captured for nobody.
+            track.capturer.delegates.remove(delegate: watcher)
+            if screenCaptureWatcher === watcher { screenCaptureWatcher = nil }
             if let publication { try? await room.localParticipant.unpublish(publication: publication) }
             _ = try? await track.stop()
             return
         }
         // Published, and still being captured: a capture can end before its watcher hears of it.
         guard let publication, track.capturer.captureState == .started else {
+            track.capturer.delegates.remove(delegate: watcher)
             if let publication { try? await room.localParticipant.unpublish(publication: publication) }
             _ = try? await track.stop()
             screenCaptureWatcher = nil
