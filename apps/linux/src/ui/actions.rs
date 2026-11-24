@@ -77,7 +77,7 @@ impl WaddleWindow {
     }
 
     /// Why files cannot be attached right now, if they cannot.
-    fn cannot_attach(&self) -> Option<&'static str> {
+    pub(super) fn cannot_attach(&self) -> Option<&'static str> {
         let imp = self.imp();
         if imp.uploading.get() {
             return Some("Wait for the current upload to finish.");
@@ -203,6 +203,7 @@ impl WaddleWindow {
                 files: wire,
                 // Occupants as of now, not when the upload began.
                 mentionable: window.mention_targets(&conversation),
+                sticker: None,
             };
             let sent = session
                 .send(&conversation.jid, conversation.kind, draft)
@@ -421,6 +422,7 @@ impl WaddleWindow {
                         thread: conversation.thread.clone(),
                         files: Vec::new(),
                         mentionable,
+                        sticker: None,
                     },
                 )
                 .await;

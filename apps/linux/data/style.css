@@ -167,6 +167,20 @@ button.reaction:checked {
   color: inherit;
 }
 
+/* Link preview cards */
+button.link-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid alpha(currentColor, 0.1);
+  border-left: 3px solid alpha(var(--accent-bg-color), 0.55);
+  background-color: alpha(currentColor, 0.05);
+  font-weight: normal;
+}
+
+button.link-card:hover {
+  background-color: alpha(currentColor, 0.09);
+}
+
 /* Composer */
 .composer {
   padding: 4px 4px 4px 8px;
