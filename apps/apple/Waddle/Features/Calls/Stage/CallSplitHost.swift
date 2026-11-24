@@ -14,16 +14,17 @@ struct CallSplitHost<Content: View>: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(CallStageModel.self) private var model
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @CallPlatform private var platform
     @ViewBuilder let content: Content
 
     var body: some View {
         let state = session.calls.state
-        let showsStage = model.surface(of: state, open: navigation.selection, platform: platform).showsStage
+        let showsStage = model.surface(of: state, open: navigation.selection, platform: platform, in: layout).showsStage
         let size = state.sid.map { model.stage(of: $0).size } ?? .defaultSize
         let conversation = navigation.selection
-        let arrangement = model.pane.flatMap {
+        let arrangement = (layout?.pane).flatMap {
             CallSurface.stageArrangement(for: size, in: $0, splitPercent: conversation.flatMap(model.splitPercent(for:)))
         }
             // Before the first layout assume the common case, a pane with room beside.
@@ -48,7 +49,7 @@ struct CallSplitHost<Content: View>: View {
             .huddleAnimation(.settle, value: showsStage)
             // A step in size settles; a drag follows the pointer.
             .huddleAnimation(.settle, value: size)
-            .onGeometryChange(for: CGSize.self, of: \.size) { model.pane = $0 }
+            .onGeometryChange(for: CGSize.self, of: \.size) { layout?.pane = $0 }
     }
 
     private static var paneSpace: String { "callPane" }
@@ -74,7 +75,7 @@ struct CallSplitHost<Content: View>: View {
             .frame(width: width, height: height)
             // The edge it shares with the conversation.
             .overlay(alignment: width == nil ? .bottom : .leading) {
-                if let conversation, let pane = model.pane, arrangement != .filling {
+                if let conversation, let pane = layout?.pane, arrangement != .filling {
                     handle(arrangement, in: pane, of: conversation)
                 }
             }

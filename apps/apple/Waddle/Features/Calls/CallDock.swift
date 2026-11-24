@@ -14,6 +14,8 @@ struct CallDock: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Absent in a sheet given no session; a dock there never yields anyway.
     @Environment(CallStageModel.self) private var stageModel: CallStageModel?
+    /// Absent in a sheet, whose dock never yields.
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @CallPlatform private var platform
     /// The dock a sheet carries. It stays quiet, so a stage change is spoken
     /// once, and it leaves the video of a call in session to the surface
@@ -26,7 +28,7 @@ struct CallDock: View {
         let phase = media?.phase ?? .idle
         let stage = CallStage(state: state, media: phase)
         let group = GroupCallStage(state: state, media: phase)
-        let surface = stageModel?.surface(of: state, open: navigation?.selection, platform: platform)
+        let surface = stageModel?.surface(of: state, open: navigation?.selection, platform: platform, in: layout)
             ?? CallSurface.placement(of: state, open: navigation?.selection, platform: platform, pane: nil)
         let content = surface
             .dockContent(isInSession: state.sessionConversation != nil, isInSheet: isInSheet)

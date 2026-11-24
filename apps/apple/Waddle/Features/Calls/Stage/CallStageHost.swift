@@ -1,15 +1,35 @@
 import SwiftUI
 import WaddleKit
 
+/// How one window is laid out for calls. Each window has its own sidebar
+/// and its own pane, so each decides for itself whether its dock, its
+/// sidebar's card or a stage has the call; the call's own choices, which
+/// are the same in every window, are in `CallStageModel`.
+@MainActor @Observable
+final class CallWindowLayout {
+    /// The pane a stage shares with its conversation, once the shell has
+    /// laid it out: the dock and the stage both place the call by it.
+    var pane: CGSize?
+    /// The sidebar is on screen to hold the card of a call whose conversation
+    /// is not open: its column is shown and the sidebar itself says it is there.
+    var isSidebarShown: Bool { sidebarColumnIsShown && sidebarIsOnScreen }
+    var sidebarColumnIsShown = true
+    /// Assumed until the sidebar has been laid out.
+    var sidebarIsOnScreen = true
+    /// Where the split shell draws calls, decided once at its root: a
+    /// split view's sidebar column is compact on an iPad, and the card in
+    /// it must still agree with the dock about who has the call.
+    var shellPlatform = CallSurface.Platform.phone
+
+    init() { /* A window not yet laid out. */ }
+}
+
 /// What the person chose on the stage of the session's call: the view, a
 /// pin, their own view hidden. It belongs to the session, not to a view, so
 /// it is still there when they come back to the call's conversation.
 @MainActor @Observable
 final class CallStageModel {
     private var memory = CallStageMemory()
-    /// The pane a stage shares with its conversation, once the shell has
-    /// laid it out: the dock and the stage both place the call by it.
-    var pane: CGSize?
     @ObservationIgnored private(set) var tileSource = CallTileSource(video: { _ in nil }, togglePin: { _ in /* no call yet */ })
     /// The share of the pane each conversation's stage was dragged to, kept
     /// on this device (web keeps it per room in local storage).
@@ -38,11 +58,15 @@ final class CallStageModel {
         return memory
     }
 
-    /// Where the slot's call shows while `selection` is the open conversation.
-    func surface(of state: CallState, open selection: ConversationID?, platform: CallSurface.Platform) -> CallSurface {
+    /// Where the slot's call shows in the window laid out as `layout`, while
+    /// `selection` is its open conversation. A window with no layout, as a
+    /// sheet, is taken to have room for everything.
+    func surface(
+        of state: CallState, open selection: ConversationID?, platform: CallSurface.Platform, in layout: CallWindowLayout?
+    ) -> CallSurface {
         CallSurface.placement(
-            of: state, open: selection, platform: platform, pane: pane,
-            size: state.sid.map { stage(of: $0).size } ?? .defaultSize
+            of: state, open: selection, platform: platform, pane: layout?.pane,
+            size: state.sid.map { stage(of: $0).size } ?? .defaultSize, isSidebarShown: layout?.isSidebarShown ?? true
         )
     }
 
@@ -76,6 +100,7 @@ final class CallStageModel {
 struct CallStageHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(CallStageModel.self) private var model
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
@@ -132,7 +157,7 @@ struct CallStageHost: View {
             escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
             participants: rows,
             canResetVolumes: media?.hasChangedVolumes ?? false,
-            participantsCoverTiles: (model.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
+            participantsCoverTiles: (layout?.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
