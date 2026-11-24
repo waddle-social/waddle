@@ -122,16 +122,15 @@ mod xep0353 {
     }
 
     /// XEP-0353 §3.2 "Intermediate State: Device Rings": the
-    /// responder's `<ringing/>` is addressed to the caller's BARE JID
-    /// so the initiator's server fans the ring state out to every
-    /// caller resource.
+    /// responder's `<ringing/>` is addressed to the initiator's FULL JID
+    /// (0.8.0: "Send JMI responses to full JID of initiator").
     #[test]
-    fn ringing_targets_bare_jid_with_jmi_id() {
+    fn ringing_targets_full_jid_with_jmi_id() {
         let stanza = message_with_jmi(
-            &Jid::from(bare("caller@waddle.test")),
+            &Jid::from(full("caller@waddle.test/phone")),
             build_ringing(&sid("c2")),
         );
-        assert_eq!(stanza.attr("to"), Some("caller@waddle.test"));
+        assert_eq!(stanza.attr("to"), Some("caller@waddle.test/phone"));
         assert_eq!(stanza.attr("type"), Some("chat"));
         let ringing = stanza
             .get_child("ringing", NS_JINGLE_MESSAGE)
@@ -187,7 +186,7 @@ mod xep0353 {
         let client = test_client(listener.clone());
         assert!(
             !client
-                .send_call_ringing("caller@waddle.test".into(), "c1".into())
+                .send_call_ringing("caller@waddle.test/phone".into(), "c1".into())
                 .await
         );
         assert!(listener
@@ -196,21 +195,21 @@ mod xep0353 {
             .any(|e| e.contains("Not connected")));
     }
 
-    /// A resource-bearing JID must be refused so a `<ringing/>` can
-    /// never target a single caller resource.
+    /// XEP-0353 0.8.0: a `<ringing/>` targets the initiator's full JID,
+    /// so a bare JID must be refused.
     #[tokio::test]
-    async fn send_call_ringing_rejects_full_jid() {
+    async fn send_call_ringing_rejects_bare_jid() {
         let listener = RecordingListener::default();
         let client = test_client(listener.clone());
         assert!(
             !client
-                .send_call_ringing("caller@waddle.test/phone".into(), "c1".into())
+                .send_call_ringing("caller@waddle.test".into(), "c1".into())
                 .await
         );
         assert!(listener
             .errors()
             .iter()
-            .any(|e| e.contains("invalid bare JID")));
+            .any(|e| e.contains("invalid full JID")));
     }
 
     #[tokio::test]
@@ -219,7 +218,7 @@ mod xep0353 {
         let client = test_client(listener.clone());
         assert!(
             !client
-                .send_call_ringing("caller@waddle.test".into(), "   ".into())
+                .send_call_ringing("caller@waddle.test/phone".into(), "   ".into())
                 .await
         );
         assert!(listener.errors().iter().any(|e| e.contains("session id")));

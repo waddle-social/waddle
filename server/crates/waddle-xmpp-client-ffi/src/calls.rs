@@ -139,13 +139,12 @@ impl WaddleClient {
         self.send_stanza_or_error(stanza, "send_call_proceed").await
     }
 
-    /// Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
-    /// initiator's server fans the responder's device-ring state out
-    /// to every caller resource (XEP-0353 §3.2, "Intermediate State:
-    /// Device Rings"). Emitted when an inbound `<propose/>` lands and
-    /// the ringing UI starts.
-    pub async fn send_call_ringing(&self, peer_bare_jid: String, sid: String) -> bool {
-        let Some(peer) = self.parse_bare_jid(&peer_bare_jid, "send_call_ringing") else {
+    /// Send a XEP-0353 `<ringing/>` to the proposer's *full* JID
+    /// (XEP-0353 §3.2: the responder's device "indicates so by sending a
+    /// message to the full JID of the initiator"), taken from the
+    /// propose's `from`.
+    pub async fn send_call_ringing(&self, peer_full_jid: String, sid: String) -> bool {
+        let Some(peer) = self.parse_full_jid(&peer_full_jid, "send_call_ringing") else {
             return false;
         };
         let Some(sid) = self.parse_session_id(sid, "send_call_ringing") else {

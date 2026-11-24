@@ -29,6 +29,7 @@ import {
 import { normalizeMucServiceDomain } from "@/lib/calls/muc-call-indicators";
 import {
   $callState,
+  configureCallContactGate,
   configureIncomingCallAlerts,
   type RawIqSender,
 } from "@/lib/calls/call-store";
@@ -661,6 +662,14 @@ let disconnectMessageToolbarLifecycle: (() => void) | null = null;
 
 onMounted(() => {
   disconnectMessageToolbarLifecycle = installMessageToolbarLifecycleSuppression();
+  // XEP-0353 Security Considerations: only a proposer who already receives
+  // our presence (roster subscription `from`/`both`) gets an automatic
+  // `<ringing/>`; anyone else would learn that a device is online.
+  configureCallContactGate((bareJid) =>
+    rosterContacts.contacts.value.some(
+      (contact) =>
+        contact.jid === bareJid && (contact.subscription === "from" || contact.subscription === "both"),
+    ));
   configureIncomingCallAlerts(createIncomingCallAlertController({
     player: createBrowserLoopingTonePlayer(),
     notifier: createBrowserIncomingCallNotifier(),
@@ -685,6 +694,7 @@ watch(selfFullJid, (fullJid) => {
 
 onUnmounted(() => {
   configureIncomingCallAlerts(null);
+  configureCallContactGate(null);
   disconnectMessageToolbarLifecycle?.();
   disconnectMessageToolbarLifecycle = null;
 });

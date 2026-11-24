@@ -128,13 +128,13 @@ impl WaddleClient {
         })
     }
 
-    /// Send a JMI `<ringing/>` to the caller's bare JID (XEP-0353
-    /// §3.2). The bare JID lets the initiator's server fan out the
-    /// responder's device-ring state to every caller resource.
-    pub fn send_call_ringing(&self, peer_bare_jid: String, sid_str: String) -> Promise {
+    /// Send a JMI `<ringing/>` to the proposer's full JID (XEP-0353
+    /// §3.2: the responder's device "indicates so by sending a message to
+    /// the full JID of the initiator"), taken from the propose's `from`.
+    pub fn send_call_ringing(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let stanza = message_with_jmi_to_bare(&peer_bare_jid, build_ringing(&sid(sid_str)))?;
+            let stanza = message_with_jmi_to_full(&peer_full_jid, build_ringing(&sid(sid_str)))?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
@@ -627,22 +627,22 @@ mod tests {
     }
 
     #[test]
-    fn jmi_ringing_targets_bare_jid_and_rejects_full_jid() {
+    fn jmi_ringing_targets_full_jid_and_rejects_bare_jid() {
         use waddle_xmpp_client::messaging::{build_ringing, SessionId};
 
-        let stanza = super::message_with_jmi_to_bare(
-            "bob@waddle.test",
+        let stanza = super::message_with_jmi_to_full(
+            "bob@waddle.test/phone",
             build_ringing(&SessionId("c1".into())),
         )
-        .expect("bare JID accepted for ringing");
-        assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
+        .expect("full JID accepted for ringing");
+        assert_eq!(stanza.attr("to"), Some("bob@waddle.test/phone"));
+        assert!(FullJid::from_str("bob@waddle.test").is_err());
         assert!(
             stanza
                 .children()
                 .any(|child| child.name() == "ringing" && child.ns() == NS_JINGLE_MESSAGE),
             "JMI ringing child preserved"
         );
-        assert!("bob@waddle.test/phone".parse::<jid::BareJid>().is_err());
     }
 
     #[test]

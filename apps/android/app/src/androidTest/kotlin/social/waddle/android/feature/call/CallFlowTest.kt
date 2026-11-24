@@ -37,6 +37,7 @@ import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleLiveKitJoin
 import social.waddle.client.ffi.WaddleMujiPresence
+import social.waddle.client.ffi.WaddleRosterContact
 
 /**
  * DM call flows over the fully-faked graph: an inbound XEP-0353
@@ -118,6 +119,8 @@ class CallFlowTest {
     fun incomingProposeRaisesRingNotificationAndDeclineSendsReject() {
         harness.signInAndConnect()
         composeAppShell()
+        harness.activeFakeClient().rosterContacts =
+            listOf(WaddleRosterContact("bob@waddle.test", null, receivesOurPresence = true))
 
         harness.emitCallEvent(incomingProposeEvent())
 
@@ -125,10 +128,10 @@ class CallFlowTest {
         waitForTag(CallTestTags.INCOMING_SCREEN)
         composeRule.waitUntil(timeoutMillis = 10_000) { hasIncomingCallNotification() }
 
-        // XEP-0353 §3.2: the responder rings back the caller's bare JID.
+        // XEP-0353 §3.2: the responder rings back the caller's full JID.
         composeRule.waitUntil(timeoutMillis = 10_000) {
             harness.activeFakeClient().callVerbs
-                .any { it == RecordedCallVerb.Ringing("bob@waddle.test", "c-in-1") }
+                .any { it == RecordedCallVerb.Ringing(peerFull, "c-in-1") }
         }
 
         composeRule.onNodeWithTag(CallTestTags.DECLINE_BUTTON).performClick()

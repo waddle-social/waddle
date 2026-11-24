@@ -40,12 +40,12 @@ extension GroupCallLateAcceptTests {
         await eventually { f.port.callSends.contains(.groupPresence(groupRoom, "alice", .init(state: .left))) }
         // A public arrival barrier lets the abandoned setup resume while leave is held.
         f.store.handle(CallEvent(from: callPeer, sid: "barrier", kind: .propose(callAudio)))
-        await eventually { f.port.callSends.last == .ringing(callPeer.bare, "barrier") }
+        await eventually { f.port.callSends.last == .ringing(callPeer, "barrier") }
         #expect(f.port.callSends == [
             .groupPresence(groupRoom, "alice", .init(state: .preparing)),
             .groupPresence(groupRoom, "alice", .init(state: .active(video: false))),
             .groupInitiate(groupRoom, callOwn, "g1", false),
-            .groupPresence(groupRoom, "alice", .init(state: .left)), .ringing(callPeer.bare, "barrier")])
+            .groupPresence(groupRoom, "alice", .init(state: .left)), .ringing(callPeer, "barrier")])
         f.port.heldCallVerbs = []
         f.port.releaseCallSends()
         await leave.value

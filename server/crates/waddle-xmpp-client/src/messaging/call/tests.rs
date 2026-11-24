@@ -72,6 +72,50 @@ fn parses_finish() {
 }
 
 #[test]
+fn xep0353_plain_reject_retract_finish_carry_should_reasons() {
+    for (name, body, condition) in [
+        ("reject", build_reject(&sid("c1")), "busy"),
+        ("retract", build_retract(&sid("c1")), "cancel"),
+        ("finish", build_finish(&sid("c1")), "success"),
+    ] {
+        let reason = body
+            .get_child("reason", NS_JINGLE)
+            .unwrap_or_else(|| panic!("{name}: SHOULD carry <reason/>"));
+        assert!(
+            reason.get_child(condition, NS_JINGLE).is_some(),
+            "{name}: reason condition must be <{condition}/>"
+        );
+    }
+}
+
+#[test]
+fn xep0167_one_to_one_descriptions_carry_payload_types() {
+    let sid = sid("c1");
+    let initiator: FullJid = "alice@waddle.test/d".parse().unwrap();
+    for jingle in [
+        build_session_initiate(&sid, &initiator, CallMedia::audio_video()),
+        build_session_accept(&sid, &initiator, CallMedia::audio_video()),
+    ] {
+        for (media, name, id, clockrate) in [
+            ("audio", "opus", "111", "48000"),
+            ("video", "VP8", "96", "90000"),
+        ] {
+            let content = jingle
+                .children()
+                .find(|c| c.attr("name") == Some(media))
+                .expect("content for media");
+            let pt = content
+                .get_child("description", NS_JINGLE_RTP)
+                .and_then(|d| d.get_child("payload-type", NS_JINGLE_RTP))
+                .expect("RTP description carries a payload-type");
+            assert_eq!(pt.attr("id"), Some(id));
+            assert_eq!(pt.attr("name"), Some(name));
+            assert_eq!(pt.attr("clockrate"), Some(clockrate));
+        }
+    }
+}
+
+#[test]
 fn parses_tie_break_reject_and_retract_metadata() {
     let xml = r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop'>
             <reject xmlns='urn:xmpp:jingle-message:0' id='c1'>
@@ -387,7 +431,7 @@ fn build_jmi_helpers_roundtrip_through_parser() {
     assert!(matches!(
         ev.kind,
         CallEventKind::Reject {
-            reason: None,
+            reason: Some(JingleReason::Busy),
             tie_break: false
         }
     ));
@@ -403,7 +447,7 @@ fn build_jmi_helpers_roundtrip_through_parser() {
     assert!(matches!(
         ev.kind,
         CallEventKind::Retract {
-            reason: None,
+            reason: Some(JingleReason::Cancel),
             tie_break: false
         }
     ));
@@ -419,7 +463,7 @@ fn build_jmi_helpers_roundtrip_through_parser() {
     assert!(matches!(
         ev.kind,
         CallEventKind::Finish {
-            reason: None,
+            reason: Some(JingleReason::Success),
             migrated_to: None
         }
     ));

@@ -207,7 +207,7 @@ class CallStoreTieBreakTest {
             CallState.Incoming(from = PEER_FULL, sid = "c-aa", media = audio),
             f.store.state.value,
         )
-        assertTrue(RecordedCallVerb.Ringing(PEER_BARE, "c-aa") in f.client.callVerbs)
+        assertTrue(RecordedCallVerb.Ringing(PEER_FULL, "c-aa") in f.client.callVerbs)
         assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
     }
 
@@ -253,7 +253,7 @@ class CallStoreTieBreakTest {
             CallState.Incoming(from = PEER_FULL, sid = "c-aa", media = audio),
             f.store.state.value,
         )
-        assertTrue(RecordedCallVerb.Ringing(PEER_BARE, "c-aa") in f.client.callVerbs)
+        assertTrue(RecordedCallVerb.Ringing(PEER_FULL, "c-aa") in f.client.callVerbs)
         assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Reject })
     }
 

@@ -1008,7 +1008,7 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retr
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_retract_tie_break(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(`ptr`: Long,`peerBareJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_session_accept(`ptr`: Long,`peerFullJid`: RustBuffer.ByValue,`responderFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`audio`: Byte,`video`: Byte,
 ): Long
@@ -1432,7 +1432,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 34869) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 19632) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {
@@ -2490,13 +2490,12 @@ public interface WaddleClientInterface {
     suspend fun `sendCallRetractTieBreak`(`peerFullJid`: kotlin.String, `sid`: kotlin.String): kotlin.Boolean
 
     /**
-     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
-     * initiator's server fans the responder's device-ring state out
-     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
-     * Device Rings"). Emitted when an inbound `<propose/>` lands and
-     * the ringing UI starts.
+     * Send a XEP-0353 `<ringing/>` to the proposer's *full* JID
+     * (XEP-0353 §3.2: the responder's device "indicates so by sending a
+     * message to the full JID of the initiator"), taken from the
+     * propose's `from`.
      */
-    suspend fun `sendCallRinging`(`peerBareJid`: kotlin.String, `sid`: kotlin.String): kotlin.Boolean
+    suspend fun `sendCallRinging`(`peerFullJid`: kotlin.String, `sid`: kotlin.String): kotlin.Boolean
 
     /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
@@ -3869,19 +3868,18 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
-     * initiator's server fans the responder's device-ring state out
-     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
-     * Device Rings"). Emitted when an inbound `<propose/>` lands and
-     * the ringing UI starts.
+     * Send a XEP-0353 `<ringing/>` to the proposer's *full* JID
+     * (XEP-0353 §3.2: the responder's device "indicates so by sending a
+     * message to the full JID of the initiator"), taken from the
+     * propose's `from`.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendCallRinging`(`peerBareJid`: kotlin.String, `sid`: kotlin.String) : kotlin.Boolean {
+    override suspend fun `sendCallRinging`(`peerFullJid`: kotlin.String, `sid`: kotlin.String) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(
                 uniffiHandle,
-                FfiConverterString.lower(`peerBareJid`),FfiConverterString.lower(`sid`),
+                FfiConverterString.lower(`peerFullJid`),FfiConverterString.lower(`sid`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -12858,6 +12856,14 @@ data class WaddleRosterContact (
     var `jid`: kotlin.String
     ,
     var `name`: kotlin.String?
+    ,
+    /**
+     * RFC 6121 §2.1.2.5 `subscription` `from` or `both`: the contact
+     * receives the account's presence. A client answers a call proposal
+     * with `<ringing/>` only for such a contact (XEP-0353 Security Considerations: replying
+     * to a stranger is a presence leak).
+     */
+    var `receivesOurPresence`: kotlin.Boolean
 
 ){
 
@@ -12876,17 +12882,20 @@ public object FfiConverterTypeWaddleRosterContact: FfiConverterRustBuffer<Waddle
         return WaddleRosterContact(
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleRosterContact) = (
             FfiConverterString.allocationSize(value.`jid`) +
-            FfiConverterOptionalString.allocationSize(value.`name`)
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`receivesOurPresence`)
     )
 
     override fun write(value: WaddleRosterContact, buf: ByteBuffer) {
             FfiConverterString.write(value.`jid`, buf)
             FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`receivesOurPresence`, buf)
     }
 }
 

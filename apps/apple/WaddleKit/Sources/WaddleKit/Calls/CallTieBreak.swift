@@ -45,8 +45,9 @@ extension CallStore {
         if case .ended(sid: previous.sid, reason: .expired) = state {
             cancelTimers()
             transition(.incoming(IncomingCall(from: event.from, sid: event.sid, media: media)))
+            guard await port.peerReceivesOurPresence(event.from.bare) else { return }
             _ = await send(epoch: epoch, error: "call ringing failed") {
-                await port.sendCallRinging(to: event.from.bare, sid: event.sid)
+                await port.sendCallRinging(to: event.from, sid: event.sid)
             }
         } else {
             _ = await send(epoch: epoch, error: "call reject failed") {

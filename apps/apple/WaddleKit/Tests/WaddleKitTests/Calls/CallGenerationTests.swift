@@ -81,7 +81,7 @@ import Testing
         #expect(f.port.callSends.last?.verb == verb)
         let sendsBeforeClear: [CallSend]
         switch verb {
-        case "ringing": sendsBeforeClear = [.ringing(callPeer.bare, "c-aa")]
+        case "ringing": sendsBeforeClear = [.ringing(callPeer, "c-aa")]
         case "initiate": sendsBeforeClear = [.initiate(callPeer, callOwn, "c-zz", callAudio)]
         case "accept": sendsBeforeClear = [.accept(callPeer, callOwn, "c1", callAudio)]
         case "reject": sendsBeforeClear = [.reject(JID(parsing: "carol@waddle.test/tab")!, "c-other", false)]
@@ -116,7 +116,7 @@ import Testing
             f.store.handle(f.event(.propose(callAudio)))
             await eventually { f.port.callSends.count == 1 }
             #expect(await f.store.acceptIncoming())
-            expected = [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .finish(callPeer, "c1", .timeout)]
+            expected = [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .finish(callPeer, "c1", .timeout)]
         } else {
             #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
             if verb == "terminate" {
@@ -141,7 +141,7 @@ import Testing
         let carol = JID(parsing: "carol@waddle.test/tab")!
         f.store.handle(f.event(.propose(callAudio), sid: "c-barrier", from: carol))
         await eventually { f.port.callSends.last == .reject(carol, "c-barrier", false) }
-        #expect(f.port.callSends == expected + [.ringing(callPeer.bare, "c-live"), .reject(carol, "c-barrier", false)])
+        #expect(f.port.callSends == expected + [.ringing(callPeer, "c-live"), .reject(carol, "c-barrier", false)])
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-live", media: callVideo)))
         #expect(f.store.lastError == nil)
         f.store.clear()

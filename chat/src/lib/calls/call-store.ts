@@ -203,6 +203,19 @@ export function configureIncomingCallAlerts(
 }
 
 /**
+ * XEP-0353 Security Considerations: answering a stranger's `<propose/>`
+ * with `<ringing/>` is a presence leak, so a responder auto-replies only to
+ * a proposer that already receives its presence (roster subscription
+ * `from` or `both`). With no gate installed nothing is auto-sent; the
+ * incoming call is still surfaced so the user can act on it.
+ */
+let callContactGate: ((bareJid: string) => boolean) | null = null;
+
+export function configureCallContactGate(gate: ((bareJid: string) => boolean) | null): void {
+  callContactGate = gate;
+}
+
+/**
  * Pure reducer over the current call state. Exposed for unit
  * testing; the production caller is the `on_call` registration in
  * `lib/xmpp/client.ts`, which subscribes via `applyCallEvent`.
@@ -486,8 +499,10 @@ function emitRingingOnIncomingPropose(
   if (!sender || event.kind !== "propose") return;
   if (next.phase !== "incoming" || next.sid !== event.sid) return;
   if (before.phase === "incoming" && before.sid === event.sid) return;
+  const proposerBare = barePeerJid(event.from) || event.from;
+  if (!callContactGate?.(proposerBare)) return;
   void outboundCalls
-    .ringing(sender, barePeerJid(event.from) || event.from, event.sid)
+    .ringing(sender, event.from, event.sid)
     .catch((err) => reportCallError(err));
 }
 

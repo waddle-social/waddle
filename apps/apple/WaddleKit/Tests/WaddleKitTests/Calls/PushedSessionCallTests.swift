@@ -65,7 +65,7 @@ import Testing
         #expect(c.calls.state == .incoming(IncomingCall(from: callPeer, sid: "c-push", media: callVideo)))
         #expect(!tracker.isAwaitingSlot)
         #expect(tracker.managedCall == systemCall)
-        #expect(port.callSends == [.ringing(callPeer.bare, "c-push")])
+        #expect(port.callSends == [.ringing(callPeer, "c-push")])
         await c.stop()
     }
 

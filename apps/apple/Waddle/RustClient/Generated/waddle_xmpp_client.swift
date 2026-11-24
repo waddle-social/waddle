@@ -734,13 +734,12 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallRetractTieBreak(peerFullJid: String, sid: String) async  -> Bool
 
     /**
-     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
-     * initiator's server fans the responder's device-ring state out
-     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
-     * Device Rings"). Emitted when an inbound `<propose/>` lands and
-     * the ringing UI starts.
+     * Send a XEP-0353 `<ringing/>` to the proposer's *full* JID
+     * (XEP-0353 §3.2: the responder's device "indicates so by sending a
+     * message to the full JID of the initiator"), taken from the
+     * propose's `from`.
      */
-    func sendCallRinging(peerBareJid: String, sid: String) async  -> Bool
+    func sendCallRinging(peerFullJid: String, sid: String) async  -> Bool
 
     /**
      * Send a XEP-0166 §7.2 `session-accept` IQ.
@@ -2016,19 +2015,18 @@ open func sendCallRetractTieBreak(peerFullJid: String, sid: String)async  -> Boo
 }
 
     /**
-     * Send a XEP-0353 `<ringing/>` to the caller's *bare* JID so the
-     * initiator's server fans the responder's device-ring state out
-     * to every caller resource (XEP-0353 §3.2, "Intermediate State:
-     * Device Rings"). Emitted when an inbound `<propose/>` lands and
-     * the ringing UI starts.
+     * Send a XEP-0353 `<ringing/>` to the proposer's *full* JID
+     * (XEP-0353 §3.2: the responder's device "indicates so by sending a
+     * message to the full JID of the initiator"), taken from the
+     * propose's `from`.
      */
-open func sendCallRinging(peerBareJid: String, sid: String)async  -> Bool  {
+open func sendCallRinging(peerFullJid: String, sid: String)async  -> Bool  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_call_ringing(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerBareJid),FfiConverterString.lower(sid)
+                    FfiConverterString.lower(peerFullJid),FfiConverterString.lower(sid)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -12324,12 +12322,26 @@ public func FfiConverterTypeWaddleRoomMemberEntry_lower(_ value: WaddleRoomMembe
 public struct WaddleRosterContact: Equatable, Hashable {
     public var jid: String
     public var name: String?
+    /**
+     * RFC 6121 §2.1.2.5 `subscription` `from` or `both`: the contact
+     * receives the account's presence. A client answers a call proposal
+     * with `<ringing/>` only for such a contact (XEP-0353 Security Considerations: replying
+     * to a stranger is a presence leak).
+     */
+    public var receivesOurPresence: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(jid: String, name: String?) {
+    public init(jid: String, name: String?,
+        /**
+         * RFC 6121 §2.1.2.5 `subscription` `from` or `both`: the contact
+         * receives the account's presence. A client answers a call proposal
+         * with `<ringing/>` only for such a contact (XEP-0353 Security Considerations: replying
+         * to a stranger is a presence leak).
+         */receivesOurPresence: Bool) {
         self.jid = jid
         self.name = name
+        self.receivesOurPresence = receivesOurPresence
     }
 
 
@@ -12349,13 +12361,15 @@ public struct FfiConverterTypeWaddleRosterContact: FfiConverterRustBuffer {
         return
             try WaddleRosterContact(
                 jid: FfiConverterString.read(from: &buf),
-                name: FfiConverterOptionString.read(from: &buf)
+                name: FfiConverterOptionString.read(from: &buf),
+                receivesOurPresence: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: WaddleRosterContact, into buf: inout [UInt8]) {
         FfiConverterString.write(value.jid, into: &buf)
         FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.receivesOurPresence, into: &buf)
     }
 }
 
@@ -22395,7 +22409,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_retract_tie_break() != 11649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 34869) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_ringing() != 19632) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_accept() != 53644) {

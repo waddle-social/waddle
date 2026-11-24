@@ -14,7 +14,12 @@ public protocol CallPort: AnyObject, Sendable {
     func sendGroupCallSessionTerminate(in room: BareJID, sid: String) async -> Bool
 
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool
-    func sendCallRinging(to peer: BareJID, sid: String) async -> Bool
+    /// XEP-0353 §3.2: addressed to the proposer's full JID.
+    func sendCallRinging(to peer: JID, sid: String) async -> Bool
+    /// Whether `peer` is a roster contact that receives this account's presence
+    /// (subscription `from` or `both`). Any failure answers false: the
+    /// automatic `<ringing/>` to a stranger is a presence leak (XEP-0353 Security).
+    func peerReceivesOurPresence(_ peer: BareJID) async -> Bool
     func sendCallProceed(to peer: JID, sid: String) async -> Bool
     func sendCallReject(to peer: JID, sid: String, tieBreak: Bool) async -> Bool
     func sendCallRetract(to peer: BareJID, sid: String) async -> Bool

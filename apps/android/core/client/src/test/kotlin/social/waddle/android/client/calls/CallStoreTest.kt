@@ -13,6 +13,7 @@ import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallSessionTerminateOutcome
 import social.waddle.client.ffi.WaddleJingleReason
+import social.waddle.client.ffi.WaddleRosterContact
 
 /**
  * The call state machine, mirroring the web reducer suite
@@ -35,8 +36,33 @@ class CallStoreTest {
 
         val state = f.store.state.value
         assertEquals(CallState.Incoming(from = PEER_FULL, sid = "c1", media = video), state)
-        // XEP-0353 §3.2: <ringing/> to the caller's BARE JID.
-        assertEquals(listOf<RecordedCallVerb>(RecordedCallVerb.Ringing(PEER_BARE, "c1")), f.client.callVerbs)
+        // XEP-0353 §3.2: <ringing/> to the proposer's FULL JID.
+        assertEquals(listOf<RecordedCallVerb>(RecordedCallVerb.Ringing(PEER_FULL, "c1")), f.client.callVerbs)
+    }
+
+    @Test
+    fun `propose from a stranger is surfaced without a ringing`() = runTest {
+        val f = Fixture()
+        f.client.rosterContacts = emptyList()
+        f.store.start(backgroundScope)
+
+        f.store.onCallEvent(propose(PEER_FULL, "c-stranger"))
+        runCurrent()
+
+        assertEquals(CallState.Incoming(from = PEER_FULL, sid = "c-stranger", media = audio), f.store.state.value)
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Ringing })
+    }
+
+    @Test
+    fun `propose from a contact that only we follow gets no ringing`() = runTest {
+        val f = Fixture()
+        f.client.rosterContacts = listOf(WaddleRosterContact(PEER_BARE, null, receivesOurPresence = false))
+        f.store.start(backgroundScope)
+
+        f.store.onCallEvent(propose(PEER_FULL, "c-to-only"))
+        runCurrent()
+
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Ringing })
     }
 
     @Test

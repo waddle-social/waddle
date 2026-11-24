@@ -206,7 +206,7 @@ sealed interface RecordedCallVerb {
         val video: Boolean,
     ) : RecordedCallVerb
 
-    data class Ringing(val peerBareJid: String, val sid: String) : RecordedCallVerb
+    data class Ringing(val peerFullJid: String, val sid: String) : RecordedCallVerb
 
     data class Proceed(val peerFullJid: String, val sid: String) : RecordedCallVerb
 
@@ -1091,8 +1091,8 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         return callVerbResult
     }
 
-    override suspend fun sendCallRinging(peerBareJid: String, sid: String): Boolean {
-        callVerbs += RecordedCallVerb.Ringing(peerBareJid, sid)
+    override suspend fun sendCallRinging(peerFullJid: String, sid: String): Boolean {
+        callVerbs += RecordedCallVerb.Ringing(peerFullJid, sid)
         return callVerbResult
     }
 
