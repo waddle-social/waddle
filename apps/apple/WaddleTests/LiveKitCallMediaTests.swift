@@ -312,9 +312,21 @@ final class LiveKitCallMediaTests: XCTestCase {
         XCTAssertNotNil(reading.candidateType, "the network path is part of a track's report")
         XCTAssertNotNil(reading.transport)
 
+        // A second window opens its settings and the first closes: the one still open keeps its figures.
+        await alice.setMeasuresVideo(true)
+        await alice.setMeasuresVideo(false)
+        let stillWatched = await alice.videoSamples()
+        XCTAssertFalse(stillWatched.isEmpty, "measuring goes on while anyone is looking")
+
         await alice.setMeasuresVideo(false)
         let after = await alice.videoSamples()
         XCTAssertTrue(after.isEmpty)
+        // One close too many does not leave the count below nothing.
+        await alice.setMeasuresVideo(false)
+        await alice.setMeasuresVideo(true)
+        let again = await alice.videoSamples()
+        XCTAssertFalse(again.isEmpty)
+        await alice.setMeasuresVideo(false)
         await alice.disconnect()
         await bob.disconnect()
     }

@@ -180,11 +180,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// The tracks asked to report statistics. Asking one again restarts its
     /// timer, so each is asked once.
     @ObservationIgnored private var measuredTracks: [ObjectIdentifier: Track] = [:]
-    @ObservationIgnored private var measuresVideo = false
+    /// How many are looking: a Mac can have the settings open in two
+    /// windows, and closing one must not blind the other.
+    @ObservationIgnored private var videoWatchers = 0
+    private var measuresVideo: Bool { videoWatchers > 0 }
 
     func setMeasuresVideo(_ on: Bool) async {
-        measuresVideo = on
-        guard on else {
+        videoWatchers = max(0, videoWatchers + (on ? 1 : -1))
+        guard measuresVideo else {
             let tracks = Array(measuredTracks.values)
             measuredTracks = [:]
             for track in tracks { await track.set(reportStatistics: false) }
@@ -743,7 +746,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
         measuredTracks = [:]
-        measuresVideo = false
+        videoWatchers = 0
         audioProcessingPublications = []
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
