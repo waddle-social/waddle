@@ -43,9 +43,10 @@ pub use mentions::{
 };
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, InCallPresenceMarkers,
-    MujiElementOptions, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_JINGLE_RTP,
-    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI, NS_REACTIONS,
-    NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW, NS_WADDLE_PIN_V0,
+    MujiElementOptions, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_JINGLE, NS_JINGLE_RTP,
+    NS_JINGLE_RTP_AUDIO, NS_JINGLE_RTP_VIDEO, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE,
+    NS_MESSAGE_RETRACT, NS_MUJI, NS_REACTIONS, NS_STANZA_ID, NS_WADDLE_IN_CALL,
+    NS_WADDLE_LINK_PREVIEW, NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;
