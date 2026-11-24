@@ -43,12 +43,12 @@ id = "unread-and-read-state"
 server_maturity = "beta"
 protocols = ["XEP-0333", "XEP-0430", "XEP-0490"]
 advertised_features = ["urn:xmpp:chat-markers:0", "urn:xmpp:inbox:1"]
-server_evidence = ["crates/waddle-server/tests/xep0430_inbox_ws.rs", "crates/waddle-server/tests/xep0490_mds_ws.rs"]
+server_evidence = ["crates/waddle-server/tests/xep0430_inbox_ws.rs", "crates/waddle-server/tests/xep0490_mds_ws.rs", "crates/waddle-server/tests/xep0060_publish_options_ws.rs"]
 topologies = { local = "beta", federated = "unsupported" }
 [capability.protocol_evidence]
 XEP-0333 = ["crates/waddle-server/tests/xep0490_mds_ws.rs"]
 XEP-0430 = ["crates/waddle-server/tests/xep0430_inbox_ws.rs"]
-XEP-0490 = ["crates/waddle-server/tests/xep0490_mds_ws.rs"]
+XEP-0490 = ["crates/waddle-server/tests/xep0490_mds_ws.rs", "crates/waddle-server/tests/xep0060_publish_options_ws.rs"]
 
 [[capability]]
 id = "push-notifications"

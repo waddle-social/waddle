@@ -273,6 +273,12 @@ impl Feature {
         Self::new("http://jabber.org/protocol/pubsub#persistent-items")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#publish-options`.
+    #[must_use]
+    pub fn pubsub_publish_options() -> Self {
+        Self::new("http://jabber.org/protocol/pubsub#publish-options")
+    }
+
     /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#publish`.
     #[must_use]
     pub fn pubsub_publish() -> Self {

@@ -112,9 +112,40 @@ pub(super) async fn handle_pubsub_iq(
         }
 
         match request {
-            PubSubRequest::Publish { node, item, .. } => {
+            PubSubRequest::Publish {
+                node,
+                item,
+                publish_options,
+            } => {
                 if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                }
+                // XEP-0060 §7.1.5: every publish-options field is a
+                // precondition, and an unknown field rejects the publish.
+                let preconditions = match publish_options
+                    .as_deref()
+                    .map(waddle_xmpp_core::pubsub::parse_publish_options_form)
+                    .transpose()
+                {
+                    Ok(preconditions) => preconditions,
+                    Err(error) => {
+                        debug!(%error, "Rejecting malformed publish-options");
+                        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                    }
+                };
+                // Only the PEP / generic node store enforces publish-options;
+                // the Waddle-specific Spaces and Community services do not
+                // support them and say so rather than ignoring a precondition.
+                if preconditions.is_some()
+                    && (target_jid.to_string() == spaces_domain
+                        || target_jid.to_string() == community_domain)
+                {
+                    return vec![iq_to_xml(build_pubsub_error(
+                        iq,
+                        PubSubError::UnsupportedFeature(
+                            waddle_xmpp_core::pubsub::stanzas::PubSubUnsupportedFeature::PublishOptions,
+                        ),
+                    ))];
                 }
                 // A room-bound extension node is written by the room's
                 // current right, not by an affiliation an earlier read left.
@@ -243,6 +274,14 @@ pub(super) async fn handle_pubsub_iq(
                 // Items arm, not Publish.
                 if is_pep && target_jid == user_jid {
                     reconcile_well_known_pep_node_config(state, &user_jid, &node).await;
+                }
+
+                if let Some(preconditions) = &preconditions {
+                    if let Err(error) =
+                        enforce_publish_options(state, &target_jid, &node, preconditions).await
+                    {
+                        return vec![iq_to_xml(build_pubsub_error(iq, error))];
+                    }
                 }
 
                 let result = state
@@ -846,6 +885,61 @@ fn pubsub_publish_error_from_xmpp_error(error: &waddle_xmpp::XmppError) -> PubSu
 /// differ from ad-hoc PEP defaults (`urn:xmpp:vcard4`, the avatar
 /// nodes, DND, joined-spaces) — we don't bulk-rewrite arbitrary user
 /// node configs here.
+/// XEP-0060 §7.1.5 publish-options preconditions.
+///
+/// An existing node must already satisfy every field, or the publish fails
+/// with `<conflict/>` and `<precondition-not-met/>`. A missing node is
+/// auto-created with its default configuration changed only by the
+/// preconditions; a precondition the node's pinned privacy and durability
+/// invariants would override (for example a non-whitelist access model on a
+/// whitelist-pinned node) cannot be honoured and fails the same way.
+async fn enforce_publish_options(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    preconditions: &waddle_xmpp_core::pubsub::NodeConfigPatch,
+) -> Result<(), PubSubError> {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let internal = |error: waddle_xmpp::XmppError| {
+        warn!(node, %error, "Failed to evaluate publish-options preconditions");
+        PubSubError::InternalServerError
+    };
+    if let Some(existing) = storage.get_node(owner, node).await.map_err(internal)? {
+        return if preconditions.met_by(node, &existing.config) {
+            Ok(())
+        } else {
+            Err(PubSubError::PreconditionNotMet)
+        };
+    }
+    let defaults = waddle_xmpp_core::pubsub::NodeConfig::pep_for_node(node);
+    let prospective = crate::pubsub::bounded_node_config(
+        node,
+        &preconditions.apply_for_node(node, defaults.clone()),
+    );
+    if !preconditions.met_by(node, &prospective) {
+        return Err(PubSubError::PreconditionNotMet);
+    }
+    let (created, was_created) = storage
+        .get_or_create_node(owner, node)
+        .await
+        .map_err(internal)?;
+    if !was_created {
+        // A concurrent publish created the node first: it is an existing node.
+        return if preconditions.met_by(node, &created.config) {
+            Ok(())
+        } else {
+            Err(PubSubError::PreconditionNotMet)
+        };
+    }
+    if prospective != defaults {
+        storage
+            .update_node_config(owner, node, &prospective)
+            .await
+            .map_err(internal)?;
+    }
+    Ok(())
+}
+
 async fn reconcile_well_known_pep_node_config(state: &WebSocketState, owner: &BareJid, node: &str) {
     if node != waddle_xmpp_core::pubsub::PEP_NODE_VCARD4
         && node != waddle_xmpp_core::pubsub::PEP_NODE_AVATAR_DATA

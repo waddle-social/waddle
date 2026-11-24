@@ -22,7 +22,8 @@ pub use stanzas::{
     build_pubsub_delete_event, build_pubsub_error, build_pubsub_event, build_pubsub_items_result,
     build_pubsub_owner_subscriptions_result, build_pubsub_publish_result,
     build_pubsub_retract_event, build_pubsub_subscribe_result, build_pubsub_success,
-    is_pubsub_event, is_pubsub_iq, parse_pubsub_event, parse_pubsub_iq, PubSubError, PubSubEvent,
-    PubSubItem, PubSubRequest, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
+    is_pubsub_event, is_pubsub_iq, parse_publish_options_form, parse_pubsub_event, parse_pubsub_iq,
+    PubSubError, PubSubEvent, PubSubItem, PubSubRequest, NS_PUBSUB, NS_PUBSUB_ERRORS,
+    NS_PUBSUB_EVENT, NS_PUBSUB_OWNER, PUBLISH_OPTIONS_FORM_TYPE,
 };
 pub use subscription::{SubId, Subscription, SubscriptionState};
