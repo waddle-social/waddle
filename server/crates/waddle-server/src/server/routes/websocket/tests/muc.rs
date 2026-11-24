@@ -4083,7 +4083,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         .await
         .expect("grant explicit channel membership");
 
-    let _ = handle_muc_join(
+    let alice_join = handle_muc_join(
         state.as_ref(),
         "example.com",
         &room_jid,
@@ -4093,6 +4093,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         Some(&alice_session.clone()),
     )
     .await;
+    super::unlock_room_the_join_created(state.as_ref(), &room_jid, &alice_join).await;
     let _ = handle_muc_join(
         state.as_ref(),
         "example.com",
