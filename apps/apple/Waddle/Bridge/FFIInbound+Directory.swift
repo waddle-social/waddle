@@ -94,7 +94,7 @@ extension FFIInbound {
     static func uploadSlot(_ slot: WaddleUploadSlot) -> UploadSlot? {
         // XEP-0363 slots are HTTP(S); anything else is not fetched or opened.
         guard let put = webURL(slot.putUrl), let get = webURL(slot.getUrl) else { return nil }
-        let headers = Dictionary(slot.putHeaders.map { ($0.name, $0.value) }, uniquingKeysWith: { first, _ in first })
+        let headers = slot.putHeaders.map { UploadHeader(name: $0.name, value: $0.value) }
         return UploadSlot(putURL: put, getURL: get, headers: headers)
     }
 

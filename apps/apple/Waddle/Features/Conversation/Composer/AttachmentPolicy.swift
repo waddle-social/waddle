@@ -41,13 +41,13 @@ enum AttachmentPolicy {
     }
 
     /// XEP-0363 §5: only Authorization, Cookie and Expires may be copied
-    /// from the slot, with newlines stripped from names and values.
-    static func uploadHeaders(_ slotHeaders: [String: String]) -> [(name: String, value: String)] {
+    /// from the slot, with newlines stripped from names and values. Repeated
+    /// names are kept and the slot's order is preserved.
+    static func uploadHeaders(_ slotHeaders: [UploadHeader]) -> [UploadHeader] {
         let allowed: Set<String> = ["authorization", "cookie", "expires"]
         return slotHeaders
-            .map { (name: stripNewlines($0.key), value: stripNewlines($0.value)) }
+            .map { UploadHeader(name: stripNewlines($0.name), value: stripNewlines($0.value)) }
             .filter { allowed.contains($0.name.lowercased()) }
-            .sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
 
     private static func stripNewlines(_ value: String) -> String {
