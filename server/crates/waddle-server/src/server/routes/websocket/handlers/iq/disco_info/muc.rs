@@ -561,6 +561,20 @@ pub(super) async fn handle_muc_disco_info<'a>(
             return Some(denial);
         }
         let snapshot = snapshot.room;
+        // XEP-0045 §10.1.1: a locked room does not (yet) exist for anyone
+        // but its owner.
+        if snapshot.is_locked()
+            && !req.requester.is_some_and(|requester| {
+                snapshot.affiliation(&requester.to_bare()) == Affiliation::Owner
+            })
+        {
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                req.response_from,
+                req.response_to,
+                item_not_found_iq_error("Requested item not found."),
+            ));
+        }
         let managed_channel = get_managed_channel_for_room(state, &room_jid)
             .await
             .ok()

@@ -364,6 +364,8 @@ async fn xep_0045_self_kick_delivers_307_before_iq_result() {
     let room = format!("self-kick-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     settle_clients(&mut [&mut admin, &mut alice]).await;
 
@@ -408,6 +410,8 @@ async fn xep_0045_kick_returns_iq_result_to_moderator_before_broadcast_copy() {
     let room = format!("kick-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
     settle_clients(&mut [&mut admin, &mut alice, &mut bob]).await;
@@ -464,6 +468,8 @@ async fn xep_0045_ban_returns_iq_result_before_301_presences() {
     let room = format!("ban-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
     settle_clients(&mut [&mut admin, &mut alice, &mut bob]).await;
@@ -533,6 +539,8 @@ async fn xep_0045_membership_loss_returns_iq_result_before_321_presences() {
     let room = format!("member-loss-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_members_only(&mut admin, &room).await;
@@ -606,6 +614,8 @@ async fn xep_0045_self_membership_loss_delivers_321_before_iq_result() {
     let room = format!("self-member-loss-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_members_only(&mut admin, &room).await;
@@ -674,6 +684,8 @@ async fn xep_0045_voice_change_returns_iq_result_before_role_update_presence() {
     let room = format!("voice-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_moderated(&mut admin, &room).await;

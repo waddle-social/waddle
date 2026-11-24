@@ -71,44 +71,10 @@ async fn join_room(client: &mut WsXmppClient, room: &str, nick: &str) {
         .expect("join responses");
 }
 
-/// Create `room` as its first occupant and unlock it with an instant-room
-/// request (XEP-0045 §10.1.2); until then only the creator may enter.
+/// Create `room` as its first occupant and unlock it, so others may enter.
 async fn create_instant_room(client: &mut WsXmppClient, room: &str, nick: &str) {
     join_room(client, room, nick).await;
-    let iq = Element::builder("iq", "jabber:client")
-        .attr(
-            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
-            "set",
-        )
-        .attr(
-            xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
-            "instant-room",
-        )
-        .attr(
-            xmpp_parsers::minidom::rxml::xml_ncname!("to").to_owned(),
-            room,
-        )
-        .append(
-            Element::builder("query", "http://jabber.org/protocol/muc#owner")
-                .append(
-                    Element::builder("x", "jabber:x:data")
-                        .attr(
-                            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
-                            "submit",
-                        )
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
-    client
-        .send(&element_to_xml(iq))
-        .await
-        .expect("send instant-room request");
-    client
-        .recv_matching(|frame| frame.contains("instant-room") && frame.contains("result"))
-        .await
-        .expect("instant-room result");
+    ws_common::iq::unlock_created_room(client, room).await;
 }
 
 fn unavailable_presence_xml(to: &str) -> String {

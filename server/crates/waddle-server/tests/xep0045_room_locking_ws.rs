@@ -23,6 +23,8 @@ const BOB: &str = "bob";
 const NS_CLIENT: &str = "jabber:client";
 const NS_COMMANDS: &str = "http://jabber.org/protocol/commands";
 const NS_DATA: &str = "jabber:x:data";
+const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
+const NS_DISCO_ITEMS: &str = "http://jabber.org/protocol/disco#items";
 const NS_MUC: &str = "http://jabber.org/protocol/muc";
 const NS_MUC_OWNER: &str = "http://jabber.org/protocol/muc#owner";
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
@@ -546,5 +548,70 @@ async fn service_provisioned_channel_is_never_locked() {
         !String::from(&bob_presence).contains("item-not-found"),
         "{}",
         String::from(&bob_presence)
+    );
+}
+
+fn disco_iq(id: &str, to: &str, ns: &'static str) -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)
+        .append(Element::builder("query", ns).build())
+        .build()
+}
+
+/// §10.1.1: a locked room does not (yet) exist for anyone but its owner, so
+/// the service does not list it and describes it only to the owner; once
+/// unlocked it is both listed and described to everyone.
+#[tokio::test]
+async fn locked_room_is_neither_listed_nor_described_to_other_users() {
+    let (mut f, _guard) = fixture().await;
+    let room = unique_room();
+    let service = format!("muc.{DOMAIN}");
+    create_locked_room(&mut f.admin, &room).await;
+
+    send(&mut f.bob, disco_iq("items1", &service, NS_DISCO_ITEMS)).await;
+    let items = recv_iq(&mut f.bob, "items1").await;
+    assert!(
+        !String::from(&items).contains(room.as_str()),
+        "a locked room is not listed: {}",
+        String::from(&items)
+    );
+
+    send(&mut f.bob, disco_iq("info1", &room, NS_DISCO_INFO)).await;
+    let info = recv_iq(&mut f.bob, "info1").await;
+    assert_eq!(info.attr("type"), Some("error"), "{}", String::from(&info));
+    assert!(
+        info.children()
+            .find(|child| child.name() == "error")
+            .is_some_and(|error| error
+                .children()
+                .any(|c| c.name() == "item-not-found" && c.ns() == NS_STANZAS)),
+        "disco#info of a locked room is item-not-found for others: {}",
+        String::from(&info)
+    );
+
+    send(&mut f.admin, disco_iq("info2", &room, NS_DISCO_INFO)).await;
+    let owner_info = recv_iq(&mut f.admin, "info2").await;
+    assert_eq!(owner_info.attr("type"), Some("result"));
+
+    send(
+        &mut f.admin,
+        owner_iq("instant1", &room, "set", Some(data_form("submit", &[]))),
+    )
+    .await;
+    assert_iq_result(&mut f.admin, "instant1").await;
+
+    send(&mut f.bob, disco_iq("items2", &service, NS_DISCO_ITEMS)).await;
+    let items = recv_iq(&mut f.bob, "items2").await;
+    assert!(
+        String::from(&items).contains(room.as_str()),
+        "an unlocked room is listed: {}",
+        String::from(&items)
+    );
+    send(&mut f.bob, disco_iq("info3", &room, NS_DISCO_INFO)).await;
+    assert_eq!(
+        recv_iq(&mut f.bob, "info3").await.attr("type"),
+        Some("result")
     );
 }

@@ -336,6 +336,7 @@ async fn join_burst_then_live(server: &TestServer) {
     let bob_occupant = room.with_resource_str("bob").expect("bob occupant");
     let mut owner = connect_owner(server).await;
     join(&mut owner, &owner_occupant).await;
+    waddle_ws_test_support::iq::unlock_created_room(&mut owner, room.as_str()).await;
     send(&mut owner, groupchat(&room, "before-join")).await;
     owner
         .recv_matching(|frame| {

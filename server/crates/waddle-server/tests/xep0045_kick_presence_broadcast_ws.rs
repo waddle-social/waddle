@@ -182,6 +182,7 @@ async fn xep_0045_kick_broadcasts_status_307_to_all_occupants() {
     // participants. Drain alice/bob's presence-from-others frames so
     // the only frames in flight after this point are kick-related.
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
 

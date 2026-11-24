@@ -234,6 +234,7 @@ async fn moderation_from_non_moderator_returns_forbidden() {
 
     let room = format!("moderate-forbidden-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
 
     bob.send(&format!(
         r#"<presence to="{room}/bob"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#

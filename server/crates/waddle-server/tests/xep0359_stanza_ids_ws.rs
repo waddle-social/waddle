@@ -219,6 +219,7 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
         .parse()
         .expect("valid room JID");
     join_room_as(&mut admin, &room, USERNAME).await;
+    ws_common::iq::unlock_created_room(&mut admin, room.as_str()).await;
     join_room_as(&mut alice, &room, ALICE).await;
 
     let shared_envelope_id = EnvelopeId::new("reused-client-id");
