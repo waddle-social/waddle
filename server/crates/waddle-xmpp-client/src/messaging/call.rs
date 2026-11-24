@@ -165,7 +165,8 @@ const NS_JINGLE: &str = "urn:xmpp:jingle:1";
 const NS_JINGLE_MESSAGE: &str = "urn:xmpp:jingle-message:0";
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
-const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
+/// Waddle LiveKit Jingle transport (`urn:waddle:*`: no XEP transport applies).
+pub const NS_WADDLE_LIVEKIT_TRANSPORT: &str = "urn:waddle:transports:livekit:0";
 /// XEP-0334 Message Processing Hints namespace. The `<store/>` hint
 /// is mandatory on every JMI envelope per XEP-0353 §3 so MAM
 /// archives keep the call timeline reconstructible even when the

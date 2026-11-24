@@ -33,6 +33,7 @@ pub use call::{
     build_session_terminate, jingle_reason_from_wire_name, jingle_reason_wire_name,
     parse_call_event, parse_jingle_iq, parse_jmi_message, wrap_jmi_message, CallEventKind,
     CallMedia, InboundCallEvent, LiveKitJoin, MujiSessionVideo, TieBreak,
+    NS_WADDLE_LIVEKIT_TRANSPORT,
 };
 pub use link_preview_lookup::{
     build_link_preview_lookup_iq, eligible_preview_url, parse_link_preview_lookup_response,
