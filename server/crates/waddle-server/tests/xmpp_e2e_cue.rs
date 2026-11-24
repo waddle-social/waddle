@@ -116,7 +116,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("vcard-temp", "XEP-0054"),
     ("urn:ietf:params:xml:ns:vcard-4.0", "XEP-0292"),
     ("urn:xmpp:push:0", "XEP-0357"),
-    ("urn:xmpp:bookmarks:1#compat", "XEP-0402"),
     ("msgoffline", "XEP-0160"),
     ("http://jabber.org/protocol/muc", "XEP-0045"),
     // XEP-0045 §7.4 stable-id: reflected groupchat messages keep the
@@ -1022,7 +1021,6 @@ fn known_xep_evidence_rules() -> BTreeSet<&'static str> {
         "XEP-0012",
         "XEP-0030",
         "XEP-0045",
-        "XEP-0048",
         "XEP-0049",
         "XEP-0050",
         "XEP-0054",
@@ -1335,7 +1333,6 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("http://jabber.org/protocol/disco#info", "XEP-0030"),
         ("http://jabber.org/protocol/disco#items", "XEP-0030"),
         ("http://jabber.org/protocol/muc", "XEP-0045"),
-        ("storage:bookmarks", "XEP-0048"),
         ("jabber:iq:private", "XEP-0049"),
         ("http://jabber.org/protocol/commands", "XEP-0050"),
         ("vcard-temp", "XEP-0054"),

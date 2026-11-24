@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_is_private_storage_query_get() {
-        let child = Element::builder("storage", "storage:bookmarks").build();
+        let child = Element::builder("storage", "urn:example:private-data").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
         let iq = Iq::Get {
             from: None,
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_is_private_storage_query_set() {
-        let child = Element::builder("storage", "storage:bookmarks").build();
+        let child = Element::builder("storage", "urn:example:private-data").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
         let iq = Iq::Set {
             from: None,
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_parse_private_storage_get() {
-        let child = Element::builder("storage", "storage:bookmarks").build();
+        let child = Element::builder("storage", "urn:example:private-data").build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
         let iq = Iq::Get {
             from: None,
@@ -243,13 +243,13 @@ mod tests {
         };
         let key = parse_private_storage_get(&iq).unwrap();
         assert_eq!(key.element_name, "storage");
-        assert_eq!(key.namespace, "storage:bookmarks");
+        assert_eq!(key.namespace, "urn:example:private-data");
     }
 
     #[test]
     fn test_parse_private_storage_set() {
-        let child = Element::builder("storage", "storage:bookmarks")
-            .append(Element::builder("conference", "storage:bookmarks").build())
+        let child = Element::builder("storage", "urn:example:private-data")
+            .append(Element::builder("item", "urn:example:private-data").build())
             .build();
         let query = Element::builder("query", NS_PRIVATE).append(child).build();
         let iq = Iq::Set {
@@ -260,7 +260,7 @@ mod tests {
         };
         let result = parse_private_storage_set(&iq).unwrap();
         assert_eq!(result.key.element_name, "storage");
-        assert_eq!(result.key.namespace, "storage:bookmarks");
+        assert_eq!(result.key.namespace, "urn:example:private-data");
         assert_eq!(result.elements[0].name(), "storage");
     }
 }

@@ -1484,51 +1484,44 @@ async fn websocket_rejects_spoofed_muc_domain_presence() {
     let _ = client.close().await;
 }
 
-fn legacy_bookmarks(rooms: &[&str]) -> Element {
-    let mut storage = Element::builder("storage", "storage:bookmarks");
-    for room in rooms {
-        storage = storage.append(
+/// `storage:bookmarks` (XEP-0048) is no longer special: XEP-0049 treats it as an
+/// ordinary private-storage namespace, and XEP-0402 bookmarks live only on the
+/// `urn:xmpp:bookmarks:1` PEP node.
+fn opaque_storage_bookmarks(room: &str) -> Element {
+    Element::builder("storage", "storage:bookmarks")
+        .append(
             Element::builder("conference", "storage:bookmarks")
-                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), *room)
-                .attr(minidom::rxml::xml_ncname!("name").to_owned(), *room)
+                .attr(minidom::rxml::xml_ncname!("jid").to_owned(), room)
                 .build(),
-        );
-    }
-    storage.build()
+        )
+        .build()
 }
 
-async fn legacy_bookmarks_set(client: &mut WsXmppClient, id: &str, rooms: &[&str]) {
-    let iq = private_storage_iq(id, "set", None, [legacy_bookmarks(rooms)]);
-    client.send(&iq).await.expect("send legacy set");
+#[tokio::test]
+async fn websocket_storage_bookmarks_is_generic_private_storage_not_pep() {
+    let (_server, mut client) = setup().await;
+    let room = "a@conference.localhost";
+
+    let set = private_storage_iq("bm-set", "set", None, [opaque_storage_bookmarks(room)]);
+    client.send(&set).await.expect("send set");
     let response = client
-        .recv_matching(|frame| frame.contains(id))
+        .recv_matching(|frame| frame.contains("bm-set"))
         .await
-        .expect("legacy set response");
+        .expect("set response");
     assert!(
         response.contains("type='result'") || response.contains("type=\"result\""),
         "expected result, got: {response}"
     );
-}
 
-#[tokio::test]
-async fn websocket_legacy_bookmarks_set_replaces_pep_and_legacy_views() {
-    let (_server, mut client) = setup().await;
-    let a = "a@conference.localhost";
-    let b = "b@conference.localhost";
-
-    legacy_bookmarks_set(&mut client, "bm-set-1", &[a, b]).await;
-    legacy_bookmarks_set(&mut client, "bm-set-2", &[a]).await;
-
-    let get = private_storage_iq("bm-get", "get", None, [legacy_bookmarks(&[])]);
-    client.send(&get).await.expect("send legacy get");
-    let legacy = client
+    let get = private_storage_iq("bm-get", "get", None, [opaque_storage_bookmarks("")]);
+    client.send(&get).await.expect("send get");
+    let stored = client
         .recv_matching(|frame| frame.contains("bm-get"))
         .await
-        .expect("legacy get response");
-    assert!(legacy.contains(a), "A missing from legacy get: {legacy}");
+        .expect("get response");
     assert!(
-        !legacy.contains(b),
-        "B must be gone from legacy get: {legacy}"
+        stored.contains(room),
+        "stored value must round-trip: {stored}"
     );
 
     let items_iq = "<iq xmlns='jabber:client' type='get' id='bm-pep'><pubsub xmlns='http://jabber.org/protocol/pubsub'><items node='urn:xmpp:bookmarks:1'/></pubsub></iq>";
@@ -1537,8 +1530,10 @@ async fn websocket_legacy_bookmarks_set_replaces_pep_and_legacy_views() {
         .recv_matching(|frame| frame.contains("bm-pep"))
         .await
         .expect("pep items response");
-    assert!(pep.contains(a), "A missing from PEP node: {pep}");
-    assert!(!pep.contains(b), "B must be retracted from PEP node: {pep}");
+    assert!(
+        !pep.contains(room),
+        "storage:bookmarks must not populate the XEP-0402 node: {pep}"
+    );
 
     let _ = client.close().await;
 }

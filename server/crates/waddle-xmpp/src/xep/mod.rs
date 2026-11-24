@@ -96,7 +96,6 @@
 //!   type, dimensions) for file sharing messages. - Emoji reactions via `<reactions/>`
 //!   element containing `<reaction>` children. - Control server-side processing
 //!   with no-store, no-copy, no-permanent-store, and store hints.
-//! - **XEP-0048**: Bookmark Storage (Legacy) - Compatibility layer over XEP-0402.
 //! - **XEP-0050**: Ad-Hoc Commands - Multi-step command execution via data forms.
 //! - **XEP-0049**: Private XML Storage - Arbitrary per-user XML key-value store.
 //! - **XEP-0054**: vcard-temp - User profile information via vCard format.
@@ -131,7 +130,6 @@
 pub mod xep0004;
 pub mod xep0012;
 pub mod xep0047;
-pub mod xep0048;
 pub mod xep0049;
 pub mod xep0050;
 pub mod xep0054;

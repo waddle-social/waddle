@@ -247,11 +247,6 @@ pub use super::xep_waddle_dm_bookmarks::{
     DmBookmarkError, NS_WADDLE_DM_BOOKMARKS_V0, PEP_NODE_WADDLE_DM_BOOKMARKS,
 };
 
-pub use super::xep0048::{
-    build_legacy_bookmarks_element, from_native_bookmark, is_legacy_bookmarks_namespace,
-    parse_legacy_bookmarks, to_native_bookmark, LegacyBookmark, NS_BOOKMARKS_LEGACY,
-};
-
 pub use super::xep0049::{
     build_private_storage_result, build_private_storage_success, is_private_storage_query,
     parse_private_storage_get, parse_private_storage_set, parse_stored_private_storage_value,
