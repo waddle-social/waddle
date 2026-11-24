@@ -139,9 +139,10 @@ async fn handle(
         Err(error) => return CommandResult::Error(error),
     };
 
-    CommandResult::Completed {
+    CommandResult::CompletedPage {
         session_id: None,
-        form: Some(build_result_form(&page)),
+        form: build_result_form(&page),
+        next_cursor: page.next_cursor.clone(),
         notes: vec![],
     }
 }
@@ -317,7 +318,6 @@ pub async fn run_users_list_query(
 /// caller. Each entry becomes one `<item/>` row.
 pub fn build_result_form(page: &UsersListPage) -> DataForm {
     let mut form = DataForm::new(FormType::Result)
-        .add_field(Field::form_type(FORM_TYPE))
         .add_reported(Field::new("jid", FieldType::JidSingle).with_label("JID"))
         .add_reported(Field::new("display_name", FieldType::TextSingle).with_label("Display name"))
         .add_reported(
@@ -332,10 +332,6 @@ pub fn build_result_form(page: &UsersListPage) -> DataForm {
             Field::boolean("has_owner_hat", entry.has_owner_hat),
         ];
         form = form.add_item(row);
-    }
-
-    if let Some(cursor) = page.next_cursor.as_ref() {
-        form = form.add_field(Field::text_single("next_cursor", cursor));
     }
 
     form
@@ -399,16 +395,9 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 3, "jid/display_name/has_owner_hat");
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.value("next_cursor"), Some("alice"));
-    }
-
-    #[test]
-    fn build_result_form_omits_next_cursor_when_absent() {
-        let page = UsersListPage {
-            entries: vec![],
-            next_cursor: None,
-        };
-        let form = build_result_form(&page);
-        assert!(form.field("next_cursor").is_none());
+        assert!(
+            form.fields.is_empty(),
+            "multi-item result carries no top-level fields"
+        );
     }
 }
