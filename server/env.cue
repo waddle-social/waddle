@@ -665,6 +665,7 @@ schema.#Project & {
 					".github/workflows/waddle-server-rootsync.yml",
 					".github/workflows/waddle-server-rusttests.yml",
 					".github/workflows/waddle-server-spacefanoutcontract.yml",
+					".github/workflows/waddle-server-streammanagementverification.yml",
 					".github/workflows/waddle-server-xmppcompliance.yml",
 					".github/workflows/waddle-server-xmppservercompliance.yml",
 					"cue.mod/module.cue",
