@@ -173,12 +173,15 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// its capture, which would turn the camera on behind a control that
     /// says off. Its track is dropped, and the next turn-on makes a new one
     /// with the choice.
-    private func applyCameraChoice() async {
+    ///
+    /// - Parameter droppingIdleTracks: off for the check made as a camera
+    ///   finishes turning on, which is about the camera that is now on.
+    private func applyCameraChoice(droppingIdleTracks: Bool = true) async {
         guard let room else { return }
         let wanted = cameraCaptureOptions()
         for publication in publications(of: .video, in: room) {
             if publication.isMuted {
-                try? await room.localParticipant.unpublish(publication: publication)
+                if droppingIdleTracks { try? await room.localParticipant.unpublish(publication: publication) }
             } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
                       capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
                 _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())
@@ -469,6 +472,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             return
         }
         refreshTracks()
+        // The camera was started with the choice as it was when it was asked
+        // for; a choice made while it was starting applies now that it is on.
+        if kind == .video, enabled { await applyCameraChoice(droppingIdleTracks: false) }
     }
 
     /// Asks for the permission, but only for a call that still owns `room`,
