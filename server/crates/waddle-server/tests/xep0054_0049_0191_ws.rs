@@ -1068,6 +1068,89 @@ async fn websocket_blocking_prevents_full_jid_iq_routing() {
     let _ = sender.close().await;
 }
 
+/// Send `payload_xml` as an IQ get to `to` and return the reply frame.
+async fn iq_get_reply(client: &mut WsXmppClient, to: &str, id: &str, payload_xml: &str) -> String {
+    client
+        .send(&format!(
+            r#"<iq xmlns="jabber:client" type="get" id="{id}" to="{to}">{payload_xml}</iq>"#
+        ))
+        .await
+        .expect("send IQ get");
+    client
+        .recv_matching(|frame| frame.contains(id))
+        .await
+        .expect("the IQ is answered")
+}
+
+/// The server answered the request itself: neither blocking refusal applies
+/// (an account with no vCard answers `item-not-found`).
+fn assert_not_gated(reply: &str) {
+    assert!(
+        !reply.contains("service-unavailable") && !reply.contains("not-acceptable"),
+        "{reply}"
+    );
+}
+
+const VCARD_GET: &str = r#"<vCard xmlns="vcard-temp"/>"#;
+const PEP_ITEMS_GET: &str = r#"<pubsub xmlns="http://jabber.org/protocol/pubsub"><items node="urn:xmpp:avatar:metadata"/></pubsub>"#;
+
+/// XEP-0191 §3.4: once alice blocked bob, bob's IQ get to alice's bare JID,
+/// which the server would answer on her behalf, is `service-unavailable`;
+/// §3.5: alice's own request to bob's bare JID is `not-acceptable` with
+/// `<blocked/>`; unblocking restores both directions.
+#[tokio::test]
+async fn websocket_blocking_gates_server_answered_bare_jid_iqs() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    let open = iq_get_reply(&mut bob, "alice@localhost", "gate-open-vcard", VCARD_GET).await;
+    assert_not_gated(&open);
+
+    block(&mut alice, "bob@localhost", "gate-block-bob").await;
+
+    for (id, payload) in [("gate-in-vcard", VCARD_GET), ("gate-in-pep", PEP_ITEMS_GET)] {
+        let reply = iq_get_reply(&mut bob, "alice@localhost", id, payload).await;
+        assert!(
+            reply.contains("type=\"error\"") || reply.contains("type='error'"),
+            "{id}: {reply}"
+        );
+        assert!(reply.contains("service-unavailable"), "{id}: {reply}");
+        assert!(!reply.contains("blocked"), "{id}: {reply}");
+    }
+
+    let reply = iq_get_reply(&mut alice, "bob@localhost", "gate-out-vcard", VCARD_GET).await;
+    assert!(reply.contains("not-acceptable"), "{reply}");
+    assert!(
+        reply.contains("urn:xmpp:blocking:errors") && reply.contains("blocked"),
+        "{reply}"
+    );
+
+    // Requests to one's own bare JID are not affected by the blocklist.
+    let own = iq_get_reply(&mut alice, "alice@localhost", "gate-own-vcard", VCARD_GET).await;
+    assert_not_gated(&own);
+
+    alice
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="gate-unblock"><unblock xmlns="urn:xmpp:blocking"><item jid="bob@localhost"/></unblock></iq>"#,
+        )
+        .await
+        .expect("send unblock");
+    alice
+        .recv_matching(|frame| frame.contains("gate-unblock") && frame.contains("result"))
+        .await
+        .expect("unblock result");
+
+    for (client, to, id) in [
+        (&mut bob, "alice@localhost", "gate-after-in"),
+        (&mut alice, "bob@localhost", "gate-after-out"),
+    ] {
+        let reply = iq_get_reply(client, to, id, VCARD_GET).await;
+        assert_not_gated(&reply);
+    }
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
 #[tokio::test]
 async fn websocket_direct_muc_invite_routes_normal_message() {
     let server = TestServer::start();
