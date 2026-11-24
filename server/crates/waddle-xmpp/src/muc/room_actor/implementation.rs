@@ -397,6 +397,9 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
         msg: RestoreLiveRoster,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        // A roster handed over from a previous actor belongs to a room that
+        // already exists, so it is established and never locked.
+        self.room.unlock();
         let reply: Self::Reply = async {
             let (pending_admin_projection, admin_mutation_resolution) = match msg
                 .pending_admin_projection
@@ -459,6 +462,8 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             restored.room_jid = self.room.room_jid.clone();
             restored.config = config;
             restored.subject = subject;
+            // A handed-over roster is an existing room's: never locked.
+            restored.unlock();
             restored.affiliation_list = affiliations;
             let restored_occupants = restored
                 .occupants
@@ -967,6 +972,11 @@ pub struct RoomActor {
     /// actor incarnation's durable restore genuinely completed. See
     /// [`DurableRestoreState`]'s own doc comment.
     pub(in crate::muc::room_actor) restore_state: DurableRestoreState,
+    /// Whether this incarnation has read the durable store once. A room the
+    /// first read finds is an established room and is never locked; a room
+    /// read only after this incarnation's own Create commit is the new room
+    /// the creator still has to configure.
+    pub(in crate::muc::room_actor) first_durable_load_done: bool,
     #[cfg(test)]
     pub(in crate::muc::room_actor) test_projection_apply_hook:
         Option<std::sync::Arc<dyn Fn(ProjectionProbe) + Send + Sync>>,
@@ -1162,6 +1172,7 @@ impl RoomActor {
             recorded_occupancy: HashMap::new(),
             durable_claim_fence: None,
             restore_state: DurableRestoreState::Ready(DurableRoomOrigin::New),
+            first_durable_load_done: false,
             #[cfg(test)]
             test_projection_apply_hook: None,
         }
@@ -1226,6 +1237,16 @@ impl RoomActor {
     /// admission watermark when the restored policy differs from the
     /// constructor/default state. Subject changes are deliberately excluded:
     /// they do not affect whether or how an occupant may enter.
+    /// Record the first successful durable read. A room that read finds
+    /// already existed, so it is established and never locked (XEP-0045
+    /// §10.1 locks only a room its creating join just made).
+    pub(in crate::muc::room_actor) fn note_first_durable_load(&mut self, found_row: bool) {
+        if !self.first_durable_load_done && found_row {
+            self.room.unlock();
+        }
+        self.first_durable_load_done = true;
+    }
+
     pub(in crate::muc::room_actor) fn install_durable_room_state(
         &mut self,
         state: super::super::durable::DurableRoomState,
@@ -1407,10 +1428,12 @@ impl RoomActor {
         {
             Ok(Some(state)) => {
                 self.install_durable_room_state(state);
+                self.note_first_durable_load(true);
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::Restored);
                 Ok(())
             }
             Ok(None) => {
+                self.note_first_durable_load(false);
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
                 Ok(())
             }
@@ -2463,10 +2486,12 @@ impl kameo::message::Message<RestoreDurableRoomState> for RoomActor {
         {
             Ok(Some(state)) => {
                 self.install_durable_room_state(state);
+                self.note_first_durable_load(true);
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::Restored);
             }
             Ok(None) => {
                 // No durable row yet — brand new room, nothing to restore.
+                self.note_first_durable_load(false);
                 self.restore_state = DurableRestoreState::Ready(DurableRoomOrigin::New);
             }
             Err(crate::XmppError::OwnershipLost { entity }) => {

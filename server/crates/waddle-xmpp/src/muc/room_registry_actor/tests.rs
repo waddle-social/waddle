@@ -5693,6 +5693,67 @@ mod ownership_claims_tests {
         assert_eq!(store.load_calls.load(Ordering::SeqCst), 1);
     }
 
+    fn locked_creation(
+        room_jid: BareJid,
+    ) -> crate::muc::room_registry_actor::GetOrCreateRoomWithInitialAffiliations {
+        crate::muc::room_registry_actor::GetOrCreateRoomWithInitialAffiliations {
+            room_jid,
+            waddle_id: crate::muc::durable::WaddleId::new("w".to_string()),
+            channel_id: crate::muc::durable::ChannelId::new("c".to_string()),
+            config: RoomConfig::default(),
+            initial_affiliations: Vec::new(),
+            locked: true,
+        }
+    }
+
+    /// A creator's join asks for a locked room, but a room the durable store
+    /// already holds is an established room: it is never locked (XEP-0045
+    /// §10.1.1 locks only the room that join just created).
+    #[tokio::test]
+    async fn locked_creation_of_a_durably_stored_room_yields_an_unlocked_room() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("locked-request-existing");
+        let store = Arc::new(RecordingDurableStore {
+            load_result: Some(restored_room_snapshot("restored")),
+            ..RecordingDurableStore::default()
+        });
+        wire_recording_store(&registry, store).await;
+
+        let acquisition = registry
+            .ask(locked_creation(room_jid))
+            .await
+            .expect("acquire the stored room");
+        assert_eq!(acquisition.creation, RoomCreation::Existing);
+        let snapshot = acquisition
+            .actor_ref
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        assert!(!snapshot.room.is_locked());
+    }
+
+    /// The same request for a room the store does not hold creates it, and
+    /// the creator's own Create commit and reload do not unlock it.
+    #[tokio::test]
+    async fn locked_creation_of_a_new_durable_room_stays_locked() {
+        let registry = spawn_registry().await;
+        let room_jid = test_room_jid("locked-request-new");
+        let store = Arc::new(RecordingDurableStore::default());
+        wire_recording_store(&registry, store).await;
+
+        let acquisition = registry
+            .ask(locked_creation(room_jid))
+            .await
+            .expect("create the room");
+        assert_eq!(acquisition.creation, RoomCreation::Created);
+        let snapshot = acquisition
+            .actor_ref
+            .ask(crate::muc::room_actor::GetSnapshot)
+            .await
+            .expect("snapshot");
+        assert!(snapshot.room.is_locked());
+    }
+
     #[tokio::test]
     async fn exclusive_create_rejects_existing_durable_room() {
         let registry = spawn_registry().await;
