@@ -74,9 +74,13 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | --- | --- | --- | --- |
 | Upload, encrypted attachments, drag and drop, paste | 0363, 0448 | ✅ | |
 | Inline images, animated GIFs | | ✅ | |
-| GIF picker | | ❌ | media |
-| Stickers: send, packs | | ❌ | media |
-| Link preview cards | | ❌ | media |
+| GIF picker | | 🟡 | |
+| Stickers: send, packs | 0449 | 🟡 | |
+| Link preview cards | urn:waddle:link-preview:0, 0511 | ✅ | |
+
+The composer's `+` button opens one menu: Photo or File, GIF, Sticker. GIF search goes through the web app's `/api/giphy` proxy (the GIPHY key stays server-side) and sends the picked GIF's address as the body, as web and Apple do. The proxy is the web app's, not the XMPP server's, so its origin is `https://waddle.chat` unless `WADDLE_GIF_PROXY_URL` names another. The sticker page lists the account's own packs (`fetch_sticker_packs`) and sends a sticker with its pack, its picture as an inline file and its description as the text. A received sticker draws without its text; clicking it opens its pack, on the sender's own sticker node only, with "Add to My Stickers" (`import_sticker_pack`) unless the author marked it restricted. Server-attached link previews render as cards under the message (site, title, description, the server-cached image); a click opens `http` or `https` targets in the browser.
+
+Gaps: no sticker pack creation or removal (the FFI has `publish_sticker_pack` and `retract_sticker_pack`; there is no editor yet); sticker pictures are decoded as a still frame, so animated stickers do not play; a sticker in a room opens its pack only from archive rows (live room messages do not expose the sender's real JID); the picker has no pack tabs; no video or player-embed cards; no composer-side link preview lookup (`lookup_link_preview` is not called, so this client's own messages carry no preview token, as on Apple); `fetch_external_services` is not used. Previews and sticker markers ride in an app-side index beside the shared timeline (`waddle-client-session` has no place for them), keyed by conversation and message id and bounded, so a card on a message that has fallen out of it is not drawn. Not tested against a live server.
 
 ## Community
 

@@ -30,13 +30,15 @@ use waddle_xmpp_client_ffi::{
     WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleMentionDirectory, WaddleMentionTarget,
     WaddleMessage, WaddleMessageAudience, WaddlePresence, WaddleReplyTarget,
     WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
-    WaddleStatusPreference, WaddleStickerHash, WaddleTopology, WaddleUserSearchEntry,
+    WaddleStatusPreference, WaddleStickerHash, WaddleStickerRef, WaddleTopology,
+    WaddleUserSearchEntry,
 };
 
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
 use crate::composer::Mentionable;
 use crate::judgments;
+use crate::media_index::{self, MessageMedia};
 use crate::notify::{self, NotifyMode, Stored};
 use crate::runtime;
 use crate::threads::{self, Thread};
@@ -175,6 +177,9 @@ pub struct Draft {
     /// Whom the body's typed `@nick`s may mention (XEP-0372).
     pub mentionable: Vec<Mentionable>,
     pub thread: Option<Thread>,
+    /// XEP-0449: the pack this sticker is from; `files` holds its picture
+    /// and `body` its text.
+    pub sticker: Option<WaddleStickerRef>,
 }
 
 struct Forwarder(async_channel::Sender<SessionEvent>);
@@ -408,11 +413,14 @@ impl Session {
             files,
             mentionable,
             thread,
+            sticker,
         } = draft;
         let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
             shared_files: files,
-            mention_directory: mention_directory(kind, &mentionable),
+            // A sticker's text is its description, not typed mentions.
+            mention_directory: mention_directory(kind, &mentionable).filter(|_| sticker.is_none()),
+            sticker,
             thread: thread.as_ref().map(Thread::wire),
             ..WaddleSendOptions::default()
         };
@@ -797,6 +805,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
         });
     };
     let stanza_id = verified_stanza_id(&message.stanza_ids, &room);
+    record_media(room.as_str(), stanza_id.as_deref(), &message);
     let mentions_me = message.broadcast_mention.is_some()
         || message
             .mention_uris
@@ -858,6 +867,7 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
         return None;
     }
     let reference_id = message.origin_id.clone().or_else(|| message.id.clone());
+    record_media(peer.as_str(), reference_id.as_deref(), &message);
     let incoming = IncomingMessage {
         stanza_id: verified_stanza_id(&message.stanza_ids, &me.bare),
         origin_id: message.origin_id,
@@ -985,6 +995,15 @@ pub fn archived_from(
             (sender, own, reference, Some(from.to_bare().to_string()))
         }
     };
+    media_index::record(
+        conversation.as_str(),
+        reference_id.as_deref(),
+        MessageMedia::from_wire(
+            &message.link_previews,
+            message.is_sticker,
+            message.sticker_pack.as_ref(),
+        ),
+    );
     let score_target = (kind == Kind::Room)
         .then(|| {
             judgments::target(
@@ -1024,6 +1043,20 @@ pub fn archived_from(
         attachments: message.shared_files.iter().map(attachment_from).collect(),
         ..IncomingMessage::default()
     })
+}
+
+/// Remember the link preview cards and sticker marker a live message
+/// carries, which the shared timeline has no place for.
+fn record_media(conversation: &str, reference: Option<&str>, message: &WaddleMessage) {
+    media_index::record(
+        conversation,
+        reference,
+        MessageMedia::from_wire(
+            &message.link_previews,
+            message.is_sticker,
+            message.sticker_pack.as_ref(),
+        ),
+    );
 }
 
 /// The stanza id `by` the expected archive (XEP-0359 §Security
@@ -1210,6 +1243,52 @@ pub(crate) mod tests {
         let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
         assert_eq!(names, ["general", "random"]);
         assert_eq!(rooms[0].jid, "general@muc.waddle.social");
+    }
+
+    #[test]
+    fn arrivals_and_archive_rows_record_cards_and_stickers() {
+        use waddle_xmpp_client_ffi::WaddleLinkPreview;
+        let preview = WaddleLinkPreview {
+            original_url: "https://example.com/post".into(),
+            normalized_url: None,
+            title: Some("A post".into()),
+            description: None,
+            image: None,
+            video: None,
+            player_embed: None,
+            remote_media_unavailable: false,
+        };
+        let mut room = wire("cards@muc.waddle.social/ann", "groupchat", "see it");
+        room.stanza_ids = vec![stanza_id("c1", "cards@muc.waddle.social")];
+        room.link_previews = vec![preview.clone()];
+        arrival(room, &me()).expect("a room message");
+        let found = media_index::lookup("cards@muc.waddle.social", "c1").expect("recorded");
+        assert_eq!(found.cards[0].title.as_deref(), Some("A post"));
+        assert!(!found.sticker);
+
+        let mut direct = wire("ann@waddle.social/pda", "chat", "😘");
+        direct.origin_id = Some("d1".into());
+        direct.is_sticker = true;
+        direct.sticker_pack = Some(WaddleStickerRef {
+            pack_id: "pack-1".into(),
+            pack_jid: None,
+            pack_node: None,
+        });
+        arrival(direct, &me()).expect("a direct message");
+        let found = media_index::lookup("ann@waddle.social", "d1").expect("recorded");
+        assert!(found.sticker);
+        assert_eq!(found.pack.expect("pack").pack_id, "pack-1");
+
+        let mut row = archived(None);
+        row.mam_id = "a1".into();
+        row.link_previews = vec![preview];
+        let conversation: BareJid = "general@muc.waddle.social".parse().expect("jid");
+        archived_from(row, &conversation, Kind::Room, &me()).expect("a row");
+        assert!(media_index::lookup("general@muc.waddle.social", "a1").is_some());
+
+        let plain = wire("plain@muc.waddle.social/ann", "groupchat", "hi");
+        arrival(plain, &me()).expect("a room message");
+        assert!(media_index::lookup("plain@muc.waddle.social", "m1").is_none());
     }
 
     #[test]

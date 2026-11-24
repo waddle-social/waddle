@@ -323,7 +323,7 @@ impl WaddleWindow {
 
     #[template_callback]
     fn on_attach(&self) {
-        self.pick_files();
+        self.show_plus_menu();
     }
 
     #[template_callback]

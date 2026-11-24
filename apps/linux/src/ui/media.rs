@@ -46,7 +46,7 @@ pub(super) fn is_media_only(body: &str) -> bool {
         && words.iter().all(|word| image_url(word).is_some())
 }
 
-async fn download(url: Url) -> Result<Vec<u8>, reqwest::Error> {
+pub(super) async fn download(url: Url) -> Result<Vec<u8>, reqwest::Error> {
     let _permit = DOWNLOADS.acquire().await.expect("download semaphore open");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -69,7 +69,7 @@ async fn download(url: Url) -> Result<Vec<u8>, reqwest::Error> {
     Ok(bytes)
 }
 
-fn decode(bytes: &[u8]) -> Result<gdk_pixbuf::PixbufAnimation, glib::Error> {
+pub(super) fn decode(bytes: &[u8]) -> Result<gdk_pixbuf::PixbufAnimation, glib::Error> {
     let loader = gdk_pixbuf::PixbufLoader::new();
     loader.connect_size_prepared(|loader, width, height| {
         let scale = (MAX_WIDTH / f64::from(width))
@@ -205,7 +205,7 @@ fn load(slot: &gtk::Box, url: Url) {
 }
 
 /// Paint the first frame, then advance frames while the picture lives.
-fn play(picture: &gtk::Picture, animation: &gdk_pixbuf::PixbufAnimation) {
+pub(super) fn play(picture: &gtk::Picture, animation: &gdk_pixbuf::PixbufAnimation) {
     // The list sizes rows by their minimum height, which is zero for a
     // picture that can shrink: hold the height and let only the width
     // give way (cropping the sides) in a narrow window.
