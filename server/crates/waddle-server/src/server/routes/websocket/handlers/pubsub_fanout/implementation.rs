@@ -20,9 +20,6 @@ pub struct FanOutRequest<'a> {
     pub published_item: &'a PubSubItem,
     pub item_id: &'a str,
     pub publisher: Option<&'a BareJid>,
-    /// The publishing resource's full JID, when known. Used to
-    /// suppress the §3.4 owner-self echo back to the originator.
-    pub publisher_full: Option<&'a FullJid>,
     /// `true` when this is a XEP-0163 PEP publish (owner is a user
     /// JID); `false` for generic PubSub / Spaces publishes where the
     /// §3 roster + owner-self passes would be a leak.
@@ -50,7 +47,6 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         EventFanOutRequest {
             owner: req.owner,
             node: req.node,
-            publisher_full: req.publisher_full,
             is_pep: req.is_pep,
             notification: Notification::Publish {
                 item: req.published_item,
@@ -78,8 +74,6 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) enum Notificat
 pub(in crate::server::routes::websocket::handlers::pubsub_fanout) struct EventFanOutRequest<'a> {
     pub(in crate::server::routes::websocket::handlers::pubsub_fanout) owner: &'a BareJid,
     pub(in crate::server::routes::websocket::handlers::pubsub_fanout) node: &'a str,
-    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) publisher_full:
-        Option<&'a FullJid>,
     pub(in crate::server::routes::websocket::handlers::pubsub_fanout) is_pep: bool,
     pub(in crate::server::routes::websocket::handlers::pubsub_fanout) notification:
         Notification<'a>,
@@ -91,7 +85,6 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
 ) {
     let owner = req.owner;
     let node = req.node;
-    let publisher_full = req.publisher_full;
     let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
 
@@ -229,14 +222,11 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
 
     // Track resources reached via the explicit-subscribers loop so the
     // roster + CAPS phase doesn't double-deliver to the same client.
-    // We also pre-seed the publishing resource itself (when known) so
-    // the §3.4 owner-self pass doesn't echo a headline event back to
-    // the same FullJid that just received the publish IQ result —
-    // matches Prosody/ejabberd behavior.
+    // The publishing resource is deliberately not excluded: XEP-0163 §4
+    // sends notifications to all of the owner's connected resources, so it
+    // is notified like any other resource (subject to `+notify`), and this
+    // set keeps it from receiving a second copy.
     let mut already_delivered: HashSet<FullJid> = HashSet::new();
-    if let Some(publisher_full) = publisher_full {
-        already_delivered.insert(publisher_full.clone());
-    }
 
     // The subscriptions of a Space node that are deliverable when the
     // event is handed over, read once per publication (below).
@@ -460,11 +450,11 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
     //   is the §3 mainline. XEP-0191 blocking is honored both directions
     //   (publisher blocking contact, contact blocking publisher).
     //
-    // - Self pass: the publisher's own *other* resources (PEP §3.4 —
-    //   account owner is among the appropriate subscribers). Same +notify
-    //   filter. The publishing resource itself is pre-seeded into
-    //   `already_delivered` above so it does NOT receive a headline
-    //   echo of the item it just authored.
+    // - Self pass: every presence-available resource of the account
+    //   owner (XEP-0163 §4: "A service automatically sends notifications
+    //   to all of the account owner's connected resources (subject to
+    //   notification filtering)"). Same +notify filter. This includes the
+    //   publishing resource itself.
     //
     // Resources mid-resolution (presence with `<c/>` arrived but the
     // disco#info round-trip hasn't completed) carry no ver mapping and
@@ -585,7 +575,7 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn priva
 
 /// Service-node retractions use only explicit subscriptions.
 pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
-    fan_out_retract_with_options(state, req, None, false, false).await;
+    fan_out_retract_with_options(state, req, false, false).await;
 }
 
 /// Service-node retractions with the request's `notify` (XEP-0060
@@ -596,23 +586,21 @@ pub async fn fan_out_service_retract(
     req: FanOutRetractRequest<'_>,
     notify: bool,
 ) {
-    fan_out_retract_with_options(state, req, None, false, notify).await;
+    fan_out_retract_with_options(state, req, false, notify).await;
 }
 
 /// PEP retractions also reach roster contacts and the owner's other resources.
 pub async fn fan_out_pep_retract(
     state: &WebSocketState,
     req: FanOutRetractRequest<'_>,
-    publisher_full: Option<&FullJid>,
     notify: bool,
 ) {
-    fan_out_retract_with_options(state, req, publisher_full, true, notify).await;
+    fan_out_retract_with_options(state, req, true, notify).await;
 }
 
 pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_out_retract_with_options(
     state: &WebSocketState,
     req: FanOutRetractRequest<'_>,
-    publisher_full: Option<&FullJid>,
     is_pep: bool,
     notify: bool,
 ) {
@@ -621,7 +609,6 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
         EventFanOutRequest {
             owner: req.owner,
             node: req.node,
-            publisher_full,
             is_pep,
             notification: Notification::Retract {
                 item_id: req.item_id,

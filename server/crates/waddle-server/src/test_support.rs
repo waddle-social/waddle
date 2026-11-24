@@ -1750,7 +1750,6 @@ pub async fn fan_out_published_item(
             published_item: &item,
             item_id,
             publisher: None,
-            publisher_full: None,
             is_pep,
         },
     )

@@ -254,7 +254,6 @@ async fn handle_community_non_bookmark_publish(
                     published_item: &item,
                     item_id: &result.item_id,
                     publisher: publisher.as_ref(),
-                    publisher_full: None,
                     is_pep: false,
                 },
             )

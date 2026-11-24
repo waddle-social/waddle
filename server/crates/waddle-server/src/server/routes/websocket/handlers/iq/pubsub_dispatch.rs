@@ -268,7 +268,6 @@ pub(super) async fn handle_pubsub_iq(
                                 published_item: &item,
                                 item_id: &publish_result.item_id,
                                 publisher: Some(&user_jid),
-                                publisher_full: phase.bound_jid(),
                                 is_pep,
                             },
                         )
@@ -624,7 +623,6 @@ pub(super) async fn handle_pubsub_iq(
                                     node: &node,
                                     item_id: &item_id,
                                 },
-                                phase.bound_jid(),
                                 notify,
                             )
                             .await;

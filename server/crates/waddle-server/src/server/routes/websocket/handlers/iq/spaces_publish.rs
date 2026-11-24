@@ -349,7 +349,6 @@ pub(super) async fn handle_spaces_publish(
                     published_item: &item,
                     item_id: &result.item_id,
                     publisher: None,
-                    publisher_full: None,
                     is_pep: false,
                 },
             )
@@ -426,7 +425,6 @@ async fn publish_space_image(
                     published_item: &item,
                     item_id: &result.item_id,
                     publisher: None,
-                    publisher_full: None,
                     is_pep: false,
                 },
             )

@@ -252,7 +252,6 @@ async fn update_story_attachment_summary(
             published_item: &summary_item,
             item_id: &result.item_id,
             publisher: Some(community_jid),
-            publisher_full: None,
             is_pep: false,
         },
     )
@@ -306,7 +305,6 @@ pub(super) async fn handle_story_attachment_publish(
                     published_item: &item,
                     item_id: &result.item_id,
                     publisher: Some(&publisher),
-                    publisher_full: None,
                     is_pep: false,
                 },
             )
