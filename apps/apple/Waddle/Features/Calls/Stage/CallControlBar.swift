@@ -12,6 +12,7 @@ struct CallStageActions {
     var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
+    var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
     /// Starts sharing our screen, by way of the picker, or stops it.
     var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
     let hangUp: @MainActor () -> Void
@@ -185,6 +186,8 @@ struct CallControlBar: View {
                 .pickerStyle(.inline)
             }
             Button(isSelfViewHidden ? "Show self view" : "Hide self view", action: actions.toggleSelfView)
+            Divider()
+            Button("Call settings…", action: actions.openSettings)
         } label: {
             CallControlButton.face(symbol: "ellipsis", tone: .plain)
         }

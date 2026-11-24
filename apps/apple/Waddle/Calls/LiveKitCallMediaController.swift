@@ -105,6 +105,129 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// The room holds its delegates weakly.
     @ObservationIgnored private var observer: RoomObserver?
 
+    // MARK: - Devices
+
+    private(set) var devices = CallDevices()
+    /// What the person chose, kept on this device (web keeps it in local storage).
+    @ObservationIgnored private var devicePreferences: CallDevicePreferences
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let devicePreferencesKey = "callDevicePreferences"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
+        #if os(macOS)
+        // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
+        AudioManager.shared.onDeviceUpdate = { [weak self] _ in
+            Task { @MainActor in await self?.refreshDevices() }
+        }
+        #endif
+        // A camera plugged in or pulled out: the list follows, and so does a camera that is on.
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            deviceObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    await self?.refreshDevices()
+                    await self?.applyCameraChoice()
+                }
+            })
+        }
+    }
+
+    @ObservationIgnored private nonisolated(unsafe) var deviceObservers: [any NSObjectProtocol] = []
+
+    deinit {
+        deviceObservers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    func refreshDevices() async {
+        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).filter(Self.isOffered).map {
+            CallDevice(id: $0.uniqueID, name: $0.localizedName)
+        }
+        var found = CallDevices(cameras: CallDeviceList(devices: cameras, preferred: devicePreferences[.camera]))
+        #if os(macOS)
+        // The system's own choice is our "System default" row, not a device of its own.
+        func listed(_ all: [AudioDevice]) -> [CallDevice] {
+            all.filter { !$0.isDefault }.map { CallDevice(id: $0.deviceId, name: $0.name) }
+        }
+        let audio = AudioManager.shared
+        found.microphones = CallDeviceList(devices: listed(audio.inputDevices), preferred: devicePreferences[.microphone])
+        found.speakers = CallDeviceList(devices: listed(audio.outputDevices), preferred: devicePreferences[.speaker])
+        // A chosen device that is gone gives way to the system's, and takes over again when it is back.
+        let input = audio.inputDevices.first { $0.deviceId == found.microphones.chosen?.id } ?? audio.defaultInputDevice
+        if audio.inputDevice.deviceId != input.deviceId { audio.inputDevice = input }
+        let output = audio.outputDevices.first { $0.deviceId == found.speakers.chosen?.id } ?? audio.defaultOutputDevice
+        if audio.outputDevice.deviceId != output.deviceId { audio.outputDevice = output }
+        #endif
+        if devices != found { devices = found }
+    }
+
+    func chooseDevice(_ kind: CallDeviceKind, id: String?) async {
+        devicePreferences[kind] = id
+        defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
+        await refreshDevices()
+        if kind == .camera { await applyCameraChoice() }
+    }
+
+    /// Moves a camera that is on to the one that should be in use. A camera
+    /// that is off is never touched: changing a capturer's options restarts
+    /// its capture, which would turn the camera on behind a control that
+    /// says off. Its track is dropped, and the next turn-on makes a new one
+    /// with the choice.
+    ///
+    /// - Parameter droppingIdleTracks: off for the check made as a camera
+    ///   finishes turning on, which is about the camera that is now on.
+    private func applyCameraChoice(droppingIdleTracks: Bool = true) async {
+        // One at a time. A change stops the capture and starts it again, and
+        // the SDK counts those: two changes at once can leave the count a
+        // start ahead, and then turning the camera off no longer stops it.
+        let earlier = cameraChoiceWork
+        let work = Task { [weak self] in
+            await earlier?.value
+            await self?.moveCameraToChoice(droppingIdleTracks: droppingIdleTracks)
+        }
+        cameraChoiceWork = work
+        await work.value
+    }
+
+    /// The latest change to the camera in use; the next waits for it.
+    @ObservationIgnored private var cameraChoiceWork: Task<Void, Never>?
+
+    private func moveCameraToChoice(droppingIdleTracks: Bool) async {
+        guard let room else { return }
+        let wanted = cameraCaptureOptions()
+        for publication in publications(of: .video, in: room) {
+            if publication.isMuted {
+                if droppingIdleTracks { try? await room.localParticipant.unpublish(publication: publication) }
+            } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
+                      capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
+                _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())
+                // The change stops the capture and starts it again. A camera
+                // turned off, or a call left, between the two finds nothing
+                // to stop, and the restart would then run on behind it.
+                if self.room !== room || publication.isMuted || captureChoices[.video] == false {
+                    _ = try? await capturer.stopCapture()
+                    if self.room === room, !publication.isMuted { try? await publication.mute() }
+                }
+            }
+        }
+        if self.room === room { refreshTracks() }
+    }
+
+    /// On iPhone and iPad the system lists every lens, and the combinations
+    /// of them, as cameras of their own: one front and one back is the choice a person has.
+    private static func isOffered(_ camera: AVCaptureDevice) -> Bool {
+        #if os(iOS)
+        camera.deviceType == .builtInWideAngleCamera || camera.deviceType == .external
+        #else
+        true
+        #endif
+    }
+
+    /// The camera the person chose, while it is connected; `nil` leaves the choice to the system.
+    private func cameraCaptureOptions() -> CameraCaptureOptions? {
+        (devices.cameras.chosen?.id).flatMap(AVCaptureDevice.init(uniqueID:)).map { CameraCaptureOptions(device: $0) }
+    }
+
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
         guard room == nil else { throw CallMediaError.alreadyConnected }
         wasEndedByServer = false
@@ -332,6 +455,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// Starts what the call agreed to, unless the person has since chosen
     /// otherwise for that device.
     private func publish(_ media: CallMedia, in room: Room) async {
+        // Here and not before the room exists: a hang-up must find a room to
+        // disconnect from the moment its connect starts.
+        await refreshDevices()
+        guard self.room === room else { return }
         if captureChoices[.audio] ?? media.audio { await setSource(.audio, enabled: true, in: room) }
         if captureChoices[.video] ?? media.video { await setSource(.video, enabled: true, in: room) }
     }
@@ -345,7 +472,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if kind == .audio {
             _ = try? await room.localParticipant.setMicrophone(enabled: enabled)
         } else {
-            _ = try? await room.localParticipant.setCamera(enabled: enabled)
+            _ = try? await room.localParticipant.setCamera(enabled: enabled, captureOptions: enabled ? cameraCaptureOptions() : nil)
         }
         // The SDK toggles one publication per device. Off means all of them.
         if !enabled {
@@ -361,6 +488,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             return
         }
         refreshTracks()
+        // The camera was started with the choice as it was when it was asked
+        // for; a choice made while it was starting applies now that it is on.
+        if kind == .video, enabled { await applyCameraChoice(droppingIdleTracks: false) }
     }
 
     /// Asks for the permission, but only for a call that still owns `room`,

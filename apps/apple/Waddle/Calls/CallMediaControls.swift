@@ -53,6 +53,13 @@ protocol CallMediaControls: AnyObject, Observable {
     func resetVolumes()
     func setMicrophone(_ on: Bool) async
     func setCamera(_ on: Bool) async
+    /// The microphones, speakers and cameras there are, and which the person chose.
+    /// Empty for a kind this device does not let an app choose, as audio on iOS.
+    var devices: CallDevices { get }
+    /// Reads the devices again; they are also re-read when one is plugged in or removed.
+    func refreshDevices() async
+    /// Uses device `id` for calls from now on, this one included; `nil` goes back to the system's choice.
+    func chooseDevice(_ kind: CallDeviceKind, id: String?) async
     /// This device can share its screen into a call: a Mac.
     var canShareScreen: Bool { get }
     /// Our screen, or a window of ours, is being shared. Its picture is `video(of:source:)` of our own identity.

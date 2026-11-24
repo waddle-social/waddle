@@ -15,6 +15,7 @@ struct CurrentCallCard: View {
         let toggleMicrophone: @MainActor () -> Void
         let toggleCamera: @MainActor () -> Void
         var stopScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
+        var openSettings: @MainActor () -> Void = { /* a card with no settings */ }
         let hangUp: @MainActor () -> Void
     }
 
@@ -123,6 +124,7 @@ struct CurrentCallCard: View {
         )
         .disabled(!hasMedia)
         control("Expand call", symbol: "arrow.up.left.and.arrow.down.right", action: actions.expand)
+        control("Call settings", symbol: "gearshape", action: actions.openSettings)
     }
 
     /// Beside the controls, not the text: the sidebar is too narrow to share a line with the summary.
@@ -197,6 +199,7 @@ struct CurrentCallCardHost: View {
     @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @Environment(\.callMediaControls) private var media
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsSettings = false
 
     var body: some View {
         let state = session.calls.state
@@ -211,6 +214,9 @@ struct CurrentCallCardHost: View {
             }
         }
         .huddleAnimation(.settle, value: conversation)
+        .callSettings(isPresented: $showsSettings)
+        // The settings were this call's.
+        .onChange(of: state.sid) { showsSettings = false }
     }
 
     private func card(for conversation: ConversationID, sid: String, state: CallState) -> some View {
@@ -250,6 +256,7 @@ struct CurrentCallCardHost: View {
                 toggleMicrophone: commands.toggleMicrophone,
                 toggleCamera: commands.toggleCamera,
                 stopScreenShare: { [media] in Task { await media?.stopScreenShare() } },
+                openSettings: { showsSettings = true },
                 hangUp: commands.hangUp
             )
         )

@@ -106,6 +106,7 @@ struct CallStageHost: View {
     @State private var speaking = SpeakingHold()
     /// What can be shared, while the person is picking.
     @State private var screenPicker: CallScreenSources?
+    @State private var showsSettings = false
 
     var body: some View {
         let state = session.calls.state
@@ -118,8 +119,12 @@ struct CallStageHost: View {
         .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
             speaking.update(accounts)
         }
+        .callSettings(isPresented: $showsSettings)
         // A list made for one call is not offered to the next.
-        .onChange(of: state.sid) { screenPicker = nil }
+        .onChange(of: state.sid) {
+            screenPicker = nil
+            showsSettings = false
+        }
         .sheet(isPresented: Binding(get: { screenPicker != nil }, set: { if !$0 { screenPicker = nil } })) {
             if let sources = screenPicker {
                 CallScreenPicker(sources: sources) { source in
@@ -221,6 +226,7 @@ struct CallStageHost: View {
             toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
+            openSettings: { showsSettings = true },
             toggleScreenShare: { [media, session] in
                 guard let media else { return }
                 Task {

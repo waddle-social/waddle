@@ -9,6 +9,40 @@ import XCTest
 /// named by `WADDLE_LIVEKIT_TEST_URL`; see the README for the local recipe.
 @MainActor
 final class LiveKitCallMediaTests: XCTestCase {
+    /// A controller with a store of its own: a test must not read the device
+    /// choices of whoever runs it, or leave its own behind.
+    private func makeController() -> LiveKitCallMediaController {
+        LiveKitCallMediaController(defaults: makeDefaults())
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let name = "LiveKitCallMediaTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name) ?? .standard
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
+    func testADeviceChoiceIsKeptForTheNextSessionAndCanBeCleared() async {
+        let defaults = makeDefaults()
+        let media = LiveKitCallMediaController(defaults: defaults)
+        await media.chooseDevice(.camera, id: "a-camera-that-is-not-here")
+        await media.chooseDevice(.microphone, id: "a-microphone-that-is-not-here")
+
+        let next = LiveKitCallMediaController(defaults: defaults)
+        await next.refreshDevices()
+        XCTAssertEqual(next.devices.cameras.preferred, "a-camera-that-is-not-here")
+        XCTAssertTrue(next.devices.cameras.isChoiceMissing, "a camera that is gone gives way to the system's")
+        XCTAssertNil(next.devices.cameras.chosen)
+        #if os(macOS)
+        XCTAssertEqual(next.devices.microphones.preferred, "a-microphone-that-is-not-here")
+        #endif
+
+        await next.chooseDevice(.camera, id: nil)
+        let last = LiveKitCallMediaController(defaults: defaults)
+        await last.refreshDevices()
+        XCTAssertNil(last.devices.cameras.preferred)
+    }
+
     private func testSFU() throws -> TestSFU {
         let environment = ProcessInfo.processInfo.environment
         guard let url = environment["WADDLE_LIVEKIT_TEST_URL"], !url.isEmpty else {
@@ -22,7 +56,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     }
 
     func testIdleMediaHasNoRosterOrVideo() {
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         let identity = "alice@waddle.test/mac"
         media.setVolume(1.5, of: identity)
 
@@ -66,7 +100,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testJoinsARoomAndLeaves() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")
         XCTAssertNil(join.grantDefect)
 
@@ -79,7 +113,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testThePhaseFollowsTheConnection() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         XCTAssertEqual(media.phase, .idle)
 
         try await media.connect(
@@ -94,7 +128,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testAloneInARoomTheParticipantsAreJustUs() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         try await media.connect(
             join: sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac"),
             media: CallMedia(audio: false, video: false), iceServers: []
@@ -117,9 +151,9 @@ final class LiveKitCallMediaTests: XCTestCase {
     func testRemotesAppearInJoinOrderAndAreRemovedWhenTheyLeave() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
-        let alice = LiveKitCallMediaController()
-        let bob = LiveKitCallMediaController()
-        let carol = LiveKitCallMediaController()
+        let alice = makeController()
+        let bob = makeController()
+        let carol = makeController()
         let none = CallMedia(audio: false, video: false)
         let own = "alice@waddle.test/mac"
         let first = "carol@waddle.test/phone"
@@ -139,8 +173,8 @@ final class LiveKitCallMediaTests: XCTestCase {
     func testRemoteGainSurvivesRoomReplacementUntilTheCallChoicesReset() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
-        let alice = LiveKitCallMediaController()
-        let bob = LiveKitCallMediaController()
+        let alice = makeController()
+        let bob = makeController()
         let aliceJoin = sfu.join(room: room, identity: "alice@waddle.test/mac")
         let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/phone")
         let none = CallMedia(audio: false, video: false)
@@ -168,8 +202,8 @@ final class LiveKitCallMediaTests: XCTestCase {
     func testResetAllReachesSomeoneWhoHasLeftAndComesBack() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
-        let alice = LiveKitCallMediaController()
-        let bob = LiveKitCallMediaController()
+        let alice = makeController()
+        let bob = makeController()
         let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/phone")
         let none = CallMedia(audio: false, video: false)
 
@@ -194,7 +228,7 @@ final class LiveKitCallMediaTests: XCTestCase {
     func testAScreenSomeoneSharesIsTheirsToShowUntilTheyStop() async throws {
         let sfu = try testSFU()
         let room = "waddle-test-\(UUID().uuidString)"
-        let alice = LiveKitCallMediaController()
+        let alice = makeController()
         let bobJoin = sfu.join(room: room, identity: "bob@waddle.test/web")
         // Bob is a plain SDK client, as a browser sharing its screen is.
         let bob = Room()
@@ -244,7 +278,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testJoinsWithAdvertisedIceServers() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         let join = sfu.join(room: "waddle-test-\(UUID().uuidString)", identity: "alice@waddle.test/mac")
         // What XEP-0215 would advertise, mapped the way the call store maps it.
         let advertised = WaddleKit.IceServer.servers(from: [
@@ -258,7 +292,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testATokenTheSFUDidNotIssueCannotJoin() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         let forged = TestSFU(url: sfu.url, key: sfu.key, secret: "not-the-secret")
             .join(room: "waddle-test-\(UUID().uuidString)", identity: "mallory@waddle.test/mac")
         do {
@@ -272,7 +306,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testTheSFUClosingTheRoomIsReportedAsAFailure() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         let room = "waddle-test-\(UUID().uuidString)"
         let dropped = expectation(description: "the media session reported its death")
         media.onFailure = { dropped.fulfill() }
@@ -288,7 +322,7 @@ final class LiveKitCallMediaTests: XCTestCase {
 
     func testLeavingIsNotReportedAsAFailure() async throws {
         let sfu = try testSFU()
-        let media = LiveKitCallMediaController()
+        let media = makeController()
         var failures = 0
         media.onFailure = { failures += 1 }
 
