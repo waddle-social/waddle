@@ -12,6 +12,16 @@ pub(super) fn handle_upload_disco_info<'a>(
         return None;
     }
 
+    // The upload service hosts no nodes (XEP-0030 §3.1).
+    if req.node.is_some() {
+        return Some(DiscoInfoResponse::error(
+            req.id,
+            req.response_from,
+            req.response_to,
+            item_not_found_iq_error("Requested item not found."),
+        ));
+    }
+
     let identities = vec![Identity::upload_service(Some("HTTP File Upload"))];
     let features = upload_service_features();
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
