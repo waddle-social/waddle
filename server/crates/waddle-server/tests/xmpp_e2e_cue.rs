@@ -64,6 +64,10 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ),
     ("http://jabber.org/protocol/pubsub#publish", "XEP-0060"),
     (
+        "http://jabber.org/protocol/pubsub#publish-options",
+        "XEP-0060",
+    ),
+    (
         "http://jabber.org/protocol/pubsub#retrieve-items",
         "XEP-0060",
     ),
