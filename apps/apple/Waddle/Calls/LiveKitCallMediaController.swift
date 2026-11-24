@@ -272,7 +272,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
         )
         guard let statistics = stream.track.statistics else { return sample }
-        sample.codec = statistics.codec.first { $0.mimeType?.hasPrefix("video/") == true }?.mimeType
         let candidate: LocalIceCandidateStatistics? = statistics.localIceCandidate
         sample.candidateType = candidate?.candidateType?.rawValue
         // A relay's own protocol is its leg to the peer, nearly always UDP;
@@ -289,6 +288,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         return sample
     }
 
+    /// The codec a stream is carried in: the one its own entry names. A
+    /// report also lists the retransmission codec, which is "video/rtx" and
+    /// must never be the answer; without a name to go by, it is the first that is not.
+    private static func codec(_ id: String?, in statistics: TrackStatistics) -> String? {
+        let named: String? = id.flatMap { id in statistics.codec.first { $0.id == id }?.mimeType }
+        if let named { return named }
+        return statistics.codec.compactMap(\.mimeType).first { type in
+            type.hasPrefix("video/") && type.lowercased() != "video/rtx"
+        }
+    }
+
     private static func fill(_ sample: inout CallVideoSample, sentBy track: Track, _ statistics: TrackStatistics) {
         // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
         let layers: [OutboundRtpStreamStatistics] = statistics.outboundRtpStream
@@ -298,6 +308,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         sample.height = top?.frameHeight.map { Int($0) }
         sample.framesPerSecond = top?.framesPerSecond
         sample.timestamp = top?.timestamp ?? 0
+        sample.codec = codec(top?.codecId, in: statistics)
         // A backup codec for those who cannot decode the first has a sender of its own.
         let backups: [OutboundRtpStreamStatistics] = track.simulcastStatistics.values.flatMap(\.outboundRtpStream)
         let sent: [UInt64] = (layers + backups).compactMap(\.bytesSent)
@@ -318,6 +329,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         sample.framesPerSecond = stream?.framesPerSecond
         sample.timestamp = stream?.timestamp ?? 0
         sample.bytes = stream?.bytesReceived
+        sample.codec = codec(stream?.codecId, in: statistics)
         if let lost = stream?.packetsLost, let received = stream?.packetsReceived {
             let missing: Int64 = max(lost, 0)
             let total: Int64 = Int64(received) + missing

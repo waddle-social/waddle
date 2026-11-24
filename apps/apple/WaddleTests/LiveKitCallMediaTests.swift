@@ -311,6 +311,7 @@ final class LiveKitCallMediaTests: XCTestCase {
         // A per-track report carries the path the media takes, not only the stream's own counters.
         XCTAssertNotNil(reading.candidateType, "the network path is part of a track's report")
         XCTAssertNotNil(reading.transport)
+        if let codec = reading.codec { XCTAssertNotEqual(codec.lowercased(), "video/rtx", "the stream's own codec, never the retransmission one") }
 
         // A second window opens its settings and the first closes: the one still open keeps its figures.
         await alice.setMeasuresVideo(true)
