@@ -208,7 +208,9 @@ pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),
         Feature::pep(),
+        Feature::pubsub_access_open(),
         Feature::pubsub_access_presence(),
+        Feature::pubsub_access_roster(),
         Feature::pubsub_access_whitelist(),
         Feature::pubsub_auto_create(),
         Feature::new("http://jabber.org/protocol/pubsub#auto-subscribe"),
@@ -244,6 +246,16 @@ mod tests {
             to: to.map(|s| s.parse().expect("valid jid")),
             id: "test-1".to_string(),
             payload: pubsub,
+        }
+    }
+
+    /// XEP-0163 §4: a PEP service MUST support open, roster and whitelist.
+    #[test]
+    fn pep_advertises_the_mandatory_access_models() {
+        let features = pep_features();
+        for model in ["open", "roster", "whitelist", "presence"] {
+            let var = format!("http://jabber.org/protocol/pubsub#access-{model}");
+            assert!(features.iter().any(|f| f.0 == var), "missing {var}");
         }
     }
 

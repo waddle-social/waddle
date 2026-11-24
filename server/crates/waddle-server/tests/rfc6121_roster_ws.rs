@@ -1527,3 +1527,85 @@ async fn pending_subscribe_is_delivered_once_per_session_not_on_presence_flips()
     let _ = alice2.close().await;
     let _ = bob.close().await;
 }
+
+/// RFC 6121 §2.1.2.2: an item carries zero or more `<group/>` children;
+/// the server stores them verbatim, returns them in roster results and
+/// pushes, and replaces the whole set on every roster set. The groups are
+/// what the PEP `roster` access model (XEP-0060 `pubsub#roster_groups_allowed`)
+/// judges, so they MUST survive durably.
+#[tokio::test]
+async fn roster_groups_round_trip_through_set_push_and_get() {
+    let (_server, mut alice, _bob) = connect_alice_bob().await;
+    // Requesting the roster makes the resource a roster-push recipient.
+    send_roster_get(&mut alice, "grp-get-0").await;
+
+    let (push, result) = send_roster_set(
+        &mut alice,
+        "grp-set-1",
+        r#"<item jid="bob@localhost" name="Bob"><group>Friends</group><group>Family</group></item>"#,
+    )
+    .await;
+    assert!(result.contains("type='result'"), "set result: {result}");
+    let get = send_roster_get(&mut alice, "grp-get-1").await;
+    for frame in [&push, &get] {
+        assert!(
+            frame.contains(">Friends</group>") && frame.contains(">Family</group>"),
+            "both groups must round-trip: {frame}"
+        );
+    }
+
+    // A set replaces the group list; a group not named again is dropped.
+    let (push, _) = send_roster_set(
+        &mut alice,
+        "grp-set-2",
+        r#"<item jid="bob@localhost" name="Bob"><group>Family</group></item>"#,
+    )
+    .await;
+    assert!(
+        push.contains(">Family</group>") && !push.contains("Friends"),
+        "set must replace the group list: {push}"
+    );
+    let get = send_roster_get(&mut alice, "grp-get-2").await;
+    assert!(
+        get.contains(">Family</group>") && !get.contains("Friends"),
+        "replaced groups are durable: {get}"
+    );
+
+    // Omitting every group clears them.
+    let (push, _) = send_roster_set(
+        &mut alice,
+        "grp-set-3",
+        r#"<item jid="bob@localhost" name="Bob"/>"#,
+    )
+    .await;
+    assert!(!push.contains("<group"), "group-less set clears: {push}");
+}
+
+/// RFC 6121 §2.1.2.2: a group name MUST NOT be empty (`not-acceptable`),
+/// and duplicate groups in one item are a malformed request.
+#[tokio::test]
+async fn roster_set_rejects_empty_and_duplicate_groups() {
+    let (_server, mut alice, _bob) = connect_alice_bob().await;
+    send_roster_get(&mut alice, "grp-get-0").await;
+    for (id, groups) in [
+        ("grp-empty", "<group></group>"),
+        ("grp-dup", "<group>A</group><group>A</group>"),
+    ] {
+        alice
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="set" id="{id}"><query xmlns="jabber:iq:roster"><item jid="bob@localhost">{groups}</item></query></iq>"#
+            ))
+            .await
+            .expect("send roster set");
+        let response = alice
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("roster set response");
+        assert!(
+            response.contains("type='error'"),
+            "{id} must be refused: {response}"
+        );
+    }
+    let get = send_roster_get(&mut alice, "grp-none").await;
+    assert!(!get.contains("<item"), "nothing stored: {get}");
+}

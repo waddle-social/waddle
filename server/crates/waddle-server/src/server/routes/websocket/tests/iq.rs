@@ -3548,7 +3548,9 @@ async fn handle_iq_pubsub_configure_spaces_node_rejects_unsupported_access_model
         .await;
         let response = responses.first().expect("configure response");
         assert!(
-            response.contains("type='error'") && response.contains("bad-request"),
+            response.contains("type='error'")
+                && response.contains("not-acceptable")
+                && response.contains("unsupported-access-model"),
             "Spaces configure should reject unsupported access_model={access_model}: {response}"
         );
         let stored = state

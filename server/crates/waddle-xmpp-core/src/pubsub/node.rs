@@ -196,6 +196,10 @@ pub struct NodeConfig {
     pub notify_delete: bool,
     /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: SendLastPublishedItem,
+    /// `pubsub#roster_groups_allowed` (XEP-0060 §16.4.4): the owner's roster
+    /// groups whose members may subscribe and retrieve items when
+    /// `access_model` is `roster`. Empty admits only the owner.
+    pub roster_groups_allowed: Vec<String>,
 }
 
 /// Partial node configuration submitted by an XEP-0060 configure form.
@@ -219,6 +223,8 @@ pub struct NodeConfigPatch {
     pub notify_delete: Option<bool>,
     /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: Option<SendLastPublishedItem>,
+    /// `pubsub#roster_groups_allowed`, replacing the stored list when present.
+    pub roster_groups_allowed: Option<Vec<String>>,
 }
 
 impl NodeConfigPatch {
@@ -252,6 +258,9 @@ impl NodeConfigPatch {
         if let Some(send_last_published_item) = self.send_last_published_item {
             config.send_last_published_item = send_last_published_item;
         }
+        if let Some(roster_groups_allowed) = &self.roster_groups_allowed {
+            config.roster_groups_allowed = roster_groups_allowed.clone();
+        }
         config
     }
 }
@@ -283,6 +292,12 @@ impl NodeConfigPatch {
             && self
                 .send_last_published_item
                 .is_none_or(|v| v == config.send_last_published_item)
+            && self.roster_groups_allowed.as_ref().is_none_or(|groups| {
+                groups.len() == config.roster_groups_allowed.len()
+                    && groups
+                        .iter()
+                        .all(|group| config.roster_groups_allowed.contains(group))
+            })
     }
 
     /// Apply this patch to `base`, resolving `pubsub#max_items=max` to the
@@ -317,6 +332,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -343,6 +359,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -364,6 +381,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -380,6 +398,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -411,6 +430,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSubAndPresence,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -491,6 +511,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -523,6 +544,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -560,6 +582,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -586,6 +609,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -618,6 +642,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -653,6 +678,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -687,6 +713,7 @@ impl NodeConfig {
             access_model: AccessModel::Whitelist,
             max_items: PEP_BOOKMARK_MAX_ITEMS,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
             ..Self::pep_default()
         }
     }
@@ -765,6 +792,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -836,6 +864,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -852,6 +881,7 @@ impl NodeConfig {
             notify_retract: true,
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
+            roster_groups_allowed: Vec::new(),
         }
     }
 
@@ -873,6 +903,7 @@ impl NodeConfig {
             notify_retract: false,
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
+            roster_groups_allowed: Vec::new(),
         }
     }
 }

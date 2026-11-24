@@ -290,7 +290,7 @@ async fn sqlite_schema_reset_drops_push_watermark_with_backing_item() {
         .await
         .expect("schema version");
     let version: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, super::schema::PUBSUB_SCHEMA_VERSION);
 }
 
 #[tokio::test]

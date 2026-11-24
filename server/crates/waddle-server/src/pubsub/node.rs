@@ -15,9 +15,9 @@ impl DatabasePubSubStorage {
             INSERT INTO pubsub_nodes (
                 owner_jid, node_name, access_model, publish_model, max_items,
                 persist_items, deliver_payloads, notify_retract, notify_delete,
-                send_last_published_item, node_type, created_at_ms
+                send_last_published_item, node_type, created_at_ms, roster_groups_allowed
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_jid, node_name) DO NOTHING
             "#,
             crate::db_params![
@@ -33,6 +33,7 @@ impl DatabasePubSubStorage {
                 config.send_last_published_item.to_string(),
                 config.node_type.map(|node_type| node_type.to_string()),
                 node.created_at.timestamp_millis(),
+                encode_roster_groups(&config.roster_groups_allowed)?,
             ],
         )
         .await?;
@@ -63,7 +64,7 @@ impl DatabasePubSubStorage {
                 r#"
                 SELECT owner_jid, node_name, access_model, publish_model, max_items,
                        persist_items, deliver_payloads, notify_retract, notify_delete,
-                       send_last_published_item, node_type, created_at_ms
+                       send_last_published_item, node_type, created_at_ms, roster_groups_allowed
                 FROM pubsub_nodes
                 WHERE owner_jid = ? AND node_name = ?
                 "#,
@@ -197,7 +198,7 @@ impl DatabasePubSubStorage {
                 r#"
                 SELECT n.owner_jid, n.node_name, n.access_model, n.publish_model, n.max_items,
                        n.persist_items, n.deliver_payloads, n.notify_retract, n.notify_delete,
-                       n.send_last_published_item, n.node_type, n.created_at_ms
+                       n.send_last_published_item, n.node_type, n.created_at_ms, n.roster_groups_allowed
                 FROM pubsub_nodes n
                 JOIN pubsub_items i
                   ON i.owner_jid = n.owner_jid AND i.node_name = n.node_name
@@ -325,7 +326,8 @@ impl DatabasePubSubStorage {
                     notify_retract = ?,
                     notify_delete = ?,
                     send_last_published_item = ?,
-                    node_type = ?
+                    node_type = ?,
+                    roster_groups_allowed = ?
                 WHERE owner_jid = ? AND node_name = ?
                 "#,
                 crate::db_params![
@@ -338,6 +340,7 @@ impl DatabasePubSubStorage {
                     config.notify_delete,
                     config.send_last_published_item.to_string(),
                     config.node_type.map(|node_type| node_type.to_string()),
+                    encode_roster_groups(&config.roster_groups_allowed)?,
                     owner.to_string(),
                     node_name,
                 ],
@@ -396,6 +399,17 @@ impl DatabasePubSubStorage {
         let created_at_ms: i64 = row
             .get(11)
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        let roster_groups_raw: Option<String> = row
+            .get(12)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let roster_groups_allowed = roster_groups_raw
+            .as_deref()
+            .map(serde_json::from_str::<Vec<String>>)
+            .transpose()
+            .map_err(|error| {
+                XmppError::internal(format!("invalid PubSub roster_groups_allowed: {error}"))
+            })?
+            .unwrap_or_default();
         let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms)
             .ok_or_else(|| XmppError::internal("invalid PubSub created_at_ms".to_string()))?;
 
@@ -441,10 +455,21 @@ impl DatabasePubSubStorage {
                 notify_retract,
                 notify_delete,
                 send_last_published_item,
+                roster_groups_allowed,
             },
             created_at,
         })
     }
+}
+
+/// `pubsub#roster_groups_allowed` as stored: a JSON array, or NULL when empty.
+fn encode_roster_groups(groups: &[String]) -> Result<Option<String>, XmppError> {
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(groups)
+        .map(Some)
+        .map_err(|error| XmppError::internal(error.to_string()))
 }
 
 pub(crate) fn bounded_node_config(node_name: &str, config: &NodeConfig) -> NodeConfig {
