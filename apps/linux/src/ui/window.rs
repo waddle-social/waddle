@@ -480,7 +480,7 @@ impl WaddleWindow {
         self.start_session(&account);
     }
 
-    async fn sign_out(&self) {
+    pub(super) async fn sign_out(&self) {
         let Some(account) = self.imp().account.take() else {
             return;
         };
@@ -495,6 +495,21 @@ impl WaddleWindow {
             self.toast(&error.to_string());
         }
         self.imp().stack.set_visible_child_name("server");
+    }
+
+    /// Leave the current account running no longer and enter another stored one.
+    pub(super) async fn switch_account(&self, account: StoredAccount) {
+        self.imp().account.take();
+        self.stop_session().await;
+        self.enter(account);
+    }
+
+    /// Show the sign-in steps for one more account. The current one stays
+    /// stored and is a "Switch" away in the preferences.
+    pub(super) async fn add_account(&self) {
+        self.imp().account.take();
+        self.stop_session().await;
+        self.on_back_to_server();
     }
 
     pub(super) fn toast(&self, message: &str) {
