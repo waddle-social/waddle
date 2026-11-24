@@ -10,6 +10,7 @@ mod auth;
 mod avatars;
 mod composer;
 mod gifs;
+mod inbox;
 mod judgments;
 mod jump;
 mod link_cards;
