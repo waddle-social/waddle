@@ -1,15 +1,17 @@
 //! The composer's suggestion popover: `@` mentions and slash commands.
 //!
-//! It never takes focus from the entry. Up and Down move the selection,
-//! Tab or Enter picks it, and Escape dismisses the popover.
+//! It never takes focus from the composer. Up and Down move the selection,
+//! Tab or Enter picks it, and Escape dismisses the popover. Slash words
+//! are the built-in commands and the server's XEP-0050 extension commands.
 
 use adw::prelude::{
-    AccessibleExtManual, BoxExt, Cast, EditableExt, EntryExt, GtkWindowExt, ListBoxRowExt,
-    ObjectExt, PopoverExt, WidgetExt,
+    AccessibleExtManual, BoxExt, Cast, GtkWindowExt, ListBoxRowExt, ObjectExt, PopoverExt,
+    TextBufferExt, TextViewExt, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::gdk;
 
+use super::composer_view::ComposerText;
 use super::WaddleWindow;
 use crate::composer::{self, RoomPeople, Suggestion};
 use crate::session::Kind;
@@ -50,13 +52,13 @@ impl WaddleWindow {
 
         let entry = &imp.composer_entry;
         let window = self.downgrade();
-        entry.connect_changed(move |_| {
+        entry.buffer().connect_changed(move |_| {
             if let Some(window) = window.upgrade() {
                 window.refresh_suggestions();
             }
         });
         let window = self.downgrade();
-        entry.connect_cursor_position_notify(move |_| {
+        entry.buffer().connect_cursor_position_notify(move |_| {
             if let Some(window) = window.upgrade() {
                 window.refresh_suggestions();
             }
@@ -72,12 +74,9 @@ impl WaddleWindow {
         entry.add_controller(focus);
     }
 
-    /// Focus sits in the entry's inner text widget, not the entry itself.
     fn composer_focused(&self) -> bool {
         let entry = self.imp().composer_entry.get();
-        GtkWindowExt::focus(self).is_some_and(|focus| {
-            focus == entry.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&entry)
-        })
+        GtkWindowExt::focus(self).is_some_and(|focus| focus == entry.upcast::<gtk::Widget>())
     }
 
     /// Offer what the token at the cursor could become, or hide.
@@ -100,7 +99,8 @@ impl WaddleWindow {
                     occupants: &occupants,
                     directory: &directory,
                 });
-                composer::suggestions(&text, cursor, room)
+                let extensions = imp.extension_commands.borrow();
+                composer::suggestions_with(&text, cursor, room, &extensions)
                     .into_iter()
                     // A correction replaces a body; it cannot run a command.
                     .filter(|suggestion| !(editing && suggestion.title.starts_with('/')))
@@ -188,7 +188,7 @@ impl WaddleWindow {
         let (text, cursor) = composer::apply(&entry.text(), &suggestion);
         self.hide_suggestions();
         entry.set_text(&text);
-        entry.grab_focus_without_selecting();
+        entry.grab_focus();
         entry.set_position(i32::try_from(cursor).unwrap_or(-1));
     }
 }

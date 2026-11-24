@@ -105,7 +105,13 @@ mod imp {
         #[template_child]
         pub composer: TemplateChild<gtk::Box>,
         #[template_child]
-        pub composer_entry: TemplateChild<gtk::Entry>,
+        pub composer_entry: TemplateChild<gtk::TextView>,
+        #[template_child]
+        pub composer_placeholder: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub format_bar: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub format_toggle: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub composer_context: TemplateChild<gtk::Box>,
         #[template_child]
@@ -157,6 +163,8 @@ mod imp {
         /// What the composer's popover offers, in its order.
         pub suggestions: RefCell<Vec<Suggestion>>,
         pub suggestion_popover: RefCell<Option<(gtk::Popover, gtk::ListBox)>>,
+        /// The server's XEP-0050 extension commands (see ui/commands.rs).
+        pub extension_commands: RefCell<Vec<waddle_xmpp_client_ffi::WaddleExtensionCommand>>,
         /// Presence, pictures and profiles (see ui/identity.rs).
         pub profile: crate::ui::identity::ProfileState,
         /// Shared images by URL: loading (`None`), shown, or failed.
@@ -359,6 +367,12 @@ impl WaddleWindow {
     #[template_callback]
     fn on_attach(&self) {
         self.show_plus_menu();
+    }
+
+    #[template_callback]
+    fn on_toggle_format(&self) {
+        use gtk::prelude::ToggleButtonExt;
+        self.show_format_bar(self.imp().format_toggle.is_active());
     }
 
     #[template_callback]

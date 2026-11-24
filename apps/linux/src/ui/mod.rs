@@ -1,5 +1,7 @@
 mod actions;
 mod avatar;
+mod commands;
+mod composer_view;
 mod conversation;
 mod directory;
 mod event_form;
