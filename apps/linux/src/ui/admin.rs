@@ -116,6 +116,7 @@ impl WaddleWindow {
             return;
         }
         self.leave_inbox();
+        self.leave_calendar();
         imp.admin.borrow_mut().open = true;
         // Nothing is being read while the console is on screen.
         imp.current.replace(None);
