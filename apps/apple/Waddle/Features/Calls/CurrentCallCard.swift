@@ -202,7 +202,9 @@ struct CurrentCallCardHost: View {
         }
         let kind: CallCardSummary.Kind = switch state {
         case .active(let call): .direct(call.media)
-        default: .room(count: session.calls.groupPresence.participants[conversation.jid]?.count ?? 0)
+        // The roster the stage and the dock count by: one row per person, however many devices they joined from.
+        default: .room(count: GroupCallStage(state: state, media: media?.phase ?? .idle)
+            .map { session.callRoster(of: $0, media: media, speaking: []).count } ?? 0)
         }
         let commands = CallCommands(calls: session.calls, media: media)
         return CurrentCallCard(
@@ -228,5 +230,16 @@ struct CurrentCallCardHost: View {
                 hangUp: commands.hangUp
             )
         )
+        // The card has the call, so it says when the connection is lost or
+        // back, as the dock and the stage do. Not on arrival: the surface
+        // the call came from has already said how it is doing.
+        .onChange(of: status) { _, status in
+            let text = switch status {
+            case .connecting: "Connecting"
+            case .connected: "Call connected"
+            case .reconnecting: "Reconnecting"
+            }
+            AccessibilityNotification.Announcement(text).post()
+        }
     }
 }
