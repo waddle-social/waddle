@@ -177,6 +177,22 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// - Parameter droppingIdleTracks: off for the check made as a camera
     ///   finishes turning on, which is about the camera that is now on.
     private func applyCameraChoice(droppingIdleTracks: Bool = true) async {
+        // One at a time. A change stops the capture and starts it again, and
+        // the SDK counts those: two changes at once can leave the count a
+        // start ahead, and then turning the camera off no longer stops it.
+        let earlier = cameraChoiceWork
+        let work = Task { [weak self] in
+            await earlier?.value
+            await self?.moveCameraToChoice(droppingIdleTracks: droppingIdleTracks)
+        }
+        cameraChoiceWork = work
+        await work.value
+    }
+
+    /// The latest change to the camera in use; the next waits for it.
+    @ObservationIgnored private var cameraChoiceWork: Task<Void, Never>?
+
+    private func moveCameraToChoice(droppingIdleTracks: Bool) async {
         guard let room else { return }
         let wanted = cameraCaptureOptions()
         for publication in publications(of: .video, in: room) {
