@@ -12,6 +12,8 @@ struct CallMediaNotice: View {
     /// The kinds being tried again now: their button says so and waits.
     var checking: Set<CallMediaIssue.Kind> = []
     let retry: @MainActor (CallMediaIssue.Kind) -> Void
+    /// Opens the system's settings where the device is allowed.
+    var openSettings: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nowhere to open */ }
     let dismiss: @MainActor (CallMediaIssue.Kind) -> Void
 
     var body: some View {
@@ -30,14 +32,14 @@ struct CallMediaNotice: View {
                 icon(issue)
                 message(issue).fixedSize()
                 Spacer(minLength: Theme.Spacing.s)
-                retryButton(issue)
+                buttons(issue)
                 dismissButton(issue)
             }
             HStack(alignment: .top, spacing: WaddleTokens.Spacing.s2Half) {
                 icon(issue)
                 VStack(alignment: .leading, spacing: Theme.Spacing.s) {
                     message(issue).fixedSize(horizontal: false, vertical: true)
-                    retryButton(issue)
+                    buttons(issue)
                 }
                 Spacer(minLength: 0)
                 dismissButton(issue)
@@ -59,17 +61,30 @@ struct CallMediaNotice: View {
     }
 
     private func message(_ issue: CallMediaIssue) -> some View {
-        Text(issue.message)
+        Text(issue.message())
             .huddleText(Theme.Typography.caption)
             .foregroundStyle(Theme.Colors.fg)
     }
 
-    private func retryButton(_ issue: CallMediaIssue) -> some View {
+    private func buttons(_ issue: CallMediaIssue) -> some View {
         let isChecking = checking.contains(issue.kind)
-        return Button(isChecking ? "Checking…" : issue.retryTitle) { retry(issue.kind) }
-            .buttonStyle(.huddle(size: .small))
-            .fixedSize()
-            .disabled(isChecking)
+        return HStack(spacing: Theme.Spacing.s) {
+            if issue.opensSettings {
+                Button("Open Settings") { openSettings(issue.kind) }
+                    .buttonStyle(.huddle(size: .small))
+                    .fixedSize()
+                    .accessibilityLabel(Text("Open Settings for the \(issue.deviceName)"))
+            }
+            Button(isChecking ? "Checking…" : issue.retryTitle) { retry(issue.kind) }
+                .buttonStyle(.huddle(size: .small))
+                .fixedSize()
+                .disabled(isChecking)
+                // Three notices must not read as three buttons of one name.
+                .accessibilityLabel(Text(
+                    isChecking ? "Checking the \(issue.deviceName)"
+                        : issue.kind == .screen ? "Share your screen again" : "Check the \(issue.deviceName) again"
+                ))
+        }
     }
 
     private func dismissButton(_ issue: CallMediaIssue) -> some View {
@@ -81,7 +96,7 @@ struct CallMediaNotice: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text("Dismiss"))
+        .accessibilityLabel(Text("Dismiss the \(issue.deviceName) notice"))
         .help("Dismiss for this call")
     }
 

@@ -751,6 +751,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
+        // What a call could not use was that call's: the next has not been
+        // asked for a camera yet, and may be allowed one by now.
+        if isMicrophoneBlocked { isMicrophoneBlocked = false }
+        if isCameraBlocked { isCameraBlocked = false }
         // What was said about sharing the screen was said about that call.
         if isScreenShareBlocked { isScreenShareBlocked = false }
         if didScreenShareFail { didScreenShareFail = false }

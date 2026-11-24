@@ -57,7 +57,8 @@ struct CallStageView: View {
             CallStageHeader(title: title, subtitle: subtitle, status: status, connection: connectionChip)
             if !issues.isEmpty {
                 CallMediaNotice(
-                    issues: issues, checking: checkingIssues, retry: actions.retryMediaIssue, dismiss: actions.dismissMediaIssue
+                    issues: issues, checking: checkingIssues, retry: actions.retryMediaIssue,
+                    openSettings: actions.openSystemSettings, dismiss: actions.dismissMediaIssue
                 )
                 .padding(.horizontal, Theme.Spacing.l)
                 .padding(.bottom, Theme.Spacing.s)
@@ -104,6 +105,13 @@ struct CallStageView: View {
         .accessibilityLabel(Text("Call with \(title)"))
         .onChange(of: announcement, initial: true) { _, text in
             if announcesChanges { AccessibilityNotification.Announcement(text).post() }
+        }
+        // A notice about our own devices is said as it appears (web: a polite live region).
+        .onChange(of: issues) { before, now in
+            guard announcesChanges else { return }
+            for issue in now where !before.contains(issue) {
+                AccessibilityNotification.Announcement(issue.message()).post()
+            }
         }
         // Only a connection that has gone wrong is spoken, and only as it
         // does: excellent and good coming and going would be noise.

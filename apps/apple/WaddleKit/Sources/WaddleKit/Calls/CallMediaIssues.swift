@@ -23,21 +23,60 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
         self.reason = reason
     }
 
+    /// Where the person changes what Waddle may use, which decides what they can be told to do.
+    public enum Platform: Equatable, Sendable {
+        /// System Settings; a change may take a relaunch to be seen.
+        case mac
+        /// Settings; the system closes the app when a privacy switch changes, so the call ends.
+        case phone
+
+        public static var current: Self {
+            #if os(macOS)
+            .mac
+            #else
+            .phone
+            #endif
+        }
+    }
+
     /// What happened, what it meant for the call, and what to do about it.
-    public var message: String {
+    public func message(on platform: Platform = .current) -> String {
         switch (kind, reason) {
-        case (.microphone, .denied):
-            "Waddle is not allowed to use the microphone, so you joined as a listener. Allow it in Settings, then check again."
-        case (.microphone, .failed):
-            "Your microphone could not be started, so you joined as a listener."
-        case (.camera, .denied):
-            "Waddle is not allowed to use the camera, so you joined without video. Allow it in Settings, then check again."
-        case (.camera, .failed):
-            "Your camera could not be started, so you joined without video."
+        case (.microphone, .denied): "Waddle is not allowed to use the microphone, so nobody hears you. \(Self.remedy(on: platform))"
+        case (.microphone, .failed): "Your microphone could not be started, so nobody hears you."
+        case (.camera, .denied): "Waddle is not allowed to use the camera, so nobody sees you. \(Self.remedy(on: platform))"
+        case (.camera, .failed): "Your camera could not be started, so nobody sees you."
         case (.screen, .denied):
             "Waddle cannot share the screen until you allow it under Screen & System Audio Recording in System Settings and reopen Waddle."
-        case (.screen, .failed):
-            "That could not be shared. Try again."
+        case (.screen, .failed): "That could not be shared. Try again."
+        }
+    }
+
+    private static func remedy(on platform: Platform) -> String {
+        switch platform {
+        case .mac: "Allow it in System Settings, then check again; Waddle may need reopening first."
+        case .phone: "Allow it in Settings. The system closes Waddle when you do, so you will need to join again."
+        }
+    }
+
+    /// The same in a line, for a surface with no buttons: the dock and the sidebar's card.
+    public var line: String {
+        switch (kind, reason) {
+        case (.microphone, .denied): "Waddle is not allowed to use the microphone. Change that in Settings."
+        case (.microphone, .failed): "Your microphone could not be started."
+        case (.camera, .denied): "Waddle is not allowed to use the camera. Change that in Settings."
+        case (.camera, .failed): "Your camera could not be started."
+        case (.screen, .denied): "Waddle is not allowed to record the screen. Change that in System Settings."
+        case (.screen, .failed): "That could not be shared. Try again."
+        }
+    }
+
+    /// What the device is called in a button's spoken name.
+    public var deviceName: String {
+        switch kind {
+        case .microphone: "microphone"
+        case .camera: "camera"
+        case .screen: "screen"
         }
     }
 
@@ -46,6 +85,9 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
     public var retryTitle: String {
         kind == .screen ? "Share again" : "Check again"
     }
+
+    /// Refused in the system's settings, which is where it is put right.
+    public var opensSettings: Bool { reason == .denied }
 }
 
 public enum CallMediaIssues {
@@ -84,6 +126,6 @@ public enum CallMediaIssues {
     /// One line for a surface with no room for a list, as the dock and the
     /// sidebar's card: the first notice's words.
     public static func line(for report: Report) -> String? {
-        shown(for: report).first?.message
+        shown(for: report).first?.line
     }
 }

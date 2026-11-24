@@ -16,6 +16,8 @@ struct CallStageActions {
     /// Tries a device the call could not use again, or puts its notice away for this call.
     var retryMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to retry */ }
     var dismissMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to dismiss */ }
+    /// Opens the system's settings where a device is allowed.
+    var openSystemSettings: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nowhere to open */ }
     /// Starts sharing our screen, by way of the picker, or stops it.
     var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
     let hangUp: @MainActor () -> Void

@@ -74,7 +74,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
             title: "priya",
             summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
             isMicrophoneOn: true,
-            notice: "Waddle is not allowed to use the camera. Change that in Settings.", actions: Self.actions
+            notice: CallMediaIssues.line(for: CallMediaIssues.Report(isCameraBlocked: true)), actions: Self.actions
         ))
     }
 

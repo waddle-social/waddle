@@ -28,20 +28,29 @@ import Testing
         #expect(CallMediaIssues.shown(for: report, dismissed: [.microphone, .camera]).isEmpty)
     }
 
-    @Test func theNoticeSaysWhatItMeantForTheCallAndWhatToDo() {
+    @Test func theNoticeSaysWhatItMeansAndWhatCanBeDoneOnThisKindOfDevice() {
         let microphone = CallMediaIssue(kind: .microphone, reason: .denied)
-        #expect(microphone.message.contains("joined as a listener"))
-        #expect(microphone.message.contains("check again"))
+        #expect(microphone.message(on: .mac).contains("nobody hears you"))
+        #expect(microphone.message(on: .mac).contains("then check again"))
+        // A phone closes the app when the switch is changed: checking again is not something it can offer.
+        #expect(!microphone.message(on: .phone).contains("check again"))
+        #expect(microphone.message(on: .phone).contains("join again"))
+        #expect(CallMediaIssue(kind: .camera, reason: .denied).message(on: .mac).contains("nobody sees you"))
         #expect(microphone.retryTitle == "Check again")
-        let camera = CallMediaIssue(kind: .camera, reason: .denied)
-        #expect(camera.message.contains("joined without video"))
-        #expect(camera.retryTitle == "Check again")
         #expect(CallMediaIssue(kind: .screen, reason: .failed).retryTitle == "Share again")
     }
 
-    @Test func aSurfaceWithOneLineShowsTheFirstNotice() {
+    @Test func onlyARefusalIsPutRightInSettings() {
+        #expect(CallMediaIssue(kind: .microphone, reason: .denied).opensSettings)
+        #expect(CallMediaIssue(kind: .screen, reason: .denied).opensSettings)
+        #expect(!CallMediaIssue(kind: .screen, reason: .failed).opensSettings)
+    }
+
+    @Test func aSurfaceWithOneLineShowsTheFirstNoticeInWordsThatPromiseNoButton() {
         let report = Report(isMicrophoneBlocked: true, isCameraBlocked: true)
-        #expect(CallMediaIssues.line(for: report) == CallMediaIssue(kind: .microphone, reason: .denied).message)
+        let line = CallMediaIssues.line(for: report)
+        #expect(line == "Waddle is not allowed to use the microphone. Change that in Settings.")
+        #expect(line?.contains("check again") == false)
         #expect(CallMediaIssues.line(for: Report(didScreenShareFail: true)) == "That could not be shared. Try again.")
     }
 }
