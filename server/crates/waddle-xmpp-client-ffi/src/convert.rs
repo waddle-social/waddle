@@ -1083,7 +1083,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
                 .parse::<Jid>()
                 .map_err(|e| format!("Invalid reply author JID '{}': {e}", target.author_jid))?;
             Some(ReplyMarker {
-                to,
+                to: Some(to),
                 id: target.message_id,
             })
         }

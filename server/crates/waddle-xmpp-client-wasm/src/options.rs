@@ -52,10 +52,12 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
 
     let reply = match options.reply {
         Some(target) => Some(ReplyMarker {
-            to: target
-                .author_jid
-                .parse::<Jid>()
-                .map_err(|err| js_error(format!("invalid reply author JID: {err}")))?,
+            to: Some(
+                target
+                    .author_jid
+                    .parse::<Jid>()
+                    .map_err(|err| js_error(format!("invalid reply author JID: {err}")))?,
+            ),
             id: target.message_id,
         }),
         None => None,

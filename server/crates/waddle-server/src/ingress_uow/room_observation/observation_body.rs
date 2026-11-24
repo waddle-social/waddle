@@ -25,9 +25,10 @@ fn supported_reply_range(message: &Message, body_len: usize) -> Option<FallbackR
     if replies.next().is_some() || parse_reply_from_message(message).is_none() {
         return None;
     }
-    // Native clients only expose the reply and its fallback when the shared
-    // reply parser accepts `to`, although XEP-0461 makes that attribute optional.
-    reply.attr("to")?.parse::<jid::Jid>().ok()?;
+    // XEP-0461 makes `to` optional; when present it must still be a JID.
+    if let Some(to) = reply.attr("to") {
+        to.parse::<jid::Jid>().ok()?;
+    }
     let mut fallbacks = message.payloads.iter().filter(|elem| {
         is_fallback_element(elem) && elem.attr("for").map(str::trim) == Some(NS_REPLY)
     });

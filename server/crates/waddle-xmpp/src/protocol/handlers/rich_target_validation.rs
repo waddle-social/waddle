@@ -1,10 +1,14 @@
 //! Rich-target validation for XEP-0308 (correction), XEP-0424
-//! (retraction), XEP-0425 (moderated retraction), and XEP-0461 (reply).
+//! (retraction), and XEP-0425 (moderated retraction).
 //!
 //! These XEPs all reference a *previously sent* message: a correction
 //! `<replace id='X'/>` claims to update message X, a retraction
-//! `<retract id='X'/>` claims to remove message X, and a reply
-//! `<reply id='X' to='Y'/>` claims to thread under message X.
+//! `<retract id='X'/>` claims to remove message X.
+//!
+//! XEP-0461 replies are deliberately not validated here: the spec imposes
+//! no target-existence rule, and 1:1 replies carry the target's origin-id
+//! or `id` rather than a server-assigned stanza-id, so a stanza-id lookup
+//! would wrongly bounce conforming replies.
 //!
 //! The handler runs on the **sender pass** only — once a rich-target
 //! request reaches the recipient pipeline, validation has already
@@ -27,8 +31,8 @@
 //!    `Continue(events)` (resume the pipeline) or `Halt(events)` with
 //!    a typed error reply.
 //!
-//! XEP-conformance test names use `xep_0308_*`, `xep_0424_*`, and
-//! `xep_0461_*` prefixes per the #229 Q9(b) convention so
+//! XEP-conformance test names use `xep_0308_*` and
+//! `xep_0424_*` prefixes per the #229 Q9(b) convention so
 //! `cargo test xep_0424` returns every retraction-rule test.
 //!
 //! # Out of scope (PR3)
@@ -50,7 +54,7 @@ use crate::mam::MamArchiveKind;
 use crate::protocol::event::{ArchivedMessage, CallbackId, MessageRef, OutboundEvent};
 use crate::protocol::message_context::MessageContext;
 use crate::protocol::traits::{HandlerOutcome, MessageHandler};
-use crate::xep::{xep0308, xep0424, xep0461};
+use crate::xep::{xep0308, xep0424};
 use jid::BareJid;
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
@@ -70,8 +74,6 @@ pub enum RichTargetKind {
     Correction,
     /// XEP-0424 Message Retraction (user-initiated).
     Retraction,
-    /// XEP-0461 Message Replies.
-    Reply,
 }
 
 /// What the dispatch step detected on the inbound message.
@@ -160,10 +162,6 @@ impl RichTargetValidationHandler {
                 RichTargetKind::Retraction => {
                     item_not_found_reply(original, "Retraction target message not found.")
                 }
-                // XEP-0461 §3.3: target not found.
-                RichTargetKind::Reply => {
-                    item_not_found_reply(original, "Reply target message not found.")
-                }
             };
             return HandlerOutcome::Halt(vec![send_message_error(reply)]);
         };
@@ -171,8 +169,6 @@ impl RichTargetValidationHandler {
         match kind {
             RichTargetKind::Correction => validate_correction(original, archived, author),
             RichTargetKind::Retraction => validate_retraction(original, archived, author),
-            // XEP-0461 §3.3: reply target only needs to exist.
-            RichTargetKind::Reply => HandlerOutcome::Continue(Vec::new()),
         }
     }
 }
@@ -207,18 +203,6 @@ pub fn detect(message: &Message, ctx: &MessageContext<'_>) -> Option<DetectedRic
             kind: RichTargetKind::Retraction,
             reference: MessageRef::StanzaId {
                 stanza_id: StanzaId::new(retraction.retracts_id, archive_jid),
-            },
-            author,
-        });
-    }
-
-    // XEP-0461 reply — references the target message by stanza-id.
-    if let Some(reply) = xep0461::parse_reply_from_message(message) {
-        let archive_jid: jid::Jid = author.clone().into();
-        return Some(DetectedRichTarget {
-            kind: RichTargetKind::Reply,
-            reference: MessageRef::StanzaId {
-                stanza_id: StanzaId::new(reply.id.as_str(), archive_jid),
             },
             author,
         });

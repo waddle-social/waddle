@@ -147,7 +147,9 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
 
     let reply_marker = xep_reply::parse_reply(el);
     let reply_to_id = reply_marker.as_ref().map(|m| m.id.clone());
-    let reply_to_sender = reply_marker.as_ref().map(|m| m.to.to_string());
+    let reply_to_sender = reply_marker
+        .as_ref()
+        .and_then(|m| m.to.as_ref().map(ToString::to_string));
     let reply_fallback = xep_reply::parse_fallback(el).map(|r| (r.start, r.end));
 
     let markup_spans = el

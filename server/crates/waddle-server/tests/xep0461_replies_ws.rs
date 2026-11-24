@@ -134,6 +134,99 @@ async fn reply_to_unknown_target_routes_without_error() {
     let _ = client.close().await;
 }
 
+async fn setup_dm() -> (TestServer, WsXmppClient, WsXmppClient) {
+    let bob_password = format!("ws-test-bob-password-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", bob_password.as_str())]);
+    let admin_password = server.fixed_account_password().to_string();
+    let admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &admin_password,
+        &format!("xep0461-admin-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("connect admin");
+    let bob = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &bob_password,
+        &format!("xep0461-bob-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("connect bob");
+    (server, admin, bob)
+}
+
+#[tokio::test]
+async fn one_to_one_reply_to_origin_id_is_delivered() {
+    // XEP-0461 Business Rules: "For other message types the sender should use
+    // the 'id' from a XEP-0359 <origin-id/> if present, or the value of the
+    // 'id' attribute on the <message/>." The server must not require the
+    // target to be a server-assigned stanza-id.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut admin, mut bob) = setup_dm().await;
+
+    admin
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-orig">
+                <body>dm question</body>
+                <origin-id xmlns="urn:xmpp:sid:0" id="dm-origin-1"/>
+            </message>"#
+        ))
+        .await
+        .expect("send original");
+    bob.recv_matching(|frame| frame.contains("dm question"))
+        .await
+        .expect("bob receives original");
+
+    admin
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-1">
+                <body>dm answer</body>
+                <reply xmlns="urn:xmpp:reply:0" to="bob@{DOMAIN}" id="dm-origin-1"/>
+            </message>"#
+        ))
+        .await
+        .expect("send reply");
+    let delivered = bob
+        .recv_matching(|frame| frame.contains("dm answer"))
+        .await
+        .expect("bob receives reply");
+    assert!(delivered.contains("urn:xmpp:reply:0"), "{delivered}");
+    assert!(delivered.contains("dm-origin-1"), "{delivered}");
+
+    let _ = admin.close().await;
+    let _ = bob.close().await;
+}
+
+#[tokio::test]
+async fn one_to_one_reply_without_to_or_known_target_is_delivered() {
+    // XEP-0461 Use Cases: the <reply/> "SHOULD have a 'to' attribute ... and
+    // MUST have an 'id' attribute"; there is no target-existence rule.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut admin, mut bob) = setup_dm().await;
+
+    admin
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-reply-orphan">
+                <body>orphan dm reply</body>
+                <reply xmlns="urn:xmpp:reply:0" id="never-seen-id"/>
+            </message>"#
+        ))
+        .await
+        .expect("send reply");
+    let delivered = bob
+        .recv_matching(|frame| frame.contains("orphan dm reply"))
+        .await
+        .expect("bob receives reply");
+    assert!(delivered.contains("never-seen-id"), "{delivered}");
+
+    let _ = admin.close().await;
+    let _ = bob.close().await;
+}
+
 #[tokio::test]
 async fn reply_with_empty_to_jid_returns_bad_request() {
     // XEP-0461 §Use Cases: if the optional `to` attribute is present it

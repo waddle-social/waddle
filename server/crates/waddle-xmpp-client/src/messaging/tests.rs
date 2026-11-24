@@ -334,6 +334,23 @@ fn parse_message_with_reply() {
 }
 
 #[test]
+fn parse_message_with_reply_without_optional_to() {
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+         <body>&gt; quoted\nresponse</body>\
+         <reply xmlns='urn:xmpp:reply:0' id='target-id'/>\
+         <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
+             <body start='0' end='10'/>\
+         </fallback>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.reply_to_id.as_deref(), Some("target-id"));
+    assert_eq!(msg.reply_to_sender, None);
+    assert_eq!(msg.reply_fallback, Some((0, 10)));
+}
+
+#[test]
 fn parse_message_with_reply_and_fallback() {
     let e = el("<message xmlns='jabber:client' type='groupchat'>\
          <body>&gt; alice wrote:\n&gt; original message\n\nmy response</body>\
