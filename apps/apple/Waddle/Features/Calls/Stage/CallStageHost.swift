@@ -107,6 +107,8 @@ struct CallStageHost: View {
     /// What can be shared, while the person is picking.
     @State private var screenPicker: CallScreenSources?
     @State private var showsSettings = false
+    /// The devices being checked again, so their notice's button says so.
+    @State private var checkingIssues: Set<CallMediaIssue.Kind> = []
 
     var body: some View {
         let state = session.calls.state
@@ -183,7 +185,8 @@ struct CallStageHost: View {
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
-            notice: media?.deviceNotice,
+            issues: media.map { CallMediaIssues.shown(for: $0.mediaReport, dismissed: memory.dismissedMediaIssues) } ?? [],
+            checkingIssues: checkingIssues,
             connection: media?.connectionQuality,
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
@@ -228,6 +231,23 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
+            retryMediaIssue: { [media, model, session] kind in
+                guard let media, !checkingIssues.contains(kind) else { return }
+                Task {
+                    checkingIssues.insert(kind)
+                    defer { checkingIssues.remove(kind) }
+                    // Tried again, it is news again: a notice put away comes back if it still holds.
+                    model.update(sid) { $0.dismissedMediaIssues.remove(kind) }
+                    switch kind {
+                    case .microphone: await media.setMicrophone(true)
+                    case .camera: await media.setCamera(true)
+                    case .screen:
+                        let sources = await media.screenSources()
+                        if session.calls.state.sid == sid { screenPicker = sources }
+                    }
+                }
+            },
+            dismissMediaIssue: { [model] kind in model.update(sid) { $0.dismissedMediaIssues.insert(kind) } },
             toggleScreenShare: { [media, session] in
                 guard let media else { return }
                 Task {

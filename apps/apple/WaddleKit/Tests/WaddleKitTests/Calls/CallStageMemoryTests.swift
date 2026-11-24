@@ -105,4 +105,14 @@ import Testing
         memory.follow(call: "b")
         #expect(!memory.showsParticipants)
     }
+
+    @Test func aNoticePutAwayStaysAwayForItsCallOnly() {
+        var memory = CallStageMemory()
+        memory.follow(call: "a")
+        memory.dismissedMediaIssues.insert(.camera)
+        memory.follow(call: "a")
+        #expect(memory.dismissedMediaIssues == [.camera])
+        memory.follow(call: "b")
+        #expect(memory.dismissedMediaIssues.isEmpty)
+    }
 }

@@ -13,6 +13,9 @@ struct CallStageActions {
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
+    /// Tries a device the call could not use again, or puts its notice away for this call.
+    var retryMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to retry */ }
+    var dismissMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to dismiss */ }
     /// Starts sharing our screen, by way of the picker, or stops it.
     var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
     let hangUp: @MainActor () -> Void

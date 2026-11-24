@@ -36,8 +36,10 @@ struct CallStageView: View {
     var isCameraOn = false
     /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
     var isHandRaised: Bool?
-    /// Something the person should know about their own devices.
-    var notice: String?
+    /// What the call could not use of our own devices, each with a way to try again or put it away.
+    var issues: [CallMediaIssue] = []
+    /// The kinds being tried again now.
+    var checkingIssues: Set<CallMediaIssue.Kind> = []
     /// How good our own connection is, once the call is live; `nil` shows no indicator.
     var connection: CallConnectionQuality?
     /// Whether we are sharing our screen; `nil` where this device cannot.
@@ -53,13 +55,12 @@ struct CallStageView: View {
     var body: some View {
         VStack(spacing: 0) {
             CallStageHeader(title: title, subtitle: subtitle, status: status, connection: connectionChip)
-            if let notice {
-                Text(notice)
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.warningText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Theme.Spacing.l)
-                    .padding(.bottom, Theme.Spacing.s)
+            if !issues.isEmpty {
+                CallMediaNotice(
+                    issues: issues, checking: checkingIssues, retry: actions.retryMediaIssue, dismiss: actions.dismissMediaIssue
+                )
+                .padding(.horizontal, Theme.Spacing.l)
+                .padding(.bottom, Theme.Spacing.s)
             }
             if let ownScreen {
                 CallSelfShareNotice(screen: ownScreen, source: tileSource)
