@@ -22,6 +22,17 @@ import Testing
         f.store.clear()
     }
 
+    /// XEP-0353 Security Considerations: replying to a stranger leaks presence.
+    @Test func aProposeFromAStrangerIsSurfacedWithoutRinging() async {
+        let f = CallFixture()
+        f.port.presenceSubscribers = []
+        f.store.handle(f.event(.propose(callAudio)))
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        #expect(f.port.callSends.isEmpty)
+        f.store.clear()
+    }
+
     @Test func sessionInitiateBeforeLocalAcceptIsIgnored() async {
         let media = RecordingCallMedia()
         let port = FakePort()
@@ -31,7 +42,7 @@ import Testing
         await eventually { port.completedCallSends.count == 1 }
         try? await Task.sleep(for: .milliseconds(50))
         #expect(store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
-        #expect(port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(port.callSends == [.ringing(callPeer, "c1")])
         #expect(media.calls.isEmpty)
         store.clear()
     }
@@ -101,7 +112,7 @@ import Testing
         await eventually { f.port.callSends.count == 1 }
         f.store.handle(f.event(.finish(reason: .success, migratedTo: nil), from: ownTablet))
         #expect(f.store.state == .ended(sid: "c1", reason: .finished(.success)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -149,7 +160,7 @@ import Testing
         await eventually { f.port.callSends.last == .reject(carol, "c-barrier", false) }
         #expect(
             f.port.callSends == [
-                .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
+                .ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
                 .reject(carol, "c-barrier", false),
             ])
         #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
@@ -164,7 +175,7 @@ import Testing
         f.store.handle(f.event(.propose(callAudio)))
         try? await Task.sleep(for: .milliseconds(50))
         #expect(f.store.state == .ended(sid: "c1", reason: .retracted))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -181,7 +192,7 @@ import Testing
         f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio), from: carol))
         try? await Task.sleep(for: .milliseconds(50))
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -246,7 +257,7 @@ import Testing
         try? await Task.sleep(for: .milliseconds(50))
         #expect(
             f.port.callSends == [
-                .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
+                .ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
                 .reject(dave, "c3", false), .finish(callPeer, "c1", .success),
             ])
         #expect(f.store.state == .idle)
@@ -258,7 +269,7 @@ import Testing
         f.store.handle(f.event(.propose(callVideo)))
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callVideo)))
         await eventually { f.port.callSends.count == 1 }
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         f.store.clear()
     }
     @Test func duplicateProposeDoesNotRingTwice() async {
@@ -266,7 +277,7 @@ import Testing
         f.store.handle(f.event(.propose(callAudio)))
         f.store.handle(f.event(.propose(callAudio)))
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
         f.store.clear()
     }
@@ -277,7 +288,7 @@ import Testing
         await eventually { f.port.callSends.count == 1 }
         #expect(await f.store.acceptIncoming())
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio, isAccepting: true)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -287,7 +298,7 @@ import Testing
         await eventually { f.port.callSends.count == 1 }
         #expect(await f.store.declineIncoming())
         #expect(f.store.state == .idle)
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .reject(callPeer, "c1", false)])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .reject(callPeer, "c1", false)])
     }
 
     @Test func sessionInitiateEstablishesAndConfirmsAsOurResource() async {
@@ -298,7 +309,7 @@ import Testing
         f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio)))
         #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
         await eventually { f.port.callSends.count == 3 }
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
         f.store.clear()
     }
 
@@ -308,7 +319,7 @@ import Testing
         await eventually { f.port.callSends.count == 1 }
         f.store.handle(f.event(.sessionInitiate(join: callJoin, media: callAudio), sid: "other-sid"))
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -325,7 +336,7 @@ import Testing
         f.store.handle(f.event(.propose(callAudio)))
         #expect(await !f.store.startCall(to: callPeer.bare, media: callAudio))
         await eventually { f.port.callSends.count == 1 }
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
         f.store.clear()
     }
 
@@ -580,7 +591,7 @@ import Testing
         await f.store.hangUpActive(ifSid: "other-sid", reason: .gone)
         #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
         #expect(
-            f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+            f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
         f.store.clear()
     }
 

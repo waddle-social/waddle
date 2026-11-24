@@ -98,7 +98,7 @@ struct SessionCallTests {
         let (coordinator, port) = session()
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
-        await eventually { port.callSends == [.ringing(callPeer.bare, "c1")] }
+        await eventually { port.callSends == [.ringing(callPeer, "c1")] }
         if accepting { #expect(await coordinator.calls.acceptIncoming()) }
         port.callSends = []
         await coordinator.stop()
@@ -139,9 +139,9 @@ struct SessionCallTests {
             account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: callOwn.resource), port: port, handlesCalls: true)
         coordinator.start()
         port.emit(.call(CallEvent(from: callPeer, sid: "c1", kind: .propose(callAudio))))
-        await eventually { port.callSends == [.ringing(callPeer.bare, "c1")] }
+        await eventually { port.callSends == [.ringing(callPeer, "c1")] }
         #expect(coordinator.calls.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
-        #expect(port.callSends == [.ringing(callPeer.bare, "c1")])
+        #expect(port.callSends == [.ringing(callPeer, "c1")])
         await coordinator.stop()
     }
 
@@ -173,13 +173,13 @@ struct SessionCallTests {
             await eventually { port.callSends.count == 3 }
             #expect(
                 port.callSends == [
-                    .ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
+                    .ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio),
                 ])
         } else {
             await eventually { coordinator.calls.lastError != nil }
             #expect(coordinator.calls.state == .ended(sid: "c1", reason: .error))
             #expect(coordinator.calls.lastError == "call session accept failed: no bound resource")
-            #expect(port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1")])
+            #expect(port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1")])
         }
         await coordinator.stop()
     }

@@ -6,6 +6,7 @@ import {
   $lastCallError,
   beginOutgoingCall,
   clearCallState,
+  configureCallContactGate,
   configureIncomingCallAlerts,
   type RawIqSender,
   scheduleOutgoingTimeout,
@@ -262,6 +263,7 @@ afterEach(() => {
   clearDmCallActivities();
   $dmCallOutcomeAnchor.set(null);
   configureIncomingCallAlerts(null);
+  configureCallContactGate(null);
   $lastCallError.set(null);
   // The Muji mocks above fire `applyMucCallPresence` to simulate
   // MUC echoes; clearing the participants store between tests
@@ -593,8 +595,40 @@ describe("DM call outcome feed anchors", () => {
 });
 
 describe("incoming DM call alerting", () => {
+  test("incoming propose from a stranger surfaces the call but sends no ringing", async () => {
+    const sender = mockSender();
+    configureCallContactGate(() => false);
+    const { emitCall } = wireClientEvents(sender);
+    emitCall({
+      kind: "propose",
+      from: "mallory@waddle.test/phone",
+      sid: "c-stranger",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get()).toMatchObject({ phase: "incoming", sid: "c-stranger" });
+    expect(sender.send_call_ringing).not.toHaveBeenCalled();
+  });
+
+  test("incoming propose with no contact gate installed sends no ringing", async () => {
+    const sender = mockSender();
+    const { emitCall } = wireClientEvents(sender);
+    emitCall({
+      kind: "propose",
+      from: "bob@waddle.test/phone",
+      sid: "c-no-gate",
+      media: audioVideo,
+    });
+    await flushCallSideEffects();
+
+    expect($callState.get()).toMatchObject({ phase: "incoming", sid: "c-no-gate" });
+    expect(sender.send_call_ringing).not.toHaveBeenCalled();
+  });
+
   test("incoming propose starts ringtone, sends ringing, and local decline stops it", async () => {
     const sender = mockSender();
+    configureCallContactGate((bareJid) => bareJid === "bob@waddle.test");
     const player = {
       startLoop: mock(() => undefined),
       stop: mock(() => undefined),
@@ -614,7 +648,7 @@ describe("incoming DM call alerting", () => {
     await flushCallSideEffects();
 
     expect(player.startLoop).toHaveBeenCalledWith("c1");
-    expect(sender.send_call_ringing).toHaveBeenCalledWith("bob@waddle.test", "c1");
+    expect(sender.send_call_ringing).toHaveBeenCalledWith("bob@waddle.test/phone", "c1");
 
     await tearDownActiveCall(sender, "gone");
     expect(player.stop).toHaveBeenCalledWith("c1");

@@ -56,8 +56,19 @@ extension FFIXmppPort {
         await client.sendCallPropose(peerBareJid: peer.description, sid: sid, audio: media.audio, video: media.video)
     }
 
-    func sendCallRinging(to peer: BareJID, sid: String) async -> Bool {
-        await client.sendCallRinging(peerBareJid: peer.description, sid: sid)
+    func sendCallRinging(to peer: JID, sid: String) async -> Bool {
+        await client.sendCallRinging(peerFullJid: peer.description, sid: sid)
+    }
+
+    func peerReceivesOurPresence(_ peer: BareJID) async -> Bool {
+        do {
+            return try await client.fetchRosterContacts().contains {
+                $0.receivesOurPresence && FFIInbound.bareJID($0.jid) == peer
+            }
+        } catch {
+            BridgeLog.debug("roster lookup for the call gate failed: \(error)")
+            return false
+        }
     }
 
     func sendCallProceed(to peer: JID, sid: String) async -> Bool {

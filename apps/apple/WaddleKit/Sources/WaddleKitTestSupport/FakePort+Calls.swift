@@ -6,7 +6,7 @@ enum CallSend: Hashable {
     case groupInitiate(BareJID, JID, String, Bool)
     case groupTerminate(BareJID, String)
     case propose(BareJID, String, CallMedia)
-    case ringing(BareJID, String)
+    case ringing(JID, String)
     case proceed(JID, String)
     case reject(JID, String, Bool)
     case retract(BareJID, String)
@@ -97,8 +97,11 @@ extension FakePort {
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool {
         await recordCall(.propose(peer, sid, media))
     }
-    func sendCallRinging(to peer: BareJID, sid: String) async -> Bool {
+    func sendCallRinging(to peer: JID, sid: String) async -> Bool {
         await recordCall(.ringing(peer, sid))
+    }
+    func peerReceivesOurPresence(_ peer: BareJID) async -> Bool {
+        presenceSubscribers.contains(peer)
     }
     func sendCallProceed(to peer: JID, sid: String) async -> Bool {
         await recordCall(.proceed(peer, sid))

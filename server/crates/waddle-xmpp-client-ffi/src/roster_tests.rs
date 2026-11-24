@@ -56,17 +56,33 @@ fn contacts_carry_their_address_and_saved_name() {
             WaddleRosterContact {
                 jid: "romeo@waddle.test".to_string(),
                 name: Some("Romeo".to_string()),
+                receives_our_presence: true,
             },
             WaddleRosterContact {
                 jid: "nurse@waddle.test".to_string(),
                 name: None,
+                receives_our_presence: false,
             },
             WaddleRosterContact {
                 jid: "friar@waddle.test".to_string(),
                 name: None,
+                receives_our_presence: false,
             },
         ]
     );
+}
+
+#[test]
+fn only_from_and_both_contacts_receive_our_presence() {
+    let contacts = roster_contacts_from_result(&roster(vec![
+        item("a@waddle.test", None, "from"),
+        item("b@waddle.test", None, "both"),
+        item("c@waddle.test", None, "to"),
+        item("d@waddle.test", None, "none"),
+    ]))
+    .expect("roster reads");
+    let flags: Vec<bool> = contacts.iter().map(|c| c.receives_our_presence).collect();
+    assert_eq!(flags, vec![true, true, false, false]);
 }
 
 #[test]

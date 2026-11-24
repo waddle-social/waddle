@@ -12,7 +12,7 @@ import Testing
         f.store.handle(f.event(.propose(callAudio), sid: "c2", from: carol))
         await eventually { f.port.callSends.count == 2 }
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .reject(carol, "c2", false)])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .reject(carol, "c2", false)])
         f.store.clear()
     }
     @Test func lowerIncomingSIDRetractsOursAndTakesTheirs() async {
@@ -73,7 +73,7 @@ import Testing
         #expect(await f.store.acceptIncoming())
         await eventually { f.port.callSends.count == 3 }
         #expect(f.store.state == .ended(sid: "c1", reason: .timeout))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .finish(callPeer, "c1", .timeout)])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .finish(callPeer, "c1", .timeout)])
         f.store.clear()
     }
 
@@ -89,7 +89,7 @@ import Testing
         #expect(await clock.store.startCall(to: callPeer.bare, media: callAudio))
         await eventually { clock.port.callSends.count == 2 }
         #expect(f.store.state == .active(ActiveCall(peer: callPeer, sid: "c1", media: callAudio, join: callJoin, initiator: callPeer)))
-        #expect(f.port.callSends == [.ringing(callPeer.bare, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
+        #expect(f.port.callSends == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .accept(callPeer, callOwn, "c1", callAudio)])
         f.store.clear()
         clock.store.clear()
     }
@@ -116,7 +116,7 @@ import Testing
         f.store.handle(f.event(.propose(callAudio), sid: "c-aa"))
         f.store.handle(f.event(.reject(reason: .expired, tieBreak: true), sid: "c-zz"))
         await eventually { f.port.callSends.count == 2 }
-        #expect(f.port.callSends == [.propose(callPeer.bare, "c-zz", callAudio), .ringing(callPeer.bare, "c-aa")])
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c-zz", callAudio), .ringing(callPeer, "c-aa")])
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-aa", media: callAudio)))
         f.store.clear()
     }
@@ -129,8 +129,8 @@ import Testing
         f.store.handle(f.event(.reject(reason: .expired, tieBreak: true), sid: "c-zz"))
         // A following live invitation is a public barrier for queued effects.
         f.store.handle(f.event(.propose(callAudio), sid: "c-next"))
-        await eventually { f.port.callSends.contains(.ringing(callPeer.bare, "c-next")) }
-        #expect(f.port.callSends == [.propose(callPeer.bare, "c-zz", callAudio), .ringing(callPeer.bare, "c-next")])
+        await eventually { f.port.callSends.contains(.ringing(callPeer, "c-next")) }
+        #expect(f.port.callSends == [.propose(callPeer.bare, "c-zz", callAudio), .ringing(callPeer, "c-next")])
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-next", media: callAudio)))
         f.store.clear()
     }
@@ -146,7 +146,7 @@ import Testing
         await eventually { f.port.callSends.count == 3 }
         #expect(
             f.port.callSends == [
-                .propose(callPeer.bare, "c-zz", callAudio), .retractTieBreak(callPeer, "c-zz"), .ringing(callPeer.bare, "c-aa"),
+                .propose(callPeer.bare, "c-zz", callAudio), .retractTieBreak(callPeer, "c-zz"), .ringing(callPeer, "c-aa"),
             ])
         #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c-aa", media: callAudio)))
         f.store.clear()

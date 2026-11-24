@@ -17,6 +17,11 @@ use crate::{WaddleClient, WaddleError};
 pub struct WaddleRosterContact {
     pub jid: String,
     pub name: Option<String>,
+    /// RFC 6121 §2.1.2.5 `subscription` `from` or `both`: the contact
+    /// receives the account's presence. A client answers a call proposal
+    /// with `<ringing/>` only for such a contact (XEP-0353 Security Considerations: replying
+    /// to a stranger is a presence leak).
+    pub receives_our_presence: bool,
 }
 
 /// The contacts in an RFC 6121 §2.1.4 roster result. A result the roster
@@ -36,6 +41,10 @@ pub(crate) fn roster_contacts_from_result(
         .map(|item| WaddleRosterContact {
             jid: item.jid.to_string(),
             name: item.name.filter(|name| !name.trim().is_empty()),
+            receives_our_presence: matches!(
+                item.subscription,
+                Subscription::From | Subscription::Both
+            ),
         })
         .collect())
 }

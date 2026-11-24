@@ -397,17 +397,23 @@ class CallStore internal constructor(
 
     /**
      * XEP-0353 §3.2: answer a fresh incoming `<propose/>` with a
-     * `<ringing/>` to the caller's BARE JID so every caller resource
-     * sees the device-ring state (web `emitRingingOnIncomingPropose`).
+     * `<ringing/>` to the proposer's FULL JID (web
+     * `emitRingingOnIncomingPropose`). Only a proposer that already
+     * receives our presence gets it (XEP-0353 Security Considerations:
+     * replying to a stranger is a presence leak); a stranger's call is
+     * still surfaced, silently, for the user to act on.
      */
     private fun emitRingingOnIncomingPropose(before: CallState, next: CallState, event: WaddleCallEvent) {
         if (event.kind !is WaddleCallEventKind.Propose) return
         if (next !is CallState.Incoming || next.sid != event.sid) return
         if (before is CallState.Incoming && before.sid == event.sid) return
         val connection = next.connection ?: return
-        enqueueEffect {
-            if (!connection.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
-        }
+        enqueueEffect { ringProposer(connection, event) }
+    }
+
+    private suspend fun ringProposer(connection: CallConnection, event: WaddleCallEvent) {
+        if (!connection.receivesOurPresence(bareJid(event.from))) return
+        if (!connection.ringing(event.from, event.sid)) reportError("call ringing failed")
     }
 
     private suspend fun proposeSideEffect(
@@ -611,8 +617,7 @@ class CallStore internal constructor(
             }
         }
         when (answer) {
-            SlotMovedAnswer.RING_WINNER ->
-                if (!connection.ringing(bareJid(event.from), event.sid)) reportError("call ringing failed")
+            SlotMovedAnswer.RING_WINNER -> ringProposer(connection, event)
             SlotMovedAnswer.DECLINE ->
                 if (!connection.reject(event.from, event.sid)) reportError("call reject failed")
             SlotMovedAnswer.ALREADY_CONCLUDED -> Unit

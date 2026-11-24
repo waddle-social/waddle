@@ -17,6 +17,8 @@ final class FakePort: XmppPort {
     var holdCallLifecycleReports = false
     var heldCallLifecycleReports: [CheckedContinuation<Void, Never>] = []
 
+    /// Contacts that receive the account's presence; the standard test peer is one.
+    var presenceSubscribers: Set<BareJID> = Set([BareJID(parsing: "bob@waddle.test")].compactMap { $0 })
     var callSends: [CallSend] = []
     var completedCallSends: [CallSend] = []
     var callResults: [String: Bool] = [:]

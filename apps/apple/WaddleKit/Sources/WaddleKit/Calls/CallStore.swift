@@ -158,8 +158,11 @@ import Observation
             enqueue { [weak self] in
                 // A decline that ran while this effect was queued already answered the proposer.
                 guard let self, self.isRinging(sid: event.sid) else { return }
+                // A stranger's call is surfaced silently: no automatic reply leaks that this device is online.
+                guard await self.port.peerReceivesOurPresence(event.from.bare) else { return }
+                guard self.isRinging(sid: event.sid) else { return }
                 _ = await self.send(epoch: epoch, error: "call ringing failed") {
-                    await self.port.sendCallRinging(to: event.from.bare, sid: event.sid)
+                    await self.port.sendCallRinging(to: event.from, sid: event.sid)
                 }
             }
         }

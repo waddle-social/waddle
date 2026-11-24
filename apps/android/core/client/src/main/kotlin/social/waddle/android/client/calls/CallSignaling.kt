@@ -53,7 +53,14 @@ internal interface CallConnection {
 
     suspend fun applyIfCurrent(action: () -> Unit): Boolean
     suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean
-    suspend fun ringing(peerBareJid: String, sid: String): Boolean
+    suspend fun ringing(peerFullJid: String, sid: String): Boolean
+
+    /**
+     * Whether [peerBareJid] is a roster contact that receives this account's
+     * presence (subscription `from` or `both`). Any failure to read the
+     * roster answers false: no automatic reply is sent on a guess.
+     */
+    suspend fun receivesOurPresence(peerBareJid: String): Boolean
     suspend fun proceed(peerFullJid: String, sid: String): Boolean
     suspend fun reject(peerFullJid: String, sid: String): Boolean
     suspend fun rejectTieBreak(peerFullJid: String, sid: String): Boolean
@@ -115,8 +122,11 @@ private class ActiveCallConnection(
 
     override suspend fun propose(peerBareJid: String, sid: String, media: WaddleCallMedia): Boolean =
         verb { it.sendCallPropose(peerBareJid, sid, media.audio, media.video) }
-    override suspend fun ringing(peerBareJid: String, sid: String): Boolean =
-        verb { it.sendCallRinging(peerBareJid, sid) }
+    override suspend fun ringing(peerFullJid: String, sid: String): Boolean =
+        verb { it.sendCallRinging(peerFullJid, sid) }
+    override suspend fun receivesOurPresence(peerBareJid: String): Boolean = invokeOr(false) { client ->
+        client.fetchRosterContacts().any { it.jid == peerBareJid && it.receivesOurPresence }
+    }
     override suspend fun proceed(peerFullJid: String, sid: String): Boolean =
         verb { it.sendCallProceed(peerFullJid, sid) }
     override suspend fun reject(peerFullJid: String, sid: String): Boolean =

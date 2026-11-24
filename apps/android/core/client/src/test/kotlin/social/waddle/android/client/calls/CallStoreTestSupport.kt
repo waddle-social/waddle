@@ -1,5 +1,6 @@
 package social.waddle.android.client.calls
 
+import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import social.waddle.android.client.FakeWaddleClient
 import social.waddle.android.client.InMemoryPreferencesDataStore
@@ -12,7 +13,7 @@ import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLiveKitJoin
 import social.waddle.client.ffi.WaddleMujiPresence
 import social.waddle.client.ffi.WaddlePresence
-import java.util.Base64
+import social.waddle.client.ffi.WaddleRosterContact
 
 /**
  * Shared fixture for the CallStore suites ([CallStoreTest],
@@ -62,7 +63,11 @@ internal class Fixture(
      */
     ownFullJid: (() -> String?)? = null,
 ) {
-    val client = FakeWaddleClient()
+    val client = FakeWaddleClient().apply {
+        // The default peer is a contact that receives our presence, so a
+        // propose from it is answered with <ringing/> (XEP-0353 Security).
+        rosterContacts = listOf(WaddleRosterContact(PEER_BARE, null, receivesOurPresence = true))
+    }
     val activeSession = ActiveSession()
     val sessionCache = MucCallSessionCache(InMemoryPreferencesDataStore())
     val store: CallStore

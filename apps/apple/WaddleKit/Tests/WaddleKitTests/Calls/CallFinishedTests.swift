@@ -7,7 +7,7 @@ import Testing
     @Test func declinedCallDoesNotRingAgainFromALateProposal() async {
         let f = CallFixture()
         f.store.handle(f.event(.propose(callAudio)))
-        await eventually { f.port.callSends == [.ringing(callPeer.bare, "c1")] }
+        await eventually { f.port.callSends == [.ringing(callPeer, "c1")] }
         #expect(await f.store.declineIncoming())
         #expect(f.store.isFinished(sid: "c1"))
         f.port.callSends = []
@@ -111,7 +111,7 @@ import Testing
 
         #expect(f.store.state == .ended(sid: "c-zz", reason: .expired))
         #expect(f.store.isFinished(sid: "c-aa"))
-        #expect(!f.port.callSends.contains(.ringing(callPeer.bare, "c-aa")))
+        #expect(!f.port.callSends.contains(.ringing(callPeer, "c-aa")))
         f.store.clear()
     }
 
@@ -135,7 +135,7 @@ import Testing
         #expect(!f.store.state.isLive)
         #expect(f.store.isFinished(sid: "c-new"))
         #expect(!f.port.callSends.contains(.proceed(callPeer, "c-new")))
-        #expect(!f.port.callSends.contains(.ringing(callPeer.bare, "c-new")))
+        #expect(!f.port.callSends.contains(.ringing(callPeer, "c-new")))
         f.store.clear()
     }
 

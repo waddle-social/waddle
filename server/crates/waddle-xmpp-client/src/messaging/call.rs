@@ -480,10 +480,10 @@ impl TieBreak {
     }
 }
 
-/// Build an XEP-0353 rejection without a reason or tie-break marker.
+/// Build an XEP-0353 rejection carrying the SHOULD `<busy/>` reason, without a tie-break marker.
 #[must_use]
 pub fn build_reject(sid: &SessionId) -> Element {
-    build_reject_with_options(sid, None, TieBreak::Plain)
+    build_reject_with_options(sid, Some(JingleReason::Busy), TieBreak::Plain)
 }
 
 /// Build an XEP-0353 rejection with an optional Jingle reason and tie-break marker.
@@ -502,10 +502,10 @@ pub fn build_reject_with_options(
     builder.build()
 }
 
-/// Build an XEP-0353 proposal withdrawal without a reason or tie-break marker.
+/// Build an XEP-0353 proposal withdrawal carrying the SHOULD `<cancel/>` reason, without a tie-break marker.
 #[must_use]
 pub fn build_retract(sid: &SessionId) -> Element {
-    build_retract_with_options(sid, None, TieBreak::Plain)
+    build_retract_with_options(sid, Some(JingleReason::Cancel), TieBreak::Plain)
 }
 
 /// Build an XEP-0353 proposal withdrawal with an optional Jingle reason and tie-break marker.
@@ -524,10 +524,10 @@ pub fn build_retract_with_options(
     builder.build()
 }
 
-/// Build an XEP-0353 session-finish signal without a reason or migration target.
+/// Build an XEP-0353 session-finish signal carrying the SHOULD `<success/>` reason.
 #[must_use]
 pub fn build_finish(sid: &SessionId) -> Element {
-    build_finish_with_reason(sid, None)
+    build_finish_with_reason(sid, Some(JingleReason::Success))
 }
 
 /// Build an XEP-0353 session-finish signal with an optional Jingle reason.
@@ -675,14 +675,43 @@ pub fn build_session_terminate(
 }
 
 fn rtp_description_element(media: &str) -> Element {
+    rtp_description_builder(media).build()
+}
+
+/// RTP description with the Waddle payload types (XEP-0167 §3.2; RFC 3264
+/// offer/answer): Opus 111/48000/2 for audio, VP8 96/90000 for video.
+fn rtp_description_builder(media: &str) -> minidom::element::ElementBuilder {
     // XEP-0167 §3.3: advertise `<rtcp-mux/>` on every RTP description.
     // LiveKit multiplexes RTP and RTCP on a single port and refuses
     // separate RTCP, so omitting this is a protocol downgrade against
     // every modern WebRTC peer.
-    Element::builder("description", NS_JINGLE_RTP)
-        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media)
-        .append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build())
-        .build()
+    let mut description = Element::builder("description", NS_JINGLE_RTP)
+        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
+    if let Some(payload) = payload_type_element(media) {
+        description = description.append(payload);
+    }
+    description.append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build())
+}
+
+fn payload_type_element(media: &str) -> Option<Element> {
+    match media {
+        "audio" => Some(
+            Element::builder("payload-type", NS_JINGLE_RTP)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
+                .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
+                .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
+                .build(),
+        ),
+        "video" => Some(
+            Element::builder("payload-type", NS_JINGLE_RTP)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
+                .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
+                .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
+                .build(),
+        ),
+        _ => None,
+    }
 }
 
 fn content_element(media: &str) -> Element {
@@ -704,31 +733,7 @@ fn content_element(media: &str) -> Element {
 /// transport placeholder the server rewrites with join credentials.
 #[must_use]
 pub fn build_muji_jingle_content(media: &str) -> Element {
-    let mut description = Element::builder("description", NS_JINGLE_RTP)
-        .attr(minidom::rxml::xml_ncname!("media").to_owned(), media);
-    match media {
-        "audio" => {
-            description = description.append(
-                Element::builder("payload-type", NS_JINGLE_RTP)
-                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "111")
-                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "opus")
-                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "48000")
-                    .attr(minidom::rxml::xml_ncname!("channels").to_owned(), "2")
-                    .build(),
-            );
-        }
-        "video" => {
-            description = description.append(
-                Element::builder("payload-type", NS_JINGLE_RTP)
-                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "96")
-                    .attr(minidom::rxml::xml_ncname!("name").to_owned(), "VP8")
-                    .attr(minidom::rxml::xml_ncname!("clockrate").to_owned(), "90000")
-                    .build(),
-            );
-        }
-        _ => {}
-    }
-    description = description.append(Element::builder("rtcp-mux", NS_JINGLE_RTP).build());
+    let description = rtp_description_builder(media);
 
     Element::builder("content", NS_JINGLE)
         .attr(
