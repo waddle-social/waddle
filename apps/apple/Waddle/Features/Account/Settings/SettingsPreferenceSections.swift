@@ -57,10 +57,11 @@ struct SettingsPrivacySection: View {
     var body: some View {
         Section {
             FormToggle("Send read receipts", isOn: $preferences.sendsReadReceipts)
+            FormToggle("Send typing indicators", isOn: $preferences.sendsChatStates)
         } header: {
             FormSectionHeader("Privacy")
         } footer: {
-            FormSectionFooter("Others see when you've read their direct messages. Your devices still sync read state.")
+            FormSectionFooter("Others see when you've read their direct messages. Your devices still sync read state. Others see when you're typing.")
         }
     }
 }

@@ -69,6 +69,9 @@ public final class SessionCoordinator {
     @ObservationIgnored public var onAuthenticationFailed: (@MainActor () -> Void)?
     /// Whether XEP-0333 displayed markers are sent (read receipts).
     @ObservationIgnored public var sendsReadReceipts = true
+    /// Whether XEP-0085 chat states are sent. When false, no composing,
+    /// paused or active notification leaves this client.
+    @ObservationIgnored public var sendsChatStates = true
 
     @ObservationIgnored let port: any XmppPort
     @ObservationIgnored private let reconnectPolicy: ReconnectPolicy
