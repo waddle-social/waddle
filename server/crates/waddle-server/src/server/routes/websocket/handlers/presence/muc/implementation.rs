@@ -1272,6 +1272,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
     // registry lookup, which respawns the room — the join must never
     // be silently dropped.
     let mut retried_dead_room = false;
+    // Whether an earlier pass of this join's loop created the room. A retry
+    // (stale admission revision, a respawned dead room) finds the actor the
+    // first pass created, but the creator still created the room: it is told
+    // so by status 201 and is the one who unlocks it (XEP-0045 §10.1.1).
+    let mut created_room_in_earlier_pass = false;
     loop {
         let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
             Ok(channel) => channel,
@@ -1892,6 +1897,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 (acquisition.actor_ref, room_created)
             }
         };
+        let created_instant_room = created_instant_room || created_room_in_earlier_pass;
+        created_room_in_earlier_pass = created_instant_room;
         // A node that took this room's claim without the mailbox poller
         // holds none of the recorded occupants. They are seated before the
         // join reads the roster, so the joiner is told who occupies the
