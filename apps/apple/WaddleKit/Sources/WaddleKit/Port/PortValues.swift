@@ -121,13 +121,25 @@ public enum AvatarFetch: Hashable, Sendable {
     case failed
 }
 
-/// XEP-0363 upload slot.
+/// One `<header/>` of a XEP-0363 slot's `<put/>`.
+public struct UploadHeader: Hashable, Sendable {
+    public let name: String
+    public let value: String
+
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+}
+
+/// XEP-0363 upload slot. `headers` keeps every `<header/>` in wire order:
+/// a name may repeat and the relative order of its values must survive.
 public struct UploadSlot: Hashable, Sendable {
     public let putURL: URL
     public let getURL: URL
-    public let headers: [String: String]
+    public let headers: [UploadHeader]
 
-    public init(putURL: URL, getURL: URL, headers: [String: String]) {
+    public init(putURL: URL, getURL: URL, headers: [UploadHeader]) {
         self.putURL = putURL
         self.getURL = getURL
         self.headers = headers
