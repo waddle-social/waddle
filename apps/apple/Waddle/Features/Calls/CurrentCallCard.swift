@@ -200,11 +200,12 @@ struct CurrentCallCardHost: View {
         case .connected: .connected
         case .reconnecting: .reconnecting
         }
-        let kind: CallCardSummary.Kind = switch state {
-        case .active(let call): .direct(call.media)
-        // The roster the stage and the dock count by: one row per person, however many devices they joined from.
-        default: .room(count: GroupCallStage(state: state, media: media?.phase ?? .idle)
-            .map { session.callRoster(of: $0, media: media, speaking: []).count } ?? 0)
+        let kind: CallCardSummary.Kind = if case .active(let call) = state {
+            .direct(call.media)
+        } else {
+            // The roster the stage and the dock count by: one row per person, however many devices they joined from.
+            .room(count: GroupCallStage(state: state, media: media?.phase ?? .idle)
+                .map { session.callRoster(of: $0, media: media, speaking: []).count } ?? 0)
         }
         let commands = CallCommands(calls: session.calls, media: media)
         return CurrentCallCard(
