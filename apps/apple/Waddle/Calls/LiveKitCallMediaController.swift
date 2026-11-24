@@ -357,8 +357,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if background == .off, isBackgroundFailing { isBackgroundFailing = false }
     }
 
-    func restartBackground() {
+    func restartBackground() async {
         for processor in backgroundProcessors.values { processor.restart() }
+        // A blur that gave no picture while the camera was starting leaves no
+        // camera at all: the SDK gives up on a track it gets no frames from.
+        // Checking again then means starting the camera again, if it is still wanted.
+        guard let room, publications(of: .video, in: room).isEmpty, captureChoices[.video] == true else { return }
+        await setSource(.video, enabled: true, in: room)
     }
 
     /// The processor a new camera is made with (`CallBackgroundProcessor`),
@@ -377,20 +382,23 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     /// The safety net under `publishCamera`: a camera of ours that somehow
-    /// has no processor is given one, and those of cameras that are gone are let go.
+    /// has no processor is given one.
+    ///
+    /// A processor is not let go because its camera is missing from the
+    /// publications: a full reconnect takes the publication away and
+    /// publishes the same track again, capturing before it reports, and a
+    /// capturer whose processor was let go meanwhile would send frames as
+    /// they are. Processors go when their track is dropped on purpose, and with the call.
     private func giveBackgroundToCameras(in room: Room) {
-        var live: Set<ObjectIdentifier> = []
         for publication in publications(of: .video, in: room) {
             guard let capturer = (publication.track as? LocalVideoTrack)?.capturer else { continue }
             let id = ObjectIdentifier(capturer)
-            live.insert(id)
             if capturer.processor == nil || backgroundProcessors[id] == nil {
                 let processor = backgroundProcessors[id] ?? makeBackgroundProcessor()
                 backgroundProcessors[id] = processor
                 capturer.processor = processor
             }
         }
-        backgroundProcessors = backgroundProcessors.filter { live.contains($0.key) }
     }
 
     /// Makes and publishes a camera of our own making. The SDK's own way
@@ -399,8 +407,18 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func publishCamera(in room: Room) async {
         let processor = makeBackgroundProcessor()
         let track = await LocalVideoTrack.createCameraTrack(options: cameraCaptureOptions(), processor: processor)
-        backgroundProcessors[ObjectIdentifier(track.capturer)] = processor
-        _ = try? await room.localParticipant.publish(videoTrack: track)
+        let id = ObjectIdentifier(track.capturer)
+        backgroundProcessors[id] = processor
+        // The choice may have changed while the track was being made, when
+        // this processor was not yet among those `setBackground` reaches.
+        processor.setBlurring(background == .blur)
+        guard (try? await room.localParticipant.publish(videoTrack: track)) != nil else {
+            // Not published, as when the blur gave it no frame to start
+            // with: nothing of it is left running, and "Check again" starts another.
+            backgroundProcessors[id] = nil
+            _ = try? await track.stop()
+            return
+        }
     }
 
     // MARK: - Audio processing
@@ -499,7 +517,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let wanted = cameraCaptureOptions()
         for publication in publications(of: .video, in: room) {
             if publication.isMuted {
-                if droppingIdleTracks { try? await room.localParticipant.unpublish(publication: publication) }
+                if droppingIdleTracks {
+                    if let capturer = (publication.track as? LocalVideoTrack)?.capturer {
+                        backgroundProcessors[ObjectIdentifier(capturer)] = nil
+                    }
+                    try? await room.localParticipant.unpublish(publication: publication)
+                }
             } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
                       capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
                 _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())

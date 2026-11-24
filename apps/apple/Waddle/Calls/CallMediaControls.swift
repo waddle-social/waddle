@@ -77,7 +77,7 @@ protocol CallMediaControls: AnyObject, Observable {
     /// The blur is on and is not producing a picture, so nothing of the camera is sent.
     var isBackgroundFailing: Bool { get }
     /// Starts the blur afresh, as when someone asks to check again.
-    func restartBackground()
+    func restartBackground() async
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.

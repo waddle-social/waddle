@@ -45,62 +45,75 @@ final class CallBackgroundProcessor: NSObject, VideoProcessor, @unchecked Sendab
 
     /// Turning the blur on starts from nothing: no mask from an earlier time.
     func setBlurring(_ on: Bool) {
-        let recovered = lock.withLock { () -> Bool in
-            guard on != isBlurring else { return false }
-            isBlurring = on
-            blur = nil
-            heldBack = 0
-            defer { hasReportedFailure = false }
-            return hasReportedFailure
-        }
-        if recovered { failing(false) }
+        lock.lock()
+        let changes = on != isBlurring
+        if changes { isBlurring = on }
+        lock.unlock()
+        if changes { startAfresh() }
     }
 
     /// Starts the blur afresh, as when someone asks to try again.
     func restart() {
-        let recovered = lock.withLock { () -> Bool in
-            blur = nil
-            heldBack = 0
-            defer { hasReportedFailure = false }
-            return hasReportedFailure
-        }
-        if recovered { failing(false) }
+        startAfresh()
+    }
+
+    private func startAfresh() {
+        lock.lock()
+        blur = nil
+        heldBack = 0
+        let hadFailed = hasReportedFailure
+        hasReportedFailure = false
+        lock.unlock()
+        if hadFailed { failing(false) }
     }
 
     func process(frame: VideoFrame) -> VideoFrame? {
-        let (blurring, current, isStale) = lock.withLock { () -> (Bool, (any VideoProcessor)?, Bool) in
-            let stale = lastFrameAt.map { frame.timeStampNs - $0 > Self.staleAfterNanoseconds } ?? false
-            lastFrameAt = frame.timeStampNs
-            if stale { blur = nil }
-            return (isBlurring, blur, stale)
-        }
-        guard blurring else { return frame }
-        _ = isStale
-        // Made here, off the main thread: it sets up Vision and Metal.
-        let blur = current ?? {
-            let made = makeBlur()
-            return lock.withLock {
-                if self.blur == nil { self.blur = made }
-                return self.blur ?? made
-            }
-        }()
-        if let blurred = blur.process(frame: frame), blurred !== frame {
-            let recovered = lock.withLock { () -> Bool in
-                heldBack = 0
-                defer { hasReportedFailure = false }
-                return hasReportedFailure
-            }
-            if recovered { failing(false) }
+        guard let blur = blurForFrame(at: frame.timeStampNs) else { return frame }
+        let blurred = blur.process(frame: frame)
+        if let blurred, blurred !== frame {
+            if noteBlurred() { failing(false) }
             return blurred
         }
         // Not blurred: it does not leave.
-        let reportsNow = lock.withLock { () -> Bool in
-            heldBack += 1
-            guard heldBack >= Self.failureThreshold, !hasReportedFailure else { return false }
-            hasReportedFailure = true
-            return true
-        }
-        if reportsNow { failing(true) }
+        if noteHeldBack() { failing(true) }
         return nil
+    }
+
+    /// The blur to put this frame through, or `nil` when none is wanted.
+    /// Made here, on the capturer's queue: it sets up Vision and Metal.
+    private func blurForFrame(at timestamp: Int64) -> (any VideoProcessor)? {
+        lock.lock()
+        if let last = lastFrameAt, timestamp - last > Self.staleAfterNanoseconds { blur = nil }
+        lastFrameAt = timestamp
+        let wanted = isBlurring
+        let existing = blur
+        lock.unlock()
+        guard wanted else { return nil }
+        if let existing { return existing }
+        let made = makeBlur()
+        lock.lock()
+        defer { lock.unlock() }
+        if blur == nil { blur = made }
+        return blur
+    }
+
+    /// A blurred frame got out. True when a failure had been said and is now over.
+    private func noteBlurred() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        heldBack = 0
+        let hadFailed = hasReportedFailure
+        hasReportedFailure = false
+        return hadFailed
+    }
+
+    /// A frame was held back. True the one time that makes it worth saying.
+    private func noteHeldBack() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        heldBack += 1
+        guard heldBack >= Self.failureThreshold, !hasReportedFailure else { return false }
+        hasReportedFailure = true
+        return true
     }
 }

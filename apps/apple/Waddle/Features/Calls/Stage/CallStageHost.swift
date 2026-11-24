@@ -242,7 +242,7 @@ struct CallStageHost: View {
                     switch kind {
                     case .microphone: await media.setMicrophone(true)
                     case .camera: await media.setCamera(true)
-                    case .background: media.restartBackground()
+                    case .background: await media.restartBackground()
                     case .screen:
                         let sources = await media.screenSources()
                         if session.calls.state.sid == sid { screenPicker = sources }
