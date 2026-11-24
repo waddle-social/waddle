@@ -107,12 +107,13 @@ XEP-0444 = ["crates/waddle-server/tests/xep0444_reactions_ws.rs"]
 [[capability]]
 id = "moderation"
 server_maturity = "experimental"
-protocols = ["XEP-0191", "XEP-0425"]
-advertised_features = ["urn:xmpp:blocking", "urn:xmpp:message-moderate:1"]
-server_evidence = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs"]
+protocols = ["XEP-0191", "XEP-0377", "XEP-0425"]
+advertised_features = ["urn:xmpp:blocking", "urn:xmpp:reporting:1", "urn:xmpp:message-moderate:1"]
+server_evidence = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs", "crates/waddle-server/tests/xep0377_block_report_ws.rs"]
 topologies = { local = "experimental", federated = "unsupported" }
 [capability.protocol_evidence]
 XEP-0191 = ["crates/waddle-server/tests/xep0054_0049_0191_ws.rs"]
+XEP-0377 = ["crates/waddle-server/tests/xep0377_block_report_ws.rs", "crates/waddle-xmpp/tests/xep0377_spam_reporting.rs"]
 XEP-0425 = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs"]
 
 [[capability]]

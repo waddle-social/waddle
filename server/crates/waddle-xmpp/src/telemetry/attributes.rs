@@ -101,6 +101,7 @@ pub use authority::RestrictedStore;
 pub use authority::SmEnableOutcome;
 mod implementation;
 mod s2s;
+pub use implementation::AbuseReportReason;
 pub use implementation::AdminOp;
 pub use implementation::AuthErrorCode;
 pub use implementation::AuthStage;

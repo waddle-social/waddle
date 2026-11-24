@@ -1,150 +1,241 @@
-//! XEP-0377: Spam Reporting dedicated suite.
+//! XEP-0377 (Blocking Command Reports) dedicated suite.
 //!
-//! Round trips the `<report/>` payload, verifies namespace exactness
-//! against `urn:xmpp:reporting:1`, and exercises the XEP-0191 block
-//! item shape a client sends when blocking with a report attached.
+//! Covers `<report/>` parsing and building, its embedding in a XEP-0191
+//! `<block/>` request, and the operator-facing counter.
 
+use jid::Jid;
 use minidom::Element;
-use waddle_xmpp::xep::{
-    build_report_element, is_report_element, parse_report, Report, ReportReason, ReportRecord,
-    ReportStore, NS_REPORTING,
+use waddle_xmpp::telemetry::test_support;
+use waddle_xmpp::xep::xep0191::{
+    parse_blocking_request, BlockingBadRequest, BlockingError, BlockingRequest,
 };
+use waddle_xmpp::xep::{
+    build_report_element, is_report_element, parse_report, record_report, Report, ReportError,
+    ReportReason, NS_REPORTING,
+};
+use waddle_xmpp_core::xep0359::StanzaId;
+use xmpp_parsers::iq::Iq;
 
-fn reparse(elem: &Element) -> Element {
-    String::from(elem)
-        .parse::<Element>()
-        .expect("serialized report is well-formed XML")
+fn parse(xml: &str) -> Element {
+    xml.parse::<Element>().expect("well-formed test XML")
 }
 
-#[test]
-fn xep0377_namespace_is_exact() {
-    assert_eq!(NS_REPORTING, "urn:xmpp:reporting:1");
+fn jid(value: &str) -> Jid {
+    value.parse().expect("valid jid")
 }
 
-#[test]
-fn xep0377_spam_report_round_trips_through_wire_xml() {
-    let elem = reparse(&build_report_element(&Report::spam()));
-    assert!(is_report_element(&elem));
-    assert_eq!(elem.attr("reason"), Some("urn:xmpp:reporting:spam"));
-
-    let parsed = parse_report(&elem).expect("parses");
-    assert_eq!(parsed.reason, ReportReason::Spam);
-    assert!(parsed.text.is_none());
-}
-
-#[test]
-fn xep0377_abuse_report_with_text_round_trips() {
-    let report = Report::abuse().with_text("Sent me threatening messages");
-    let parsed = parse_report(&reparse(&build_report_element(&report))).expect("parses");
-    assert_eq!(parsed, report);
-}
-
-#[test]
-fn xep0377_report_text_child_is_in_reporting_namespace() {
-    let elem = build_report_element(&Report::spam().with_text("Never stops"));
-    let text = elem
-        .get_child("text", NS_REPORTING)
-        .expect("text child in urn:xmpp:reporting:1");
-    assert_eq!(text.text(), "Never stops");
-}
-
-#[test]
-fn xep0377_unknown_reason_is_rejected() {
-    assert_eq!(ReportReason::from_str_attr("phishing"), None);
-    // Bare tokens are not the registered URN values from XEP-0377 §3.
-    assert_eq!(ReportReason::from_str_attr("spam"), None);
-    assert_eq!(ReportReason::from_str_attr("abuse"), None);
-
-    let elem: Element = "<report xmlns='urn:xmpp:reporting:1' reason='phishing'/>"
-        .parse()
-        .expect("valid xml");
-    assert!(parse_report(&elem).is_none());
-}
-
-#[test]
-fn xep0377_report_without_reason_is_rejected() {
-    let elem: Element = "<report xmlns='urn:xmpp:reporting:1'/>"
-        .parse()
-        .expect("valid xml");
-    assert!(parse_report(&elem).is_none());
-}
-
-#[test]
-fn xep0377_report_in_wrong_namespace_is_not_detected() {
-    let elem: Element = "<report xmlns='urn:xmpp:reporting:0' reason='urn:xmpp:reporting:spam'/>"
-        .parse()
-        .expect("valid xml");
-    assert!(!is_report_element(&elem));
-    assert!(parse_report(&elem).is_none());
-}
-
-#[test]
-fn xep0377_report_extracts_from_blocking_item_shape() {
-    // XEP-0377 §3.2: the report rides inside a XEP-0191 block <item/>.
-    let block: Element = "<block xmlns='urn:xmpp:blocking'>\
-                          <item jid='spammer@badhost.example'>\
-                          <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'>\
-                          <text xmlns='urn:xmpp:reporting:1'>Never came trouble to my house like this.</text>\
-                          </report></item></block>"
-        .parse()
-        .expect("valid xml");
-
-    let item = block
-        .get_child("item", "urn:xmpp:blocking")
-        .expect("item child");
-    let report_elem = item
-        .children()
-        .find(|c| is_report_element(c))
-        .expect("report child");
-    let report = parse_report(report_elem).expect("parses");
-
-    assert_eq!(report.reason, ReportReason::Spam);
-    assert_eq!(
-        report.text.as_deref(),
-        Some("Never came trouble to my house like this.")
-    );
-    assert_eq!(item.attr("jid"), Some("spammer@badhost.example"));
-}
-
-#[test]
-fn xep0377_reason_wire_values_round_trip() {
-    for reason in [ReportReason::Spam, ReportReason::Abuse] {
-        assert_eq!(ReportReason::from_str_attr(reason.as_str()), Some(reason));
-        assert_eq!(reason.to_string(), reason.as_str());
+fn block_iq(item: &str) -> Iq {
+    Iq::Set {
+        from: None,
+        to: None,
+        id: "block1".to_owned(),
+        payload: parse(&format!("<block xmlns='urn:xmpp:blocking'>{item}</block>")),
     }
 }
 
 #[test]
-fn xep0377_report_store_tracks_per_jid_counts_and_reasons() {
-    let mut store = ReportStore::new();
-    store.file_report(
-        ReportRecord::new(
-            "alice@example.com",
-            "spammer@badhost.example",
-            Report::spam(),
-        )
-        .with_timestamp("2024-06-01T12:00:00Z"),
-    );
-    store.file_report(ReportRecord::new(
-        "bob@example.com",
-        "spammer@badhost.example",
-        Report::spam().with_text("ads"),
-    ));
-    store.file_report(ReportRecord::new(
-        "alice@example.com",
-        "troll@badhost.example",
-        Report::abuse(),
-    ));
+fn namespace_is_exact() {
+    assert_eq!(NS_REPORTING, "urn:xmpp:reporting:1");
+}
 
-    assert_eq!(store.total(), 3);
-    assert_eq!(store.report_count("spammer@badhost.example"), 2);
-    assert_eq!(store.reports_for("troll@badhost.example").len(), 1);
-    assert_eq!(store.spam_reports().len(), 2);
-    assert_eq!(store.report_count("innocent@example.com"), 0);
+#[test]
+fn defined_reasons_parse() {
+    let spam = parse("<report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'/>");
+    let abuse = parse("<report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:abuse'/>");
     assert_eq!(
-        store.reports_for("spammer@badhost.example")[0]
-            .timestamp
+        parse_report(&spam).expect("spam").reason,
+        ReportReason::Spam
+    );
+    assert_eq!(
+        parse_report(&abuse).expect("abuse").reason,
+        ReportReason::Abuse
+    );
+}
+
+#[test]
+fn reason_is_required_and_must_be_a_uri() {
+    let none = parse("<report xmlns='urn:xmpp:reporting:1'/>");
+    assert_eq!(parse_report(&none), Err(ReportError::MissingReason));
+    for bad in ["", "spam", "two words:x"] {
+        let elem = parse(&format!(
+            "<report xmlns='urn:xmpp:reporting:1' reason='{bad}'/>"
+        ));
+        assert_eq!(
+            parse_report(&elem),
+            Err(ReportError::MalformedReason),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn unregistered_reason_uri_is_preserved() {
+    let elem = parse("<report xmlns='urn:xmpp:reporting:1' reason='urn:example:phishing'/>");
+    let report = parse_report(&elem).expect("report");
+    assert_eq!(report.reason.as_str(), "urn:example:phishing");
+    assert!(matches!(report.reason, ReportReason::Other(_)));
+}
+
+#[test]
+fn wrong_namespace_or_name_is_not_a_report() {
+    let wrong_ns = parse("<report xmlns='jabber:client' reason='urn:xmpp:reporting:spam'/>");
+    assert!(!is_report_element(&wrong_ns));
+    assert_eq!(parse_report(&wrong_ns), Err(ReportError::NotReport));
+    let wrong_name = parse("<other xmlns='urn:xmpp:reporting:1'/>");
+    assert_eq!(parse_report(&wrong_name), Err(ReportError::NotReport));
+}
+
+#[test]
+fn full_example_from_the_spec_parses() {
+    let elem = parse(
+        "<report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'>\
+           <stanza-id xmlns='urn:xmpp:sid:0' by='romeo@example.net' id='28482-98726-73623'/>\
+           <stanza-id xmlns='urn:xmpp:sid:0' by='romeo@example.net' id='38383-38018-18385'/>\
+           <text xml:lang='en'>Never came trouble to my house like this.</text>\
+           <report-origin/><third-party/>\
+         </report>",
+    );
+    let report = parse_report(&elem).expect("report");
+    assert_eq!(report.texts.len(), 1);
+    assert_eq!(report.texts[0].lang.as_deref(), Some("en"));
+    assert_eq!(
+        report.first_text(),
+        Some("Never came trouble to my house like this.")
+    );
+    assert_eq!(
+        report.stanza_ids,
+        vec![
+            StanzaId::new("28482-98726-73623", jid("romeo@example.net")),
+            StanzaId::new("38383-38018-18385", jid("romeo@example.net")),
+        ]
+    );
+    assert!(report.report_origin && report.third_party);
+}
+
+#[test]
+fn malformed_stanza_ids_are_dropped_not_fatal() {
+    let elem = parse(
+        "<report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'>\
+           <stanza-id xmlns='urn:xmpp:sid:0' id='no-by'/>\
+           <stanza-id xmlns='urn:xmpp:sid:0' by='a@b'/>\
+         </report>",
+    );
+    assert!(parse_report(&elem).expect("report").stanza_ids.is_empty());
+}
+
+#[test]
+fn build_parse_round_trips_through_wire_xml() {
+    let mut report = Report::abuse()
+        .with_text_lang("en", "Threatening messages")
+        .with_text_lang("fr", "Messages menaçants")
+        .with_stanza_id(StanzaId::new("sid-1", jid("romeo@example.net")));
+    report.report_origin = true;
+    let wire = String::from(&build_report_element(&report));
+    let reparsed = parse_report(&parse(&wire)).expect("round trip");
+    assert_eq!(reparsed, report);
+}
+
+#[test]
+fn block_item_carries_the_report() {
+    let iq = block_iq(
+        "<item jid='romeo@example.net'>\
+           <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:abuse'/>\
+         </item>\
+         <item jid='plain@example.net'/>",
+    );
+    let BlockingRequest::Block(items) = parse_blocking_request(&iq).expect("block") else {
+        panic!("expected block request");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].jid, jid("romeo@example.net"));
+    assert_eq!(
+        items[0].report.as_ref().map(|r| r.reason.clone()),
+        Some(ReportReason::Abuse)
+    );
+    assert_eq!(items[1].report, None);
+}
+
+#[test]
+fn block_with_malformed_report_is_bad_request() {
+    let iq = block_iq("<item jid='a@b'><report xmlns='urn:xmpp:reporting:1'/></item>");
+    assert_eq!(
+        parse_blocking_request(&iq),
+        Err(BlockingError::BadRequest(
+            BlockingBadRequest::MalformedReport
+        ))
+    );
+}
+
+#[test]
+fn block_item_with_two_reports_is_bad_request() {
+    let iq = block_iq(
+        "<item jid='a@b'>\
+           <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'/>\
+           <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:abuse'/>\
+         </item>",
+    );
+    assert_eq!(
+        parse_blocking_request(&iq),
+        Err(BlockingError::BadRequest(
+            BlockingBadRequest::MultipleReports
+        ))
+    );
+}
+
+#[test]
+fn report_outside_block_item_is_rejected() {
+    let unblock = Iq::Set {
+        from: None,
+        to: None,
+        id: "u1".to_owned(),
+        payload: parse(
+            "<unblock xmlns='urn:xmpp:blocking'><item jid='a@b'>\
+               <report xmlns='urn:xmpp:reporting:1' reason='urn:xmpp:reporting:spam'/>\
+             </item></unblock>",
+        ),
+    };
+    assert_eq!(
+        parse_blocking_request(&unblock),
+        Err(BlockingError::BadRequest(
+            BlockingBadRequest::UnexpectedChild
+        ))
+    );
+    let unknown_child = block_iq("<item jid='a@b'><junk xmlns='urn:x'/></item>");
+    assert_eq!(
+        parse_blocking_request(&unknown_child),
+        Err(BlockingError::BadRequest(
+            BlockingBadRequest::UnexpectedChild
+        ))
+    );
+}
+
+#[tokio::test]
+async fn recording_a_report_counts_it_by_reason() {
+    let metrics = test_support::acquire().await;
+    let reporter = "juliet@example.com".parse().expect("bare jid");
+    let reported = jid("romeo@example.net");
+    record_report(&reporter, &reported, &Report::spam());
+    record_report(&reporter, &reported, &Report::spam().with_text("ads"));
+    record_report(&reporter, &reported, &Report::abuse());
+    let other = parse_report(&parse(
+        "<report xmlns='urn:xmpp:reporting:1' reason='urn:example:x'/>",
+    ))
+    .expect("report");
+    record_report(&reporter, &reported, &other);
+
+    let count = |reason: &str| {
+        metrics.counter_sum(
+            "waddle.abuse_reports.received",
+            &[("report_reason", reason)],
+        )
+    };
+    assert_eq!(count("spam"), Some(2));
+    assert_eq!(count("abuse"), Some(1));
+    assert_eq!(count("other"), Some(1));
+    assert_eq!(
+        metrics
+            .metric_unit("waddle.abuse_reports.received")
             .as_deref(),
-        Some("2024-06-01T12:00:00Z")
+        Some("{report}")
     );
 }

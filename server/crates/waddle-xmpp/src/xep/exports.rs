@@ -52,7 +52,8 @@ pub use super::xep0363::{
 pub use super::xep0191::{
     build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
     build_unblock_push, is_block_set, is_blocking_query, is_blocklist_get, is_unblock_set,
-    parse_blocking_request, BlockingBadRequest, BlockingError, BlockingRequest, NS_BLOCKING,
+    parse_blocking_request, BlockItem, BlockingBadRequest, BlockingError, BlockingRequest,
+    NS_BLOCKING,
 };
 
 pub use super::xep0085::{
@@ -154,8 +155,8 @@ pub use super::xep0372::{
 };
 
 pub use super::xep0377::{
-    build_report_element, is_report_element, parse_report, Report, ReportReason, ReportRecord,
-    ReportStore, NS_REPORTING,
+    build_report_element, is_report_element, parse_report, record_report, ReasonUri, Report,
+    ReportError, ReportReason, ReportText, NS_REPORTING,
 };
 
 pub use waddle_xmpp_core::xep0392::{

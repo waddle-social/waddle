@@ -2085,6 +2085,33 @@ impl MetricAttribute for MucJoinDenyReason {
     }
 }
 
+/// `report_reason` — the XEP-0377 reason of a report attached to a block.
+/// Reasons registered elsewhere collapse into `Other` so the value space
+/// stays closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbuseReportReason {
+    /// `urn:xmpp:reporting:spam`.
+    Spam,
+    /// `urn:xmpp:reporting:abuse`.
+    Abuse,
+    /// Any other well-formed reason URI.
+    Other,
+}
+
+impl sealed::Sealed for AbuseReportReason {}
+impl MetricAttribute for AbuseReportReason {
+    fn key(&self) -> &'static str {
+        "report_reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Spam => "spam",
+            Self::Abuse => "abuse",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// `reason` — why a relayed ingress append obligation was not used as a
 /// deduplication key (#1778). `Unauthorized` means the peer's identity was
 /// provably not usable; `Indeterminate` means the receiver could not decide,

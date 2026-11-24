@@ -207,6 +207,13 @@ impl Feature {
         Self::new("urn:xmpp:blocking")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:reporting:1`
+    /// (XEP-0377 reports attached to a blocking command).
+    #[must_use]
+    pub fn reporting() -> Self {
+        Self::new("urn:xmpp:reporting:1")
+    }
+
     /// Create a discovery feature advertisement for `urn:xmpp:ping`.
     #[must_use]
     pub fn ping() -> Self {

@@ -1,8 +1,12 @@
-//! XEP-0377: Spam Reporting
+//! XEP-0377: Blocking Command Reports
 //!
-//! Extends XEP-0191 (Blocking Command) with abuse/spam reporting.
-//! When blocking a user, the client can include a reason why, enabling
-//! the server to take action on reported accounts.
+//! Extends XEP-0191 (Blocking Command) with an optional `<report/>` inside a
+//! blocking `<item/>`. The server blocks the JID exactly as it would without the
+//! report (§5) and may then act on the report. Waddle records each report for
+//! its operators through a structured log line and a counter; it does not
+//! forward reports to other domains or third parties, so the `<report-origin/>`
+//! and `<third-party/>` opt-ins are parsed but never acted on (§4: servers MAY
+//! ignore processing options).
 //!
 //! ## XML Format
 //!
@@ -19,46 +23,86 @@
 //!
 //! ## Report Reasons
 //!
-//! - **spam**: Unsolicited commercial messages
-//! - **abuse**: Harassment, threats, hate speech
+//! - `urn:xmpp:reporting:spam`: a JID sending unwanted messages
+//! - `urn:xmpp:reporting:abuse`: general abuse
 //!
-//! ## Use Cases
-//!
-//! - Report + block spammers in one action
-//! - Server-side abuse tracking and automated action
-//! - Community moderation analytics
+//! Other reason URIs may be registered by other specifications. A report
+//! with an unregistered reason is still recorded and the JID is still blocked.
 
+use jid::{BareJid, Jid};
 use minidom::Element;
+use waddle_xmpp_core::xep0359::{is_stanza_id_element, StanzaId};
 
-/// Namespace for XEP-0377 Spam Reporting.
+/// Namespace for XEP-0377 Blocking Command Reports.
 pub const NS_REPORTING: &str = "urn:xmpp:reporting:1";
 
-/// Report reason categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReportReason {
-    /// Unsolicited commercial messages.
-    Spam,
-    /// Harassment, threats, or hate speech.
-    Abuse,
-}
+const REASON_SPAM: &str = "urn:xmpp:reporting:spam";
+const REASON_ABUSE: &str = "urn:xmpp:reporting:abuse";
+const MAX_REASON_LEN: usize = 512;
+/// Report text longer than this many characters is truncated in the
+/// operator log; the full text stays in the parsed [`Report`].
+const LOG_TEXT_LIMIT: usize = 1024;
+/// At most this many reported stanza-ids are listed in the operator log.
+const LOG_STANZA_ID_LIMIT: usize = 16;
 
-impl ReportReason {
-    /// Parse from attribute string.
-    ///
-    /// Reasons are the registered URNs from XEP-0377 §3.
-    pub fn from_str_attr(s: &str) -> Option<Self> {
-        match s {
-            "urn:xmpp:reporting:spam" => Some(Self::Spam),
-            "urn:xmpp:reporting:abuse" => Some(Self::Abuse),
-            _ => None,
+/// A reason URI that is not one of the reasons defined by XEP-0377.
+///
+/// Reasons are registered by separate specifications (§ Abuse Reporting
+/// Registry), so a server can legitimately receive one it does not know.
+/// The value is a validated absolute URI: non-empty, bounded, no whitespace
+/// or control characters, and a scheme separator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReasonUri(String);
+
+impl ReasonUri {
+    /// Validate `value` as a reason URI.
+    pub fn parse(value: &str) -> Result<Self, ReportError> {
+        let valid = !value.is_empty()
+            && value.len() <= MAX_REASON_LEN
+            && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+            && value
+                .split_once(':')
+                .is_some_and(|(scheme, rest)| !scheme.is_empty() && !rest.is_empty());
+        if valid {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(ReportError::MalformedReason)
         }
     }
 
-    /// Convert to attribute string.
-    pub fn as_str(self) -> &'static str {
+    /// The URI as written on the wire.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The reason for a report (`reason` attribute of `<report/>`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReportReason {
+    /// `urn:xmpp:reporting:spam`: a JID that is sending unwanted messages.
+    Spam,
+    /// `urn:xmpp:reporting:abuse`: general abuse.
+    Abuse,
+    /// A well-formed reason URI registered elsewhere.
+    Other(ReasonUri),
+}
+
+impl ReportReason {
+    /// Parse the `reason` attribute value.
+    pub fn parse(value: &str) -> Result<Self, ReportError> {
+        match value {
+            REASON_SPAM => Ok(Self::Spam),
+            REASON_ABUSE => Ok(Self::Abuse),
+            other => ReasonUri::parse(other).map(Self::Other),
+        }
+    }
+
+    /// The reason URI as written on the wire.
+    pub fn as_str(&self) -> &str {
         match self {
-            Self::Spam => "urn:xmpp:reporting:spam",
-            Self::Abuse => "urn:xmpp:reporting:abuse",
+            Self::Spam => REASON_SPAM,
+            Self::Abuse => REASON_ABUSE,
+            Self::Other(uri) => uri.as_str(),
         }
     }
 }
@@ -69,118 +113,93 @@ impl std::fmt::Display for ReportReason {
     }
 }
 
-/// A user report attached to a blocking action.
+/// A user-provided `<text/>` child, with its optional `xml:lang`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportText {
+    /// Natural language of the text (`xml:lang`), when given.
+    pub lang: Option<String>,
+    /// The text.
+    pub text: String,
+}
+
+/// Why a `<report/>` element was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReportError {
+    /// The element is not `<report xmlns='urn:xmpp:reporting:1'/>`.
+    #[error("not a urn:xmpp:reporting:1 report element")]
+    NotReport,
+    /// §3: "Abuse reports MUST include a reason for the report".
+    #[error("report has no reason attribute")]
+    MissingReason,
+    /// The `reason` attribute is not a well-formed URI.
+    #[error("report reason is not a well-formed URI")]
+    MalformedReason,
+}
+
+/// A report attached to one blocked JID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     /// The reason for the report.
     pub reason: ReportReason,
-    /// Optional free-text explanation.
-    pub text: Option<String>,
+    /// User-provided explanations (§3), one per language.
+    pub texts: Vec<ReportText>,
+    /// XEP-0359 stanza-ids of the reported messages (§5). Entries without a
+    /// valid `by` JID and `id` are dropped.
+    pub stanza_ids: Vec<StanzaId>,
+    /// §4: the user approved forwarding to the originating domain.
+    pub report_origin: bool,
+    /// §4: the user approved forwarding to third-party processors.
+    pub third_party: bool,
 }
 
 impl Report {
+    fn with_reason(reason: ReportReason) -> Self {
+        Self {
+            reason,
+            texts: Vec::new(),
+            stanza_ids: Vec::new(),
+            report_origin: false,
+            third_party: false,
+        }
+    }
+
     /// Create a spam report.
     pub fn spam() -> Self {
-        Self {
-            reason: ReportReason::Spam,
-            text: None,
-        }
+        Self::with_reason(ReportReason::Spam)
     }
 
     /// Create an abuse report.
     pub fn abuse() -> Self {
-        Self {
-            reason: ReportReason::Abuse,
-            text: None,
-        }
+        Self::with_reason(ReportReason::Abuse)
     }
 
-    /// Add explanatory text.
+    /// Add explanatory text without a language tag.
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
-        self.text = Some(text.into());
+        self.texts.push(ReportText {
+            lang: None,
+            text: text.into(),
+        });
         self
     }
-}
 
-/// A complete report record (for server-side storage).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReportRecord {
-    /// Who filed the report.
-    pub reporter_jid: String,
-    /// Who was reported.
-    pub reported_jid: String,
-    /// The report details.
-    pub report: Report,
-    /// Timestamp when filed.
-    pub timestamp: Option<String>,
-}
-
-impl ReportRecord {
-    /// Create a new report record.
-    pub fn new(
-        reporter_jid: impl Into<String>,
-        reported_jid: impl Into<String>,
-        report: Report,
-    ) -> Self {
-        Self {
-            reporter_jid: reporter_jid.into(),
-            reported_jid: reported_jid.into(),
-            report,
-            timestamp: None,
-        }
-    }
-
-    /// Set the timestamp.
-    pub fn with_timestamp(mut self, ts: impl Into<String>) -> Self {
-        self.timestamp = Some(ts.into());
+    /// Add explanatory text in `lang`.
+    pub fn with_text_lang(mut self, lang: impl Into<String>, text: impl Into<String>) -> Self {
+        self.texts.push(ReportText {
+            lang: Some(lang.into()),
+            text: text.into(),
+        });
         self
     }
-}
 
-/// Report storage for server-side tracking.
-#[derive(Debug, Default)]
-pub struct ReportStore {
-    reports: Vec<ReportRecord>,
-}
-
-impl ReportStore {
-    /// Create an empty store.
-    pub fn new() -> Self {
-        Self::default()
+    /// Reference a reported message by stanza-id.
+    pub fn with_stanza_id(mut self, stanza_id: StanzaId) -> Self {
+        self.stanza_ids.push(stanza_id);
+        self
     }
 
-    /// File a report.
-    pub fn file_report(&mut self, record: ReportRecord) {
-        self.reports.push(record);
-    }
-
-    /// Get all reports for a specific JID.
-    pub fn reports_for(&self, reported_jid: &str) -> Vec<&ReportRecord> {
-        self.reports
-            .iter()
-            .filter(|r| r.reported_jid == reported_jid)
-            .collect()
-    }
-
-    /// Count reports for a JID.
-    pub fn report_count(&self, reported_jid: &str) -> usize {
-        self.reports
-            .iter()
-            .filter(|r| r.reported_jid == reported_jid)
-            .count()
-    }
-
-    /// Get all spam reports.
-    pub fn spam_reports(&self) -> Vec<&ReportRecord> {
-        self.reports
-            .iter()
-            .filter(|r| r.report.reason == ReportReason::Spam)
-            .collect()
-    }
-
-    /// Total reports.
-    pub fn total(&self) -> usize {
-        self.reports.len()
+    /// The first user-provided text, if any.
+    pub fn first_text(&self) -> Option<&str> {
+        self.texts.first().map(|t| t.text.as_str())
     }
 }
 
@@ -194,20 +213,44 @@ pub fn is_report_element(elem: &Element) -> bool {
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Parse a report from a `<report/>` element.
-pub fn parse_report(elem: &Element) -> Option<Report> {
+///
+/// A missing `reason` is an error (§3 MUST). Unknown children are ignored so
+/// future extensions do not break blocking.
+pub fn parse_report(elem: &Element) -> Result<Report, ReportError> {
     if !is_report_element(elem) {
-        return None;
+        return Err(ReportError::NotReport);
+    }
+    let reason = ReportReason::parse(elem.attr("reason").ok_or(ReportError::MissingReason)?)?;
+    let mut report = Report::with_reason(reason);
+
+    for child in elem.children() {
+        if child.ns() == NS_REPORTING {
+            match child.name() {
+                "text" => {
+                    let text = child.text();
+                    if !text.is_empty() {
+                        report.texts.push(ReportText {
+                            lang: child
+                                .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                                .map(str::to_owned),
+                            text,
+                        });
+                    }
+                }
+                "report-origin" => report.report_origin = true,
+                "third-party" => report.third_party = true,
+                _ => {}
+            }
+        } else if is_stanza_id_element(child) {
+            let id = child.attr("id").filter(|s| !s.is_empty());
+            let by = child.attr("by").and_then(|by| by.parse::<Jid>().ok());
+            if let (Some(id), Some(by)) = (id, by) {
+                report.stanza_ids.push(StanzaId::new(id, by));
+            }
+        }
     }
 
-    let reason = elem.attr("reason").and_then(ReportReason::from_str_attr)?;
-
-    let text = elem
-        .children()
-        .find(|c| c.name() == "text")
-        .map(|c| c.text())
-        .filter(|t| !t.is_empty());
-
-    Some(Report { reason, text })
+    Ok(report)
 }
 
 // ── Building ─────────────────────────────────────────────────────────
@@ -221,135 +264,82 @@ pub fn build_report_element(report: &Report) -> Element {
         )
         .build();
 
-    if let Some(ref text) = report.text {
-        let mut text_elem = Element::builder("text", NS_REPORTING).build();
-        text_elem.append_text_node(text);
+    for stanza_id in &report.stanza_ids {
+        elem.append_child(waddle_xmpp_core::xep0359::build_stanza_id_element(
+            &stanza_id.id,
+            &stanza_id.by,
+        ));
+    }
+    for text in &report.texts {
+        let mut text_elem = Element::builder("text", NS_REPORTING);
+        if let Some(lang) = &text.lang {
+            text_elem = text_elem.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang.as_str(),
+            );
+        }
+        let mut text_elem = text_elem.build();
+        text_elem.append_text_node(text.text.as_str());
         elem.append_child(text_elem);
+    }
+    if report.report_origin {
+        elem.append_child(Element::builder("report-origin", NS_REPORTING).build());
+    }
+    if report.third_party {
+        elem.append_child(Element::builder("third-party", NS_REPORTING).build());
     }
 
     elem
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ── Recording ────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_report_reason_roundtrip() {
-        for reason in [ReportReason::Spam, ReportReason::Abuse] {
-            let s = reason.as_str();
-            assert_eq!(ReportReason::from_str_attr(s), Some(reason));
+impl From<&ReportReason> for crate::telemetry::attributes::AbuseReportReason {
+    fn from(reason: &ReportReason) -> Self {
+        match reason {
+            ReportReason::Spam => Self::Spam,
+            ReportReason::Abuse => Self::Abuse,
+            ReportReason::Other(_) => Self::Other,
         }
-        assert_eq!(ReportReason::from_str_attr("unknown"), None);
     }
+}
 
-    #[test]
-    fn test_report_reason_display() {
-        assert_eq!(ReportReason::Spam.to_string(), "urn:xmpp:reporting:spam");
-        assert_eq!(ReportReason::Abuse.to_string(), "urn:xmpp:reporting:abuse");
-    }
+/// Record an accepted report for the operator: one structured
+/// `info` event on target `waddle::abuse_report` and one
+/// `waddle.abuse_reports.received` increment.
+///
+/// Call only after the block itself succeeded. Nothing is forwarded: the
+/// §4 processing opt-ins are logged as given but not acted on.
+pub fn record_report(reporter: &BareJid, reported: &Jid, report: &Report) {
+    use crate::telemetry::attributes::AbuseReportReason;
 
-    #[test]
-    fn test_is_report_element() {
-        let elem = Element::builder("report", NS_REPORTING)
-            .attr(
-                minidom::rxml::xml_ncname!("reason").to_owned(),
-                "urn:xmpp:reporting:spam",
-            )
-            .build();
-        assert!(is_report_element(&elem));
-
-        let wrong = Element::builder("report", "jabber:client").build();
-        assert!(!is_report_element(&wrong));
-    }
-
-    #[test]
-    fn test_build_and_parse_spam() {
-        let report = Report::spam();
-        let elem = build_report_element(&report);
-
-        assert_eq!(elem.attr("reason"), Some("urn:xmpp:reporting:spam"));
-        let parsed = parse_report(&elem).expect("parseable");
-        assert_eq!(parsed.reason, ReportReason::Spam);
-        assert_eq!(parsed.text, None);
-    }
-
-    #[test]
-    fn test_build_and_parse_abuse_with_text() {
-        let report = Report::abuse().with_text("Threatening messages");
-        let elem = build_report_element(&report);
-
-        let parsed = parse_report(&elem).expect("parseable");
-        assert_eq!(parsed.reason, ReportReason::Abuse);
-        assert_eq!(parsed.text.as_deref(), Some("Threatening messages"));
-    }
-
-    #[test]
-    fn test_parse_wrong_element() {
-        let elem = Element::builder("other", NS_REPORTING).build();
-        assert!(parse_report(&elem).is_none());
-    }
-
-    #[test]
-    fn test_parse_missing_reason() {
-        let elem = Element::builder("report", NS_REPORTING).build();
-        assert!(parse_report(&elem).is_none());
-    }
-
-    #[test]
-    fn test_report_store() {
-        let mut store = ReportStore::new();
-        assert_eq!(store.total(), 0);
-
-        store.file_report(ReportRecord::new(
-            "alice@example.com",
-            "spammer@example.com",
-            Report::spam(),
-        ));
-        store.file_report(ReportRecord::new(
-            "bob@example.com",
-            "spammer@example.com",
-            Report::spam().with_text("Sending ads"),
-        ));
-        store.file_report(ReportRecord::new(
-            "alice@example.com",
-            "troll@example.com",
-            Report::abuse(),
-        ));
-
-        assert_eq!(store.total(), 3);
-        assert_eq!(store.report_count("spammer@example.com"), 2);
-        assert_eq!(store.report_count("troll@example.com"), 1);
-        assert_eq!(store.report_count("innocent@example.com"), 0);
-        assert_eq!(store.spam_reports().len(), 2);
-        assert_eq!(store.reports_for("troll@example.com").len(), 1);
-    }
-
-    #[test]
-    fn test_report_record_builder() {
-        let record =
-            ReportRecord::new("a@b", "c@d", Report::spam()).with_timestamp("2024-06-01T12:00:00Z");
-        assert_eq!(record.reporter_jid, "a@b");
-        assert_eq!(record.reported_jid, "c@d");
-        assert_eq!(record.timestamp.as_deref(), Some("2024-06-01T12:00:00Z"));
-    }
-
-    #[test]
-    fn test_namespace_constant() {
-        assert_eq!(NS_REPORTING, "urn:xmpp:reporting:1");
-    }
-
-    #[test]
-    fn test_report_store_empty() {
-        let store = ReportStore::new();
-        assert_eq!(store.total(), 0);
-        assert!(store.spam_reports().is_empty());
-        assert!(store.reports_for("anyone").is_empty());
-    }
-
-    #[test]
-    fn test_report_constructors() {
-        assert_eq!(Report::spam().reason, ReportReason::Spam);
-        assert_eq!(Report::abuse().reason, ReportReason::Abuse);
-    }
+    let log_text = report
+        .first_text()
+        .map(|text| text.chars().take(LOG_TEXT_LIMIT).collect::<String>());
+    let stanza_ids: Vec<String> = report
+        .stanza_ids
+        .iter()
+        .take(LOG_STANZA_ID_LIMIT)
+        .map(|sid| format!("{}@{}", sid.id, sid.by))
+        .collect();
+    tracing::info!(
+        target: "waddle::abuse_report",
+        reporter = %reporter,
+        reported = %reported,
+        reason = %report.reason,
+        text = log_text.as_deref(),
+        stanza_id_count = report.stanza_ids.len(),
+        stanza_ids = ?stanza_ids,
+        report_origin_opt_in = report.report_origin,
+        third_party_opt_in = report.third_party,
+        "abuse report received with block"
+    );
+    crate::counter_add!(
+        "waddle.abuse_reports.received",
+        "{report}",
+        "XEP-0377 reports received attached to a block, by reason",
+        1,
+        AbuseReportReason::from(&report.reason),
+    );
 }

@@ -52,6 +52,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:http:upload:0", "XEP-0363"),
     ("jabber:iq:last", "XEP-0012"),
     ("urn:xmpp:blocking", "XEP-0191"),
+    ("urn:xmpp:reporting:1", "XEP-0377"),
     ("urn:xmpp:ping", "XEP-0199"),
     ("urn:xmpp:time", "XEP-0202"),
     ("jabber:iq:version", "XEP-0092"),
@@ -308,10 +309,6 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
     XepCoverageExemption {
         xep: "XEP-0319",
         reason: "Library-only idle-presence element helper is not advertised or synthesized by the server.",
-    },
-    XepCoverageExemption {
-        xep: "XEP-0377",
-        reason: "Spam-reporting payload helper is not wired into server blocking behavior yet.",
     },
     XepCoverageExemption {
         xep: "XEP-0392",
