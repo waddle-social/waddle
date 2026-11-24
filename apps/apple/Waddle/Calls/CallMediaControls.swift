@@ -64,8 +64,9 @@ protocol CallMediaControls: AnyObject, Observable {
     var connectionQuality: CallConnectionQuality { get }
     /// Has the media engine measure the call's video streams, or stop; measuring costs a little, so it runs only while someone looks.
     func setMeasuresVideo(_ on: Bool) async
-    /// The latest reading of each video stream we send or receive; empty until measured.
-    func videoSamples() -> [CallVideoSample]
+    /// The latest reading of each video stream we send or receive; empty unless measuring.
+    /// A stream that appeared since the last reading is measured from this one on.
+    func videoSamples() async -> [CallVideoSample]
     /// What is done to the microphone's sound before it is sent.
     var audioProcessing: CallAudioProcessing { get }
     /// Uses `processing` for calls from now on, this one included.

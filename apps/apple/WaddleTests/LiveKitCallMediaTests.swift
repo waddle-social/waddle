@@ -291,19 +291,30 @@ final class LiveKitCallMediaTests: XCTestCase {
         defer { frames.cancel() }
         _ = try await bob.localParticipant.publish(videoTrack: screen)
         try await until { alice.participants.last?.screenPublicationID != nil }
-        XCTAssertTrue(alice.videoSamples().isEmpty, "nothing is measured until someone looks")
+        let unmeasured = await alice.videoSamples()
+        XCTAssertTrue(unmeasured.isEmpty, "nothing is measured until someone looks")
 
         await alice.setMeasuresVideo(true)
-        try await until(timeout: .seconds(15)) { alice.videoSamples().first?.bytes != nil }
-        let sample = try XCTUnwrap(alice.videoSamples().first)
-        XCTAssertEqual(sample.key, "\(bobJoin.identity):screen:received")
-        XCTAssertEqual(sample.label, "bob")
-        XCTAssertEqual(sample.direction, .received)
-        let taken = CallVideoStatsTracker.seconds(sample.timestamp)
+        var sample: CallVideoSample?
+        let deadline = ContinuousClock.now + .seconds(15)
+        while sample?.bytes == nil, ContinuousClock.now < deadline {
+            sample = await alice.videoSamples().first
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let reading = try XCTUnwrap(sample)
+        XCTAssertNotNil(reading.bytes)
+        XCTAssertEqual(reading.key, "\(bobJoin.identity):screen:received")
+        XCTAssertEqual(reading.label, "bob")
+        XCTAssertEqual(reading.direction, .received)
+        let taken = CallVideoStatsTracker.seconds(reading.timestamp)
         XCTAssertEqual(taken, Date().timeIntervalSince1970, accuracy: 3600, "the engine's timestamp is read in the right unit")
+        // A per-track report carries the path the media takes, not only the stream's own counters.
+        XCTAssertNotNil(reading.candidateType, "the network path is part of a track's report")
+        XCTAssertNotNil(reading.transport)
 
         await alice.setMeasuresVideo(false)
-        XCTAssertTrue(alice.videoSamples().isEmpty)
+        let after = await alice.videoSamples()
+        XCTAssertTrue(after.isEmpty)
         await alice.disconnect()
         await bob.disconnect()
     }

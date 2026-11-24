@@ -32,7 +32,7 @@ import Testing
         reading.transport = "tcp"
         let row = tracker.update(with: [reading])[0]
         #expect(row.title == "linus · Screen")
-        #expect(row.resolution == "2560 × 1440")
+        #expect(row.resolution == "2560×1440")
         #expect(row.framesPerSecond == "30 fps")
         #expect(row.loss == "1.2%")
         #expect(row.roundTrip == "42 ms")

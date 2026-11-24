@@ -214,26 +214,41 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     private func measureNewVideoTracks() async {
+        let measuring = room
         for stream in videoStreams where measuredTracks[ObjectIdentifier(stream.track)] == nil {
             measuredTracks[ObjectIdentifier(stream.track)] = stream.track
             await stream.track.set(reportStatistics: true)
+            // The settings closed, or the call ended, while that one was being
+            // switched on: it goes off again and nothing more is switched on.
+            guard measuresVideo, room === measuring else {
+                measuredTracks[ObjectIdentifier(stream.track)] = nil
+                await stream.track.set(reportStatistics: false)
+                return
+            }
         }
+        // A track that is gone is no longer held.
+        let live = Set(videoStreams.map { ObjectIdentifier($0.track) })
+        measuredTracks = measuredTracks.filter { live.contains($0.key) }
     }
 
-    func videoSamples() -> [CallVideoSample] {
+    func videoSamples() async -> [CallVideoSample] {
         guard measuresVideo else { return [] }
         // A camera turned on while someone is looking is measured from then on.
-        if videoStreams.contains(where: { measuredTracks[ObjectIdentifier($0.track)] == nil }) {
-            Task { await measureNewVideoTracks() }
-        }
+        await measureNewVideoTracks()
+        guard measuresVideo else { return [] }
         return videoStreams.map { stream in
             var sample = CallVideoSample(
                 key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
             )
             guard let statistics = stream.track.statistics else { return sample }
             sample.codec = statistics.codec.first { $0.mimeType?.hasPrefix("video/") == true }?.mimeType
-            sample.candidateType = statistics.localIceCandidate?.candidateType?.rawValue
-            sample.transport = statistics.localIceCandidate?.protocol
+            let candidate = statistics.localIceCandidate
+            sample.candidateType = candidate?.candidateType?.rawValue
+            // A relay's own protocol is its leg to the peer, nearly always
+            // UDP; what tells a TCP fallback is how we reach the relay (as web `iceCandidatePath`).
+            sample.transport = candidate?.candidateType == .relay
+                ? candidate?.relayProtocol.map { $0 == .udp ? "udp" : "tcp" }
+                : candidate?.protocol
             switch stream.direction {
             case .sent:
                 // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
@@ -243,11 +258,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 sample.height = top?.frameHeight.map { Int($0) }
                 sample.framesPerSecond = top?.framesPerSecond
                 sample.timestamp = top?.timestamp ?? 0
-                let sent = layers.compactMap(\.bytesSent)
+                // A backup codec for those who cannot decode the first has a sender of its own.
+                let backups = stream.track.simulcastStatistics.values.flatMap(\.outboundRtpStream)
+                let sent = (layers + backups).compactMap(\.bytesSent)
                 sample.bytes = sent.isEmpty ? nil : sent.reduce(0, +)
-                // The far end's word on what arrived.
-                sample.lossFraction = statistics.remoteInboundRtpStream.first?.fractionLost
-                sample.roundTrip = statistics.remoteInboundRtpStream.first?.roundTripTime
+                // The far end's word on what arrived, over every layer as the
+                // web counts it: one layer's report alone jumps about.
+                let reports = statistics.remoteInboundRtpStream
+                let lost = reports.compactMap(\.packetsLost).reduce(0, +)
+                let packets = layers.compactMap(\.packetsSent).reduce(0, +)
+                if !reports.isEmpty, packets > 0 { sample.lossFraction = Double(max(lost, 0)) / Double(packets) }
+                sample.roundTrip = reports.compactMap(\.roundTripTime).max()
             case .received:
                 let stream = statistics.inboundRtpStream.first
                 sample.width = stream?.frameWidth.map { Int($0) }

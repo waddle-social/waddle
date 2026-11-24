@@ -123,7 +123,7 @@ public struct CallVideoStatsTracker: Equatable, Sendable {
         return CallVideoStat(
             id: sample.key,
             title: "\(sample.label) · \(sample.source == .camera ? "Camera" : "Screen")",
-            resolution: sample.width.flatMap { width in sample.height.map { "\(width) × \($0)" } } ?? unknown,
+            resolution: sample.width.flatMap { width in sample.height.map { "\(width)×\($0)" } } ?? unknown,
             framesPerSecond: sample.framesPerSecond.map { "\(Int($0.rounded())) fps" } ?? unknown,
             bitrate: kilobitsPerSecond.map(Self.bitrate) ?? unknown,
             loss: sample.lossFraction.map { "\(Self.oneDecimal(min(max($0, 0), 1) * 100))%" } ?? unknown,

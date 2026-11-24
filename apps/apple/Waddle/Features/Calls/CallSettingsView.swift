@@ -96,6 +96,20 @@ struct CallSettingsView: View {
                     .foregroundStyle(Theme.Colors.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // A big room has many cameras: the list scrolls, and the sheet keeps its height and its Done.
+            if stats.count > Self.videoRowsShown {
+                ScrollView { videoRows(stats) }.frame(height: Self.videoRowsHeight)
+            } else {
+                videoRows(stats)
+            }
+        }
+    }
+
+    private static let videoRowsShown = 4
+    private static let videoRowsHeight: CGFloat = 176
+
+    private func videoRows(_ stats: [CallVideoStat]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
             ForEach(stats) { stat in
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                     HStack {
@@ -185,34 +199,42 @@ extension CallMediaControls {
 struct CallSettingsSheet: ViewModifier {
     @Binding var isPresented: Bool
     @Environment(\.callMediaControls) private var media
-    @State private var tracker = CallVideoStatsTracker()
-    @State private var videoStats: [CallVideoStat] = []
 
     func body(content: Content) -> some View {
         content.sheet(isPresented: $isPresented) {
-            if let media {
-                CallSettingsView(
-                    devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
-                    setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
-                    videoStats: videoStats
-                ) { kind, id in
-                    Task { await media.chooseDevice(kind, id: id) }
-                } done: {
-                    isPresented = false
-                }
-                // What is plugged in may have changed since the call began.
-                .task { await media.refreshDevices() }
-                // Measured only while someone is looking, once a second as the web does.
-                .task {
-                    tracker = CallVideoStatsTracker()
-                    await media.setMeasuresVideo(true)
-                    while !Task.isCancelled {
-                        videoStats = tracker.update(with: media.videoSamples())
-                        try? await Task.sleep(for: .seconds(1))
-                    }
-                    await media.setMeasuresVideo(false)
-                }
+            if let media { CallSettingsContent(media: media) { isPresented = false } }
+        }
+    }
+}
+
+/// The settings of the session's call. The figures renewed every second
+/// are this view's own state, so a tick redraws the sheet and never the
+/// stage or the sidebar that presented it.
+private struct CallSettingsContent: View {
+    let media: any CallMediaControls
+    let done: @MainActor () -> Void
+    @State private var tracker = CallVideoStatsTracker()
+    @State private var videoStats: [CallVideoStat] = []
+
+    var body: some View {
+        CallSettingsView(
+            devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
+            setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
+            videoStats: videoStats,
+            choose: { kind, id in Task { await media.chooseDevice(kind, id: id) } },
+            done: done
+        )
+        // What is plugged in may have changed since the call began.
+        .task { await media.refreshDevices() }
+        // Measured only while someone is looking, once a second as the web does.
+        .task {
+            tracker = CallVideoStatsTracker()
+            await media.setMeasuresVideo(true)
+            while !Task.isCancelled {
+                videoStats = tracker.update(with: await media.videoSamples())
+                try? await Task.sleep(for: .seconds(1))
             }
+            await media.setMeasuresVideo(false)
         }
     }
 }
