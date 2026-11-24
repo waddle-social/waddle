@@ -2356,11 +2356,14 @@ async fn test_inmemory_rsm_index_pages_from_position_and_reports_first_index() {
 async fn assert_rsm_index_pages_from_position_and_reports_first_index(storage: &dyn MamStorage) {
     let archive = bare("room@conference.example.com");
     store_nonlexical_archive_order_messages(storage, &archive, Utc::now()).await;
-    let page = |query: MamQuery| async {
-        storage
-            .query_messages(&archive, MamArchiveKind::Room, &query)
-            .await
-            .unwrap()
+    let page = |query: MamQuery| {
+        let archive = &archive;
+        async move {
+            storage
+                .query_messages(archive, MamArchiveKind::Room, &query)
+                .await
+                .unwrap()
+        }
     };
 
     // Archive order is z-first, a-second, y-third, b-fourth, x-fifth.
