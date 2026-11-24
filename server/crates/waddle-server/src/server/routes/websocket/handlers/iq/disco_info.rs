@@ -17,6 +17,7 @@ use super::{
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 mod account;
+pub(super) use account::requester_may_discover_account;
 mod calls_mixer;
 mod community;
 mod extensions;
