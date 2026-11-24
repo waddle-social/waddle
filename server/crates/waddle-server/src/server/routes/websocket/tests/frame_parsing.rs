@@ -495,7 +495,8 @@ async fn websocket_malformed_scram_response_resets_phase_and_allows_retry() {
             .append(client_first)
             .build(),
     );
-    let malformed_response = r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#;
+    let malformed_response =
+        r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><x/></response>"#;
     let mut conn = WsConnState::new();
 
     let first = handle_xmpp_frame(&auth_frame, &domain, state.as_ref(), &mut conn).await;
@@ -1073,7 +1074,8 @@ async fn handle_xmpp_frame_not_well_formed_frame_closes_stream_with_stream_error
 
         assert_eq!(responses.len(), 2, "{frame}: {responses:?}");
         assert!(
-            responses[0].contains("not-well-formed") && responses[0].contains("stream:error"),
+            responses[0].contains("not-well-formed")
+                && responses[0].contains("http://etherx.jabber.org/streams"),
             "{frame}: {responses:?}"
         );
         assert!(responses[1].contains("close"), "{frame}: {responses:?}");
