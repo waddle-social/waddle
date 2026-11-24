@@ -1,6 +1,5 @@
 package social.waddle.android.client.calls
 
-import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import social.waddle.android.client.FakeWaddleClient
 import social.waddle.android.client.InMemoryPreferencesDataStore
@@ -14,6 +13,7 @@ import social.waddle.client.ffi.WaddleLiveKitJoin
 import social.waddle.client.ffi.WaddleMujiPresence
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleRosterContact
+import java.util.Base64
 
 /**
  * Shared fixture for the CallStore suites ([CallStoreTest],
