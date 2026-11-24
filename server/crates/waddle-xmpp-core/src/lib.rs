@@ -11,6 +11,7 @@ pub mod error;
 pub mod event_planning;
 pub mod link_preview;
 pub mod mam;
+pub mod mention_markup;
 pub mod occupancy_session;
 pub mod parser_utils;
 pub mod presence;

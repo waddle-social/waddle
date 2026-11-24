@@ -9,24 +9,25 @@
 //!   support out as its own URI so non-supporting servers can
 //!   refuse to broadcast `@channel`-style pings without dropping
 //!   per-occupant mentions),
-//! - the `<mention>` wire shape: builder attributes (begin/end,
-//!   jid, occupantid, mentions, uri) plus the `<active/>` and
-//!   `<noping/>` children,
-//! - parser robustness: payloads with no mention-identifying
-//!   attribute are dropped (would otherwise create phantom
-//!   mentions); `jid=""` and malformed JID strings don't panic.
+//! - the XEP-0513 wire shape: `<mention type target active/>` inside an
+//!   XEP-0394 `<markup><span start end>` wrapper, with Waddle-only data
+//!   (jid, uri, noping) in `urn:waddle:mentions:0` and nothing extra in
+//!   the official namespace,
+//! - parser robustness: mentions without a `type` are dropped (would
+//!   otherwise create phantom mentions); malformed JID strings and
+//!   offsets don't panic.
 
 use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp::disco::{muc_room_features, Feature};
 use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0513::{
-    build_mention_element, build_mentions_permissions_query, extract_explicit_mentions,
-    has_explicit_mentions, is_mention_element, is_mentions_permissions_query,
-    parse_mention_element, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
+    build_mention_markup, build_mentions_permissions_query, extract_explicit_mentions,
+    has_explicit_mentions, has_malformed_mention_markup, is_mentions_permissions_query,
+    parse_mention_markup, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
     ExplicitMentionCarrier, ExplicitMentions, MentionsPermission, MentionsPermissions,
     CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT, FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT,
-    FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
+    FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS, NS_WADDLE_MENTIONS, OCCUPANT_MENTION,
 };
 use xmpp_parsers::message::Message;
 
@@ -311,22 +312,112 @@ fn xep0513_permissions_form_omits_unadvertised_fields() {
     }
 }
 
-// ── §3 wire shape ────────────────────────────────────────────────────
+// ── Wire shape: XEP-0394 markup/span wrapper ────────────────────────
 
-#[test]
-fn xep0513_classifier_accepts_spec_shape_only() {
-    let canonical = Element::builder("mention", NS_EXPLICIT_MENTIONS).build();
-    assert!(is_mention_element(&canonical));
+const NS_MARKUP: &str = "urn:xmpp:markup:0";
+const OCCUPANT_TYPE: &str = "urn:xmpp:mentions:0#occupant";
 
-    let wrong_ns = Element::builder("mention", "wrong:ns").build();
-    assert!(!is_mention_element(&wrong_ns));
+fn parse_xml(xml: &str) -> Element {
+    xml.parse().expect("well-formed test XML")
+}
 
-    let wrong_name = Element::builder("mentions", NS_EXPLICIT_MENTIONS).build();
-    assert!(!is_mention_element(&wrong_name));
+fn single_span(markup: &Element) -> &Element {
+    assert!(
+        markup.is("markup", NS_MARKUP),
+        "root is <markup/>: {markup:?}"
+    );
+    let mut spans = markup.children();
+    let span = spans.next().expect("one span");
+    assert!(spans.next().is_none(), "exactly one span");
+    assert!(span.is("span", NS_MARKUP));
+    span
 }
 
 #[test]
-fn xep0513_jid_mention_round_trip_preserves_all_attributes() {
+fn xep0513_namespace_constants_for_wire_shape() {
+    assert_eq!(NS_WADDLE_MENTIONS, "urn:waddle:mentions:0");
+    assert_eq!(OCCUPANT_MENTION, OCCUPANT_TYPE);
+}
+
+#[test]
+fn xep0513_occupant_mention_matches_spec_example() {
+    // XEP-0513 "Mentioning a user in a room": the <mention/> is a child
+    // of an XEP-0394 <span start end> inside <markup>, with a required
+    // `type` and the XEP-0421 occupant-id as `target`.
+    let markup = build_mention_markup(&ExplicitMention {
+        begin: Some(7),
+        end: Some(12),
+        ..ExplicitMention::occupant_id("dd72603deec90a38ba552f7c68cbcc61bca202cd")
+    });
+    let expected = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'>\
+           <span start='7' end='12'>\
+             <mention xmlns='urn:xmpp:mentions:0' \
+               type='urn:xmpp:mentions:0#occupant' \
+               target='dd72603deec90a38ba552f7c68cbcc61bca202cd'/>\
+           </span>\
+         </markup>",
+    );
+    assert_eq!(markup, expected);
+
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].begin, Some(7));
+    assert_eq!(parsed[0].end, Some(12));
+    assert_eq!(
+        parsed[0].occupant_id.as_deref(),
+        Some("dd72603deec90a38ba552f7c68cbcc61bca202cd")
+    );
+}
+
+#[test]
+fn xep0513_channel_mention_has_type_and_no_target() {
+    // "@room": type '#channel', and 'target' MUST NOT be specified.
+    let markup = build_mention_markup(&ExplicitMention {
+        begin: Some(5),
+        end: Some(10),
+        ..ExplicitMention::channel()
+    });
+    let expected = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'>\
+           <span start='5' end='10'>\
+             <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel'/>\
+           </span>\
+         </markup>",
+    );
+    assert_eq!(markup, expected);
+
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 1);
+    assert!(parsed[0].is_channel());
+    assert!(!parsed[0].is_individual());
+}
+
+#[test]
+fn xep0513_active_is_a_boolean_attribute() {
+    // "@here": active='true' on the <mention/>.
+    let markup = build_mention_markup(&ExplicitMention {
+        begin: Some(0),
+        end: Some(5),
+        ..ExplicitMention::active_channel()
+    });
+    let expected = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'>\
+           <span start='0' end='5'>\
+             <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel' \
+               active='true'/>\
+           </span>\
+         </markup>",
+    );
+    assert_eq!(markup, expected);
+    assert!(parse_mention_markup(&markup)[0].active);
+}
+
+#[test]
+fn xep0513_official_namespace_carries_only_spec_attributes() {
+    // jid / uri / noping are Waddle-only: they MUST live in
+    // urn:waddle:mentions:0, never as attributes or children of the
+    // official <mention/>.
     let mention = ExplicitMention {
         begin: Some(5),
         end: Some(11),
@@ -335,75 +426,141 @@ fn xep0513_jid_mention_round_trip_preserves_all_attributes() {
         mentions: None,
         uri: Some("xmpp:alice@example.com".to_owned()),
         active: false,
-        noping: false,
+        noping: true,
     };
-    let elem = build_mention_element(&mention);
-    assert_eq!(elem.name(), "mention");
-    assert_eq!(elem.ns(), NS_EXPLICIT_MENTIONS);
-    assert_eq!(elem.attr("begin"), Some("5"));
-    assert_eq!(elem.attr("end"), Some("11"));
-    assert_eq!(elem.attr("jid"), Some("alice@example.com"));
-    assert_eq!(elem.attr("occupantid"), Some("opaque-occupant-id"));
-    assert_eq!(elem.attr("uri"), Some("xmpp:alice@example.com"));
-    // `mentions` attr is for the channel URI; absent on a per-JID
-    // mention.
-    assert!(elem.attr("mentions").is_none());
+    let markup = build_mention_markup(&mention);
+    let span = single_span(&markup);
+    assert_eq!(span.attr("start"), Some("5"));
+    assert_eq!(span.attr("end"), Some("11"));
 
-    let parsed = parse_mention_element(&elem).expect("mention round-trips");
-    assert_eq!(parsed.begin, Some(5));
-    assert_eq!(parsed.end, Some(11));
+    let official = span
+        .get_child("mention", NS_EXPLICIT_MENTIONS)
+        .expect("XEP-0513 mention");
     assert_eq!(
-        parsed.jid.as_ref().map(ToString::to_string).as_deref(),
+        official.attrs().into_iter().count(),
+        2,
+        "only type and target"
+    );
+    assert_eq!(official.attr("type"), Some(OCCUPANT_TYPE));
+    assert_eq!(official.attr("target"), Some("opaque-occupant-id"));
+    assert_eq!(official.children().count(), 0);
+
+    let extension = span
+        .get_child("mention", NS_WADDLE_MENTIONS)
+        .expect("Waddle extension");
+    assert_eq!(extension.attr("jid"), Some("alice@example.com"));
+    assert_eq!(extension.attr("uri"), Some("xmpp:alice@example.com"));
+    assert_eq!(extension.attr("noping"), Some("true"));
+
+    // Whole-mention round-trip.
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed, vec![mention]);
+}
+
+#[test]
+fn xep0513_jid_only_mention_has_no_official_element() {
+    // XEP-0513 defines no JID target, so a JID-only mention emits no
+    // element in the official namespace.
+    let markup = build_mention_markup(&ExplicitMention {
+        begin: Some(0),
+        end: Some(5),
+        ..ExplicitMention::jid("alice@example.com".parse().expect("jid"))
+    });
+    let span = single_span(&markup);
+    assert!(span.get_child("mention", NS_EXPLICIT_MENTIONS).is_none());
+    assert!(span.get_child("mention", NS_WADDLE_MENTIONS).is_some());
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(
+        parsed[0].jid.as_ref().map(ToString::to_string).as_deref(),
         Some("alice@example.com")
     );
-    assert_eq!(parsed.occupant_id.as_deref(), Some("opaque-occupant-id"));
-    assert_eq!(parsed.uri.as_deref(), Some("xmpp:alice@example.com"));
-    assert!(!parsed.active);
-    assert!(!parsed.noping);
 }
 
 #[test]
-fn xep0513_channel_mention_uses_dedicated_uri() {
-    // The channel `@channel`-style mention is identified by the
-    // `mentions="urn:xmpp:mentions:0#channel"` attribute, NOT by a
-    // JID. Building via the `channel()` helper MUST set that URI.
-    let elem = build_mention_element(&ExplicitMention::channel());
-    assert_eq!(elem.attr("mentions"), Some(CHANNEL_MENTION));
-    assert!(
-        elem.attr("jid").is_none(),
-        "channel mention MUST NOT carry a JID"
+fn xep0513_group_type_wins_over_occupant_target() {
+    // A group mention MUST NOT carry a target; a mention holding both a
+    // group URI and an occupant-id serializes as the group mention only.
+    let mention = ExplicitMention {
+        mentions: Some(CHANNEL_MENTION.to_owned()),
+        ..ExplicitMention::occupant_id("occ-1")
+    };
+    let markup = build_mention_markup(&mention);
+    let official = single_span(&markup)
+        .get_child("mention", NS_EXPLICIT_MENTIONS)
+        .expect("official mention");
+    assert_eq!(official.attr("type"), Some(CHANNEL_MENTION));
+    assert_eq!(official.attr("target"), None);
+}
+
+#[test]
+fn xep0513_multiple_mentions_share_one_markup_element() {
+    let mut msg = Message::new(None::<jid::Jid>);
+    set_explicit_mentions(
+        &mut msg,
+        &ExplicitMentions::new()
+            .with_mention(ExplicitMention {
+                begin: Some(0),
+                end: Some(3),
+                ..ExplicitMention::occupant_id("a")
+            })
+            .with_mention(ExplicitMention {
+                begin: Some(4),
+                end: Some(9),
+                ..ExplicitMention::channel()
+            }),
     );
-
-    let parsed = parse_mention_element(&elem).expect("channel mention parses");
-    assert!(parsed.is_channel());
-    assert!(!parsed.is_individual());
+    assert_eq!(msg.payloads.len(), 1, "one <markup/> payload");
+    assert_eq!(msg.payloads[0].children().count(), 2, "two spans");
+    let parsed = extract_explicit_mentions(&msg).expect("mentions");
+    assert_eq!(parsed.mentions.len(), 2);
+    assert_eq!(parsed.mentions[0].occupant_id.as_deref(), Some("a"));
+    assert!(parsed.mentions[1].is_channel());
 }
 
 #[test]
-fn xep0513_active_and_noping_emit_child_elements_not_attributes() {
-    // §3.1 / §3.2: `<active/>` and `<noping/>` are CHILD elements
-    // (not attributes) so the wire shape carries clear booleans.
-    // The builder must put them under `<mention>`, namespaced
-    // under XEP-0513.
-    let elem = build_mention_element(&ExplicitMention {
-        active: true,
-        noping: true,
-        ..ExplicitMention::channel()
-    });
+fn xep0513_several_mentions_in_one_span_all_parse() {
+    // XEP-0513: "Multiple mentions may be contained in the same <span />".
+    let markup = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='3' end='14'>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant' \
+             target='dd72603deec90a38ba552f7c68cbcc61bca202cd'/>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant' \
+             target='3deec90a38ba552f7c68cbcc61bca202cddd7260'/>\
+         </span></markup>",
+    );
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 2);
+    assert!(parsed
+        .iter()
+        .all(|m| m.begin == Some(3) && m.end == Some(14)));
+}
 
-    let active = elem
-        .children()
-        .find(|c| c.name() == "active" && c.ns() == NS_EXPLICIT_MENTIONS);
-    assert!(active.is_some(), "<active/> child MUST be present");
+#[test]
+fn xep0513_role_and_hat_types_parse_as_group_mentions() {
+    let markup = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='4' end='13'>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#moderators'/>\
+         </span></markup>",
+    );
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(
+        parsed[0].mentions.as_deref(),
+        Some("urn:xmpp:mentions:0#moderators")
+    );
+    assert!(!parsed[0].is_channel());
+}
 
-    let noping = elem
-        .children()
-        .find(|c| c.name() == "noping" && c.ns() == NS_EXPLICIT_MENTIONS);
-    assert!(noping.is_some(), "<noping/> child MUST be present");
-
-    let parsed = parse_mention_element(&elem).expect("parses");
-    assert!(parsed.active);
-    assert!(parsed.noping);
+#[test]
+fn xep0513_legacy_bare_mention_payload_is_not_a_mention() {
+    // The pre-markup shape (a top-level <mention begin end occupantid/>
+    // payload) is not XEP-0513 and is no longer recognised.
+    let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads.push(parse_xml(
+        "<mention xmlns='urn:xmpp:mentions:0' begin='0' end='6' occupantid='x'/>",
+    ));
+    assert!(!has_explicit_mentions(&msg));
+    assert!(extract_explicit_mentions(&msg).is_none());
 }
 
 // ── Carrier-trait surface + collection helpers ──────────────────────
@@ -411,8 +568,8 @@ fn xep0513_active_and_noping_emit_child_elements_not_attributes() {
 #[test]
 fn xep0513_set_explicit_mentions_replaces_prior_payloads() {
     // The collection mutator: each call replaces every prior
-    // namespaced payload. Otherwise repeated edits would
-    // accumulate duplicate mentions on the same message.
+    // mention. Otherwise repeated edits would accumulate duplicate
+    // mentions on the same message.
     let mut msg = Message::new(None::<jid::Jid>);
     set_explicit_mentions(
         &mut msg,
@@ -429,8 +586,11 @@ fn xep0513_set_explicit_mentions_replaces_prior_payloads() {
 }
 
 #[test]
-fn xep0513_strip_clears_every_namespaced_payload() {
+fn xep0513_strip_clears_mentions_and_keeps_other_markup() {
     let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads.push(parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><bquote start='0' end='4'/></markup>",
+    ));
     set_explicit_mentions(
         &mut msg,
         &ExplicitMentions::new()
@@ -439,9 +599,18 @@ fn xep0513_strip_clears_every_namespaced_payload() {
             ))
             .with_channel(),
     );
+    assert_eq!(msg.payloads.len(), 1, "mentions join the existing markup");
     strip_explicit_mentions(&mut msg);
     assert!(!has_explicit_mentions(&msg));
     assert!(extract_explicit_mentions(&msg).is_none());
+    assert_eq!(msg.payloads.len(), 1, "blockquote markup is preserved");
+    assert!(msg.payloads[0].get_child("bquote", NS_MARKUP).is_some());
+
+    // A markup element holding only mentions disappears entirely.
+    let mut only = Message::new(None::<jid::Jid>);
+    set_explicit_mentions(&mut only, &ExplicitMentions::new().with_channel());
+    strip_explicit_mentions(&mut only);
+    assert!(only.payloads.is_empty());
 }
 
 #[test]
@@ -461,57 +630,84 @@ fn xep0513_carrier_trait_surfaces_mentions_via_explicit_mentions() {
 // ── Parser robustness ───────────────────────────────────────────────
 
 #[test]
-fn xep0513_parse_drops_mention_with_no_identifying_attribute() {
-    // A `<mention begin="5" end="11"/>` with no jid, occupantid,
-    // mentions, uri, active, or noping is a structural shell —
-    // not a real mention. The parser MUST reject it; otherwise
-    // every message with a stray empty `<mention/>` would falsely
-    // claim to mention someone (downstream notification logic
-    // would then page the wrong person, or noone).
-    let stub = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr(minidom::rxml::xml_ncname!("begin").to_owned(), "5")
-        .attr(minidom::rxml::xml_ncname!("end").to_owned(), "11")
-        .build();
-    assert!(parse_mention_element(&stub).is_none());
+fn xep0513_mention_without_type_is_dropped_and_malformed() {
+    // `type` is REQUIRED. A <mention/> without it is not interpretable;
+    // the parser drops it and message validation flags it.
+    let markup = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='5' end='11'>\
+           <mention xmlns='urn:xmpp:mentions:0' target='x'/>\
+         </span></markup>",
+    );
+    assert!(parse_mention_markup(&markup).is_empty());
+    let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads.push(markup);
+    assert!(has_malformed_mention_markup(&msg));
+}
+
+#[test]
+fn xep0513_occupant_mention_without_target_is_malformed() {
+    let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads.push(parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='5' end='11'>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant'/>\
+         </span></markup>",
+    ));
+    assert!(has_malformed_mention_markup(&msg));
+
+    let mut ok = Message::new(None::<jid::Jid>);
+    set_explicit_mentions(&mut ok, &ExplicitMentions::new().with_channel());
+    assert!(!has_malformed_mention_markup(&ok));
+}
+
+#[test]
+fn xep0513_waddle_jid_extension_is_rejected_by_validation() {
+    let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads
+        .push(build_mention_markup(&ExplicitMention::jid(
+            "alice@example.com".parse().expect("jid"),
+        )));
+    assert!(has_malformed_mention_markup(&msg));
 }
 
 #[test]
 fn xep0513_parse_drops_invalid_jid_attribute_silently() {
-    // BareJid-unparseable strings must drop to None for the jid
-    // field without poisoning the surrounding mention. If the
-    // mention also has another identifying attribute (e.g.
-    // `mentions=`), it still surfaces. `@@@` is unambiguous garbage
-    // — RFC 7622 / PRECIS reject multiple `@`s in a bare JID, so
-    // the parse MUST fail.
-    let elem = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr(minidom::rxml::xml_ncname!("jid").to_owned(), "@@@")
-        .attr(
-            minidom::rxml::xml_ncname!("mentions").to_owned(),
-            CHANNEL_MENTION,
-        )
-        .build();
-    let parsed = parse_mention_element(&elem).expect("channel-mentions identity survives");
-    assert!(parsed.jid.is_none(), "malformed jid dropped to None");
-    assert!(parsed.is_channel());
+    // A BareJid-unparseable string drops to None for the jid field
+    // without poisoning the surrounding mention.
+    let markup = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='0' end='3'>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel'/>\
+           <mention xmlns='urn:waddle:mentions:0' jid='@@@'/>\
+         </span></markup>",
+    );
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 1);
+    assert!(parsed[0].jid.is_none(), "malformed jid dropped to None");
+    assert!(parsed[0].is_channel());
 }
 
 #[test]
 fn xep0513_parse_drops_malformed_numeric_offsets() {
-    // `begin="three"` MUST drop to None rather than panic or
-    // coerce to 0 (a 0-offset would make the mention point at the
-    // wrong character range — silent corruption of the rendered
-    // span).
-    let elem = Element::builder("mention", NS_EXPLICIT_MENTIONS)
-        .attr(minidom::rxml::xml_ncname!("begin").to_owned(), "three")
-        .attr(minidom::rxml::xml_ncname!("end").to_owned(), "")
-        .attr(
-            minidom::rxml::xml_ncname!("jid").to_owned(),
-            "alice@example.com",
-        )
-        .build();
-    let parsed = parse_mention_element(&elem).expect("identifies via jid");
-    assert_eq!(parsed.begin, None);
-    assert_eq!(parsed.end, None);
+    // `start="three"` MUST drop to None rather than panic or coerce
+    // to 0 (which would point the mention at the wrong range).
+    let markup = parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='three' end=''>\
+           <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel'/>\
+         </span></markup>",
+    );
+    let parsed = parse_mention_markup(&markup);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].begin, None);
+    assert_eq!(parsed[0].end, None);
+}
+
+#[test]
+fn xep0513_span_without_mentions_is_not_a_mention() {
+    let mut msg = Message::new(None::<jid::Jid>);
+    msg.payloads.push(parse_xml(
+        "<markup xmlns='urn:xmpp:markup:0'><span start='0' end='3'><emphasis/></span></markup>",
+    ));
+    assert!(!has_explicit_mentions(&msg));
+    assert!(extract_explicit_mentions(&msg).is_none());
 }
 
 #[test]

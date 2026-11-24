@@ -114,7 +114,12 @@ async fn explicit_mentions_route_and_replay_from_mam() {
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-1">
                 <body>@admin please check this</body>
-                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="6" occupantid="{occupant_id}"/>
+                <markup xmlns="urn:xmpp:markup:0">
+                    <span start="0" end="6">
+                        <mention xmlns="urn:xmpp:mentions:0"
+                            type="urn:xmpp:mentions:0#occupant" target="{occupant_id}"/>
+                    </span>
+                </markup>
             </message>"#
         ))
         .await
@@ -130,6 +135,25 @@ async fn explicit_mentions_route_and_replay_from_mam() {
     assert!(
         !echo.contains("jid='admin@localhost") && !echo.contains("jid='admin@localhost"),
         "MUC mention payload leaked a JID despite occupant-id support: {echo}"
+    );
+    // XEP-0513 wire shape: <markup><span start end><mention type target/>.
+    let echoed = Element::from_str(&echo).expect("echo parses as XML");
+    let markup = echoed
+        .get_child("markup", "urn:xmpp:markup:0")
+        .unwrap_or_else(|| panic!("mention rides in XEP-0394 markup: {echo}"));
+    let span = markup
+        .get_child("span", "urn:xmpp:markup:0")
+        .expect("markup span");
+    assert_eq!(span.attr("start"), Some("0"));
+    assert_eq!(span.attr("end"), Some("6"));
+    let mention = span
+        .get_child("mention", NS_EXPLICIT_MENTIONS)
+        .expect("XEP-0513 mention");
+    assert_eq!(mention.attr("type"), Some("urn:xmpp:mentions:0#occupant"));
+    assert_eq!(mention.attr("target"), Some(occupant_id.as_str()));
+    assert!(
+        mention.attr("occupantid").is_none() && mention.attr("begin").is_none(),
+        "no pre-XEP attributes in the official namespace: {echo}"
     );
 
     client
@@ -191,7 +215,11 @@ async fn mention_without_target_attribute_returns_bad_request() {
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="bad-mention">
                 <body>broken mention</body>
-                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="6"/>
+                <markup xmlns="urn:xmpp:markup:0">
+                    <span start="0" end="6">
+                        <mention xmlns="urn:xmpp:mentions:0" target="no-type"/>
+                    </span>
+                </markup>
             </message>"#
         ))
         .await
@@ -219,7 +247,11 @@ async fn muc_jid_mention_returns_bad_request_when_occupant_ids_supported() {
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="jid-mention">
                 <body>jid mention</body>
-                <mention xmlns="urn:xmpp:mentions:0" begin="0" end="3" jid="admin@localhost"/>
+                <markup xmlns="urn:xmpp:markup:0">
+                    <span start="0" end="3">
+                        <mention xmlns="urn:waddle:mentions:0" jid="admin@localhost"/>
+                    </span>
+                </markup>
             </message>"#
         ))
         .await
@@ -505,7 +537,7 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         NotificationThreadId,
     };
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
-    use waddle_xmpp::xep::{build_mention_element, generate_occupant_id, ExplicitMention};
+    use waddle_xmpp::xep::{build_mention_markup, generate_occupant_id, ExplicitMention};
 
     let owner = "juliet@example.com".parse().expect("owner");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
@@ -517,7 +549,7 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         let mut mention = ExplicitMention::occupant_id(occupant.as_str());
         mention.noping = noping;
         let mut envelope = xmpp_parsers::message::Message::new(None);
-        envelope.payloads.push(build_mention_element(&mention));
+        envelope.payloads.push(build_mention_markup(&mention));
         let candidate = candidate_from_envelope(
             &envelope,
             GroupchatCandidateIdentity {
@@ -675,9 +707,14 @@ async fn mention_count_cap_bounds_offline_non_member_inbox_rows() {
 
     // Five XEP-0513 occupant-id targets plus one XEP-0372 reference to
     // carol exceed the cap of five, so every mention is ignored.
-    let over_cap = (0..5)
-        .map(|_| format!(r#"<mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>"#))
-        .collect::<String>();
+    let over_cap = format!(
+        r#"<markup xmlns="urn:xmpp:markup:0">{}</markup>"#,
+        (0..5)
+            .map(|_| format!(
+                r#"<span start="0" end="6"><mention xmlns="urn:xmpp:mentions:0" type="urn:xmpp:mentions:0#occupant" target="{occupant_id}"/></span>"#
+            ))
+            .collect::<String>()
+    );
     client
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-nm-1">
@@ -699,7 +736,9 @@ async fn mention_count_cap_bounds_offline_non_member_inbox_rows() {
         .send(&format!(
             r#"<message type="groupchat" to="{room}" id="mention-nm-2">
                 <body>@admin @peer please check</body>
-                <mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>
+                <markup xmlns="urn:xmpp:markup:0">
+                    <span start="0" end="6"><mention xmlns="urn:xmpp:mentions:0" type="urn:xmpp:mentions:0#occupant" target="{occupant_id}"/></span>
+                </markup>
                 <reference xmlns="urn:xmpp:reference:0" type="mention" uri="xmpp:peer@localhost"/>
             </message>"#
         ))

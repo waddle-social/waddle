@@ -8,7 +8,7 @@ fn message_with_mention(mention: waddle_xmpp::xep::ExplicitMention) -> Message {
     let mut message = Message::new(None::<Jid>);
     message
         .payloads
-        .push(waddle_xmpp::xep::build_mention_element(&mention));
+        .push(waddle_xmpp::xep::build_mention_markup(&mention));
     message
 }
 
@@ -77,11 +77,11 @@ fn xep0513_dm_mention_count_exceeded_downgrades_is_mention_but_preserves_noping(
     // Case A: count exceeded, NO `<noping/>` for recipient → both
     // bits collapse (is_mention forced false; no noping to set).
     let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
-    msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+    msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
         &waddle_xmpp::xep::ExplicitMention::jid(recipient.clone()),
     ));
     for i in 0..threshold {
-        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+        msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(
                 format!("user{i}@example.com").parse().expect("user bare"),
             ),
@@ -105,11 +105,11 @@ fn xep0513_dm_mention_count_exceeded_downgrades_is_mention_but_preserves_noping(
     let mut msg = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     let mut recipient_noping_mention = waddle_xmpp::xep::ExplicitMention::jid(recipient.clone());
     recipient_noping_mention.noping = true;
-    msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+    msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
         &recipient_noping_mention,
     ));
     for i in 0..threshold {
-        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+        msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(
                 format!("user{i}@example.com").parse().expect("user bare"),
             ),
@@ -141,10 +141,10 @@ fn xep0513_dm_mention_count_at_threshold_preserves_noping() {
     let mut recipient_noping = waddle_xmpp::xep::ExplicitMention::jid(recipient.clone());
     recipient_noping.noping = true;
     msg.payloads
-        .push(waddle_xmpp::xep::build_mention_element(&recipient_noping));
+        .push(waddle_xmpp::xep::build_mention_markup(&recipient_noping));
     // Fill to exactly threshold mentions total.
     for i in 0..(threshold - 1) {
-        msg.payloads.push(waddle_xmpp::xep::build_mention_element(
+        msg.payloads.push(waddle_xmpp::xep::build_mention_markup(
             &waddle_xmpp::xep::ExplicitMention::jid(
                 format!("user{i}@example.com").parse().expect("user bare"),
             ),

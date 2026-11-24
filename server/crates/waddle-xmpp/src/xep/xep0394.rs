@@ -6,7 +6,7 @@
 use minidom::Element;
 
 /// Namespace for XEP-0394 Message Markup.
-pub const NS_MARKUP: &str = "urn:xmpp:markup:0";
+pub const NS_MARKUP: &str = waddle_xmpp_core::mention_markup::NS_MARKUP;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkupKind {

@@ -109,5 +109,4 @@ const MESSAGE_RETRACT_NS: &str = "urn:xmpp:message-retract:1";
 const MESSAGE_MODERATE_NS: &str = "urn:xmpp:message-moderate:1";
 const REACTIONS_NS: &str = "urn:xmpp:reactions:0";
 const REFERENCE_NS: &str = "urn:xmpp:reference:0";
-const MENTIONS_NS: &str = "urn:xmpp:mentions:0";
 const XDATA_VALIDATE_NS: &str = "http://jabber.org/protocol/xdata-validate";
