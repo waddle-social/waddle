@@ -381,6 +381,87 @@ async fn sent_carbon_delivered_to_opted_in_sibling_over_websocket() {
     let _ = desktop.close().await;
 }
 
+async fn connect_sibling_pair(server: &TestServer) -> (WsXmppClient, WsXmppClient) {
+    let password = server.fixed_account_password().to_string();
+    let mut desktop = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("desktop-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("desktop connection");
+    enable_carbons(&mut desktop, "carbons-enable-desktop")
+        .await
+        .expect("enable carbons");
+    let phone = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("phone-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("phone connection");
+    (desktop, phone)
+}
+
+/// XEP-0280 §6.1: "A MESSAGE containing a XEP-0249 SHOULD be
+/// carbon-copied." Rules `urn:xmpp:carbons:rules:0` make this REQUIRED.
+#[tokio::test]
+async fn bodyless_direct_invitation_is_sent_carbon_copied() {
+    let server = TestServer::start();
+    let (mut desktop, mut phone) = connect_sibling_pair(&server).await;
+
+    phone
+        .send(
+            r#"<message xmlns="jabber:client" to="ghost@localhost" id="inv-direct-1"><x xmlns="jabber:x:conference" jid="room@conference.localhost"/></message>"#,
+        )
+        .await
+        .expect("send direct invitation");
+
+    let carbon = desktop
+        .recv_matching(|frame| {
+            frame.contains("urn:xmpp:carbons:2")
+                && frame.contains("<sent")
+                && frame.contains("jabber:x:conference")
+        })
+        .await
+        .expect("desktop receives sent carbon for direct invitation");
+    assert!(carbon.contains("room@conference.localhost"), "{carbon}");
+
+    let _ = phone.close().await;
+    let _ = desktop.close().await;
+}
+
+/// XEP-0280 §6.1: "A MESSAGE containing a Mediated Invitation SHOULD be
+/// carbon-copied."
+#[tokio::test]
+async fn bodyless_mediated_invitation_is_sent_carbon_copied() {
+    let server = TestServer::start();
+    let (mut desktop, mut phone) = connect_sibling_pair(&server).await;
+
+    phone
+        .send(
+            r#"<message xmlns="jabber:client" to="ghost@localhost" id="inv-mediated-1"><x xmlns="http://jabber.org/protocol/muc#user"><invite to="ghost@localhost"/></x></message>"#,
+        )
+        .await
+        .expect("send mediated invitation");
+
+    desktop
+        .recv_matching(|frame| {
+            frame.contains("urn:xmpp:carbons:2")
+                && frame.contains("<sent")
+                && frame.contains("muc#user")
+        })
+        .await
+        .expect("desktop receives sent carbon for mediated invitation");
+
+    let _ = phone.close().await;
+    let _ = desktop.close().await;
+}
+
 #[tokio::test]
 async fn sent_carbon_replays_to_detached_resumable_sibling() {
     let server = TestServer::start();
