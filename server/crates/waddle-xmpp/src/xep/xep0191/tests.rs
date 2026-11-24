@@ -200,7 +200,7 @@ fn test_parse_block_request_rejects_item_text() {
 }
 
 #[test]
-fn test_parse_block_request_rejects_item_whitespace() {
+fn test_parse_block_request_accepts_whitespace_in_item() {
     let iq = set_iq(
         "block-item-whitespace",
         Element::builder("block", NS_BLOCKING)
@@ -210,16 +210,13 @@ fn test_parse_block_request_rejects_item_whitespace() {
                         minidom::rxml::xml_ncname!("jid").to_owned(),
                         "romeo@montague.net",
                     )
-                    .append(" ")
+                    .append("\n  ")
                     .build(),
             )
             .build(),
     );
 
-    assert_eq!(
-        parse_blocking_request(&iq).unwrap_err(),
-        BlockingError::BadRequest(BlockingBadRequest::UnexpectedChild)
-    );
+    assert!(parse_blocking_request(&iq).is_ok());
 }
 
 #[test]
