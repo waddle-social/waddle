@@ -26,7 +26,7 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | --- | --- | --- | --- |
 | Rooms and 1:1 DMs, paged history | 0045, 0313 | ✅ | |
 | Replies | 0461 | ✅ | |
-| Reactions (quick set via menu) | 0444 | 🟡 | message actions |
+| Reactions (quick set via menu) | 0444 | ✅ | #2721: quick reactions in the menu and toolbar, full emoji chooser, replace-set toggle |
 | Corrections | 0308 | ✅ | |
 | Retraction | 0424 | ✅ | |
 | Threads and sub-threads | 0201 | ✅ | |
@@ -35,10 +35,10 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Typing indicators (send and show) | 0085 | ❌ | delivery |
 | Read markers and cross-device cursors | 0333, 0490 | 🟡 | delivery |
 | Shared reconnect controller | | 🟡 | delivery |
-| Message search (per conversation) | 0313 | ❌ | message actions |
-| Pinned messages, pin list | urn:waddle:pin | ❌ | message actions |
-| Message actions menu parity (copy text, pin, view pack, moderator removal, hover toolbar, keyboard access) | | 🟡 | message actions |
-| `/me` actions | 0245 | ❌ | message actions |
+| Message search (per conversation) | 0313 | 🟡 | #2721: header search (Ctrl+F), result jumps and pages history in. Capped at 50 results, newest first, no paging; corrections hidden |
+| Pinned messages, pin list | urn:waddle:pin | 🟡 | #2721: pin/unpin, header list, jump, live events, row mark. Room pin default is admins-only when unpublished; in a DM the server pin id can differ from the archive id, so the mark may not match |
+| Message actions menu parity (copy text, pin, view pack, moderator removal, hover toolbar, keyboard access) | | 🟡 | #2721: one action list for menu and toolbar, pin, copy, moderator removal, focusable rows with Menu/Shift+F10. No view pack |
+| `/me` actions | 0245 | ✅ | #2721: italic "* Name action" keeping links; quotes and notifications match |
 | Formatting (bold, italic, strike, code, quote) | 0394 | ❌ | composer |
 
 ## Conversations and rooms
