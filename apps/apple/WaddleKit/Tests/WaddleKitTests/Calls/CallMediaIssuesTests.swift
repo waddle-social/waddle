@@ -77,4 +77,12 @@ import Testing
         #expect(line?.contains("check again") == false)
         #expect(CallMediaIssues.line(for: Report(didScreenShareFail: true)) == "That could not be shared. Try again.")
     }
+
+    @Test func aBlurThatIsNotWorkingSaysThePictureIsHeldBack() {
+        let issues = CallMediaIssues.shown(for: Report(isBackgroundFailing: true))
+        #expect(issues == [CallMediaIssue(kind: .background, reason: .failed)])
+        #expect(issues[0].message().contains("held back"))
+        #expect(!issues[0].opensSettings)
+        #expect(issues[0].retryTitle == "Check again")
+    }
 }

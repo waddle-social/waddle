@@ -62,7 +62,8 @@ extension CallMediaControls {
     var mediaReport: CallMediaIssues.Report {
         CallMediaIssues.Report(
             isMicrophoneBlocked: isMicrophoneBlocked, isCameraBlocked: isCameraBlocked,
-            isScreenBlocked: isScreenShareBlocked, didScreenShareFail: didScreenShareFail, refusals: mediaRefusals
+            isScreenBlocked: isScreenShareBlocked, didScreenShareFail: didScreenShareFail,
+            isBackgroundFailing: isBackgroundFailing, refusals: mediaRefusals
         )
     }
 
