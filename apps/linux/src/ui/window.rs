@@ -12,7 +12,7 @@ use gtk::{gio, glib};
 
 use crate::auth::device::{DeviceAuthClient, DeviceAuthorization, Provider, ServerUrl};
 use crate::auth::store::{CredentialStore, StoredAccount};
-use crate::composer::{Availability, Suggestion};
+use crate::composer::Suggestion;
 use crate::runtime;
 use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
@@ -145,8 +145,8 @@ mod imp {
         /// What the composer's popover offers, in its order.
         pub suggestions: RefCell<Vec<Suggestion>>,
         pub suggestion_popover: RefCell<Option<(gtk::Popover, gtk::ListBox)>>,
-        /// The user's manual presence, announced again on each connect.
-        pub availability: Cell<Availability>,
+        /// Presence, pictures and profiles (see ui/identity.rs).
+        pub profile: crate::ui::identity::ProfileState,
         /// Shared images by URL: loading (`None`), shown, or failed.
         pub images: RefCell<crate::ui::images::ImageCache>,
         /// Files are uploading; the composer waits.
@@ -332,6 +332,16 @@ impl WaddleWindow {
     }
 
     #[template_callback]
+    fn on_account(&self) {
+        self.open_profile();
+    }
+
+    #[template_callback]
+    fn on_people(&self) {
+        self.open_people();
+    }
+
+    #[template_callback]
     fn on_open_verification(&self) {
         if let Some(authorization) = self.imp().authorization.borrow().as_ref() {
             self.open_verification(authorization);
@@ -426,6 +436,7 @@ impl WaddleWindow {
         imp.account_name.set_label(name);
         imp.account_label.set_label(&jid);
         imp.account.replace(Some(account.clone()));
+        imp.profile.reset();
         imp.stack.set_visible_child_name("shell");
         self.start_session(&account);
     }

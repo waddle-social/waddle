@@ -17,7 +17,7 @@ use waddle_client_session::{Delivery, IncomingMessage, LocalEcho, ReplyTo, Timel
 use super::conversation::Row;
 use super::WaddleWindow;
 use crate::attachments::MAX_UPLOAD_BYTES;
-use crate::composer::{self, Availability, CommandAction};
+use crate::composer::{self, CommandAction};
 use crate::message_actions::{MessageAction, QUICK_REACTIONS};
 use crate::session::{Draft, Kind, Outgoing, Quote};
 
@@ -435,16 +435,6 @@ impl WaddleWindow {
                 window.toast("The message could not be sent.");
             }
         });
-    }
-
-    /// `/away`, `/active`, `/dnd`: announce it now and on every reconnect.
-    fn set_availability(&self, availability: Availability) {
-        let imp = self.imp();
-        imp.availability.set(availability);
-        if let Some(session) = imp.session.borrow().as_ref() {
-            session.announce(availability);
-        }
-        self.toast(&format!("Your status is now {}.", availability.title()));
     }
 
     /// XEP-0444 sends the user's complete set, so toggle within it.

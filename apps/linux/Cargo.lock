@@ -3226,6 +3226,7 @@ dependencies = [
  "uuid",
  "waddle-client-session",
  "waddle-xmpp-client-ffi",
+ "waddle-xmpp-core",
 ]
 
 [[package]]

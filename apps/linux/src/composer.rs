@@ -92,15 +92,6 @@ pub enum Availability {
 }
 
 impl Availability {
-    /// RFC 6121 §4.7.2.1 `<show/>`; none means available.
-    pub fn show(self) -> Option<&'static str> {
-        match self {
-            Self::Available => None,
-            Self::Away => Some("away"),
-            Self::DoNotDisturb => Some("dnd"),
-        }
-    }
-
     pub fn title(self) -> &'static str {
         match self {
             Self::Available => "Available",

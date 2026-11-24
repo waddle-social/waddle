@@ -55,17 +55,17 @@ Each row names the PR that closes it. The audit date is 2026-11-24, against
 | Notify modes and mute | 0492 | 🟡 | Header bell menu sets all, mentions only or mute per room and DM, stored on the account; muted rows show an icon and notify nothing. No sidebar context menu; a mode changed on another device shows here at the next reconnect |
 | Desktop notifications with reply and mark-read actions | | 🟡 | One notification per conversation with Reply (opens it, composer focused; GNotification has no inline reply) and Mark as Read; withdrawn when read here or elsewhere. Not run against a live server or notification daemon |
 | @-mentions, slash commands, extension commands | 0372, 0050 | 🟡 | composer |
-| Nick colors | 0392 | ❌ | profile |
+| Nick colors | 0392 | ✅ | Author names in the shared Rust hue at HSL 55%/45%. A room participant is colored by nick, a direct message by the person's address. Initials avatars keep the four brand tints |
 
 ## Presence and profile
 
 | Feature | XEP(s) | Now | Closed by |
 | --- | --- | --- | --- |
-| Presence picker, status message, auto-away | | 🟡 | profile |
-| Avatars: fetch, publish | 0084, 0153 | ❌ | profile |
-| vCard / profile editor | 0292 | ❌ | profile |
-| People view and profile sheet | | ❌ | profile |
-| Mood, activity, tune | 0107, 0108, 0118 | ❌ | profile |
+| Presence picker, status message, auto-away | 0319 | ✅ | Automatic, Online, Away or Do not disturb with a status message, from the account row (also `/active`, `/away`, `/dnd`). A pick is stored on the account (`urn:waddle:status-preference:0`) and taken up by every device, live and on connect. While Automatic: Away after 10 minutes without input, Extended Away after 30, stamped with when input stopped, driven by input in the Waddle window only (not the system idle time). No invisible: the core has none. An open dialog does not follow a pick made on another device |
+| Avatars: fetch, publish | 0084, 0153 | 🟡 | Fetched for DM rows, message authors whose address is known, People, profiles and the account row, with the initials fallback; revalidated on `+notify` and after a reconnect, held in memory for the session. Publish (resized to at most 512 px, PNG) and remove from the profile. A room participant whose address the room hides shows initials. XEP-0153 presence hashes are not read, and there is no member list yet (rooms) |
+| vCard / profile editor | 0292 | ✅ | Edit your name, nickname, pronouns, about and link; the picture address is kept on save, and the editor stays closed if the current vCard cannot be read. Someone else's opens from their avatar or name, and from People. Only an `http` or `https` link can be opened |
+| People view and profile sheet | 6121, 0055 | ✅ | Contacts (by saved name), direct-message peers, anyone whose presence was seen and room participants with an exposed address, split into Here now and Away and offline, with name search that also looks in the community directory. Rows open the profile sheet, which can start a direct message. No call badge until calls land |
+| Mood, activity, tune | 0107, 0108, 0118 | 🟡 | Set and clear your own from the profile. The picker leaves out `talking`, and a call mark published by another device is never overwritten or cleared. A tune is typed in. Others' show in their profile sheet, looked up when it opens; there is no live update or list marker |
 | Blocking, DND schedule | 0191 | 🚫 | no core verb yet (also open on Apple, #2462, #2463) |
 
 ## Media
