@@ -1,0 +1,14 @@
+[package]
+name = "waddle-sm-proof"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The proof uses Kani's pinned compiler and the production source below.
+[workspace]
+
+[dependencies]
+thiserror = "=2.0.18"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

@@ -1,4 +1,4 @@
-# Detached stream resume
+# XEP-0198 stream management verification
 
 This Quint model starts with one durably detached XEP-0198 stream. Two nodes
 can each attempt resume once. At most three stanza ordinals exist. The
@@ -43,29 +43,35 @@ ordinals and abstracts the resume deadline as a boolean. It excludes wire counte
 wraparound, XML and bytes, transport writes, live admissions after publication,
 database failure semantics, races to acquire the reaper claim, and liveness. The finite bounds apply to the model.
 
-## Replay a trace against Rust
+## Verify the Rust implementation
 
-The hydration-tail scenario exports an ITF trace that the opt-in
-[authority test](../../crates/waddle-server/tests/sm_durable_resume.rs) replays
-against the production durable store with SQLite. The test maps the modeled
-resume to a fresh binding, then compares the replay snapshot, ordered
-completion tail, and final persisted window with the exported trace.
+The `verifyStreamManagementRust` CI job checks the production Rust counter
+and lifecycle modules with [Kani](https://model-checking.github.io/kani/).
+The isolated proof crate compiles those source files directly. The harnesses
+check:
+
+- Every ordered window whose last ordinal fits in a signed 64-bit database
+  column and whose retained span is below half the wire counter space.
+  For every 32-bit `h`, the implementation agrees with the absolute-ordinal
+  contract for live and resume acknowledgments. A successful acknowledgment
+  updates only the acknowledged floor. Replay starts above that floor and
+  ends at the unchanged appended ordinal.
+- For the same windows and every 32-bit sequence, the replay lookup returns
+  the matching retained ordinal exactly when it exists.
+- Across the lifecycle state/event pairs, terminal states reject all events,
+  resume enters hydration only from an eligible state, publication requires
+  hydration, and expiry requires a detached session.
+
+Run the same harnesses locally with Kani 0.68.0 installed:
 
 ```sh
-trace_dir=$(mktemp -d)
-bunx @informalsystems/quint@0.34.0 test --backend=typescript \
-  --match=replayIncludesHydrationTailTest \
-  --out-itf="$trace_dir/{test}_{seq}.itf.json" \
-  server/specs/stream-management/detached_resume_test.qnt
-(
-  cd server
-  WADDLE_QUINT_RESUME_TRACE="$trace_dir/replayIncludesHydrationTailTest_0.itf.json" \
-    cargo test --locked -p waddle-server --test sm_durable_resume \
-    replay_quint_hydration_trace -- --ignored --exact
-)
+cd server/specs/stream-management/proof
+cargo fetch --locked
+CARGO_NET_OFFLINE=true cargo kani
 ```
 
-The trace adapter covers this one scenario. The SQLite test uses a local
-binding, so the modeled claim acquisition has no corresponding store call.
-The native PostgreSQL suite linked above exercises real cross-node claims
-and XMPP wire behavior independently.
+The counter harness inputs are symbolic across their full stated domains.
+The lifecycle contract concerns the pure transition function. The proofs
+do not establish PostgreSQL claim atomicity, orchestration correctness, or
+delivery of replay bytes. The Quint model explores abstract handoff
+interleavings independently of the Rust proofs.
