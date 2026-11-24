@@ -620,6 +620,21 @@ fn parse_node_config_fields(form: &Element, reject_unknown: bool) -> CoreResult<
                     CoreError::bad_request(Some(format!("invalid pubsub#type: {value}")))
                 })?);
             }
+            // Purging on publisher departure is not supported: only the
+            // value the node already has (false) may be submitted.
+            "pubsub#purge_offline" => match value.as_str() {
+                "0" | "false" => {}
+                "1" | "true" => {
+                    return Err(CoreError::bad_request(Some(
+                        "pubsub#purge_offline is not supported".to_owned(),
+                    )))
+                }
+                _ => {
+                    return Err(CoreError::bad_request(Some(format!(
+                        "invalid pubsub#purge_offline: {value}"
+                    ))))
+                }
+            },
             "pubsub#max_items" => {
                 // XEP-0060 §16.4.3 + XEP-0490 §3 publish-options use the
                 // literal token "max" to mean "no upper bound". Accept it

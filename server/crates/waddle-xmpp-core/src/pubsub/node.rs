@@ -325,7 +325,7 @@ impl NodeConfig {
         Self {
             access_model: AccessModel::Open,
             publish_model: PublishModel::Publishers,
-            node_type: None,
+            node_type: Some(PubSubNodeType::Space),
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
@@ -385,13 +385,23 @@ impl NodeConfig {
         }
     }
 
+    /// Configuration for the community calendar node: open to read, owner
+    /// published. It is not a Space, so it carries no Space `pubsub#type`.
+    #[must_use]
+    pub fn community_calendar() -> Self {
+        Self {
+            node_type: None,
+            ..Self::spaces_public()
+        }
+    }
+
     /// XEP-0503 configuration for a private Space node.
     #[must_use]
     pub fn spaces_private() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
             publish_model: PublishModel::Publishers,
-            node_type: None,
+            node_type: Some(PubSubNodeType::Space),
             max_items: u32::MAX,
             persist_items: true,
             deliver_payloads: true,
