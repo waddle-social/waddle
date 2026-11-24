@@ -123,6 +123,7 @@ pub(super) async fn download_handler(
 }
 
 /// Media types that are safe to render inline from the server origin.
+/// `text/plain` is inert because every response also carries `nosniff`.
 ///
 /// Anything else (HTML, SVG, XML, scripts, PDF, unknown types) is forced to
 /// download so user-supplied content can never execute in the server origin
@@ -130,7 +131,13 @@ pub(super) async fn download_handler(
 fn is_safe_inline_type(essence: &str) -> bool {
     matches!(
         essence,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/bmp"
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "text/plain"
     ) || essence.starts_with("audio/")
         || essence.starts_with("video/")
 }
