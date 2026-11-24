@@ -221,7 +221,6 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam(),
         Feature::mam_extended(),
         Feature::push(),
-        Feature::bookmarks_compat(),
         Feature::vcard4(),
     ]
 }
@@ -315,11 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn pep_features_do_not_advertise_xep0402_compat_pep() {
-        // XEP-0402 §Compatibility: #compat-pep promises a PEP storage:bookmarks
-        // bridge, which this server does not implement.
+    fn pep_features_do_not_advertise_xep0402_compat_features() {
+        // The XEP-0048 bridges are not implemented, so neither compat feature
+        // may be advertised.
         let features = pep_features();
+        assert!(!features.contains(&Feature::new("urn:xmpp:bookmarks:1#compat")));
         assert!(!features.contains(&Feature::new("urn:xmpp:bookmarks:1#compat-pep")));
-        assert!(features.contains(&Feature::bookmarks_compat()));
     }
 }

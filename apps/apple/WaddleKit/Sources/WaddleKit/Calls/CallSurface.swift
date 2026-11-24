@@ -64,11 +64,11 @@ public extension CallSurface {
     }
 
     /// One surface draws a call's video and one set of controls is in reach:
-    /// the shell's dock yields to a stage, and a sheet's dock, which covers
-    /// whatever has the video, keeps only the controls of a call in session.
+    /// the shell's dock yields to a stage and to the sidebar's card, and a
+    /// sheet's dock, which covers them, keeps only the controls of a call in session.
     func dockContent(isInSession: Bool, isInSheet: Bool) -> DockContent {
         if isInSheet { return isInSession ? .controls : .call }
-        return showsStage ? .hidden : .call
+        return self == .dock ? .call : .hidden
     }
 
     /// Where the stage stands in the pane it shares with its conversation.
@@ -134,9 +134,11 @@ public extension CallSurface {
     ///
     /// - Parameter pane: the pane the conversation and a stage would share,
     ///   once it has been laid out. A call whose stage it cannot hold stays in the dock.
+    /// - Parameter isSidebarShown: the sidebar is on screen to hold the card
+    ///   of a call whose conversation is not open; otherwise the dock keeps it.
     static func placement(
         of state: CallState, open selection: ConversationID?, platform: Platform, pane: CGSize?,
-        size: Size = .defaultSize
+        size: Size = .defaultSize, isSidebarShown: Bool = true
     ) -> Self {
         let conversation = state.sessionConversation
         let surface = placement(
@@ -144,6 +146,7 @@ public extension CallSurface {
             platform: platform, size: size
         )
         if surface.showsStage, let pane, stageArrangement(for: size, in: pane, splitPercent: nil) == nil { return .dock }
+        if surface == .sidebarCard, !isSidebarShown { return .dock }
         return surface
     }
 }

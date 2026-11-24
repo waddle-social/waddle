@@ -3,7 +3,6 @@ package xmpp_e2e_scenarios
 scenario: #Scenario & {
 	name: "xep-storage-pubsub-pep"
 	xeps: [
-		"XEP-0048",
 		"XEP-0049",
 		"XEP-0054",
 		"XEP-0060",
@@ -69,9 +68,9 @@ scenario: #Scenario & {
 				"http://jabber.org/protocol/pubsub#subscribe",
 				"http://jabber.org/protocol/pubsub#filtered-notifications",
 				"urn:xmpp:push:0",
-				"urn:xmpp:bookmarks:1#compat",
 			]
 			absent: [
+				"urn:xmpp:bookmarks:1#compat",
 				"urn:xmpp:bookmarks:1#compat-pep",
 				"urn:xmpp:pep-vcard-conversion:0",
 				"http://jabber.org/protocol/pubsub#config-node-max",
@@ -112,11 +111,11 @@ scenario: #Scenario & {
 				children: [
 					#XmlElement & {
 						name: "storage"
-						ns:   "storage:bookmarks"
+						ns:   "urn:waddle:test:private-storage"
 						children: [
 							#XmlElement & {
 								name: "conference"
-								ns:   "storage:bookmarks"
+								ns:   "urn:waddle:test:private-storage"
 								attrs: {
 									name: "CUE Room"
 									jid:  roomJid
@@ -136,7 +135,7 @@ scenario: #Scenario & {
 				name: "query"
 				ns:   "jabber:iq:private"
 				children: [
-					#XmlElement & {name: "storage", ns: "storage:bookmarks"},
+					#XmlElement & {name: "storage", ns: "urn:waddle:test:private-storage"},
 				]
 			}
 		},
@@ -144,7 +143,7 @@ scenario: #Scenario & {
 			target:   adminPhone
 			id:       "cue-private-get"
 			type:     "result"
-			contains: ["storage:bookmarks", roomJid]
+			contains: ["urn:waddle:test:private-storage", roomJid]
 		},
 		#SendIq & {
 			actor: adminPhone

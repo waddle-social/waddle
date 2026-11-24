@@ -318,12 +318,6 @@ impl Feature {
         Self::new("urn:ietf:params:xml:ns:xcal")
     }
 
-    /// Create a discovery feature advertisement for `urn:xmpp:bookmarks:1#compat`.
-    #[must_use]
-    pub fn bookmarks_compat() -> Self {
-        Self::new("urn:xmpp:bookmarks:1#compat")
-    }
-
     /// Create a discovery feature advertisement for `urn:xmpp:carbons:rules:0`.
     #[must_use]
     pub fn carbons_rules() -> Self {

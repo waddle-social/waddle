@@ -65,5 +65,17 @@ final class ShellScreenSnapshotTests: XCTestCase {
         }
         try await assertScreenSnapshot(of: sample.host(screen), size: .callDesktop)
     }
+
+    /// Away from its conversation, a call in session is a card in the sidebar and the dock is gone.
+    func testCallCardInTheSidebarAwayFromItsConversation() async throws {
+        let sample = SampleSession(account: SampleSession.anaOnThisMac)
+        await sample.answerCall(from: SampleSession.priya, video: true)
+        sample.navigation.selection = nil
+        let screen = VStack(spacing: 0) {
+            CallDock()
+            SplitShell()
+        }
+        try await assertScreenSnapshot(of: sample.host(screen), size: .callDesktop)
+    }
     #endif
 }

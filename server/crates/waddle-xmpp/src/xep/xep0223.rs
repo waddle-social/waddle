@@ -17,8 +17,6 @@ pub const FEATURE_PERSISTENT_ITEMS: &str = "http://jabber.org/protocol/pubsub#pe
 pub fn is_private_storage_node(node: &str) -> bool {
     // Bookmarks (XEP-0402) - private by default
     node == "urn:xmpp:bookmarks:1"
-    // Legacy bookmarks
-    || node == "storage:bookmarks"
 }
 
 #[cfg(test)]
@@ -28,7 +26,7 @@ mod tests {
     #[test]
     fn test_is_private_storage_node() {
         assert!(is_private_storage_node("urn:xmpp:bookmarks:1"));
-        assert!(is_private_storage_node("storage:bookmarks"));
+        assert!(!is_private_storage_node("storage:bookmarks"));
         assert!(!is_private_storage_node("urn:xmpp:avatar:data"));
         assert!(!is_private_storage_node("some:custom:node"));
     }

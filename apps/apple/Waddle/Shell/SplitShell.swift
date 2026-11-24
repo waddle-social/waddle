@@ -7,12 +7,13 @@ struct SplitShell: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(CallStageModel.self) private var callStage
+    @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @CallPlatform private var callPlatform
     @State private var columnVisibility = NavigationSplitViewVisibility.all
 
     /// A full-screen call has the window to itself: no sidebar, toolbar or inspector.
     private var isCallFullScreen: Bool {
-        callStage.surface(of: session.calls.state, open: navigation.selection, platform: callPlatform) == .fullscreen
+        callStage.surface(of: session.calls.state, open: navigation.selection, platform: callPlatform, in: layout) == .fullscreen
     }
 
     var body: some View {
@@ -41,6 +42,12 @@ struct SplitShell: View {
             // opening another conversation, comes back expanded.
             guard !isFullScreen, let sid = session.calls.state.sid else { return }
             callStage.update(sid) { $0.size = $0.size.afterFullscreenExit }
+        }
+        .onChange(of: columnVisibility, initial: true) { _, columns in
+            layout?.sidebarColumnIsShown = columns != .detailOnly
+        }
+        .onChange(of: callPlatform, initial: true) { _, platform in
+            layout?.shellPlatform = platform
         }
         .callFullScreen(isCallFullScreen) {
             // The window left full screen by its own button: the call steps down with it.

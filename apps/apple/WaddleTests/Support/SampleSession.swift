@@ -22,6 +22,8 @@ final class SampleSession {
     let coordinator: SessionCoordinator
     let navigation = NavigationModel()
     let callStage: CallStageModel
+    /// The one window a test draws.
+    let callLayout = CallWindowLayout()
     let app = AppState()
 
     /// - Parameter account: Ana, unless the test needs her on a named device.
@@ -176,5 +178,6 @@ final class SampleSession {
             .environment(coordinator)
             .environment(navigation)
             .environment(callStage)
+            .environment(callLayout)
     }
 }
