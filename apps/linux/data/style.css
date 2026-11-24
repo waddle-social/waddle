@@ -179,3 +179,28 @@ button.reaction:checked {
   box-shadow: none;
   border: none;
 }
+
+/* Unread overview: one card per room or DM. */
+.inbox-card {
+  padding: 8px;
+}
+
+.inbox-message {
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.inbox-thread-heading {
+  margin-top: 4px;
+}
+
+.mention-badge {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-color);
+  color: var(--accent-color);
+  font-size: 0.8em;
+  font-weight: 700;
+}
