@@ -156,8 +156,19 @@ private struct CallTilePicture: View, Equatable {
 /// The last cell of a full gallery: how many people have no tile (web's "+N more").
 struct CallOverflowTile: View {
     let hiddenCount: Int
+    /// `nil` while the list is already open.
+    var showParticipants: (@MainActor () -> Void)?
 
     var body: some View {
+        Button { showParticipants?() } label: { face }
+            .buttonStyle(.plain)
+            .disabled(showParticipants == nil)
+            .accessibilityLabel(Text(hiddenCount == 1 ? "1 more person" : "\(hiddenCount) more people"))
+            .accessibilityHint(Text("Shows everyone in the call"))
+            .help("Show everyone in the call")
+    }
+
+    private var face: some View {
         VStack(spacing: Theme.Spacing.xs) {
             Text("+\(hiddenCount)")
                 .huddleText(Theme.Typography.title.sized(22).weight(700))
@@ -168,7 +179,6 @@ struct CallOverflowTile: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(CallTileView.Metrics.shape.fill(Theme.Colors.surface2))
-        .accessibilityElement()
-        .accessibilityLabel(Text(hiddenCount == 1 ? "1 more person" : "\(hiddenCount) more people"))
+        .contentShape(CallTileView.Metrics.shape)
     }
 }

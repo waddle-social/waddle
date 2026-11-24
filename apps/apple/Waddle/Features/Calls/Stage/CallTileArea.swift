@@ -9,6 +9,8 @@ struct CallTileArea: View {
     let presentation: CallStagePresentation
     var promoted: String?
     let source: CallTileSource
+    /// Opens the list of everyone, for the people the gallery has no cell for.
+    var showParticipants: (@MainActor () -> Void)?
 
     /// The most gallery cells, the "+N more" cell included: eight people and
     /// the rest. Set by a measurement still to be done: on a Mac LiveKit
@@ -57,7 +59,7 @@ struct CallTileArea: View {
                         Group {
                             switch cell {
                             case .tile(let tile): self.tile(tile)
-                            case .overflow(let count): CallOverflowTile(hiddenCount: count)
+                            case .overflow(let count): CallOverflowTile(hiddenCount: count, showParticipants: showParticipants)
                             }
                         }
                         .frame(width: width, height: height)

@@ -26,6 +26,10 @@ struct CallStageView: View {
     /// How much of the window the stage has, for the buttons that change it.
     var size = CallSurface.Size.split
     var escapeStepsDown = true
+    /// The participants panel's rows while it is open.
+    var participants: [CallParticipantRow]?
+    /// The stage is too narrow for tiles and the panel side by side: the panel takes the tiles' place.
+    var participantsCoverTiles = false
     var isMicrophoneOn = false
     var isCameraOn = false
     /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
@@ -49,16 +53,31 @@ struct CallStageView: View {
                     .padding(.horizontal, Theme.Spacing.l)
                     .padding(.bottom, Theme.Spacing.s)
             }
-            CallTileArea(
-                tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource
-            )
+            HStack(spacing: Theme.Spacing.m) {
+                if participants == nil || !participantsCoverTiles {
+                    CallTileArea(
+                        tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
+                        showParticipants: participants == nil ? actions.toggleParticipants : nil
+                    )
+                }
+                if let participants {
+                    CallParticipantsPanel(
+                        rows: participants, setVolume: actions.setVolume, resetVolumes: actions.resetVolumes,
+                        close: actions.toggleParticipants
+                    )
+                    .frame(width: participantsCoverTiles ? nil : CallParticipantsPanel.width)
+                    .transition(.opacity)
+                }
+            }
+            .huddleAnimation(.settle, value: participants == nil)
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, WaddleTokens.Spacing.s1Half)
             .padding(.bottom, Theme.Spacing.m)
             CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
-                isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown, actions: actions
+                isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
+                showsParticipants: participants != nil, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)
