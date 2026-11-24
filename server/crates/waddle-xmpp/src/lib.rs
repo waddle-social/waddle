@@ -60,9 +60,7 @@ pub use app_state::{
     AppState, ScramCredentials, Session, SpaceAccessModel, SpaceDetails, UserDirectoryEntry,
 };
 
-pub use error::{
-    generate_stream_error, stream_errors, StanzaErrorCondition, StanzaErrorType, XmppError,
-};
+pub use error::{StanzaErrorCondition, StanzaErrorType, XmppError};
 pub use parser::ns;
 pub use postgres_identity::{
     ClusterColocationIdentities, PostgresBoundaryIdentity, PostgresDatabaseIdentity,

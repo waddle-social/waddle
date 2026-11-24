@@ -486,23 +486,3 @@ impl std::fmt::Display for StanzaErrorType {
         write!(f, "{}", self.as_str())
     }
 }
-
-/// Generate a stream error and close tag.
-///
-/// Stream errors are fatal and must be followed by closing the stream.
-pub fn generate_stream_error(condition: &str, text: Option<&str>) -> String {
-    let mut error = format!(
-        "<stream:error><{} xmlns='urn:ietf:params:xml:ns:xmpp-streams'/>",
-        condition
-    );
-
-    if let Some(t) = text {
-        error.push_str(&format!(
-            "<text xmlns='urn:ietf:params:xml:ns:xmpp-streams' xml:lang='en'>{}</text>",
-            t
-        ));
-    }
-
-    error.push_str("</stream:error></stream:stream>");
-    error
-}
