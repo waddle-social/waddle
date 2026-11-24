@@ -104,7 +104,7 @@ async fn handle_xmpp_frame_malformed_sasl_response_returns_malformed_request() {
     let mut conn = WsConnState::new();
 
     let responses = handle_xmpp_frame(
-        r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#,
+        r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><x/></response>"#,
         "example.com",
         state.as_ref(),
         &mut conn,
@@ -1015,139 +1015,6 @@ async fn handle_xmpp_frame_invalid_iq_result_returns_no_response() {
 }
 
 #[tokio::test]
-async fn handle_xmpp_frame_malformed_xml_iq_request_preserves_legacy_error() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq id="broken-iq" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='broken-iq'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_ignores_type_suffix_attributes() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq id="req-1" mimetype="result" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-1'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_recovers_attrs_with_spaces_and_gt() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq note="1 > 0" id = "req-2" type = "get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-2'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_and_keeps_scanning() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus=x id="req-3" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-3'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_skips_unquoted_attr_with_slashes() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus=http://x id="req-4" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-4'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_keeps_id_after_empty_attr_value() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus= id="req-5" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-5'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_recovers_unquoted_type_value() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=get id="req-6"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-6'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
 async fn handle_xmpp_frame_wrong_namespace_iq_stays_silent() {
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
@@ -1161,262 +1028,6 @@ async fn handle_xmpp_frame_wrong_namespace_iq_stays_silent() {
         .await;
 
     assert!(responses.is_empty(), "expected no response: {responses:?}");
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_self_closing_iq_result_stays_silent() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=result/>"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert!(responses.is_empty(), "expected no response: {responses:?}");
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_skips_url_like_attr_with_equals() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus=http://x=y id="req-7" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-7'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_does_not_shadow_real_type_attr() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq prev=type=result id="req-8" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-8'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_ignores_embedded_quoted_type_in_broken_value() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq prev=type="result" id="req-9" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-9'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_prefers_later_quoted_type_attr() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=result id="req-10" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-10'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_prefers_later_unquoted_type_attr() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=result type=get id="req-10b"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-10b'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_keeps_type_when_later_attr_is_truncated() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=get id="req-11" bogus="#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-11'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_keeps_unquoted_type_when_later_quote_is_unterminated() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type=get id="req-12" to="alice@example.com"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains("type='error'"));
-    assert!(responses[0].contains("id='req-12'"));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_unescapes_recovered_id() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq id="a&amp;b" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id='a&amp;b'"#));
-    assert!(!responses[0].contains(r#"id='a&amp;amp;b'"#));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_recovers_later_unquoted_type_attr() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus= type=get id="req-13"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id='req-13'"#));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_recovers_later_spaced_quoted_type_attr() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq bogus= type = "get" id="req-13b"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id='req-13b'"#));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_id_attr_as_type_value() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq type= id="req-14"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert!(responses.is_empty(), "expected no response: {responses:?}");
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_does_not_treat_next_type_attr_as_id_value() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq id= type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(!responses[0].contains(r#"id='type=&quot;get&quot;'"#));
-    assert!(responses[0].contains("feature-not-implemented"));
-}
-
-#[tokio::test]
-async fn handle_xmpp_frame_malformed_iq_keeps_invalid_numeric_entity_escaped() {
-    let state = create_test_websocket_state().await;
-    let mut conn = WsConnState::new();
-
-    let responses = handle_xmpp_frame(
-        r#"<iq id="&#1;" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
-        "example.com",
-        state.as_ref(),
-        &mut conn,
-    )
-    .await;
-
-    assert_eq!(responses.len(), 1, "expected one response: {responses:?}");
-    assert!(responses[0].contains(r#"id='&amp;#1;'"#));
-    assert!(responses[0].contains("feature-not-implemented"));
 }
 
 #[tokio::test]
@@ -1442,4 +1053,54 @@ async fn handle_xmpp_frame_ping_roundtrips_through_sans_io_path() {
         iq.split().1,
         xmpp_parsers::iq::IqPayload::Result(None)
     ));
+}
+
+#[tokio::test]
+async fn handle_xmpp_frame_not_well_formed_frame_closes_stream_with_stream_error() {
+    for frame in [
+        r#"<iq id="broken-iq" type="get"><ping xmlns="urn:xmpp:ping"></iq"#,
+        r#"<response xmlns="urn:ietf:params:xml:ns:xmpp-sasl">not-closed"#,
+        r#"<message to="a@example.com"><body>x</message>"#,
+        "not xml at all",
+    ] {
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+        let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+        conn.phase = ConnectionPhase::ready(jid, false);
+        conn.begin_server_stream_open_response();
+
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(responses.len(), 2, "{frame}: {responses:?}");
+        assert!(
+            responses[0].contains("not-well-formed") && responses[0].contains("stream:error"),
+            "{frame}: {responses:?}"
+        );
+        assert!(responses[1].contains("close"), "{frame}: {responses:?}");
+        assert!(
+            matches!(conn.phase, ConnectionPhase::Closing { .. }),
+            "{frame}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handle_xmpp_frame_invalid_iq_request_returns_bad_request() {
+    for frame in [
+        r#"<iq id="two" type="get"><ping xmlns="urn:xmpp:ping"/><ping xmlns="urn:xmpp:ping"/></iq>"#,
+        r#"<iq id="none" type="set"/>"#,
+    ] {
+        let state = create_test_websocket_state().await;
+        let mut conn = WsConnState::new();
+
+        let responses = handle_xmpp_frame(frame, "example.com", state.as_ref(), &mut conn).await;
+
+        assert_eq!(responses.len(), 1, "{frame}: {responses:?}");
+        assert!(responses[0].contains("type='error'"), "{responses:?}");
+        assert!(responses[0].contains("bad-request"), "{responses:?}");
+        assert!(
+            !responses[0].contains("feature-not-implemented"),
+            "{responses:?}"
+        );
+    }
 }

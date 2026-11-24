@@ -1,9 +1,6 @@
-use super::handlers::iq::errors::jid_malformed_iq_error;
+use super::handlers::iq::errors::{bad_request_iq_error, jid_malformed_iq_error};
 use super::transport_xml::{element_to_xml, sasl2_failure_element, sasl_failure_xml};
-use super::{
-    build_iq_error_xml_typed, feature_not_implemented_iq_error, inject_client_ns_if_missing,
-    Element, FromStr, ParseError,
-};
+use super::{build_iq_error_xml_typed, inject_client_ns_if_missing, Element, FromStr, ParseError};
 
 pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     if !matches!(
@@ -109,7 +106,7 @@ pub(super) fn parse_error_responses(frame: &str, err: &ParseError) -> Option<Vec
         (_, ParseError::IdentityProfile { kind, .. }) => {
             identity_profile_error_response(frame, kind).map(|response| vec![response])
         }
-        (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. } | ParseError::InvalidXml(_)) => {
+        (Some("iq"), ParseError::InvalidStanza { kind: "iq", .. }) => {
             invalid_iq_parse_error_response(frame).map(|response| vec![response])
         }
         _ => None,
@@ -131,47 +128,26 @@ fn parse_error_root_name(frame: &str) -> Option<&str> {
     Some(&rest[..name_end])
 }
 
+/// The `<bad-request/>` error (RFC 6120 §8.3.3.1) for an IQ get or set that
+/// is well-formed XML but violates the IQ schema: the payload is missing,
+/// repeated, or otherwise cannot be processed.
+///
+/// An IQ result or error is never answered (RFC 6120 §8.2.3). The error
+/// keeps the request's `id`, and swaps `to` and `from` so it returns to the
+/// sender.
 fn invalid_iq_parse_error_response(frame: &str) -> Option<String> {
-    let patched = inject_client_ns_if_missing(frame);
-    let parsed = Element::from_str(&patched).ok();
-    let namespace = parsed
-        .as_ref()
-        .map(|element| element.ns().to_string())
-        .or_else(|| decoded_raw_xml_attr_value(frame, "xmlns"))
-        .unwrap_or(waddle_xmpp::ns::JABBER_CLIENT.to_string());
-    if namespace.as_str() != waddle_xmpp::ns::JABBER_CLIENT {
+    let iq = Element::from_str(&inject_client_ns_if_missing(frame)).ok()?;
+    if iq.ns() != waddle_xmpp::ns::JABBER_CLIENT {
         return None;
     }
-    let iq_type = parsed
-        .as_ref()
-        .and_then(|element| element.attr("type"))
-        .map(ToString::to_string)
-        .or_else(|| decoded_raw_xml_attr_value(frame, "type"))?;
-    if matches!(iq_type.as_str(), "result" | "error") {
+    if !matches!(iq.attr("type"), Some("get" | "set")) {
         return None;
     }
-
-    let id = parsed
-        .as_ref()
-        .and_then(|element| element.attr("id"))
-        .map(ToString::to_string)
-        .or_else(|| decoded_raw_xml_attr_value(frame, "id"))
-        .unwrap_or_default();
-    let response_from = parsed
-        .as_ref()
-        .and_then(|element| element.attr("to"))
-        .map(ToString::to_string)
-        .or_else(|| decoded_raw_xml_attr_value(frame, "to"));
-    let response_to = parsed
-        .as_ref()
-        .and_then(|element| element.attr("from"))
-        .map(ToString::to_string)
-        .or_else(|| decoded_raw_xml_attr_value(frame, "from"));
     Some(build_iq_error_xml_typed(
-        &id,
-        response_from.as_deref(),
-        response_to.as_deref(),
-        feature_not_implemented_iq_error("Requested feature not implemented."),
+        iq.attr("id").unwrap_or_default(),
+        iq.attr("to"),
+        iq.attr("from"),
+        bad_request_iq_error("The IQ does not conform to the stanza schema."),
     ))
 }
 
