@@ -52,19 +52,23 @@ final class CallSettingsSnapshotTests: XCTestCase {
     /// Our camera going out and someone's screen coming in, as the tracker writes them.
     func testVideoStatistics() async throws {
         var tracker = CallVideoStatsTracker()
+        func reading(
+            _ key: String, _ label: String, _ source: CallVideoSource, _ direction: CallVideoSample.Direction,
+            size: (Int, Int), fps: Double, bytesPerSecond: Double, loss: Double, at second: Double
+        ) -> CallVideoSample {
+            var sample = CallVideoSample(
+                key: key, label: label, source: source, direction: direction, bytes: UInt64(bytesPerSecond * second),
+                timestamp: 1_700_000_000_000 + second * 1000
+            )
+            (sample.width, sample.height, sample.framesPerSecond) = (size.0, size.1, fps)
+            (sample.lossFraction, sample.roundTrip) = (loss, 0.038)
+            (sample.codec, sample.candidateType, sample.transport) = ("video/VP9", "srflx", "udp")
+            return sample
+        }
         func readings(second: Double) -> [CallVideoSample] {
             [
-                CallVideoSample(
-                    key: "me:camera:sent", label: "You", source: .camera, direction: .sent, width: 1280, height: 720,
-                    framesPerSecond: 30, bytes: UInt64(150_000 * second), timestamp: 1_700_000_000_000 + second * 1000,
-                    lossFraction: 0.004, roundTrip: 0.038, codec: "video/VP9", candidateType: "srflx", transport: "udp"
-                ),
-                CallVideoSample(
-                    key: "linus:screen:received", label: "linus", source: .screen, direction: .received, width: 2560,
-                    height: 1440, framesPerSecond: 14.6, bytes: UInt64(420_000 * second),
-                    timestamp: 1_700_000_000_000 + second * 1000, lossFraction: 0.021, roundTrip: 0.038,
-                    codec: "video/VP9", candidateType: "srflx", transport: "udp"
-                ),
+                reading("me:camera:sent", "You", .camera, .sent, size: (1280, 720), fps: 30, bytesPerSecond: 150_000, loss: 0.004, at: second),
+                reading("linus:screen:received", "linus", .screen, .received, size: (2560, 1440), fps: 14.6, bytesPerSecond: 420_000, loss: 0.021, at: second),
             ]
         }
         _ = tracker.update(with: readings(second: 1))

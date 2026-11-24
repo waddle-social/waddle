@@ -193,24 +193,44 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         await measureNewVideoTracks()
     }
 
+    /// One video stream of the call and the track that carries it.
+    private struct VideoStream {
+        let key: String
+        let label: String
+        let source: CallVideoSource
+        let direction: CallVideoSample.Direction
+        let track: Track
+    }
+
     /// Every video stream of the call now: ours first, then the others'.
-    private var videoStreams: [(key: String, label: String, source: CallVideoSource, direction: CallVideoSample.Direction, track: Track)] {
+    private var videoStreams: [VideoStream] {
         guard let room else { return [] }
-        let own = room.localParticipant.identity?.stringValue ?? joinedIdentity ?? ""
-        var streams: [(String, String, CallVideoSource, CallVideoSample.Direction, Track)] = []
+        let own: String = room.localParticipant.identity?.stringValue ?? joinedIdentity ?? ""
+        var streams: [VideoStream] = []
         for publication in room.localParticipant.localVideoTracks where !publication.isMuted {
             guard let track = publication.track else { continue }
             let source: CallVideoSource = publication.source == .screenShareVideo ? .screen : .camera
-            streams.append(("\(own):\(source):sent", "You", source, .sent, track))
+            streams.append(VideoStream(key: "\(own):\(source):sent", label: "You", source: source, direction: .sent, track: track))
         }
-        func name(_ identity: String) -> String { JID(parsing: identity)?.bare.localpart ?? identity }
-        for (identity, track) in cameraTracks.sorted(by: { $0.key < $1.key }) where identity != own {
-            if let track = track as? Track { streams.append(("\(identity):camera:received", name(identity), .camera, .received, track)) }
+        for (identity, camera) in cameraTracks.sorted(by: { $0.key < $1.key }) where identity != own {
+            guard let track = camera as? Track else { continue }
+            streams.append(VideoStream(
+                key: "\(identity):camera:received", label: Self.name(of: identity), source: .camera, direction: .received,
+                track: track
+            ))
         }
         for (identity, screen) in screenTracks.sorted(by: { $0.key < $1.key }) {
-            if let track = screen.track as? Track { streams.append(("\(identity):screen:received", name(identity), .screen, .received, track)) }
+            guard let track = screen.track as? Track else { continue }
+            streams.append(VideoStream(
+                key: "\(identity):screen:received", label: Self.name(of: identity), source: .screen, direction: .received,
+                track: track
+            ))
         }
-        return streams.map { (key: $0.0, label: $0.1, source: $0.2, direction: $0.3, track: $0.4) }
+        return streams
+    }
+
+    private static func name(of identity: String) -> String {
+        JID(parsing: identity)?.bare.localpart ?? identity
     }
 
     private func measureNewVideoTracks() async {
@@ -226,9 +246,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 return
             }
         }
-        // A track that is gone is no longer held.
+        // A track that is no longer a stream, as a camera turned off, stops
+        // being measured: muting does not stop the SDK's timer, and a track
+        // only dropped from here would go on polling for the rest of the call.
         let live = Set(videoStreams.map { ObjectIdentifier($0.track) })
-        measuredTracks = measuredTracks.filter { live.contains($0.key) }
+        for (id, track) in measuredTracks where !live.contains(id) {
+            measuredTracks[id] = nil
+            await track.set(reportStatistics: false)
+        }
     }
 
     func videoSamples() async -> [CallVideoSample] {
@@ -236,53 +261,66 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // A camera turned on while someone is looking is measured from then on.
         await measureNewVideoTracks()
         guard measuresVideo else { return [] }
-        return videoStreams.map { stream in
-            var sample = CallVideoSample(
-                key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
-            )
-            guard let statistics = stream.track.statistics else { return sample }
-            sample.codec = statistics.codec.first { $0.mimeType?.hasPrefix("video/") == true }?.mimeType
-            let candidate = statistics.localIceCandidate
-            sample.candidateType = candidate?.candidateType?.rawValue
-            // A relay's own protocol is its leg to the peer, nearly always
-            // UDP; what tells a TCP fallback is how we reach the relay (as web `iceCandidatePath`).
-            sample.transport = candidate?.candidateType == .relay
-                ? candidate?.relayProtocol.map { $0 == .udp ? "udp" : "tcp" }
-                : candidate?.protocol
-            switch stream.direction {
-            case .sent:
-                // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
-                let layers = statistics.outboundRtpStream
-                let top = layers.max { ($0.frameWidth ?? 0) * ($0.frameHeight ?? 0) < ($1.frameWidth ?? 0) * ($1.frameHeight ?? 0) }
-                sample.width = top?.frameWidth.map { Int($0) }
-                sample.height = top?.frameHeight.map { Int($0) }
-                sample.framesPerSecond = top?.framesPerSecond
-                sample.timestamp = top?.timestamp ?? 0
-                // A backup codec for those who cannot decode the first has a sender of its own.
-                let backups = stream.track.simulcastStatistics.values.flatMap(\.outboundRtpStream)
-                let sent = (layers + backups).compactMap(\.bytesSent)
-                sample.bytes = sent.isEmpty ? nil : sent.reduce(0, +)
-                // The far end's word on what arrived, over every layer as the
-                // web counts it: one layer's report alone jumps about.
-                let reports = statistics.remoteInboundRtpStream
-                let lost = reports.compactMap(\.packetsLost).reduce(0, +)
-                let packets = layers.compactMap(\.packetsSent).reduce(0, +)
-                if !reports.isEmpty, packets > 0 { sample.lossFraction = Double(max(lost, 0)) / Double(packets) }
-                sample.roundTrip = reports.compactMap(\.roundTripTime).max()
-            case .received:
-                let stream = statistics.inboundRtpStream.first
-                sample.width = stream?.frameWidth.map { Int($0) }
-                sample.height = stream?.frameHeight.map { Int($0) }
-                sample.framesPerSecond = stream?.framesPerSecond
-                sample.timestamp = stream?.timestamp ?? 0
-                sample.bytes = stream?.bytesReceived
-                if let lost = stream?.packetsLost, let received = stream?.packetsReceived, Int64(received) + lost > 0 {
-                    sample.lossFraction = Double(max(lost, 0)) / Double(Int64(received) + max(lost, 0))
-                }
-                sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
-            }
-            return sample
+        return videoStreams.map(Self.sample(of:))
+    }
+
+    private static func sample(of stream: VideoStream) -> CallVideoSample {
+        var sample = CallVideoSample(
+            key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
+        )
+        guard let statistics = stream.track.statistics else { return sample }
+        sample.codec = statistics.codec.first { $0.mimeType?.hasPrefix("video/") == true }?.mimeType
+        let candidate: LocalIceCandidateStatistics? = statistics.localIceCandidate
+        sample.candidateType = candidate?.candidateType?.rawValue
+        // A relay's own protocol is its leg to the peer, nearly always UDP;
+        // what tells a TCP fallback is how we reach the relay (as web `iceCandidatePath`).
+        if candidate?.candidateType == .relay {
+            sample.transport = candidate?.relayProtocol.map { $0 == .udp ? "udp" : "tcp" }
+        } else {
+            sample.transport = candidate?.protocol
         }
+        switch stream.direction {
+        case .sent: fill(&sample, sentBy: stream.track, statistics)
+        case .received: fill(&sample, received: statistics)
+        }
+        return sample
+    }
+
+    private static func fill(_ sample: inout CallVideoSample, sentBy track: Track, _ statistics: TrackStatistics) {
+        // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
+        let layers: [OutboundRtpStreamStatistics] = statistics.outboundRtpStream
+        func area(_ layer: OutboundRtpStreamStatistics) -> UInt { (layer.frameWidth ?? 0) * (layer.frameHeight ?? 0) }
+        let top: OutboundRtpStreamStatistics? = layers.max { area($0) < area($1) }
+        sample.width = top?.frameWidth.map { Int($0) }
+        sample.height = top?.frameHeight.map { Int($0) }
+        sample.framesPerSecond = top?.framesPerSecond
+        sample.timestamp = top?.timestamp ?? 0
+        // A backup codec for those who cannot decode the first has a sender of its own.
+        let backups: [OutboundRtpStreamStatistics] = track.simulcastStatistics.values.flatMap(\.outboundRtpStream)
+        let sent: [UInt64] = (layers + backups).compactMap(\.bytesSent)
+        sample.bytes = sent.isEmpty ? nil : sent.reduce(0, +)
+        // The far end's word on what arrived, over every layer as the web
+        // counts it: one layer's report alone jumps about.
+        let reports: [RemoteInboundRtpStreamStatistics] = statistics.remoteInboundRtpStream
+        let lost: Int64 = reports.compactMap(\.packetsLost).reduce(0, +)
+        let packets: UInt64 = layers.compactMap(\.packetsSent).reduce(0, +)
+        if !reports.isEmpty, packets > 0 { sample.lossFraction = Double(max(lost, 0)) / Double(packets) }
+        sample.roundTrip = reports.compactMap(\.roundTripTime).max()
+    }
+
+    private static func fill(_ sample: inout CallVideoSample, received statistics: TrackStatistics) {
+        let stream: InboundRtpStreamStatistics? = statistics.inboundRtpStream.first
+        sample.width = stream?.frameWidth.map { Int($0) }
+        sample.height = stream?.frameHeight.map { Int($0) }
+        sample.framesPerSecond = stream?.framesPerSecond
+        sample.timestamp = stream?.timestamp ?? 0
+        sample.bytes = stream?.bytesReceived
+        if let lost = stream?.packetsLost, let received = stream?.packetsReceived {
+            let missing: Int64 = max(lost, 0)
+            let total: Int64 = Int64(received) + missing
+            if total > 0 { sample.lossFraction = Double(missing) / Double(total) }
+        }
+        sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
     }
 
     // MARK: - Audio processing

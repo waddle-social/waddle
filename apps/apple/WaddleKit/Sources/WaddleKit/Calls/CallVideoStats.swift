@@ -29,25 +29,16 @@ public struct CallVideoSample: Equatable, Sendable {
     /// "udp" or "tcp".
     public var transport: String?
 
+    /// A reading with nothing measured yet; what the engine reports is filled in after.
     public init(
-        key: String, label: String, source: CallVideoSource, direction: Direction, width: Int? = nil, height: Int? = nil,
-        framesPerSecond: Double? = nil, bytes: UInt64? = nil, timestamp: Double, lossFraction: Double? = nil,
-        roundTrip: TimeInterval? = nil, codec: String? = nil, candidateType: String? = nil, transport: String? = nil
+        key: String, label: String, source: CallVideoSource, direction: Direction, bytes: UInt64? = nil, timestamp: Double
     ) {
         self.key = key
         self.label = label
         self.source = source
         self.direction = direction
-        self.width = width
-        self.height = height
-        self.framesPerSecond = framesPerSecond
         self.bytes = bytes
         self.timestamp = timestamp
-        self.lossFraction = lossFraction
-        self.roundTrip = roundTrip
-        self.codec = codec
-        self.candidateType = candidateType
-        self.transport = transport
     }
 }
 
