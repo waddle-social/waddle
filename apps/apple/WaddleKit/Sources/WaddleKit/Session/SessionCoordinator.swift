@@ -703,7 +703,8 @@ public final class SessionCoordinator {
             cursors.forEach(applyDisplayedCursor)
             return
         }
-        if let reaction = message.inCallReaction {
+        // A message with words in it is a message, whatever else it carries.
+        if let reaction = message.inCallReaction, message.body == nil {
             // For the call's stage and nowhere else: never a row, an unread or an alert.
             calls.receiveReaction(reaction, from: message.from, isGroupchat: message.isGroupchat)
             return

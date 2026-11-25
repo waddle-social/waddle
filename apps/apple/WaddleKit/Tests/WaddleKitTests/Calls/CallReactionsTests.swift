@@ -23,14 +23,26 @@ struct CallReactionsTests {
         #expect(ledger.nextExpiry == nil)
     }
 
-    @Test func onlySoManyShowAtOnceAndTheOldestMakeWay() {
+    /// Anyone in a room can send these as fast as they like: what is on the stage changes only so often.
+    @Test func onePastTheLimitIsNotShown() {
         var ledger = CallReactionLedger()
-        for index in 0..<(CallReactionLedger.limit + 3) {
-            ledger.received("🎉", from: ada, at: now.addingTimeInterval(Double(index) * 0.01))
+        for index in 0..<(CallReactionLedger.limit + 5) {
+            let sender = JID(parsing: "design@rooms.waddle.test/p\(index)")!
+            ledger.received("🎉", from: sender, at: now.addingTimeInterval(Double(index) * 0.01))
         }
         #expect(ledger.bursts.count == CallReactionLedger.limit)
-        #expect(ledger.bursts.first?.id == 4)
-        #expect(Set(ledger.bursts.map(\.id)).count == CallReactionLedger.limit)
+        #expect(ledger.bursts.map(\.id) == Array(1...CallReactionLedger.limit), "the first are shown out; a later one waits for nothing")
+        // When they have gone there is room again.
+        ledger.received("🎉", from: ada, at: now.addingTimeInterval(CallReactionLedger.lifetime + 1))
+        #expect(ledger.bursts.count == 1)
+    }
+
+    @Test func nobodyFillsTheStageAlone() {
+        var ledger = CallReactionLedger()
+        for _ in 0..<10 { ledger.received("👍", from: ada, at: now) }
+        #expect(ledger.bursts.count == CallReactionLedger.limitEach)
+        ledger.received("👍", from: JID(parsing: "linus@waddle.test/web")!, at: now)
+        #expect(ledger.bursts.count == CallReactionLedger.limitEach + 1)
     }
 
     @Test func eachIsSaidWithWhoseItIs() {
@@ -38,21 +50,22 @@ struct CallReactionsTests {
         ledger.received("👍", from: JID(parsing: "design@rooms.waddle.test/Ada")!, at: now)
         ledger.received("🎉", from: ada, at: now)
         ledger.received("🔥", from: nil, at: now)
-        #expect(ledger.bursts[0].spoken(inRoom: true) == "Ada reacted 👍")
-        #expect(ledger.bursts[1].spoken(inRoom: false) == "ada reacted 🎉")
-        #expect(ledger.bursts[2].spoken(inRoom: false) == "You reacted 🔥")
+        #expect(ledger.bursts[0].spoken(ownNick: "me") == "Ada reacted 👍")
+        #expect(ledger.bursts[0].spoken(ownNick: "Ada") == "You reacted 👍", "a room hands our own back under our nick")
+        #expect(ledger.bursts[1].spoken(ownNick: nil) == "ada reacted 🎉")
+        #expect(ledger.bursts[2].spoken(ownNick: nil) == "You reacted 🔥")
     }
 
     @Test func twoAtOnceRiseInDifferentPlaces() {
         var ledger = CallReactionLedger()
         ledger.received("👍", from: ada, at: now)
-        ledger.received("👍", from: ada, at: now)
+        ledger.received("👍", from: nil, at: now)
         let lanes = ledger.bursts.map(\.lane)
         #expect(abs(lanes[0] - lanes[1]) > 0.2)
         #expect(lanes.allSatisfy { (0..<1).contains($0) })
     }
 
-    @Test(arguments: ["👍", "❤️", "😂", "🔥", "👏", "🎉", "👨‍👩‍👧", "🇳🇴", "👍🏽", "1️⃣"])
+    @Test(arguments: ["👍", "❤️", "😂", "🔥", "👏", "🎉", "👨‍👩‍👧", "🇳🇴", "👍🏽", "1️⃣", "✌🏽", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"])
     func oneEmojiIsShown(_ emoji: String) {
         #expect(CallReactionLedger.isOneEmoji(emoji))
     }
@@ -64,6 +77,16 @@ struct CallReactionsTests {
         var ledger = CallReactionLedger()
         ledger.received(text, from: ada, at: now)
         #expect(ledger.bursts.isEmpty)
+    }
+
+    /// One "character" can be made of hundreds of parts, and draws as a wall of them.
+    @Test func aSingleCharacterBuiltToBeHugeIsNotAnEmoji() {
+        let stacked = "👍" + String(repeating: "\u{0301}", count: 300)
+        let joined = Array(repeating: "👨", count: 200).joined(separator: "\u{200D}")
+        let toned = "👍" + String(repeating: "🏽", count: 200)
+        for text in [stacked, joined, toned] {
+            #expect(!CallReactionLedger.isOneEmoji(text))
+        }
     }
 
     @Test func thePickersSixAreAllShown() {
@@ -116,6 +139,8 @@ struct CallReactionsTests {
             return
         }
         #expect(f.store.reactions.bursts.isEmpty, "the room hands ours back with everyone else's")
+        f.store.receiveReaction(InCallReaction(sid: "x", emoji: "👍"), from: nil, isGroupchat: true)
+        #expect(f.store.reactions.bursts.isEmpty, "from nobody is from nobody in the call")
         f.store.receiveReaction(
             InCallReaction(sid: "someone-elses", emoji: "👍"), from: JID(parsing: "\(groupRoom)/alice")!, isGroupchat: true
         )

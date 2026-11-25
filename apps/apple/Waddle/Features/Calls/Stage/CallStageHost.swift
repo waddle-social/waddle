@@ -194,20 +194,14 @@ struct CallStageHost: View {
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
             showsChat: chat?.isOpen ?? false,
-            reactions: session.calls.reactions.bursts,
+            reactions: session.calls.reactions,
+            ownNick: ownNick,
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
             tileSource: model.tileSource,
             actions: actions(for: call.sid, chat: chat)
         )
-        // Each reaction is said as it arrives, when nothing more pressing is being said.
-        .onChange(of: session.calls.reactions.bursts.last) { _, newest in
-            guard let newest else { return }
-            var text = AttributedString(newest.spoken(inRoom: call.isRoom))
-            text.accessibilitySpeechAnnouncementPriority = .low
-            AccessibilityNotification.Announcement(text).post()
-        }
         // What is in front of the person while the chat is open has been seen.
         .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
             model.update(call.sid) { $0.sawChat(upTo: newest) }
@@ -239,6 +233,11 @@ struct CallStageHost: View {
 
     /// A stage narrower than this gives the panel the tiles' place.
     private static let widthForTilesAndPanel: CGFloat = 720
+
+    /// Our nick in the room whose call the slot holds.
+    private var ownNick: String? {
+        if case .inGroup(let call) = session.calls.state { call.nick } else { nil }
+    }
 
     /// The chat of a room's call: the thread its announcement heads, with
     /// the messages of it that are loaded. A call of two has none here yet.

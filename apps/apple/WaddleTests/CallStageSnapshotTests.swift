@@ -310,7 +310,7 @@ final class CallStageSnapshotTests: XCTestCase {
         for emoji in ["👍", "🎉", "❤️"] { ledger.received(emoji, from: nil, at: now) }
         assertHuddleSnapshot(
             precision: 0.97,
-            of: CallReactionsOverlay(bursts: ledger.bursts, animates: false)
+            of: CallReactionsField(bursts: ledger.bursts, animates: false)
                 .frame(width: Self.panel.width, height: 240)
                 .background(Theme.Colors.seaDeep),
             width: Self.panel.width + 2 * Theme.Spacing.l
@@ -358,6 +358,11 @@ final class CallStageSnapshotTests: XCTestCase {
     /// Room for every button: reactions have one of their own.
     func testControlBarWithReactionsInAnExpandedStage() {
         assertBar(isHandRaised: false, size: .expanded, canReact: true)
+    }
+
+    /// The 400 pt column of a room's call: reacting goes into More, and sharing and the list of people keep their buttons.
+    func testControlBarWithReactionsInASplitRoomStage() {
+        assertBar(isHandRaised: false, size: .split, isSharingScreen: false, canReact: true)
     }
 
     func testControlBarDirect() {

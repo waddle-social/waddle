@@ -68,6 +68,11 @@ struct CallControlBar: View {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
                 endButton
             }
+            // One button too many for that column: reacting goes into More before sharing and the list of people do.
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, reactInMenu: true) }
+                endButton
+            }
             // Narrower still, or with every button there is: sharing and the list of people go there too.
             VStack(spacing: Theme.Spacing.s) {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
@@ -82,7 +87,7 @@ struct CallControlBar: View {
     private var toggles: some View { toggles(viewChoiceInMenu: false) }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool, extrasInMenu: Bool = false) -> some View {
+    private func toggles(viewChoiceInMenu: Bool, reactInMenu: Bool = false, extrasInMenu: Bool = false) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -123,7 +128,7 @@ struct CallControlBar: View {
             }
             .accessibilityAddTraits(showsChat ? .isSelected : [])
         }
-        if canReact, !extrasInMenu { reactMenu }
+        if canReact, !extrasInMenu, !reactInMenu { reactMenu }
         if !extrasInMenu {
             CallControlButton(
                 title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
@@ -132,7 +137,7 @@ struct CallControlBar: View {
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
         }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu)
+        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu, withReact: reactInMenu || extrasInMenu)
     }
 
     // MARK: - Split, expanded, full screen
@@ -220,19 +225,19 @@ struct CallControlBar: View {
         }
     }
 
-    private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
+    private func more(withViewChoice: Bool, withExtras: Bool = false, withReact: Bool = false) -> some View {
         Menu {
             if withExtras {
                 if isSharingScreen == false {
                     Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
                 }
                 Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
-                if canReact {
-                    Menu("React") { reactionChoices }
-                }
                 if let chatUnread, chatUnread == 0, !showsChat {
                     Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
                 }
+            }
+            if withReact, canReact {
+                Menu("React") { reactionChoices }
             }
             if withViewChoice {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {

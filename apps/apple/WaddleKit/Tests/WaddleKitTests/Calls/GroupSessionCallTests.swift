@@ -140,6 +140,41 @@ import Testing
             occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]), groupCall: groupCall)
     }
 
+    /// A reaction is for the call's stage: it is no row of the room, no unread and no alert.
+    @Test func aReactionInOurRoomsCallGoesToTheStageAndNowhereElse() async throws {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.start()
+        let joining = Task { await coordinator.calls.joinGroupCall(in: groupRoom, media: callAudio, nick: "alice") }
+        await eventually { port.callSends.contains(.groupPresence(groupRoom, "alice", .init(state: .preparing))) }
+        let sid = try #require(coordinator.calls.state.sid)
+        port.emit(.presence(ownPresence(groupCall: .init(isPreparing: true, media: nil))))
+        await eventually { port.callSends.contains(.groupInitiate(groupRoom, callOwn, sid, false)) }
+        port.emit(.call(CallEvent(from: JID(parsing: "calls.waddle.test/mixer")!, sid: sid,
+            kind: .sessionAccept(join: groupJoin, media: callAudio))))
+        #expect(await joining.value)
+
+        func message(body: String?, id: String) -> WireMessage {
+            var message = WireMessage(
+                type: .groupchat, from: JID(parsing: "room@muc.waddle.test/bob")!, to: callOwn,
+                identity: MessageIdentity(messageID: id, stanzaIDs: [StanzaID(id: "s-\(id)", by: groupRoom)]), body: body
+            )
+            message.inCallReaction = InCallReaction(sid: "bobs-own", emoji: "🎉")
+            return message
+        }
+        port.emit(.message(message(body: nil, id: "r1")))
+        await eventually { coordinator.calls.reactions.bursts.count == 1 }
+        let timeline = coordinator.timelines.timeline(for: .room(groupRoom))
+        #expect(timeline.items.isEmpty)
+        #expect(coordinator.unread.count(for: .room(groupRoom)) == 0)
+
+        // A message with words in it is a message, whatever else it carries.
+        port.emit(.message(message(body: "hello", id: "m1")))
+        await eventually { !timeline.items.isEmpty }
+        #expect(timeline.items.map(\.body) == ["hello"])
+        #expect(coordinator.calls.reactions.bursts.count == 1)
+        await coordinator.stop()
+    }
+
     @Test func stopForgetsRoomCallPresence() async {
         let (coordinator, port) = session(handlesCalls: true)
         coordinator.start()

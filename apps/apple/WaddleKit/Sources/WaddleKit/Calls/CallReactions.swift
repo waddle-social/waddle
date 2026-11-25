@@ -24,11 +24,15 @@ public struct CallReactionBurst: Identifiable, Equatable, Sendable {
     public let expires: Date
 
     /// "ada reacted 👍", "You reacted 👍": a screen reader says the emoji's own name.
-    public func spoken(inRoom: Bool) -> String {
+    ///
+    /// - Parameter ownNick: Our nick in the room of a room's call, which
+    ///   hands our own reaction back to us as it does everyone's; `nil` in a call of two.
+    public func spoken(ownNick: String?) -> String {
         guard let from else { return "You reacted \(emoji)" }
+        guard let ownNick else { return "\(from.bare.localpart ?? "Someone") reacted \(emoji)" }
         // In a room the sender is an occupant, named by their nick.
-        let name = inRoom ? from.resource : from.bare.localpart
-        return "\(name ?? "Someone") reacted \(emoji)"
+        guard let nick = from.resource else { return "Someone reacted \(emoji)" }
+        return nick == ownNick ? "You reacted \(emoji)" : "\(nick) reacted \(emoji)"
     }
 }
 
@@ -36,8 +40,13 @@ public struct CallReactionBurst: Identifiable, Equatable, Sendable {
 public struct CallReactionLedger: Equatable, Sendable {
     /// How long one shows (web: 2400 ms).
     public static let lifetime: TimeInterval = 2.4
-    /// Shown at once; an older one makes way.
+    /// Shown at once. One more waits for nothing: it is not shown.
     public static let limit = 8
+    /// Shown at once from one sender, so that nobody fills the stage alone.
+    public static let limitEach = 3
+    /// The longest emoji there is has about ten scalars; a "single
+    /// character" can be made of hundreds.
+    static let longestEmoji = 12
     /// The six the picker offers, as on the web.
     public static let offered = ["👍", "❤️", "😂", "🔥", "👏", "🎉"]
 
@@ -48,15 +57,20 @@ public struct CallReactionLedger: Equatable, Sendable {
 
     /// Adds one. Anything that is not a single emoji is not shown: the
     /// wire carries whatever the sender typed.
+    ///
+    /// One past the limits is dropped, not shown in an older one's place.
+    /// In a room anyone in it can send these as fast as they like, and each
+    /// one shown is work on the thread that draws the call's video: what
+    /// is on the stage changes at most `limit` times in `lifetime`.
     public mutating func received(_ emoji: String, from: JID?, at now: Date) {
         guard Self.isOneEmoji(emoji) else { return }
         expire(at: now)
+        guard bursts.count < Self.limit, bursts.count(where: { $0.from == from }) < Self.limitEach else { return }
         sequence += 1
         bursts.append(CallReactionBurst(
             id: sequence, emoji: emoji, from: from, lane: Self.lane(of: sequence),
             expires: now.addingTimeInterval(Self.lifetime)
         ))
-        if bursts.count > Self.limit { bursts.removeFirst(bursts.count - Self.limit) }
     }
 
     public mutating func expire(at now: Date) {
@@ -78,10 +92,12 @@ public struct CallReactionLedger: Equatable, Sendable {
     /// One character that is an emoji, with whatever joiners and variation
     /// selectors it is made of.
     public static func isOneEmoji(_ text: String) -> Bool {
-        guard text.count == 1, let first = text.unicodeScalars.first else { return false }
-        // A digit or "#" is an emoji base only when the text presents it as one.
+        let scalars = text.unicodeScalars
+        guard text.count == 1, scalars.count <= longestEmoji, let first = scalars.first else { return false }
         if first.properties.isEmojiPresentation { return true }
-        return first.properties.isEmoji && text.unicodeScalars.contains { $0.value == 0xFE0F }
+        // A digit, "#" or "✌" is an emoji only when the text presents it as
+        // one: with the emoji selector, or with a skin tone.
+        return first.properties.isEmoji && scalars.dropFirst().contains { $0.value == 0xFE0F || $0.properties.isEmojiModifier }
     }
 
     /// Whether a reaction that arrived belongs to the call in the slot.
