@@ -1,0 +1,240 @@
+--- a/src/main/java/com/cloudwebrtc/webrtc/StateProvider.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/StateProvider.java
+@@ -17,6 +17,10 @@
+  * It is encouraged to use this class instead of a component directly.
+  */
+ public interface StateProvider {
++
++  WaddleAudioCapture audioCapture();
++
++  void trackDispose(String trackId);
+
+   boolean putLocalStream(String streamId, MediaStream stream);
+
+--- a/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
+@@ -381,6 +381,7 @@
+     }
+
+     private ConstraintsMap getUserAudio(ConstraintsMap constraints, MediaStream stream) {
++        if (stateProvider.audioCapture().leased()) return null;
+         AudioSwitchManager.instance.start();
+         MediaConstraints audioConstraints = new MediaConstraints();
+         String deviceId = null;
+@@ -399,6 +400,7 @@
+         AudioTrack track = pcFactory.createAudioTrack(trackId, audioSource);
+         stream.addTrack(track);
+
++        stateProvider.audioCapture().add(track);
+         stateProvider.putLocalTrack(track.id(), new LocalAudioTrack(track));
+
+         ConstraintsMap trackParams = new ConstraintsMap();
+@@ -636,6 +638,7 @@
+                 && (trackParams[1] = getUserVideo(constraints, mediaStream)) == null)) {
+             for (MediaStreamTrack track : mediaStream.audioTracks) {
+                 if (track != null) {
++                    stateProvider.trackDispose(track.id());
+                     track.dispose();
+                 }
+             }
+@@ -1127,6 +1130,7 @@
+             throws Exception {
+         AudioSamplesInterceptor interceptor = null;
+         if (audioChannel == AudioChannel.INPUT) {
++            if (stateProvider.audioCapture().leased()) throw new IllegalStateException("The call owns the microphone.");
+             interceptor = inputSamplesInterceptor;
+         } else if (audioChannel == AudioChannel.OUTPUT) {
+             if (outputSamplesInterceptor == null) {
+--- a/src/main/java/com/cloudwebrtc/webrtc/record/AudioSamplesInterceptor.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/record/AudioSamplesInterceptor.java
+@@ -16,18 +16,20 @@
+     @SuppressLint("UseSparseArrays")
+     protected final HashMap<Integer, SamplesReadyCallback> callbacks = new HashMap<>();
+
++    public synchronized boolean hasListeners() { return !callbacks.isEmpty(); }
++
+     @Override
+-    public void onWebRtcAudioRecordSamplesReady(AudioSamples audioSamples) {
++    public synchronized void onWebRtcAudioRecordSamplesReady(AudioSamples audioSamples) {
+         for (SamplesReadyCallback callback : callbacks.values()) {
+             callback.onWebRtcAudioRecordSamplesReady(audioSamples);
+         }
+     }
+
+-    public void attachCallback(Integer id, SamplesReadyCallback callback) throws Exception {
++    public synchronized void attachCallback(Integer id, SamplesReadyCallback callback) throws Exception {
+         callbacks.put(id, callback);
+     }
+
+-    public void detachCallback(Integer id) {
++    public synchronized void detachCallback(Integer id) {
+         callbacks.remove(id);
+     }
+
+--- a/src/main/java/org/webrtc/audio/WebRtcAudioTrackUtils.java
++++ b/src/main/java/org/webrtc/audio/WebRtcAudioTrackUtils.java
+@@ -16,6 +16,10 @@
+ public abstract class WebRtcAudioTrackUtils {
+
+     static private final String TAG = "WebRtcAudioTrackUtils";
++
++    public static int inputSampleRate(android.content.Context context) {
++        return WebRtcAudioManager.getSampleRate(context.getSystemService(android.media.AudioManager.class));
++    }
+
+     public static void attachOutputCallback(
+             SamplesReadyCallback callback,
+--- a/src/main/java/com/cloudwebrtc/webrtc/MethodCallHandlerImpl.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/MethodCallHandlerImpl.java
+@@ -109,6 +109,8 @@
+
+   private final Map<String, PeerConnectionObserver> mPeerConnectionObservers = new HashMap<>();
+   private final BinaryMessenger messenger;
++  private final WaddleAudioCapture audioCapture;
++  public WaddleAudioCapture audioCapture() { return audioCapture; }
+   private final Context context;
+   private final TextureRegistry textures;
+   private PeerConnectionFactory mFactory;
+@@ -183,6 +185,8 @@
+     this.context = context;
+     this.textures = textureRegistry;
+     this.messenger = messenger;
++    audioCapture = new WaddleAudioCapture(messenger, mPeerConnectionObservers,
++        () -> getUserMediaImpl != null && getUserMediaImpl.inputSamplesInterceptor.hasListeners());
+   }
+
+   static private void resultError(String method, String error, Result result) {
+@@ -192,6 +196,7 @@
+   }
+
+   void dispose() {
++    audioCapture.close();
+     for (int i = 0; i < renders.size(); i++) {
+       FlutterRTCVideoRenderer renderer = renders.valueAt(i);
+       if (renderer != null) {
+@@ -344,10 +349,15 @@
+       }
+     }
+
+-    audioDeviceModuleBuilder.setSamplesReadyCallback(recordSamplesReadyCallbackAdapter);
++    int captureRate = audioSampleRate == null ? org.webrtc.audio.WebRtcAudioTrackUtils.inputSampleRate(context) : audioSampleRate;
++    audioCapture.format(captureRate, bypassVoiceProcessing ? 2 : 1);
++    audioDeviceModuleBuilder.setAudioBufferCallback(audioCapture);
++    audioDeviceModuleBuilder.setSamplesReadyCallback(samples -> audioCapture.delivered(recordSamplesReadyCallbackAdapter, samples));
+     audioDeviceModuleBuilder.setPlaybackSamplesReadyCallback(playbackSamplesReadyCallbackAdapter);
+
+-    recordSamplesReadyCallbackAdapter.addCallback(getUserMediaImpl.inputSamplesInterceptor);
++    recordSamplesReadyCallbackAdapter.addCallback(samples -> {
++      if (audioCapture.allowsLocalSink(null)) getUserMediaImpl.inputSamplesInterceptor.onWebRtcAudioRecordSamplesReady(samples);
++    });
+
+     recordSamplesReadyCallbackAdapter.addCallback(new JavaAudioDeviceModule.SamplesReadyCallback() {
+       @Override
+@@ -357,7 +367,7 @@
+           tracksCopy = new ArrayList<>(localTracks.values());
+         }
+         for(LocalTrack track : tracksCopy) {
+-          if (track instanceof LocalAudioTrack) {
++          if (track instanceof LocalAudioTrack && audioCapture.allowsLocalSink(track.track)) {
+             ((LocalAudioTrack) track).onWebRtcAudioRecordSamplesReady(audioSamples);
+           }
+         }
+@@ -1894,6 +1904,7 @@
+     synchronized (localTracks) {
+       localTracks.remove(trackId);
+     }
++    audioCapture.remove(track.track);
+   }
+
+   public void mediaStreamTrackSetEnabled(final String id, final boolean enabled, String peerConnectionId) {
+@@ -1905,6 +1916,7 @@
+     } else if (track.enabled() == enabled) {
+       return;
+     }
++    if (track instanceof AudioTrack) audioCapture.enabled(track, enabled);
+     track.setEnabled(enabled);
+   }
+
+@@ -1929,6 +1941,7 @@
+       if (track != null) {
+         String kind = track.kind();
+         if (kind.equals("audio")) {
++          if (audioCapture.reject(track, result)) return;
+           mediaStream.addTrack((AudioTrack) track);
+           result.success(null);
+         } else if (kind.equals("video")) {
+@@ -1989,6 +2002,7 @@
+     synchronized (localTracks) {
+       localTracks.remove(_trackId);
+     }
++    audioCapture.remove(track.track);
+     if (track.kind().equals("audio")) {
+       stream.removeTrack((AudioTrack) track.track);
+     } else if (track.kind().equals("video")) {
+@@ -2043,6 +2057,7 @@
+     }
+     PeerConnection peerConnection = getPeerConnection(id);
+     if (peerConnection != null) {
++      for (AudioTrack track : mediaStream.audioTracks) if (audioCapture.reject(track, result)) return;
+       boolean res = peerConnection.addStream(mediaStream);
+       Log.d(TAG, "addStream" + result);
+       result.success(res);
+@@ -2308,6 +2323,7 @@
+         synchronized (localTracks) {
+           localTracks.remove(trackId);
+         }
++        audioCapture.remove(track);
+         stream.removeTrack(track);
+       } catch (IllegalStateException e) {
+         Log.d(TAG, "streamDispose(): audio track already disposed, skipping");
+@@ -2415,6 +2431,7 @@
+     if (pco == null || pco.getPeerConnection() == null) {
+       resultError("addTrack", "peerConnection is null", result);
+     } else {
++      if (audioCapture.reject(track.track, result)) return;
+       pco.addTrack(track.track, streamIds, result);
+     }
+   }
+@@ -2442,6 +2459,7 @@
+     if (pco == null || pco.getPeerConnection() == null) {
+       resultError("addTransceiver", "peerConnection is null", result);
+     } else {
++      if (audioCapture.reject(track.track, result)) return;
+       pco.addTransceiver(track.track, transceiverInit, result);
+     }
+   }
+@@ -2557,6 +2575,7 @@
+       if(track != null) {
+         mediaStreamTrack = track.track;
+       }
++      if (audioCapture.reject(mediaStreamTrack, pco, rtpSenderId, result)) return;
+       pco.rtpSenderSetTrack(rtpSenderId, mediaStreamTrack, result, replace);
+     }
+   }
+--- a/src/main/java/com/cloudwebrtc/webrtc/PeerConnectionObserver.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/PeerConnectionObserver.java
+@@ -1218,7 +1218,10 @@
+       resultError("rtpSenderSetTrack", "sender is null", result);
+       return;
+     }
+-    sender.setTrack(track, false);
++    if (!sender.setTrack(track, false)) {
++      result.error("rtp_sender_track", "WebRTC declined the sender track change.", null);
++      return;
++    }
+     result.success(null);
+   }
+
+--- a/src/main/java/com/cloudwebrtc/webrtc/FlutterWebRTCPlugin.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/FlutterWebRTCPlugin.java
+@@ -67,6 +67,10 @@
+
+     public MediaStream getStreamForId(String streamId, String peerConnectionId) {
+         return methodCallHandler.getStreamForId(streamId, peerConnectionId);
++    }
++
++    public void setExternalAudioRecording(Object recorder, boolean active) {
++        methodCallHandler.audioCapture().setExternalRecording(recorder, active);
+     }
+
+     public LocalTrack getLocalTrack(String trackId) {

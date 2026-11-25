@@ -1,0 +1,36 @@
+// Install this fixture in the init.d of an isolated GRADLE_USER_HOME, then run
+// flutter test integration_test/android_audio_filter_test.dart -d <emulator>
+// with --dart-define=WADDLE_AUDIO_SIGNAL=true. The release plugin keeps its own source tree.
+import groovy.io.FileType
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
+gradle.settingsEvaluated { settings ->
+    def plugin = settings.findProject(':flutter_webrtc')
+    def definitions = gradle.startParameter.projectProperties['dart-defines']?.split(',') ?: []
+    def signal = 'WADDLE_AUDIO_SIGNAL=true'.bytes.encodeBase64().toString()
+    if (!plugin || !definitions.contains(signal)) return
+    if (gradle.startParameter.taskNames.every { !it.endsWith('assembleDebug') }) return
+    assert gradle.startParameter.taskNames.every { it.endsWith('assembleDebug') }
+    def pluginSources = plugin.projectDir.canonicalFile
+    assert pluginSources == new File(settings.rootDir.parentFile, '.dart_tool/android-sdk-plugins/flutter_webrtc').canonicalFile
+    def fixture = new File(pluginSources.parentFile, 'flutter_webrtc_audio_filter_test')
+    pluginSources.eachFileRecurse(FileType.FILES) { input ->
+        def output = fixture.toPath().resolve(pluginSources.toPath().relativize(input.toPath()))
+        Files.createDirectories(output.parent)
+        Files.copy(input.toPath(), output, StandardCopyOption.REPLACE_EXISTING)
+    }
+    plugin.projectDir = fixture
+    def source = new File(fixture, 'src/main/java/com/cloudwebrtc/webrtc/MethodCallHandlerImpl.java')
+    def hook = 'audioDeviceModuleBuilder.setAudioBufferCallback(audioCapture);'
+    assert source.text.count(hook) == 1
+    source.text = source.text.replace(hook, '''
+        final java.util.Random signal = new java.util.Random(8242L);
+        audioDeviceModuleBuilder.setAudioBufferCallback((pcm, encoding, channels, rate, bytes, timestamp) -> {
+          if (channels != 2 || encoding != android.media.AudioFormat.ENCODING_PCM_16BIT)
+            throw new IllegalStateException("Expected stereo PCM16 in signal test");
+          pcm.order(java.nio.ByteOrder.nativeOrder());
+          for (int i = 0; i < bytes; i += 2) pcm.putShort(i, (short)(signal.nextInt(22001) - 11000));
+          return audioCapture.onBuffer(pcm, encoding, channels, rate, bytes, timestamp);
+        });''')
+}

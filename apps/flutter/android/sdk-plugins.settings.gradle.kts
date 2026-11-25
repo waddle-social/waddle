@@ -1,5 +1,5 @@
 // Gradle 9 requires a writable project for SDK-supplied integration_test.
-// The Flutter WebRTC Android copy forwards projection revocation and identifies camera sources.
+// The Flutter WebRTC Android copy exposes the identified camera, screen and microphone sources.
 fun localAndroidPlugin(name: String, configure: (File, File) -> Unit = { _, _ -> }) {
     val plugin = findProject(":$name") ?: return
     val source = plugin.projectDir
@@ -20,7 +20,11 @@ localAndroidPlugin("flutter_webrtc") { source, destination ->
         lines.first { it.startsWith("version:") }.substringAfter(':').trim()
     }
     check(version == "1.6.3") { "Review the Android capture hooks for flutter_webrtc $version" }
-    val patches = listOf("projection-stop", "camera-source").map {
+    rootDir.resolve("webrtc/WaddleAudioCapture.java").copyTo(
+        destination.resolve("src/main/java/com/cloudwebrtc/webrtc/WaddleAudioCapture.java"))
+    rootDir.resolve("webrtc/WaddleTrackIdentity.java").copyTo(
+        destination.resolve("src/main/java/org/webrtc/WaddleTrackIdentity.java"))
+    val patches = listOf("projection-stop", "camera-source", "audio-capture").map {
         rootDir.resolve("flutter-webrtc-1.6.3-$it.patch").absolutePath
     }
     val process = ProcessBuilder(listOf("git", "apply") + patches).directory(destination)

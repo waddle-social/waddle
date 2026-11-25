@@ -19,18 +19,21 @@ import org.webrtc.VideoTrack;
 /** Records the preview and microphone into one private MP4 without starting a call. */
 final class StoryVideoRecorder {
     private final Context context;
+    private final FlutterWebRTCPlugin rtc;
     private MediaRecorder recorder;
     private EglRenderer renderer;
     private Surface surface;
     private VideoTrack track;
     private String recordingId;
 
-    private StoryVideoRecorder(Context context) {
+    private StoryVideoRecorder(Context context, FlutterWebRTCPlugin rtc) {
         this.context = context;
+        this.rtc = rtc;
     }
 
     static void register(FlutterEngine engine, Context context) {
-        StoryVideoRecorder camera = new StoryVideoRecorder(context);
+        StoryVideoRecorder camera = new StoryVideoRecorder(context,
+                (FlutterWebRTCPlugin) engine.getPlugins().get(FlutterWebRTCPlugin.class));
         new MethodChannel(engine.getDartExecutor().getBinaryMessenger(),
                 "social.waddle.flutter/story_video").setMethodCallHandler((call, result) -> {
             try {
@@ -61,13 +64,13 @@ final class StoryVideoRecorder {
         if (!directory.isDirectory() || !context.getCacheDir().getCanonicalFile().equals(directory.getParentFile())) {
             throw new IOException("The recording directory is unavailable.");
         }
-        FlutterWebRTCPlugin plugin = FlutterWebRTCPlugin.sharedSingleton;
-        LocalTrack local = plugin == null ? null : plugin.getLocalTrack(trackId);
+        LocalTrack local = rtc == null ? null : rtc.getLocalTrack(trackId);
         if (local == null || !(local.track instanceof VideoTrack)) {
             throw new IllegalStateException("The camera track is unavailable.");
         }
         int width = portrait ? 480 : 640;
         int height = portrait ? 640 : 480;
+        rtc.setExternalAudioRecording(this, true);
         try {
             recorder = Build.VERSION.SDK_INT >= 31 ? new MediaRecorder(context) : new MediaRecorder();
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
@@ -109,14 +112,21 @@ final class StoryVideoRecorder {
     }
 
     private void release() {
-        if (track != null) track.removeSink(renderer);
-        if (renderer != null) renderer.release();
-        if (surface != null) surface.release();
-        if (recorder != null) recorder.release();
-        track = null;
-        renderer = null;
-        surface = null;
-        recorder = null;
-        recordingId = null;
+        try {
+            if (track != null) track.removeSink(renderer);
+            if (renderer != null) renderer.release();
+            if (surface != null) surface.release();
+        } finally {
+            try {
+                if (recorder != null) recorder.release();
+            } finally {
+                track = null;
+                renderer = null;
+                surface = null;
+                recorder = null;
+                recordingId = null;
+                rtc.setExternalAudioRecording(this, false);
+            }
+        }
     }
 }
