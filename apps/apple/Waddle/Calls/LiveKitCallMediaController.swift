@@ -131,6 +131,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// A camera asked for with blur on never got as far as being
     /// published: there is no camera, and no processor left to say so.
     @ObservationIgnored private var cameraFailedToStartBlurred = false
+    /// The processors of a room that has been forgotten and is still being
+    /// taken down. Its cameras go on capturing until the SDK has stopped
+    /// them, and a capturer whose processor has been let go sends its
+    /// frames as they are: so they are held until the disconnect is done.
+    @ObservationIgnored private var departingBackgroundProcessors: [ObjectIdentifier: [CallBackgroundProcessor]] = [:]
     private(set) var audioProcessing = CallAudioProcessing()
 
     init(defaults: UserDefaults = .standard) {
@@ -407,6 +412,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshBackgroundFailing()
     }
 
+    /// Call when `room` has finished disconnecting: its cameras are stopped, and their processors can go.
+    private func releaseBackgroundProcessors(of room: Room) {
+        departingBackgroundProcessors[ObjectIdentifier(room)] = nil
+    }
+
     /// Lets a capturer's processor go, and its word about the blur with it.
     private func discardBackgroundProcessor(of capturer: ObjectIdentifier) {
         if let processor = backgroundProcessors.removeValue(forKey: capturer) {
@@ -451,6 +461,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let processor = makeBackgroundProcessor()
         let track = await LocalVideoTrack.createCameraTrack(options: cameraCaptureOptions(), processor: processor)
         let id = ObjectIdentifier(track.capturer)
+        guard self.room === room else {
+            // The call ended while the camera was being made. `setSource`
+            // takes the room down next; the processor is held until then
+            // and never counted among those of a later call.
+            departingBackgroundProcessors[ObjectIdentifier(room), default: []].append(processor)
+            _ = try? await track.stop()
+            return
+        }
         backgroundProcessors[id] = processor
         // The choice may have changed while the track was being made, when
         // this processor was not yet among those `setBackground` reaches.
@@ -636,6 +654,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         } catch {
             if self.room === room { forgetRoom() }
             await room.disconnect()
+            releaseBackgroundProcessors(of: room)
             throw error
         }
         if phase == .connecting { phase = .connected }
@@ -653,6 +672,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let room else { return }
         forgetRoom()
         await room.disconnect()
+        releaseBackgroundProcessors(of: room)
     }
 
     func forgetCaptureChoices() {
@@ -876,6 +896,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard self.room === room else {
             await room.localParticipant.unpublishAll()
             await room.disconnect()
+            releaseBackgroundProcessors(of: room)
             return
         }
         refreshTracks()
@@ -899,6 +920,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     private func forgetRoom() {
+        let departing = room
         room = nil
         observer = nil
         joinedIdentity = nil
@@ -917,6 +939,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         connectionSettling?.cancel()
         connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
+        // Forgotten at once, so nothing stale is heard; let go only when the room is down.
+        if let departing, !backgroundProcessors.isEmpty {
+            departingBackgroundProcessors[ObjectIdentifier(departing), default: []] += Array(backgroundProcessors.values)
+        }
         backgroundProcessors = [:]
         failingBackgrounds = []
         cameraFailedToStartBlurred = false
