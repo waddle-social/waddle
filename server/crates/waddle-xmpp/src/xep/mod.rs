@@ -70,8 +70,6 @@
 //!   validation during account registration with preauth element.
 //! - **XEP-0449**: Stickers - Sticker packs and sticker messages with
 //!   pack references, built on XEP-0446/0447 file sharing.
-//! - **XEP-0452**: MUC Mention Notifications - @mention alerts with
-//!   notification elements and per-room unread mention counter.
 //! - **Proto-calendar xCal**: Community events with scheduling, RSVP
 //!   tracking (going/interested/not-going), and PubSub storage.
 //! - **XEP-0470**: Pubsub Attachments - Reactions/comments on PubSub items
@@ -188,7 +186,6 @@ pub mod xep0446;
 pub mod xep0447;
 pub mod xep0448;
 pub mod xep0449;
-pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
 pub use waddle_xmpp_core::xep0470;

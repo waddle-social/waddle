@@ -22,6 +22,7 @@ class MentionSpanTracker {
         val endExclusive: Int,
         val display: String,
         val uri: String,
+        val broadcast: Boolean,
     )
 
     private var text: String = ""
@@ -75,6 +76,7 @@ class MentionSpanTracker {
             endExclusive = token.start + label.length,
             display = candidate.display,
             uri = candidate.uri,
+            broadcast = candidate.isBroadcast,
         )
         return MentionInsertion(text = newText, cursor = token.start + label.length + 1)
     }
@@ -84,13 +86,15 @@ class MentionSpanTracker {
      * Unicode CODE POINTS over the TRIMMED body (the exact string the
      * ViewModel sends). Spans whose label text no longer reads
      * `@display` are dropped — stale bookkeeping must never mislabel an
-     * unrelated substring on the wire.
+     * unrelated substring on the wire. Broadcast picks (`@everyone`,
+     * `@here`) are not references: the send builder turns the typed token
+     * into an XEP-0513 `#channel` mention through the room directory.
      */
     fun mentionRefs(): List<MentionRef> {
         if (spans.isEmpty()) return emptyList()
         val body = text.trim()
         val leading = text.length - text.trimStart().length
-        return spans.mapNotNull { span ->
+        return spans.filterNot { it.broadcast }.mapNotNull { span ->
             val start = span.start - leading
             val end = span.endExclusive - leading
             if (start < 0 || end > body.length || start >= end) return@mapNotNull null

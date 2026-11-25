@@ -8,9 +8,10 @@ use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file as xep_encrypted_file;
 use crate::xep::{reply as xep_reply, thread as xep_thread};
+use waddle_xmpp_core::mention_markup::{MentionSpan, MENTION_TYPE_CHANNEL};
 use waddle_xmpp_core::CoreError;
 
-use super::mentions::resolve_typed_mentions;
+use super::mentions::{resolve_typed_mentions, BroadcastMention};
 use super::namespaces::{
     NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_FILE_METADATA, NS_HINTS, NS_MARKUP,
     NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC, NS_MUC_USER, NS_ORIGIN_ID,
@@ -429,15 +430,30 @@ pub fn build_outbound_message(
     if let Some(thread) = options.thread.as_ref() {
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
-    if !options.markup_spans.is_empty() {
-        builder = builder.append(build_markup_element(&options.markup_spans));
-    }
     let typed_mentions = options
         .mention_directory
         .as_ref()
         .map(|directory| resolve_typed_mentions(body, directory, options))
         .unwrap_or_default();
-    for reference in options.references.iter().chain(&typed_mentions) {
+    if !options.markup_spans.is_empty() || !typed_mentions.broadcasts.is_empty() {
+        let mut markups = build_markup_element(&options.markup_spans);
+        // XEP-0513 `#channel` mentions share the XEP-0394 `<markup/>`: the
+        // `<mention/>` child sits inside a `<span/>` over the `@label` token.
+        for broadcast in &typed_mentions.broadcasts {
+            markups.append_child(
+                MentionSpan {
+                    begin: Some(broadcast.begin),
+                    end: Some(broadcast.end),
+                    mentions: Some(MENTION_TYPE_CHANNEL.to_string()),
+                    active: broadcast.kind == BroadcastMention::Here,
+                    ..MentionSpan::default()
+                }
+                .to_span_element(),
+            );
+        }
+        builder = builder.append(markups);
+    }
+    for reference in options.references.iter().chain(&typed_mentions.references) {
         // XEP-0372 §2.1: `begin` and `end` are OPTIONAL. They MUST be present
         // when the reference points at a substring of the body, and MUST be
         // absent when no body position applies (e.g. anchor-only references

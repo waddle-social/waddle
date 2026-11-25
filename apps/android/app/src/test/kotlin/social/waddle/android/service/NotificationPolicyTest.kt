@@ -253,8 +253,7 @@ class NotificationPolicyTest {
                 from = "general@muc.waddle.test/alice",
                 messageType = "groupchat",
                 isMuc = true,
-                broadcastMention = "xmpp:@everyone",
-                mentionUris = listOf("xmpp:@everyone"),
+                broadcastMention = "everyone",
             ),
         )
 
@@ -294,7 +293,7 @@ class NotificationPolicyTest {
 
         assertNull(policy.decide(mucMessage()))
         assertNull(policy.decide(mucMessage(mentionUris = listOf("xmpp:icepuma@waddle.test"))))
-        assertNull(policy.decide(mucMessage(broadcastMention = "xmpp:@everyone")))
+        assertNull(policy.decide(mucMessage(broadcastMention = "everyone")))
     }
 
     @Test
@@ -319,7 +318,7 @@ class NotificationPolicyTest {
         val selfMention = policy.decide(mucMessage(mentionUris = listOf("xmpp:icepuma@waddle.test")))
         assertEquals(true, selfMention?.isMention)
 
-        val broadcast = policy.decide(mucMessage(broadcastMention = "xmpp:@everyone"))
+        val broadcast = policy.decide(mucMessage(broadcastMention = "everyone"))
         assertEquals(true, broadcast?.isMention)
     }
 

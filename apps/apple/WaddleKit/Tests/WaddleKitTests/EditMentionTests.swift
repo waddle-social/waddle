@@ -116,16 +116,19 @@ struct EditMentionTests {
         #expect(port.corrections.last?.options.markupSpans == [MarkupSpan(kind: .bold, start: 0, end: 6)])
     }
 
-    @Test func broadcastMentionsSurvive() async {
+    @Test func broadcastMentionsAreNotSentAsReferences() async {
+        // `@everyone` / `@here` have no valid XEP-0372 URI; the Rust send
+        // builder derives XEP-0513 `#channel` mentions from the typed text.
         let draft = Draft(
             text: "@everyone and @here look",
             mentions: [MentionDraft(target: .everyone, range: 0..<9), MentionDraft(target: .here, range: 14..<19)]
         )
         let (coordinator, port, item) = await sent(draft)
+        #expect(item.message.references.isEmpty)
         let editable = EditableMessage(item: item)
-        #expect(editable.mentions == draft.mentions)
+        #expect(editable.mentions.isEmpty)
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "@everyone and @here look now")))
-        #expect(port.corrections.last?.options.references == [mention(.everyone, 0, 9), mention(.here, 14, 19)])
+        #expect(port.corrections.last?.options.references.isEmpty == true)
     }
 
     @Test func replyFallbackOffsetsAreRebased() async {

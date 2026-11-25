@@ -95,8 +95,8 @@ pub struct WaddleMessage {
     pub parent_thread_id: Option<String>,
     /// XEP-0394 message markup spans over the body.
     pub markup_spans: Vec<WaddleMarkupSpan>,
-    /// XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
-    /// one of the mention references targets the whole room.
+    /// XEP-0513 room-wide mention: `everyone`, or `here` for an
+    /// `active='true'` `#channel` mention.
     pub broadcast_mention: Option<String>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
@@ -574,7 +574,7 @@ pub struct WaddleArchivedMessage {
     pub reply_fallback_end: Option<u32>,
     /// XEP-0394 markup spans of the inner message.
     pub markup_spans: Vec<WaddleMarkupSpan>,
-    /// XEP-0372 broadcast mention URI, when present.
+    /// XEP-0513 room-wide mention (`everyone` or `here`), when present.
     pub broadcast_mention: Option<String>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
@@ -958,7 +958,7 @@ pub struct WaddleSendOptions {
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleMentionDirectory {
     pub targets: Vec<WaddleMentionTarget>,
-    /// Resolve `@everyone` / `@here` to broadcast mention URIs.
+    /// Resolve `@everyone` / `@here` to XEP-0513 `#channel` mentions.
     pub broadcasts: bool,
 }
 

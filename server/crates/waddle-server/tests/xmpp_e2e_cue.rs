@@ -365,10 +365,6 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
         reason: "Sticker payload model is client-carried message XML with no server-specific behavior.",
     },
     XepCoverageExemption {
-        xep: "XEP-0452",
-        reason: "Legacy MUC mention-notification payload is not advertised; server behavior uses XEP-0513.",
-    },
-    XepCoverageExemption {
         xep: "XEP-0469",
         reason: "Bookmark pinning helper is only consumed inside bookmark payload projection, not advertised separately.",
     },
