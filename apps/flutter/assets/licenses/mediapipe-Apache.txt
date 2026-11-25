@@ -1,0 +1,1 @@
+../../../../server/crates/waddle-camera-effects/models/LICENSE

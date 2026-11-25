@@ -52,6 +52,7 @@ flutter:
   assets:
     - assets/brand/
     - assets/backgrounds/
+    - assets/licenses/
     - assets/fonts/manrope-OFL.txt
     - assets/fonts/fredoka-OFL.txt
   fonts:

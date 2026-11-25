@@ -13,12 +13,19 @@ import 'features/compact_call.dart';
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
   LicenseRegistry.addLicense(() async* {
-    yield LicenseEntryWithLineBreaks([
-      'Manrope',
-    ], await rootBundle.loadString('assets/fonts/manrope-OFL.txt'));
-    yield LicenseEntryWithLineBreaks([
-      'Fredoka',
-    ], await rootBundle.loadString('assets/fonts/fredoka-OFL.txt'));
+    const notices = {
+      'Manrope': 'assets/fonts/manrope-OFL.txt',
+      'Fredoka': 'assets/fonts/fredoka-OFL.txt',
+      'DTLN': 'assets/licenses/dtln-MIT.txt',
+      'MediaPipe Selfie Segmentation': 'assets/licenses/mediapipe-Apache.txt',
+      'nnnoiseless': 'assets/licenses/nnnoiseless-BSD.txt',
+    };
+    for (final notice in notices.entries) {
+      yield LicenseEntryWithLineBreaks(
+        [notice.key],
+        await rootBundle.loadString(notice.value),
+      );
+    }
   });
   await _launch(headless: arguments.contains('--unifiedpush-bg'));
 }
