@@ -1,0 +1,32 @@
+name: Isolated thirty-minute queue window
+on:
+  pull_request:
+    branches: ['ci-canary/window-20261125-1507-base']
+  merge_group:
+    types: [checks_requested]
+    branches: ['ci-canary/window-20261125-1507-base']
+  push:
+    branches: ['ci-canary/window-20261125-1507-base']
+permissions: {}
+jobs:
+  smoke:
+    name: PR smoke
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check the fixture on the immutable event commit
+        shell: bash
+        run: |
+          git init --quiet .
+          git fetch --depth=1 https://github.com/waddle-social/waddle.git "$GITHUB_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git ls-tree --name-only "$GITHUB_SHA" | grep -Eq '^window-(first|second)$'
+  push:
+    name: Observe queue window target push
+    if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Show the resulting target push range
+        run: echo "$GITHUB_SHA"
