@@ -10,3 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "Received merge_group on the disposable queue"
+  delayed-fetch:
+    name: Fetch disposable commit after merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Check original commit after the queue has time to advance
+        shell: bash
+        run: |
+          sleep 75
+          git init --quiet .
+          git remote add upstream https://github.com/waddle-social/waddle.git
+          git ls-remote --heads upstream "$GITHUB_REF"
+          git fetch --depth=1 upstream "$GITHUB_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git cat-file -e "$GITHUB_SHA:required-control"
