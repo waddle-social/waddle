@@ -332,6 +332,11 @@ final class CallStageSnapshotTests: XCTestCase {
         assertBar(isHandRaised: false, size: .expanded, chatUnread: 3)
     }
 
+    /// Everything that keeps its button whatever the width, at the stage's narrowest: a hand, a share in progress, unread chat.
+    func testControlBarAtItsFullestInASplitStage() {
+        assertBar(isHandRaised: true, size: .split, isSharingScreen: true, chatUnread: 12)
+    }
+
     func testControlBarWithTheCallChatOpen() {
         assertBar(isHandRaised: false, size: .expanded, chatUnread: 0, showsChat: true)
     }

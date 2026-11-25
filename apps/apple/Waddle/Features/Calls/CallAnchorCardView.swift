@@ -46,7 +46,7 @@ struct CallAnchorCardView: View {
         .accessibilityAddTraits(card.action == .join ? .isButton : [])
         .accessibilityAction { if card.action == .join { join() } }
         .accessibilityActions {
-            if let chatLink { Button(chatLink, action: openChat) }
+            if let chatLink { Button("Open call chat: \(chatLink)", action: openChat) }
         }
     }
 

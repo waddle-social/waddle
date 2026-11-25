@@ -163,7 +163,9 @@ struct CallStageHost: View {
             subtitle = CallStageSubtitle.room(others: rows.count { !$0.isSelf })
         }
         let memory = model.stage(of: call.sid)
-        let chat = Chat(of: call.kind, session: session, navigation: navigation)
+        // A full-screen call hides the pane the chat opens in: whatever the
+        // inspector is set to, nobody is looking at it.
+        let chat = Chat(of: call.kind, session: session, navigation: navigation, isHidden: memory.size == .immersive)
         let rows = memory.showsParticipants ? CallParticipantRows.make(
             tiles: tiles,
             audio: (media?.participants ?? []).map {
@@ -240,7 +242,7 @@ struct CallStageHost: View {
         let isOpen: Bool
 
         @MainActor
-        init?(of kind: Call.Kind, session: SessionCoordinator, navigation: NavigationModel) {
+        init?(of kind: Call.Kind, session: SessionCoordinator, navigation: NavigationModel, isHidden: Bool) {
             guard case .room = kind, case .inGroup(let call) = session.calls.state else { return nil }
             let conversation = ConversationID.room(call.room)
             let timeline = session.timelines.timeline(for: conversation)
@@ -248,7 +250,7 @@ struct CallStageHost: View {
             self.conversation = conversation
             self.thread = thread
             replies = timeline.threadReplies(threadID: thread)
-            isOpen = navigation.selection == conversation && navigation.inspector == .thread(rootID: thread)
+            isOpen = !isHidden && navigation.selection == conversation && navigation.inspector == .thread(rootID: thread)
         }
     }
 
@@ -272,9 +274,9 @@ struct CallStageHost: View {
                     return
                 }
                 model.update(sid) {
-                    // The chat opens beside the conversation, which a stage
-                    // that fills the pane covers: the stage makes room.
-                    $0.size = .split
+                    // The chat opens beside the pane the stage is in; only a
+                    // full-screen call, which hides everything else, is in its way.
+                    $0.size = $0.size.afterFullscreenExit
                     $0.sawChat(upTo: chat.replies.last?.id)
                 }
                 navigation.openThread(chat.thread, in: chat.conversation, usesInspector: true)

@@ -13,9 +13,9 @@ struct CallStageActions {
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
-    /// Tries a device the call could not use again, or puts its notice away for this call.
     /// Opens the call's chat beside the conversation, or puts it away.
     var toggleChat: @MainActor () -> Void = { /* a call with no chat */ }
+    /// Tries a device the call could not use again, or puts its notice away for this call.
     var retryMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to retry */ }
     var dismissMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to dismiss */ }
     /// Opens the system's settings where a device is allowed.
@@ -246,7 +246,6 @@ struct CallControlBar: View {
     }
 }
 
-/// A round, glyph-only call control (web `huddleCtl`).
 /// A count on the corner of a round control: messages not yet seen.
 struct CallControlBadge: View {
     let text: String
@@ -271,6 +270,7 @@ struct CallControlBadge: View {
     }
 }
 
+/// A round, glyph-only call control (web `huddleCtl`).
 struct CallControlButton: View {
     enum Tone {
         case plain

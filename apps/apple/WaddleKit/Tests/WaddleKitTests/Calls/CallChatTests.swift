@@ -90,6 +90,20 @@ import Testing
         #expect(memory.chatSeenID == nil)
     }
 
+    /// The room's announcement heads the chat, and nobody wrote it.
+    @Test func aCallsChatIsNotStartedByTheRoom() {
+        let store = store()
+        store.ingest(announcement("o1", thread: "t1", started: morning))
+        store.ingest(chat("hello", from: "bob", id: "c1", thread: "t1"))
+        let timeline = store.timeline(for: roomConversation)
+        let header = ThreadHeader(
+            root: timeline.items.first { $0.callAnchor != nil }, replies: timeline.threadReplies(threadID: "t1"), replyCount: 1,
+            breadcrumb: []
+        )
+        #expect(header.startedBy == nil)
+        #expect(header.faces.map(\.name) == ["bob"])
+    }
+
     @Test func theWords() {
         #expect(CallChat.buttonTitle(unread: 0, isOpen: false) == "Call chat")
         #expect(CallChat.buttonTitle(unread: 3, isOpen: false) == "Call chat, 3 unread")
