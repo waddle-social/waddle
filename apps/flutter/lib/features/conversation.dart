@@ -9,11 +9,14 @@ import 'package:flutter/services.dart';
 import '../bridge.dart';
 import '../design.dart';
 import '../page_coverage_observer.dart';
+import 'composer_emoji_picker.dart';
 import 'gif_picker.dart';
 import 'message_media.dart';
 import 'trip_plan.dart';
 import 'room_extensions.dart';
 import 'verified_image.dart';
+
+part 'conversation_chrome.dart';
 
 /// Presentation only. Native conversation view models retain ownership of
 /// delivery, encryption, history cursors, read markers and XMPP action IDs.
@@ -632,7 +635,13 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
+  Widget build(BuildContext context) =>
+      LayoutBuilder(builder: _conversationPane);
+
+  Widget _conversationPane(
+    BuildContext context,
+    BoxConstraints pane,
+  ) => AnimatedBuilder(
     animation: widget.bridge,
     builder: (context, _) {
       final data = _data;
@@ -652,13 +661,18 @@ class _ConversationScreenState extends State<ConversationScreen>
       final typing = (data['typing'] as List? ?? const [])
           .map((value) => value.toString())
           .toList();
+      final wide = pane.maxWidth >= 650;
+      final inset = wide ? 24.0 : 12.0;
+      final showHistory =
+          data['loadingOlder'] == true || data['reachedStart'] != true;
       return Scaffold(
         appBar: AppBar(
           toolbarHeight: MediaQuery.textScalerOf(context).scale(18) > 26
-              ? 100
-              : 72,
-          titleSpacing: 4,
-          title: _header(),
+              ? 88
+              : 56,
+          titleSpacing: Navigator.canPop(context) ? 4 : inset,
+          backgroundColor: Theme.of(context).colorScheme.surface,
+          title: _header(wide),
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(1),
             child: Divider(
@@ -672,8 +686,14 @@ class _ConversationScreenState extends State<ConversationScreen>
               icon: const Icon(Icons.search_rounded),
               onPressed: _search,
             ),
+            if (wide)
+              IconButton(
+                tooltip: 'Pinned messages',
+                icon: const Icon(Icons.push_pin_outlined),
+                onPressed: () => _menu('pins'),
+              ),
             if (widget.threadId == null &&
-                MediaQuery.sizeOf(context).width >= 390 &&
+                pane.maxWidth >= 390 &&
                 MediaQuery.textScalerOf(context).scale(16) < 25)
               IconButton(
                 tooltip: callHere
@@ -702,6 +722,20 @@ class _ConversationScreenState extends State<ConversationScreen>
                     : () => _startCall(
                         joinCall && _roomCallState['video'] == true,
                       ),
+              ),
+            if (wide && widget.threadId == null)
+              IconButton(
+                tooltip: 'Start video call',
+                icon: const Icon(Icons.videocam_outlined),
+                onPressed: _startingCall || callBusy
+                    ? null
+                    : () => _startCall(true),
+              ),
+            if (wide && widget.group)
+              IconButton(
+                tooltip: 'Members',
+                icon: const Icon(Icons.people_outline_rounded),
+                onPressed: () => _menu('members'),
               ),
             PopupMenuButton<String>(
               tooltip: 'Conversation options',
@@ -757,226 +791,180 @@ class _ConversationScreenState extends State<ConversationScreen>
         ),
         body: SafeArea(
           top: false,
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
-              child: Column(
-                children: [
-                  if (_error != null)
-                    MaterialBanner(
-                      content: Text(_error!),
-                      leading: const Icon(Icons.error_outline),
-                      actions: [
-                        TextButton(
-                          onPressed: () => setState(() => _error = null),
-                          child: const Text('Dismiss'),
-                        ),
-                      ],
+          child: Column(
+            children: [
+              if (_error != null)
+                MaterialBanner(
+                  content: Text(_error!),
+                  leading: const Icon(Icons.error_outline),
+                  actions: [
+                    TextButton(
+                      onPressed: () => setState(() => _error = null),
+                      child: const Text('Dismiss'),
                     ),
-                  if (data['uploadState'] == 'uploading')
-                    const LinearProgressIndicator(
-                      semanticsLabel: 'Encrypting and uploading attachment',
+                  ],
+                ),
+              if (data['uploadState'] == 'uploading')
+                const LinearProgressIndicator(
+                  semanticsLabel: 'Encrypting and uploading attachment',
+                ),
+              if (data['uploadState'] == 'failed' ||
+                  data['uploadState'] == 'toolarge')
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text(
+                    data['uploadState'] == 'toolarge'
+                        ? 'This file exceeds the server upload limit.'
+                        : 'The attachment could not be uploaded. Please try again.',
+                  ),
+                ),
+              if (_roomCallState['controls'] == 'join' &&
+                  widget.threadId == null)
+                Material(
+                  color: Theme.of(context).colorScheme.secondaryContainer,
+                  child: ListTile(
+                    iconColor: Theme.of(
+                      context,
+                    ).colorScheme.onSecondaryContainer,
+                    textColor: Theme.of(
+                      context,
+                    ).colorScheme.onSecondaryContainer,
+                    leading: Icon(
+                      _roomCallState['video'] == true
+                          ? Icons.videocam_outlined
+                          : Icons.call_outlined,
                     ),
-                  if (data['uploadState'] == 'failed' ||
-                      data['uploadState'] == 'toolarge')
-                    Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Text(
-                        data['uploadState'] == 'toolarge'
-                            ? 'This file exceeds the server upload limit.'
-                            : 'The attachment could not be uploaded. Please try again.',
-                      ),
+                    title: Text(
+                      '${_roomCallState['participantCount'] ?? 0} in the room call',
                     ),
-                  if (_roomCallState['controls'] == 'join' &&
-                      widget.threadId == null)
-                    Material(
-                      color: Theme.of(context).colorScheme.secondaryContainer,
-                      child: ListTile(
-                        iconColor: Theme.of(
-                          context,
-                        ).colorScheme.onSecondaryContainer,
-                        textColor: Theme.of(
-                          context,
-                        ).colorScheme.onSecondaryContainer,
-                        leading: Icon(
-                          _roomCallState['video'] == true
-                              ? Icons.videocam_outlined
-                              : Icons.call_outlined,
-                        ),
-                        title: Text(
-                          '${_roomCallState['participantCount'] ?? 0} in the room call',
-                        ),
-                        trailing: TextButton(
-                          onPressed: _startingCall
-                              ? null
-                              : () =>
-                                    _startCall(_roomCallState['video'] == true),
-                          child: const Text('Join'),
-                        ),
-                      ),
-                    ),
-                  Expanded(
-                    child: Stack(
-                      children: [
-                        if ((_opening || data['loading'] == true) &&
-                            rows.isEmpty)
-                          const Center(
-                            child: CircularProgressIndicator(
-                              semanticsLabel: 'Loading messages',
-                            ),
-                          )
-                        else if (rows.isEmpty)
-                          Center(
-                            child: Padding(
-                              padding: const EdgeInsets.all(32),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.forum_outlined,
-                                    size: 48,
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.primary,
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    'Start the conversation',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleLarge,
-                                  ),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                    'Send a message, share a file, or say hello.',
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          )
-                        else
-                          ListView.builder(
-                            restorationId: 'timeline:$social',
-                            key: PageStorageKey(
-                              '${widget.jid}/${widget.threadId ?? ''}/$social',
-                            ),
-                            controller: _scroll,
-                            reverse: !social,
-                            keyboardDismissBehavior:
-                                ScrollViewKeyboardDismissBehavior.onDrag,
-                            padding: EdgeInsets.symmetric(
-                              horizontal: MediaQuery.sizeOf(context).width < 420
-                                  ? 12
-                                  : 24,
-                              vertical: 12,
-                            ),
-                            itemCount: rows.length + 1,
-                            itemBuilder: (context, index) {
-                              if (index == rows.length) {
-                                return Center(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(12),
-                                    child: data['loadingOlder'] == true
-                                        ? const SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                            ),
-                                          )
-                                        : data['reachedStart'] == true
-                                        ? Text(
-                                            'Beginning of conversation',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.labelSmall,
-                                          )
-                                        : TextButton(
-                                            onPressed: () => _command(
-                                              'conversation.history',
-                                            ),
-                                            child: const Text(
-                                              'Load earlier messages',
-                                            ),
-                                          ),
-                                  ),
-                                );
-                              }
-                              final message = rows[index];
-                              final previous = social
-                                  ? (index > 0 ? rows[index - 1] : null)
-                                  : (index + 1 < rows.length
-                                        ? rows[index + 1]
-                                        : null);
-                              final date = _date(message);
-                              final previousDate = previous == null
-                                  ? null
-                                  : _date(previous);
-                              final separator =
-                                  date != null && !_sameDay(date, previousDate)
-                                  ? date
-                                  : null;
-                              final grouped = _continuesGroup(
-                                message,
-                                previous,
-                                social: social,
-                              );
-                              return Column(
-                                children: [
-                                  if (separator != null) _dayLabel(separator),
-                                  if (!social &&
-                                      message['unreadDivider'] == true)
-                                    _unreadDivider(message),
-                                  _message(message, grouped),
-                                  if (social &&
-                                      message['unreadDivider'] == true)
-                                    _unreadDivider(message),
-                                ],
-                              );
-                            },
-                          ),
-                        if (!_atNewest)
-                          Positioned(
-                            right: 12,
-                            bottom: 12,
-                            child: FloatingActionButton.small(
-                              heroTag:
-                                  'latest-${widget.jid}-${widget.threadId}',
-                              tooltip: 'Jump to latest message',
-                              onPressed: _jumpToNewest,
-                              child: Icon(
-                                social
-                                    ? Icons.arrow_upward
-                                    : Icons.arrow_downward,
-                              ),
-                            ),
-                          ),
-                      ],
+                    trailing: TextButton(
+                      onPressed: _startingCall
+                          ? null
+                          : () => _startCall(_roomCallState['video'] == true),
+                      child: const Text('Join'),
                     ),
                   ),
-                  if (typing.isNotEmpty)
-                    Semantics(
-                      liveRegion: true,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 4,
+                ),
+              Expanded(
+                child: Stack(
+                  children: [
+                    if ((_opening || data['loading'] == true) && rows.isEmpty)
+                      const Center(
+                        child: CircularProgressIndicator(
+                          semanticsLabel: 'Loading messages',
                         ),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            '${typing.join(', ')} ${typing.length == 1 ? 'is' : 'are'} typing…',
-                            style: Theme.of(context).textTheme.labelSmall,
+                      )
+                    else if (rows.isEmpty)
+                      _ConversationEmptyState(
+                        title: widget.title,
+                        room: widget.group,
+                        thread: widget.threadId != null,
+                      )
+                    else
+                      ListView.builder(
+                        shrinkWrap: true,
+                        restorationId: 'timeline:$social',
+                        key: PageStorageKey(
+                          '${widget.jid}/${widget.threadId ?? ''}/$social',
+                        ),
+                        controller: _scroll,
+                        reverse: !social,
+                        keyboardDismissBehavior:
+                            ScrollViewKeyboardDismissBehavior.onDrag,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: wide ? 8 : 0,
+                          vertical: 12,
+                        ),
+                        itemCount: rows.length + (showHistory ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == rows.length) {
+                            return Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: data['loadingOlder'] == true
+                                    ? const SizedBox(
+                                        width: 20,
+                                        height: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : TextButton(
+                                        onPressed: () =>
+                                            _command('conversation.history'),
+                                        child: const Text(
+                                          'Load earlier messages',
+                                        ),
+                                      ),
+                              ),
+                            );
+                          }
+                          final message = rows[index];
+                          final previous = social
+                              ? (index > 0 ? rows[index - 1] : null)
+                              : (index + 1 < rows.length
+                                    ? rows[index + 1]
+                                    : null);
+                          final date = _date(message);
+                          final previousDate = previous == null
+                              ? null
+                              : _date(previous);
+                          final separator =
+                              date != null && !_sameDay(date, previousDate)
+                              ? date
+                              : null;
+                          final grouped = _continuesGroup(
+                            message,
+                            previous,
+                            social: social,
+                          );
+                          return Column(
+                            children: [
+                              if (separator != null) _dayLabel(separator),
+                              if (!social && message['unreadDivider'] == true)
+                                _unreadDivider(message),
+                              _message(message, grouped, wide),
+                              if (social && message['unreadDivider'] == true)
+                                _unreadDivider(message),
+                            ],
+                          );
+                        },
+                      ),
+                    if (!_atNewest)
+                      Positioned(
+                        right: 12,
+                        bottom: 12,
+                        child: FloatingActionButton.small(
+                          heroTag: 'latest-${widget.jid}-${widget.threadId}',
+                          tooltip: 'Jump to latest message',
+                          onPressed: _jumpToNewest,
+                          child: Icon(
+                            social ? Icons.arrow_upward : Icons.arrow_downward,
                           ),
                         ),
                       ),
-                    ),
-                  _dropTarget(_composer()),
-                ],
+                  ],
+                ),
               ),
-            ),
+              if (typing.isNotEmpty)
+                Semantics(
+                  liveRegion: true,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 4,
+                    ),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '${typing.join(', ')} ${typing.length == 1 ? 'is' : 'are'} typing…',
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ),
+                  ),
+                ),
+              _dropTarget(_composer(pane.maxWidth)),
+            ],
           ),
         ),
       );
@@ -995,7 +983,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         ),
       );
 
-  Widget _header() {
+  Widget _header(bool wide) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final room = _maps(
@@ -1022,62 +1010,63 @@ class _ConversationScreenState extends State<ConversationScreen>
         : online
         ? 'Online now'
         : widget.jid;
+    final title = Text(
+      widget.threadId == null ? widget.title : 'Thread',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.titleMedium?.copyWith(
+        fontWeight: FontWeight.w700,
+        fontSize: wide ? 18 : 16,
+      ),
+    );
+    final caption = Text(
+      subline,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: online ? colors.primary : colors.onSurfaceVariant,
+      ),
+    );
     return LayoutBuilder(
-      builder: (context, constraints) => Row(
-        children: [
-          if (constraints.maxWidth > 200 &&
-              MediaQuery.textScalerOf(context).scale(16) < 25) ...[
-            if (!widget.group && widget.threadId == null)
-              WaddleAvatar(name: widget.title, size: 42, online: online)
-            else
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: colors.primaryContainer,
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: Icon(
+      builder: (context, constraints) {
+        final inline =
+            wide &&
+            widget.group &&
+            widget.threadId == null &&
+            constraints.maxWidth > 380 &&
+            MediaQuery.textScalerOf(context).scale(16) < 25;
+        return Row(
+          children: [
+            if (wide && constraints.maxWidth > 180) ...[
+              if (!widget.group && widget.threadId == null)
+                WaddleAvatar(name: widget.title, size: 36, online: online)
+              else
+                Icon(
                   widget.threadId != null
                       ? Icons.forum_outlined
                       : _isGroupDm
                       ? Icons.group_outlined
                       : Icons.tag_rounded,
-                  color: colors.onPrimaryContainer,
-                  size: 25,
+                  size: 22,
+                  color: colors.onSurfaceVariant,
+                ),
+              const SizedBox(width: 10),
+            ],
+            if (inline) ...[
+              Flexible(child: title),
+              const SizedBox(width: 12),
+              Flexible(child: caption),
+            ] else
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [title, caption],
                 ),
               ),
-            const SizedBox(width: 12),
           ],
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.threadId == null ? widget.title : 'Thread',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -.6,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  subline,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: online ? colors.primary : colors.onSurfaceVariant,
-                    letterSpacing: .1,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -1091,34 +1080,32 @@ class _ConversationScreenState extends State<ConversationScreen>
         ? 'Yesterday'
         : MaterialLocalizations.of(context).formatMediumDate(date);
     final colors = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        children: [
-          Expanded(child: Divider(color: colors.outlineVariant)),
-          Flexible(
-            flex: 3,
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 14),
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
-              decoration: BoxDecoration(
-                color: colors.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: colors.onSurfaceVariant,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: .4,
+    return LayoutBuilder(
+      builder: (context, constraints) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(child: Divider(color: colors.outlineVariant)),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth * .6),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  label.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    fontFamily: 'Atkinson Hyperlegible Mono',
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: .8,
+                    color: colors.onSurfaceVariant,
+                  ),
                 ),
               ),
             ),
-          ),
-          Expanded(child: Divider(color: colors.outlineVariant)),
-        ],
+            Expanded(child: Divider(color: colors.outlineVariant)),
+          ],
+        ),
       ),
     );
   }
@@ -1184,9 +1171,10 @@ class _ConversationScreenState extends State<ConversationScreen>
         when!.difference(prior!).inMinutes.abs() < 5;
   }
 
-  Widget _message(Map<String, dynamic> message, bool grouped) {
+  Widget _message(Map<String, dynamic> message, bool grouped, bool wide) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final desktopActions = wide && _desktopKeyboard;
     final mine = message['mine'] == true;
     final deleted = message['deleted'] == true;
     final actionable = !deleted && message['pending'] != true;
@@ -1226,17 +1214,40 @@ class _ConversationScreenState extends State<ConversationScreen>
         color: colors.onSurfaceVariant,
       ),
     );
-    return Padding(
+    return _MessageFrame(
       key: ValueKey(message['presentationId'] ?? message['id']),
-      padding: EdgeInsets.only(top: grouped ? 0 : 8, bottom: 2),
+      wide: desktopActions,
+      timeInGutter: grouped ? time : '',
+      actions: [
+        if (actionable) ...[
+          IconButton(
+            tooltip: 'Reply',
+            icon: const Icon(Icons.reply_rounded),
+            onPressed: () => _replyTo(message),
+          ),
+          if (widget.threadId == null)
+            IconButton(
+              tooltip: 'Reply in thread',
+              icon: const Icon(Icons.forum_outlined),
+              onPressed: () => _thread(thread),
+            ),
+        ],
+        if (hasActions) actions,
+      ],
+      padding: EdgeInsets.fromLTRB(
+        wide ? 16 : 8,
+        grouped ? 0 : 8,
+        wide ? 16 : 4,
+        grouped ? 2 : 6,
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 48,
-            height: 48,
+            width: wide ? 40 : 48,
+            height: desktopActions ? (grouped ? 24 : 40) : 48,
             child: grouped
-                ? (hasActions
+                ? (!desktopActions && hasActions
                       ? IconButton(
                           tooltip: time.isEmpty
                               ? 'Message actions'
@@ -1262,7 +1273,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                     ),
                   ),
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: wide ? 12 : 6),
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -1283,9 +1294,9 @@ class _ConversationScreenState extends State<ConversationScreen>
                             onTap: () => _profile(message),
                             child: Text(
                               author,
-                              style: theme.textTheme.labelLarge?.copyWith(
+                              style: theme.textTheme.bodyLarge?.copyWith(
                                 fontWeight: FontWeight.w700,
-                                color: mine ? colors.primary : colors.onSurface,
+                                color: colors.onSurface,
                               ),
                             ),
                           ),
@@ -1293,7 +1304,6 @@ class _ConversationScreenState extends State<ConversationScreen>
                             Text(
                               time,
                               style: theme.textTheme.labelSmall?.copyWith(
-                                fontSize: 10,
                                 color: colors.onSurfaceVariant,
                               ),
                             ),
@@ -1352,7 +1362,10 @@ class _ConversationScreenState extends State<ConversationScreen>
                     if (message['isCallRow'] == true)
                       _callRow(message)
                     else if (_str(message['body']).isNotEmpty)
-                      _richBody(message),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 680),
+                        child: _richBody(message),
+                      ),
                     for (final file in _maps(message['files']))
                       _attachment(message, file),
                     for (final preview in _maps(message['linkPreviews']))
@@ -1406,6 +1419,30 @@ class _ConversationScreenState extends State<ConversationScreen>
                                 .whereType<String>())
                           ActionChip(
                             label: Text(label),
+                            labelStyle: theme.textTheme.bodySmall?.copyWith(
+                              color: label == 'Question'
+                                  ? colors.secondary
+                                  : colors.onSurfaceVariant,
+                            ),
+                            avatar: Icon(
+                              label == 'Question'
+                                  ? Icons.help_outline
+                                  : Icons.shield_outlined,
+                              size: 14,
+                              color: label == 'Question'
+                                  ? colors.secondary
+                                  : colors.onSurfaceVariant,
+                            ),
+                            side: BorderSide.none,
+                            backgroundColor: Colors.transparent,
+                            padding: EdgeInsets.zero,
+                            labelPadding: const EdgeInsetsDirectional.only(
+                              end: 3,
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize: desktopActions
+                                ? MaterialTapTargetSize.shrinkWrap
+                                : MaterialTapTargetSize.padded,
                             onPressed: () =>
                                 _safetyScores(message['safetyScores']),
                           ),
@@ -1463,7 +1500,7 @@ class _ConversationScreenState extends State<ConversationScreen>
               ),
             ),
           ),
-          if (!grouped && hasActions)
+          if (!desktopActions && !grouped && hasActions)
             SizedBox(width: 48, height: 48, child: actions),
         ],
       ),
@@ -1955,11 +1992,35 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
-  Widget _composer() {
+  bool get _desktopKeyboard => switch (Theme.of(context).platform) {
+    TargetPlatform.linux ||
+    TargetPlatform.macOS ||
+    TargetPlatform.windows => true,
+    _ => false,
+  };
+
+  KeyEventResult _composerKey(FocusNode node, KeyEvent event) {
+    if (!_desktopKeyboard ||
+        (event.logicalKey != LogicalKeyboardKey.enter &&
+            event.logicalKey != LogicalKeyboardKey.numpadEnter) ||
+        HardwareKeyboard.instance.isShiftPressed ||
+        HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed ||
+        HardwareKeyboard.instance.isMetaPressed ||
+        !_draft.value.composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent) unawaited(_send());
+    return KeyEventResult.handled;
+  }
+
+  Widget _composer(double width) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final media = MediaQuery.of(context);
-    final header = media.textScaler.scale(18) > 26 ? 100.0 : 72.0;
+    final header = media.textScaler.scale(18) > 26 ? 88.0 : 56.0;
+    final wide = width >= 600;
+    final stacked = width < 370 || media.textScaler.scale(16) > 25;
     final available =
         (media.size.height -
                 media.viewInsets.bottom -
@@ -1968,20 +2029,89 @@ class _ConversationScreenState extends State<ConversationScreen>
             .clamp(100.0, double.infinity)
             .toDouble();
     final editorMax = (available * .28).clamp(56.0, 136.0).toDouble();
-    final extrasMax = (available - editorMax - 72).clamp(0.0, 152.0).toDouble();
+    final extrasMax = (available - editorMax - (stacked ? 88 : 64))
+        .clamp(0.0, 152.0)
+        .toDouble();
     final hasContext = _reply != null || _edit != null;
-    return Padding(
+    final editor = Focus(
+      canRequestFocus: false,
+      onKeyEvent: _composerKey,
+      child: ClipRect(
+        key: const ValueKey('composer-editor-clip'),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: 44, maxHeight: editorMax),
+          child: TextField(
+            controller: _draft,
+            focusNode: _focus,
+            autofocus: widget.focusComposer,
+            minLines: 1,
+            maxLines: 4,
+            textCapitalization: TextCapitalization.sentences,
+            keyboardType: TextInputType.multiline,
+            style: theme.textTheme.bodyLarge?.copyWith(
+              color: colors.onSurface,
+              height: 1.4,
+            ),
+            contentInsertionConfiguration: ContentInsertionConfiguration(
+              allowedMimeTypes: const ['image/*'],
+              onContentInserted: (content) =>
+                  _sendImmediate('conversation.insertContent', {
+                    'uri': content.uri,
+                    'mimeType': content.mimeType,
+                    if (content.data != null) 'data': content.data,
+                  }),
+            ),
+            decoration: InputDecoration(
+              hintText: widget.threadId == null
+                  ? 'Message ${widget.title}'
+                  : 'Reply in thread',
+              isDense: true,
+              hintStyle: theme.textTheme.bodyLarge?.copyWith(
+                color: colors.onSurfaceVariant,
+              ),
+              filled: false,
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 12,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return Container(
       key: const ValueKey('conversation-composer'),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: colors.outlineVariant),
+      padding: EdgeInsets.fromLTRB(
+        wide ? 24 : 12,
+        8,
+        wide ? 24 : 12,
+        wide ? 20 : 12,
+      ),
+      decoration: BoxDecoration(
+        color: wide ? colors.surface : colors.surfaceContainerLow,
+        border: wide
+            ? null
+            : Border(top: BorderSide(color: colors.outlineVariant)),
+      ),
+      child: ListenableBuilder(
+        listenable: _focus,
+        builder: (context, child) => DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.surfaceContainer,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: _focus.hasFocus ? colors.primary : colors.outline,
+              width: _focus.hasFocus ? 2 : 1,
+            ),
+          ),
+          child: child,
         ),
         child: Material(
           color: Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(14),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2054,10 +2184,14 @@ class _ConversationScreenState extends State<ConversationScreen>
                     ),
                   ),
                 ),
+              if (stacked)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 4, 6, 0),
+                  child: SizedBox(width: double.infinity, child: editor),
+                ),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                padding: const EdgeInsets.all(6),
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     IconButton(
                       tooltip: 'Attach encrypted file',
@@ -2066,66 +2200,55 @@ class _ConversationScreenState extends State<ConversationScreen>
                           ? null
                           : () => _sendImmediate('conversation.attach'),
                     ),
-                    Expanded(
-                      child: ClipRect(
-                        key: const ValueKey('composer-editor-clip'),
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(
-                            minHeight: 48,
-                            maxHeight: editorMax,
+                    if (!stacked) Expanded(child: editor) else const Spacer(),
+                    if (wide)
+                      PopupMenuButton<String>(
+                        tooltip: 'Format message',
+                        icon: const Icon(Icons.text_format_rounded),
+                        onSelected: _composerAction,
+                        itemBuilder: (_) => [
+                          _menuItem('bold', 'Bold', Icons.format_bold),
+                          _menuItem('italic', 'Italic', Icons.format_italic),
+                          _menuItem('code', 'Code', Icons.code_rounded),
+                          _menuItem(
+                            'strike',
+                            'Strikethrough',
+                            Icons.strikethrough_s,
                           ),
-                          child: TextField(
-                            controller: _draft,
-                            focusNode: _focus,
-                            autofocus: widget.focusComposer,
-                            minLines: 1,
-                            maxLines: 4,
-                            textCapitalization: TextCapitalization.sentences,
-                            keyboardType: TextInputType.multiline,
-                            style: theme.textTheme.bodyLarge?.copyWith(
-                              color: colors.onSurface,
-                              height: 1.4,
-                            ),
-                            contentInsertionConfiguration:
-                                ContentInsertionConfiguration(
-                                  allowedMimeTypes: const ['image/*'],
-                                  onContentInserted: (content) =>
-                                      _sendImmediate(
-                                        'conversation.insertContent',
-                                        {
-                                          'uri': content.uri,
-                                          'mimeType': content.mimeType,
-                                          if (content.data != null)
-                                            'data': content.data,
-                                        },
-                                      ),
-                                ),
-                            decoration: InputDecoration(
-                              hintText: widget.threadId == null
-                                  ? 'Message ${widget.title}'
-                                  : 'Reply in thread',
-                              isDense: true,
-                              hintStyle: theme.textTheme.bodyLarge?.copyWith(
-                                color: colors.onSurfaceVariant,
-                              ),
-                              filled: false,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 4,
-                                vertical: 12,
-                              ),
-                            ),
-                          ),
-                        ),
+                        ],
                       ),
-                    ),
+                    if (wide || stacked || width >= 410)
+                      IconButton(
+                        tooltip: 'Insert emoji',
+                        icon: const Icon(
+                          Icons.sentiment_satisfied_alt_outlined,
+                        ),
+                        onPressed: _pickEmoji,
+                      ),
+                    if (wide && widget.group)
+                      IconButton(
+                        tooltip: 'Mention someone',
+                        icon: const Icon(Icons.alternate_email),
+                        onPressed: () =>
+                            _insertComposerText('@', separateWord: true),
+                      ),
+                    if (wide)
+                      IconButton(
+                        tooltip: 'Run a command',
+                        icon: const Icon(Icons.terminal_outlined),
+                        onPressed: () => _composerAction('slash'),
+                      ),
                     PopupMenuButton<String>(
                       tooltip: 'More message options',
                       icon: const Icon(Icons.more_horiz_rounded),
                       onSelected: _composerAction,
                       itemBuilder: (context) => [
+                        if (!wide && !stacked && width < 410)
+                          _menuItem(
+                            'emoji',
+                            'Insert emoji',
+                            Icons.sentiment_satisfied_alt_outlined,
+                          ),
                         _menuItem(
                           'stickers',
                           'Stickers',
@@ -2161,8 +2284,9 @@ class _ConversationScreenState extends State<ConversationScreen>
                             : _send,
                         style: IconButton.styleFrom(
                           minimumSize: const Size(48, 48),
+                          disabledBackgroundColor: Colors.transparent,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
+                            borderRadius: BorderRadius.circular(8),
                           ),
                         ),
                         icon: _sending
@@ -2176,7 +2300,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                               )
                             : Icon(
                                 _edit == null
-                                    ? Icons.arrow_upward_rounded
+                                    ? Icons.send_rounded
                                     : Icons.check_rounded,
                               ),
                       ),
@@ -2191,6 +2315,48 @@ class _ConversationScreenState extends State<ConversationScreen>
     );
   }
 
+  Future<void> _pickEmoji() async {
+    final generation = widget.bridge.generation;
+    final value = _draft.value;
+    final selection = value.selection;
+    final picked = await showDialog<String>(
+      context: context,
+      useRootNavigator: false,
+      builder: (_) => const ComposerEmojiPicker(),
+    );
+    if (!mounted ||
+        generation != widget.bridge.generation ||
+        _route?.isCurrent != true) {
+      return;
+    }
+    if (picked != null) {
+      // Opening a picker can collapse the text selection when the editor loses focus.
+      if (_draft.text == value.text && selection.isValid) {
+        _draft.selection = selection;
+      }
+      _insertComposerText(picked);
+    } else {
+      _focus.requestFocus();
+    }
+  }
+
+  void _insertComposerText(String insert, {bool separateWord = false}) {
+    final value = _draft.value;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start : value.text.length;
+    final end = selection.isValid ? selection.end : start;
+    if (separateWord && start > 0 && value.text[start - 1].trim().isNotEmpty) {
+      insert = ' $insert';
+    }
+    _draft.value = value
+        .replaced(TextRange(start: start, end: end), insert)
+        .copyWith(
+          selection: TextSelection.collapsed(offset: start + insert.length),
+          composing: TextRange.empty,
+        );
+    _focus.requestFocus();
+  }
+
   Future<void> _composerAction(String action) async {
     if (_edit != null && ['stickers', 'gifs', 'paste'].contains(action)) {
       setState(
@@ -2200,6 +2366,8 @@ class _ConversationScreenState extends State<ConversationScreen>
       return;
     }
     switch (action) {
+      case 'emoji':
+        await _pickEmoji();
       case 'stickers':
         await _stickerPicker();
       case 'bold':
@@ -2261,6 +2429,14 @@ class _ConversationScreenState extends State<ConversationScreen>
       ..clear()
       ..addAll(preservedMentions);
     _saveMentions();
+    _focus.requestFocus();
+  }
+
+  void _replyTo(Map<String, dynamic> message) {
+    setState(() {
+      _reply = message;
+      _edit = null;
+    });
     _focus.requestFocus();
   }
 
@@ -2382,11 +2558,7 @@ class _ConversationScreenState extends State<ConversationScreen>
       case 'retry':
         await _command('conversation.retry', {'localId': message['localId']});
       case 'reply':
-        setState(() {
-          _reply = message;
-          _edit = null;
-        });
-        _focus.requestFocus();
+        _replyTo(message);
       case 'subthread':
         await _thread(message['subthreadTargetId'] as String);
       case 'thread':

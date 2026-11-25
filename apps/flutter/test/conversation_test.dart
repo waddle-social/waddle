@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/bridge.dart';
 import 'package:waddle_flutter/features/conversation.dart';
+import 'package:waddle_flutter/features/composer_emoji_picker.dart';
 
 const _jid = 'general@rooms.example.org';
 
@@ -202,6 +204,117 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
+  );
+
+  testWidgets(
+    'desktop timeline and composer use the pane and expose mouse and keyboard actions',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot(messages: true);
+      await _mount(tester, harness);
+      tester.view.physicalSize = const Size(1440, 900);
+      await tester.pumpAndSettle();
+      final composer = tester.getRect(
+        find.byKey(const ValueKey('conversation-composer')),
+      );
+      final first = tester.getRect(_body('Older message'));
+      expect(composer.width, 1440);
+      expect(first.left, lessThan(100));
+      expect(first.top, lessThan(260));
+      final day = find.text(
+        MaterialLocalizations.of(
+          tester.element(_body('Older message')),
+        ).formatMediumDate(DateTime(2026, 10, 31)).toUpperCase(),
+      );
+      expect(tester.getCenter(day).dx, closeTo(composer.center.dx, 1));
+      expect(find.byTooltip('Pinned messages'), findsOneWidget);
+      expect(find.byTooltip('Members'), findsOneWidget);
+      expect(find.byTooltip('Format message'), findsOneWidget);
+      final hover = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await hover.addPointer(location: Offset.zero);
+      addTearDown(hover.removePointer);
+      await hover.moveTo(first.center);
+      await tester.pump();
+      final reply = find.descendant(
+        of: find.byKey(const ValueKey<dynamic>('old')),
+        matching: find.byTooltip('Reply'),
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: reply, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        1,
+      );
+      await tester.tap(reply);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Meet');
+      await tester.tap(find.byTooltip('Mention someone'));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Meet @',
+      );
+      await tester.ensureVisible(find.text('alex'));
+      await tester.tap(find.text('alex'));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(
+        harness.calls('conversation.send').single,
+        containsPair('body', 'Meet @alex'),
+      );
+      expect(
+        harness.calls('conversation.send').single,
+        containsPair('replyTo', 'old'),
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.linux),
+  );
+
+  testWidgets(
+    'emoji keyword search inserts at the selection and returns editor focus',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot(messages: true);
+      await _mount(tester, harness);
+      if (Theme.of(tester.element(find.byType(TextField))).platform ==
+          TargetPlatform.linux) {
+        tester.view.physicalSize = const Size(1440, 900);
+        await tester.pumpAndSettle();
+      }
+      final catalog = await tester.runAsync(
+        () => ComposerEmojiPicker.loadCatalog(rootBundle),
+      );
+      expect(catalog, hasLength(1914));
+      final draft = tester.widget<TextField>(find.byType(TextField));
+      await tester.enterText(find.byType(TextField), 'Take a bird along');
+      draft.controller!.selection = const TextSelection(
+        baseOffset: 7,
+        extentOffset: 11,
+      );
+      await tester.tap(find.byTooltip('Insert emoji'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Search emoji'),
+        'jemima',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Insert goose'));
+      await tester.pumpAndSettle();
+      expect(draft.controller!.text, 'Take a 🪿 along');
+      expect(draft.controller!.selection.baseOffset, 'Take a 🪿'.length);
+      expect(draft.focusNode!.hasFocus, isTrue);
+      expect(harness.calls('conversation.send'), isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.linux,
+    }),
   );
 
   testWidgets('chat and social timelines keep the correct live edge', (
