@@ -2848,6 +2848,21 @@ fn build_in_call_reaction_message_has_transient_carrier_shape() {
 }
 
 #[test]
+fn build_in_call_reaction_message_to_room_omits_no_copy_hint() {
+    // XEP-0334: "This hint MUST only be included on messages addressed to
+    // full JIDs"; a groupchat reaction targets the room's bare JID.
+    let recipient =
+        InCallReactionRecipient::Room("room@muc.example.com".parse().expect("bare jid"));
+    let sid = InCallSessionId::try_new("call-1").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
+    let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
+    assert_eq!(stanza.attr("to"), Some("room@muc.example.com"));
+    assert_eq!(stanza.attr("type"), Some("groupchat"));
+    assert!(stanza.get_child("no-store", NS_HINTS).is_some());
+    assert!(stanza.get_child("no-copy", NS_HINTS).is_none());
+}
+
+#[test]
 fn in_call_reaction_values_reject_empty_wire_fields() {
     assert!(InCallSessionId::try_new("").is_err());
     assert!(InCallSessionId::try_new("   ").is_err());
