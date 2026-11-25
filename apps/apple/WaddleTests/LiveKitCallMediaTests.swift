@@ -22,6 +22,17 @@ final class LiveKitCallMediaTests: XCTestCase {
         return defaults
     }
 
+    func testTheBackgroundIsTheRoomUntilChosenAndIsKept() {
+        let defaults = makeDefaults()
+        let media = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(media.background, .off)
+        // With no call there is no camera to give it to: it is kept for the next.
+        media.setBackground(.blur)
+        XCTAssertEqual(LiveKitCallMediaController(defaults: defaults).background, .blur)
+        media.setBackground(.off)
+        XCTAssertEqual(LiveKitCallMediaController(defaults: defaults).background, .off)
+    }
+
     func testAudioProcessingIsAllOnUntilChosenAndIsKept() async {
         let defaults = makeDefaults()
         let media = LiveKitCallMediaController(defaults: defaults)

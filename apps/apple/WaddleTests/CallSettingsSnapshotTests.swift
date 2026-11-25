@@ -14,12 +14,14 @@ final class CallSettingsSnapshotTests: XCTestCase {
 
     private func assertSettings(
         _ devices: CallDevices, kinds: [CallDeviceKind] = CallDeviceKind.allCases, width: CGFloat = CallSettingsView.width,
-        audioProcessing: CallAudioProcessing = CallAudioProcessing(), videoStats: [CallVideoStat]? = nil,
-        height: CGFloat = 520, testName: String = #function, line: UInt = #line
+        audioProcessing: CallAudioProcessing = CallAudioProcessing(), background: CallBackground = .off,
+        videoStats: [CallVideoStat]? = nil,
+        height: CGFloat = 620, testName: String = #function, line: UInt = #line
     ) async throws {
         try await assertScreenSnapshot(
             of: CallSettingsView(
-                devices: devices, kinds: kinds, audioProcessing: audioProcessing, videoStats: videoStats, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }
+                devices: devices, kinds: kinds, audioProcessing: audioProcessing, background: background,
+                videoStats: videoStats, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }
             ),
             size: CGSize(width: width, height: height), testName: testName, line: line
         )
@@ -40,7 +42,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
                 microphones: CallDeviceList(devices: [Self.builtIn], preferred: Self.headset.id),
                 speakers: CallDeviceList(devices: [Self.speakers])
             ),
-            audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false), height: 560
+            audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false), height: 600
         )
     }
 
@@ -72,11 +74,15 @@ final class CallSettingsSnapshotTests: XCTestCase {
             ]
         }
         _ = tracker.update(with: readings(second: 1))
-        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 660)
+        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 760)
+    }
+
+    func testABlurredBackground() async throws {
+        try await assertSettings(Self.devices, background: .blur, height: 620)
     }
 
     func testNoVideoToMeasure() async throws {
-        try await assertSettings(Self.devices, videoStats: [], height: 600)
+        try await assertSettings(Self.devices, videoStats: [], height: 700)
     }
 
     #if os(iOS)
@@ -87,7 +93,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
             CallDevices(cameras: CallDeviceList(devices: [
                 CallDevice(id: "front", name: "Front Camera"), CallDevice(id: "back", name: "Back Camera"),
             ])),
-            kinds: [.camera], width: 375, height: 420
+            kinds: [.camera], width: 375, height: 520
         )
     }
     #endif

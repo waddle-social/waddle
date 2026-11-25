@@ -76,4 +76,20 @@ import Testing
         #expect(CallAudioProcessing(stored: ["noiseSuppression": false, "echoCancellation": "no", "autoGainControl": true]) == CallAudioProcessing())
         #expect(CallAudioProcessing(stored: "nonsense") == CallAudioProcessing())
     }
+
+    // MARK: - Camera background
+
+    @Test func theBackgroundIsTheRoomUntilChosen() {
+        #expect(CallBackground(stored: nil) == .off)
+    }
+
+    @Test func aChosenBackgroundSurvivesStorage() {
+        #expect(CallBackground(stored: CallBackground.blur.rawValue) == .blur)
+        #expect(CallBackground(stored: CallBackground.off.rawValue) == .off)
+    }
+
+    @Test func aBackgroundThisAppDoesNotHaveIsTheRoom() {
+        #expect(CallBackground(stored: "image") == .off)
+        #expect(CallBackground(stored: "") == .off)
+    }
 }

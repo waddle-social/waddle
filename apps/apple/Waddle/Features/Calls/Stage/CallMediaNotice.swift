@@ -107,6 +107,7 @@ struct CallMediaNotice: View {
         case .microphone: "mic.slash"
         case .camera: "video.slash"
         case .screen: "rectangle.inset.filled.and.person.filled"
+        case .background: "person.crop.rectangle"
         }
     }
 

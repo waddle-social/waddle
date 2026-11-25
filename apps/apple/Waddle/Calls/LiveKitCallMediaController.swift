@@ -119,12 +119,30 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private let defaults: UserDefaults
     private static let devicePreferencesKey = "callDevicePreferences"
     private static let audioProcessingKey = "callAudioProcessing"
+    private static let backgroundKey = "callBackground"
+    private(set) var background = CallBackground.off
+    private(set) var isBackgroundFailing = false
+    /// What stands between each of our cameras and what its picture goes
+    /// to, by capturer. Kept here: a capturer holds its processor weakly.
+    @ObservationIgnored private var backgroundProcessors: [ObjectIdentifier: CallBackgroundProcessor] = [:]
+    /// The processors that say their blur is not working. Each speaks for
+    /// itself, so one that is replaced takes its word with it.
+    @ObservationIgnored private var failingBackgrounds: Set<ObjectIdentifier> = []
+    /// A camera asked for with blur on never got as far as being
+    /// published: there is no camera, and no processor left to say so.
+    @ObservationIgnored private var cameraFailedToStartBlurred = false
+    /// The processors of a room that has been forgotten and is still being
+    /// taken down. Its cameras go on capturing until the SDK has stopped
+    /// them, and a capturer whose processor has been let go sends its
+    /// frames as they are: so they are held until the disconnect is done.
+    @ObservationIgnored private var departingBackgroundProcessors: [ObjectIdentifier: [CallBackgroundProcessor]] = [:]
     private(set) var audioProcessing = CallAudioProcessing()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
+        background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
         #if os(macOS)
         // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
         AudioManager.shared.onDeviceUpdate = { [weak self] _ in
@@ -340,6 +358,153 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
     }
 
+    // MARK: - Camera background
+
+    func setBackground(_ background: CallBackground) {
+        guard background != self.background else { return }
+        self.background = background
+        defaults.set(background.rawValue, forKey: Self.backgroundKey)
+        for processor in backgroundProcessors.values { processor.setBlurring(background == .blur) }
+        if background == .off {
+            failingBackgrounds = []
+            cameraFailedToStartBlurred = false
+            refreshBackgroundFailing()
+        }
+    }
+
+    func restartBackground() async {
+        for processor in backgroundProcessors.values { processor.restart() }
+        // A blur that gave no picture while the camera was starting leaves no
+        // camera at all: the SDK gives up on a track it gets no frames from.
+        // Checking again then means starting the camera again, if it is still wanted.
+        guard let room, publications(of: .video, in: room).isEmpty, captureChoices[.video] == true else { return }
+        await setSource(.video, enabled: true, in: room)
+    }
+
+    /// The processor a new camera is made with (`CallBackgroundProcessor`),
+    /// so that no frame of it gets out before the blur is in place.
+    private func makeBackgroundProcessor() -> CallBackgroundProcessor {
+        // The processor's word is filed under the processor, which does not exist until this returns.
+        let made = MadeProcessor()
+        let processor = CallBackgroundProcessor(isBlurring: background == .blur) { [weak self] isFailing in
+            Task { @MainActor in
+                guard let self, let processor = made.processor else { return }
+                self.backgroundFailureChanged(isFailing, for: processor)
+            }
+        }
+        made.processor = processor
+        return processor
+    }
+
+    /// Lets a processor's callback name the processor it belongs to.
+    private final class MadeProcessor: @unchecked Sendable {
+        weak var processor: CallBackgroundProcessor?
+    }
+
+    private func backgroundFailureChanged(_ isFailing: Bool, for processor: CallBackgroundProcessor) {
+        // A processor that has been let go has nothing more to say about the call.
+        guard backgroundProcessors.values.contains(where: { $0 === processor }) else { return }
+        if isFailing, background == .blur {
+            failingBackgrounds.insert(ObjectIdentifier(processor))
+        } else {
+            failingBackgrounds.remove(ObjectIdentifier(processor))
+        }
+        refreshBackgroundFailing()
+    }
+
+    /// Call when `room` has finished disconnecting: its cameras are stopped, and their processors can go.
+    private func releaseBackgroundProcessors(of room: Room) {
+        departingBackgroundProcessors[ObjectIdentifier(room)] = nil
+    }
+
+    /// Lets a capturer's processor go, and its word about the blur with it.
+    private func discardBackgroundProcessor(of capturer: ObjectIdentifier) {
+        if let processor = backgroundProcessors.removeValue(forKey: capturer) {
+            failingBackgrounds.remove(ObjectIdentifier(processor))
+        }
+        refreshBackgroundFailing()
+    }
+
+    /// The one thing the stage is told: the blur is on and no picture is getting out.
+    private func refreshBackgroundFailing() {
+        let isFailing = room != nil && background == .blur && (!failingBackgrounds.isEmpty || cameraFailedToStartBlurred)
+        guard isBackgroundFailing != isFailing else { return }
+        isBackgroundFailing = isFailing
+        // Said again each time it happens, as a refused device is.
+        if isFailing { mediaRefusals[.background, default: 0] += 1 }
+    }
+
+    /// The safety net under `publishCamera`: a camera of ours that somehow
+    /// has no processor is given one.
+    ///
+    /// A processor is not let go because its camera is missing from the
+    /// publications: a full reconnect takes the publication away and
+    /// publishes the same track again, capturing before it reports, and a
+    /// capturer whose processor was let go meanwhile would send frames as
+    /// they are. Processors go when their track is dropped on purpose, and with the call.
+    private func giveBackgroundToCameras(in room: Room) {
+        for publication in publications(of: .video, in: room) {
+            guard let capturer = (publication.track as? LocalVideoTrack)?.capturer else { continue }
+            let id = ObjectIdentifier(capturer)
+            if capturer.processor == nil || backgroundProcessors[id] == nil {
+                let processor = backgroundProcessors[id] ?? makeBackgroundProcessor()
+                backgroundProcessors[id] = processor
+                capturer.processor = processor
+            }
+        }
+    }
+
+    /// Unmutes the camera we have, or makes one. Every camera this
+    /// controller ever sends from is one `publishCamera` made.
+    private func turnCameraOn(in room: Room) async {
+        for publication in publications(of: .video, in: room) where publication.isMuted {
+            try? await publication.unmute()
+        }
+        // None to unmute, or it went away while we were at it, as a muted
+        // track does in a full reconnect: a new one, made our way.
+        if self.room === room, !publications(of: .video, in: room).contains(where: { !$0.isMuted }) {
+            await publishCamera(in: room)
+        }
+    }
+
+    /// Makes and publishes a camera of our own making. The SDK's own way
+    /// makes the track without a processor and sends frames before one can
+    /// be attached; ours has it from before the first frame.
+    private func publishCamera(in room: Room) async {
+        let processor = makeBackgroundProcessor()
+        let track = await LocalVideoTrack.createCameraTrack(options: cameraCaptureOptions(), processor: processor)
+        let id = ObjectIdentifier(track.capturer)
+        guard self.room === room else {
+            // The call ended while the camera was being made. `setSource`
+            // takes the room down next; the processor is held until then
+            // and never counted among those of a later call.
+            departingBackgroundProcessors[ObjectIdentifier(room), default: []].append(processor)
+            _ = try? await track.stop()
+            return
+        }
+        backgroundProcessors[id] = processor
+        // The choice may have changed while the track was being made, when
+        // this processor was not yet among those `setBackground` reaches.
+        processor.setBlurring(background == .blur)
+        guard (try? await room.localParticipant.publish(videoTrack: track)) != nil else {
+            // Not published, as when the blur gave it no frame to start
+            // with: nothing of it is left running, and "Check again" starts
+            // another. Its processor goes, so the failure is kept here.
+            discardBackgroundProcessor(of: id)
+            _ = try? await track.stop()
+            if self.room === room, background == .blur {
+                cameraFailedToStartBlurred = true
+                refreshBackgroundFailing()
+            }
+            return
+        }
+        // A camera that came up puts an earlier failed start behind us.
+        if cameraFailedToStartBlurred {
+            cameraFailedToStartBlurred = false
+            refreshBackgroundFailing()
+        }
+    }
+
     // MARK: - Audio processing
 
     func setAudioProcessing(_ processing: CallAudioProcessing) async {
@@ -436,7 +601,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let wanted = cameraCaptureOptions()
         for publication in publications(of: .video, in: room) {
             if publication.isMuted {
-                if droppingIdleTracks { try? await room.localParticipant.unpublish(publication: publication) }
+                if droppingIdleTracks {
+                    if let capturer = (publication.track as? LocalVideoTrack)?.capturer {
+                        discardBackgroundProcessor(of: ObjectIdentifier(capturer))
+                    }
+                    try? await room.localParticipant.unpublish(publication: publication)
+                }
             } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
                       capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
                 _ = try? await capturer.set(options: wanted ?? CameraCaptureOptions())
@@ -497,6 +667,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         } catch {
             if self.room === room { forgetRoom() }
             await room.disconnect()
+            releaseBackgroundProcessors(of: room)
             throw error
         }
         if phase == .connecting { phase = .connected }
@@ -514,6 +685,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let room else { return }
         forgetRoom()
         await room.disconnect()
+        releaseBackgroundProcessors(of: room)
     }
 
     func forgetCaptureChoices() {
@@ -532,6 +704,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func setCamera(_ on: Bool) async {
         captureChoices[.video] = on
+        if !on, cameraFailedToStartBlurred {
+            // A camera they no longer want is not a camera that failed to start.
+            cameraFailedToStartBlurred = false
+            refreshBackgroundFailing()
+        }
         guard let room else { return }
         await setSource(.video, enabled: on, in: room)
     }
@@ -714,7 +891,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if kind == .audio {
             _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? audioCaptureOptions : nil)
         } else {
-            _ = try? await room.localParticipant.setCamera(enabled: enabled, captureOptions: enabled ? cameraCaptureOptions() : nil)
+            // The SDK's own `setCamera` is never asked to turn a camera on:
+            // it looks for the publication again inside its own queue and,
+            // finding none, as during a reconnect, makes a camera with no
+            // background processor, whose frames go out as they are. A
+            // camera of ours is unmuted here, and one that is not there is
+            // made by `publishCamera`, with its processor on it from the start.
+            if enabled { await turnCameraOn(in: room) }
         }
         // The SDK toggles one publication per device. Off means all of them.
         if !enabled {
@@ -727,6 +910,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard self.room === room else {
             await room.localParticipant.unpublishAll()
             await room.disconnect()
+            releaseBackgroundProcessors(of: room)
             return
         }
         refreshTracks()
@@ -750,6 +934,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     private func forgetRoom() {
+        let departing = room
         room = nil
         observer = nil
         joinedIdentity = nil
@@ -768,6 +953,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         connectionSettling?.cancel()
         connectionRating = CallConnectionRatingGate()
         appliedAudioProcessing = nil
+        // Forgotten at once, so nothing stale is heard; let go only when the room is down.
+        if let departing, !backgroundProcessors.isEmpty {
+            departingBackgroundProcessors[ObjectIdentifier(departing), default: []] += Array(backgroundProcessors.values)
+        }
+        backgroundProcessors = [:]
+        failingBackgrounds = []
+        cameraFailedToStartBlurred = false
+        if isBackgroundFailing { isBackgroundFailing = false }
         measuredTracks = [:]
         videoWatchers = 0
         audioProcessingPublications = []
@@ -826,6 +1019,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         refreshTracks(restoringVolumes: restoringVolumes)
         dropDuplicatePublications(in: room)
         enforceCaptureChoices(in: room)
+        // A camera just turned on, or published again after a reconnect, has a capturer that has not been given it.
+        giveBackgroundToCameras(in: room)
         giveAudioProcessingToNewPublications(in: room)
         #if os(macOS)
         // A full reconnect republishes what it had: not a screen the person has stopped sharing since.

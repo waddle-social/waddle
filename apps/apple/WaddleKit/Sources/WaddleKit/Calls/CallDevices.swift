@@ -90,6 +90,20 @@ public struct CallAudioProcessing: Equatable, Sendable {
     }
 }
 
+/// What stands behind us in our camera's picture (web `BackgroundEffect`).
+public enum CallBackground: String, CaseIterable, Equatable, Sendable {
+    /// The room as it is.
+    case off
+    /// The room blurred, and us sharp.
+    case blur
+
+    /// As stored. Anything else, as a picture background chosen on a
+    /// client that has them, is the room as it is: never a guess.
+    public init(stored: String?) {
+        self = stored.flatMap(Self.init(rawValue:)) ?? .off
+    }
+}
+
 /// Which devices the person chose for calls, kept on this device (web `device-prefs`).
 public struct CallDevicePreferences: Equatable, Sendable {
     private var chosen: [CallDeviceKind: String] = [:]

@@ -4,6 +4,8 @@
 public struct CallMediaIssue: Equatable, Identifiable, Sendable {
     public enum Kind: String, CaseIterable, Hashable, Sendable {
         case microphone, camera, screen
+        /// The blur behind us in the camera's picture.
+        case background
     }
 
     public enum Reason: Equatable, Sendable {
@@ -49,6 +51,8 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
         case (.screen, .denied):
             "Waddle cannot share the screen until you allow it under Screen & System Audio Recording in System Settings and reopen Waddle."
         case (.screen, .failed): "That could not be shared. Try again."
+        case (.background, _):
+            "Your background could not be blurred, so your camera's picture is being held back. Check again, or turn the blur off in call settings."
         }
     }
 
@@ -68,6 +72,7 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
         case (.camera, .failed): "Your camera could not be started."
         case (.screen, .denied): "Waddle is not allowed to record the screen. Change that in System Settings."
         case (.screen, .failed): "That could not be shared. Try again."
+        case (.background, _): "Your background could not be blurred, so your camera's picture is held back."
         }
     }
 
@@ -77,6 +82,7 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
         case .microphone: "microphone"
         case .camera: "camera"
         case .screen: "screen"
+        case .background: "background blur"
         }
     }
 
@@ -97,18 +103,22 @@ public enum CallMediaIssues {
         public var isCameraBlocked = false
         public var isScreenBlocked = false
         public var didScreenShareFail = false
+        /// The blur is on and is not producing a picture, so nothing of the camera is sent.
+        public var isBackgroundFailing = false
         /// How many times each device has been tried and refused or failed
         /// in this call, from whichever surface asked.
         public var refusals: [CallMediaIssue.Kind: Int] = [:]
 
         public init(
             isMicrophoneBlocked: Bool = false, isCameraBlocked: Bool = false, isScreenBlocked: Bool = false,
-            didScreenShareFail: Bool = false, refusals: [CallMediaIssue.Kind: Int] = [:]
+            didScreenShareFail: Bool = false, isBackgroundFailing: Bool = false,
+            refusals: [CallMediaIssue.Kind: Int] = [:]
         ) {
             self.isMicrophoneBlocked = isMicrophoneBlocked
             self.isCameraBlocked = isCameraBlocked
             self.isScreenBlocked = isScreenBlocked
             self.didScreenShareFail = didScreenShareFail
+            self.isBackgroundFailing = isBackgroundFailing
             self.refusals = refusals
         }
     }
@@ -141,6 +151,7 @@ public enum CallMediaIssues {
         } else if report.didScreenShareFail {
             issues.append(CallMediaIssue(kind: .screen, reason: .failed))
         }
+        if report.isBackgroundFailing { issues.append(CallMediaIssue(kind: .background, reason: .failed)) }
         return issues.filter { !dismissed.hides($0.kind, in: report) }
     }
 
