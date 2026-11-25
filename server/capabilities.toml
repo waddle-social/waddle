@@ -154,7 +154,10 @@ server_evidence = ["crates/waddle-server/tests/admin_spaces_ws.rs", "crates/wadd
 topologies = { local = "beta", federated = "unsupported" }
 [capability.protocol_evidence]
 XEP-0050 = ["crates/waddle-server/tests/admin_spaces_ws.rs", "crates/waddle-server/tests/admin_channels_ws.rs", "crates/waddle-server/tests/xep0050_ad_hoc_commands_ws.rs"]
-XEP-0503 = ["crates/waddle-server/tests/xep0503_spaces_ws.rs"]
+XEP-0503 = [
+  "crates/waddle-server/tests/xep0503_spaces_ws.rs",
+  "crates/waddle-server/tests/xep0503_space_notifications.rs",
+]
 
 [[capability]]
 id = "community-feed-stories"
