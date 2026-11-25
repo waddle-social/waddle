@@ -27,14 +27,19 @@ launch, configuration, state, and interaction flows go through XMPP to
 
 ## Hard Rules
 
-- The only Waddle framework namespace is `urn:waddle:extension:1`.
+- The only Waddle extension framework namespace is `urn:waddle:extension:1`.
+  Brokered inference credential custody and lifecycle use the dedicated
+  server-domain IQ namespace `urn:waddle:credential:1` with client-sealed
+  payloads bound to a client-pinned root broker key.
 - Plugin payload namespaces must be Waddle-owned and must start with
   `urn:waddle:`.
 - Official XEP namespaces may appear only when the wire shape is exactly that
   XEP's shape.
-- User clients never receive or submit user/provider secrets. No XEP-0050 form
-  may request API keys, OAuth refresh tokens, webhook secrets, or provider
-  credentials.
+- No XEP-0050 form on `extensions.<domain>` may request API keys, OAuth refresh
+  tokens, webhook secrets, or provider credentials (`isForbiddenExtensionCommandField`).
+  Inference provider credentials are enrolled directly into the independent
+  broker via client-sealed `urn:waddle:credential:1` IQs and are never exposed
+  to cells, plugins, or extension forms.
 - Extensions never render in iframes, WebViews, plugin DOM, plugin JS, or
   plugin CSS. Clients render server-validated declarative view descriptors and
   immutable media artifacts only.
@@ -101,6 +106,7 @@ Use these exact Waddle namespaces:
 | Link Board payloads | `urn:waddle:link-board:1` |
 | Standard AI Chatbot payloads | `urn:waddle:ai-chatbot:1` |
 | Decision Polls payloads | `urn:waddle:decision-polls:1` |
+| Brokered inference credential lifecycle (server-domain IQ, client-sealed) | `urn:waddle:credential:1` |
 
 Do not introduce `urn:waddle:github:*`, `urn:waddle:bot:*`,
 `urn:waddle:enrichment:*`, `urn:xmpp:*`, `jabber:*`, or
@@ -473,7 +479,7 @@ Use these permission names:
 | `pubsub.publish` | Exact node or prefix pattern | Publish only matching typed payloads as server/plugin publisher. |
 | `net.fetch.opengraph` | Host allowlist and byte/time limits | Server-side fetch of OpenGraph metadata for URLs already present in accepted messages. |
 | `artifact.write` | Artifact class and max bytes | Write immutable generated artifacts. |
-| `extension.provider.config` | Extension-owned provider settings | Configure provider behavior inside the extension. The server does not expose an AI invocation API. |
+| `extension.provider.config` | Extension-owned provider settings | Configure non-secret provider behavior inside the extension. Inference credentials are brokered via typed `tenant(name)` / `invoking-user(provider)` references and never stored in plugin config. |
 
 Permission rules:
 
@@ -483,9 +489,9 @@ Permission rules:
 - Network scopes are never client-controlled. OpenGraph fetches must enforce
   scheme, host allowlist, content type, redirect count, body byte limit, and
   timeout before the plugin receives sanitized metadata.
-- AI scopes expose only server-owned profile IDs. Clients and plugin config
-  never include API keys, OAuth tokens, model provider credentials, or endpoint
-  secrets.
+- AI scopes expose only brokered typed credential references (`tenant(name)` /
+  `invoking-user(provider)`). Cells and plugin configs never hold plaintext API
+  keys, OAuth tokens, model provider credentials, or endpoint secrets.
 - Every denied permission emits an audit item and returns a typed extension
   error to the caller or runtime.
 
@@ -989,8 +995,10 @@ Launch:
 ```
 
 Invoke fields: `payload#question` is required for follow-up form submissions.
-Provider integration is owned by the extension. Users never submit model API
-keys or provider tokens through Waddle clients.
+Provider credentials are enrolled into the independent Credential & Inference
+Broker via client-sealed `urn:waddle:credential:1` server-domain IQs (never via
+XEP-0050 extension forms); extensions reference credentials strictly by typed
+handle and never receive plaintext API keys.
 
 The standard chatbot is intentionally plain: one bot persona, mention/reply/DM
 triggers, optional bounded MAM context, text answer messages, and no custom
