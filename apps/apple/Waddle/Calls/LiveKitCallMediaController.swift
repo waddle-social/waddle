@@ -117,6 +117,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// What the person chose, kept on this device (web keeps it in local storage).
     @ObservationIgnored private var devicePreferences: CallDevicePreferences
     @ObservationIgnored private let defaults: UserDefaults
+    /// Consent, cameras and screens: all the controller has of the hardware.
+    @ObservationIgnored private let capture: any CallCaptureSources
     private static let devicePreferencesKey = "callDevicePreferences"
     private static let audioProcessingKey = "callAudioProcessing"
     private static let backgroundKey = "callBackground"
@@ -138,8 +140,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private var departingBackgroundProcessors: [ObjectIdentifier: [CallBackgroundProcessor]] = [:]
     private(set) var audioProcessing = CallAudioProcessing()
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, capture: any CallCaptureSources = SystemCaptureSources()) {
         self.defaults = defaults
+        self.capture = capture
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
         background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
@@ -472,7 +475,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// be attached; ours has it from before the first frame.
     private func publishCamera(in room: Room) async {
         let processor = makeBackgroundProcessor()
-        let track = await LocalVideoTrack.createCameraTrack(options: cameraCaptureOptions(), processor: processor)
+        let track = await capture.makeCamera(options: cameraCaptureOptions(), processor: processor)
         let id = ObjectIdentifier(track.capturer)
         guard self.room === room else {
             // The call ended while the camera was being made. `setSource`
@@ -722,10 +725,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if didScreenShareFail { didScreenShareFail = false }
         // The first request shows the system's prompt and returns at once; the
         // listing below then fails until the person has allowed it.
-        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
-        guard let found = await capturableContent() else {
+        if !capture.isScreenCaptureAllowed { capture.requestScreenCapture() }
+        guard let found = await capture.screenContent() else {
             // Refused, or not yet answered: either way there is nothing to pick from.
-            isScreenShareBlocked = !CGPreflightScreenCaptureAccess()
+            isScreenShareBlocked = !capture.isScreenCaptureAllowed
             if isScreenShareBlocked { mediaRefusals[.screen, default: 0] += 1 }
             return isScreenShareBlocked ? nil : CallScreenSources(CallScreenCandidates(), ownBundleID: nil)
         }
@@ -770,7 +773,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         defer { isScreenShareStarting = false }
         // Listed again now: the picker's list may be minutes old, and a
         // screen is captured with the applications that exist when it is listed.
-        guard room.connectionState == .connected, let capture = await capturableContent()?.sources[source.id] else {
+        guard room.connectionState == .connected, let makeTrack = await capture.screenContent()?.makeTrack[source.id] else {
             if self.room === room, generation == screenShareGeneration {
                 wantsScreenShare = false
                 didScreenShareFail = true
@@ -778,10 +781,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             }
             return
         }
-        let track = await LocalVideoTrack.createMacOSScreenShareTrack(
-            source: capture,
-            options: ScreenShareCaptureOptions(dimensions: .h1440_169, fps: Self.screenShareFPS, showCursor: true)
-        )
+        let track = await makeTrack(ScreenShareCaptureOptions(dimensions: .h1440_169, fps: Self.screenShareFPS, showCursor: true))
         // As the web publishes a shared screen: VP9 with VP8 for those who
         // cannot decode it, up to 5 Mbps so dense text stays sharp, and
         // resolution kept over frame rate when the network is short.
@@ -834,30 +834,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             try? await room.localParticipant.unpublish(publication: publication)
         }
         if self.room === room { refreshTracks() }
-    }
-
-    /// What the system will let us capture now, or `nil` when it will not say.
-    private func capturableContent() async -> (candidates: CallScreenCandidates, sources: [String: any MacOSScreenCaptureSource])? {
-        guard let displays = try? await MacOSScreenCapturer.displaySources(),
-              let windows = try? await MacOSScreenCapturer.windowSources() else { return nil }
-        let main = CGMainDisplayID()
-        var sources: [String: any MacOSScreenCaptureSource] = [:]
-        var candidates = CallScreenCandidates()
-        for display in displays {
-            sources["screen:\(display.displayID)"] = display
-            candidates.screens.append(.init(
-                number: display.displayID, width: display.width, height: display.height, isMain: display.displayID == main
-            ))
-        }
-        for window in windows {
-            sources["window:\(window.windowID)"] = window
-            candidates.windows.append(.init(
-                number: window.windowID, title: window.title, application: window.owningApplication?.applicationName,
-                bundleID: window.owningApplication?.bundleIdentifier, layer: window.windowLayer,
-                isOnScreen: window.isOnScreen, size: window.frame.size
-            ))
-        }
-        return (candidates, sources)
     }
 
     private static let screenShareFPS = 30
@@ -929,7 +905,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// long after a hang-up. An ended call neither prompts nor captures.
     private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
         guard self.room === room else { return false }
-        let isAllowed = await AVCaptureDevice.requestAccess(for: kind)
+        let isAllowed = await capture.requestAccess(for: kind)
         // Kept for the dock, which says why the control does nothing.
         if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
         if !isAllowed { mediaRefusals[kind == .audio ? .microphone : .camera, default: 0] += 1 }
