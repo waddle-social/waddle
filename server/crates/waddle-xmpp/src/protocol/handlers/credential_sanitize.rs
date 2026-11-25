@@ -54,8 +54,8 @@ pub fn sanitize_iq_error_echo_payload(payload: &Element) -> Option<Element> {
 #[must_use]
 pub fn strip_sensitive_descendants(el: &Element) -> Element {
     let mut builder = Element::builder(el.name(), el.ns());
-    for ((_attr_ns, attr_name), attr_val) in el.attrs() {
-        builder = builder.attr(attr_name.to_owned(), attr_val);
+    for ((attr_ns, attr_name), attr_val) in el.attrs() {
+        builder = builder.attr_ns(attr_ns.clone(), attr_name.to_owned(), attr_val);
     }
     for node in el.nodes() {
         match node {
@@ -107,5 +107,37 @@ mod tests {
         let pin = Element::builder("pin", "urn:waddle:pin:0").build();
         assert!(!is_sensitive_credential_namespace("urn:waddle:pin:0"));
         assert_eq!(sanitize_iq_error_echo_payload(&pin), Some(pin));
+    }
+
+    #[test]
+    fn preserves_namespaced_attributes_while_stripping_sensitive_children() {
+        let raw_xml = "<query xmlns='http://jabber.org/protocol/muc#admin' \
+            xml:lang='en' plain='yes' xmlns:ex='urn:example:attr' ex:tag='v1'>\
+            <enroll-credential xmlns='urn:waddle:credential:1'>sk-secret-attr</enroll-credential>\
+            <item role='member' xml:lang='fr'>kept</item>\
+            </query>";
+        let parsed: Element = raw_xml.parse().expect("valid xml");
+        let sanitized = sanitize_iq_error_echo_payload(&parsed).expect("outer preserved");
+
+        let xml_ns = minidom::rxml::Namespace::XML;
+        let ex_ns = minidom::rxml::Namespace::from("urn:example:attr");
+        assert_eq!(sanitized.attr_ns(&xml_ns, "lang"), Some("en"));
+        assert_eq!(sanitized.attr("lang"), None);
+        assert_eq!(sanitized.attr("plain"), Some("yes"));
+        assert_eq!(sanitized.attr_ns(&ex_ns, "tag"), Some("v1"));
+
+        let item = sanitized
+            .get_child("item", "http://jabber.org/protocol/muc#admin")
+            .expect("item child preserved");
+        assert_eq!(item.attr_ns(&xml_ns, "lang"), Some("fr"));
+        assert_eq!(item.attr("role"), Some("member"));
+
+        let serialized = String::from(&sanitized);
+        assert!(
+            serialized.contains("xml:lang='en'") || serialized.contains("xml:lang=\"en\""),
+            "expected xml:lang='en' in serialized output: {serialized}"
+        );
+        assert!(!serialized.contains("sk-secret-attr"));
+        assert!(!serialized.contains("urn:waddle:credential:1"));
     }
 }
