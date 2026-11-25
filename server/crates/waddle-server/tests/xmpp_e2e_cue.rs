@@ -578,6 +578,10 @@ enum Step {
         room: String,
         nick: String,
     },
+    /// XEP-0045 §10.1.2: the owner of a room its join created asks for an
+    /// instant room, which unlocks it.
+    #[serde(rename = "unlockMucRoom")]
+    UnlockMucRoom { actor: Actor, room: String },
     #[serde(rename = "setMucAffiliation")]
     SetMucAffiliation {
         actor: Actor,
@@ -1242,6 +1246,7 @@ fn add_step_xep_evidence(step: &Step, evidence: &mut BTreeSet<&'static str>) {
             }
         }
         Step::JoinMuc { .. }
+        | Step::UnlockMucRoom { .. }
         | Step::SetMucAffiliation { .. }
         | Step::ExpectMucAffiliation { .. }
         | Step::ExpectMucAdminDenied { .. } => {
@@ -2351,11 +2356,17 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let xml = stanza_xml(Stanza::Presence(presence))?;
             let client = client_mut(ctx, actor)?;
             client.send(&xml).await.map_err(|error| anyhow!(error))?;
-            recv_matching(ctx, actor, |frame| {
+            let self_presence = recv_matching(ctx, actor, |frame| {
                 frame_is_muc_join_self_presence(frame, room, nick)
             })
             .await?;
+            // XEP-0045 §10.1.1: a room the join created (status 201) stays
+            // locked until its owner asks for an instant room (§10.1.2).
+            if self_presence.contains("code='201'") || self_presence.contains("code=\"201\"") {
+                unlock_muc_room(ctx, actor, room).await?;
+            }
         }
+        Step::UnlockMucRoom { actor, room } => unlock_muc_room(ctx, actor, room).await?,
         Step::SetMucAffiliation {
             actor,
             room,
@@ -2772,6 +2783,18 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Ask for the instant room (XEP-0045 §10.1.2) and wait for the result.
+/// Frames read past meanwhile (the room subject) stay pending for the
+/// scenario's own expectations.
+async fn unlock_muc_room(ctx: &mut ScenarioContext, actor: &Actor, room: &str) -> Result<()> {
+    let id = ws_common::iq::send_unlock_created_room(client_mut(ctx, actor)?, room).await;
+    recv_matching(ctx, actor, |frame| {
+        frame.contains("type='result'") && frame.contains(id.as_str())
+    })
+    .await?;
     Ok(())
 }
 

@@ -232,12 +232,13 @@ impl RoomActor {
                 // members-only room — never <registration-required/>, which
                 // would invite the banned user to apply for membership
                 // (#1265 item 1).
-                let reason =
-                    if self.room.affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast {
-                        JoinDenialReason::Banned
-                    } else {
-                        JoinDenialReason::MembersOnly
-                    };
+                let reason = if self.room.is_locked() {
+                    JoinDenialReason::Locked
+                } else if self.room.affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast {
+                    JoinDenialReason::Banned
+                } else {
+                    JoinDenialReason::MembersOnly
+                };
                 return Err(RoomActorError::JoinForbidden { reason });
             }
             // #1107: the same FULL JID must never hold two occupancies.
@@ -805,7 +806,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 remaining_muji_sessions,
                 remaining_nick_real_jid,
                 occupant_count,
-                is_persistent: actor.room.config.persistent,
+                is_persistent: actor.room.retained_when_empty(),
                 occupancy_revision: actor.occupancy_revision,
             }))
         })

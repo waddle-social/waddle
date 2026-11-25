@@ -957,6 +957,7 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // multi-session join: shared occupant entry, two underlying full
     // JIDs in `occupant_sessions`.
     muji_join_room(&mut web, &room, nick).await;
+    ws_common::iq::unlock_created_room(&mut web, &room).await;
     muji_join_room(&mut mobile, &room, nick).await;
 
     // Web emits a XEP-0272 §Joining content presence (active call).
@@ -1185,6 +1186,7 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
     let room = format!("forbidden-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     muji_join_room(&mut admin_web, &room, "admin").await;
+    ws_common::iq::unlock_created_room(&mut admin_web, &room).await;
     muji_join_room(&mut admin_mobile, &room, "admin").await;
 
     let active = Element::builder("presence", "jabber:client")
@@ -1407,6 +1409,7 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     let room = format!("ended-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     let nick = "admin";
     muji_join_room(&mut web, &room, nick).await;
+    ws_common::iq::unlock_created_room(&mut web, &room).await;
     muji_join_room(&mut mobile, &room, nick).await;
 
     let active = format!(
@@ -1737,6 +1740,7 @@ async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
         .expect("bob connects");
     let room = format!("grants-devoiced-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     muji_join_room(&mut alice, &room, "admin").await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     muji_join_room(&mut bob, &room, "bob").await;
 
     // Make the room moderated so the visitor role actually withholds

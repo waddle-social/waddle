@@ -73,6 +73,7 @@ scenario: #Scenario & {
 			]
 			absentElements: [#XmlElement & {name: "hats", ns: "urn:xmpp:hats:0"}]
 		},
+		#UnlockMucRoom & {actor: adminPhone, room: roomJid},
 		#SetMucAffiliation & {
 			actor:       adminPhone
 			room:        roomJid

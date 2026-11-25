@@ -1272,6 +1272,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
     // registry lookup, which respawns the room — the join must never
     // be silently dropped.
     let mut retried_dead_room = false;
+    // Whether an earlier pass of this join's loop created the room. A retry
+    // (stale admission revision, a respawned dead room) finds the actor the
+    // first pass created, but the creator still created the room: it is told
+    // so by status 201 and is the one who unlocks it (XEP-0045 §10.1.1).
+    let mut created_room_in_earlier_pass = false;
     loop {
         let managed_channel = match get_managed_channel_for_room(state, room_jid).await {
             Ok(channel) => channel,
@@ -1694,6 +1699,11 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                             waddle_xmpp::muc::durable::ChannelId::new(channel_id),
                             config,
                             initial_affiliations,
+                            // XEP-0045 §10.1.1: a room its first occupant
+                            // creates is locked until that owner configures
+                            // it. A channel-backed room is provisioned
+                            // already configured and takes the other arm.
+                            true,
                         )
                         .await
                 };
@@ -1887,6 +1897,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 (acquisition.actor_ref, room_created)
             }
         };
+        let created_instant_room = created_instant_room || created_room_in_earlier_pass;
+        created_room_in_earlier_pass = created_instant_room;
         // A node that took this room's claim without the mailbox poller
         // holds none of the recorded occupants. They are seated before the
         // join reads the roster, so the joiner is told who occupies the
@@ -2086,16 +2098,26 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                 {
                     // XEP-0045 §7.2.8: bans map to <forbidden/> even in
                     // members-only rooms (#1265 item 1).
-                    let (condition, deny_reason, message) = match reason {
+                    let (condition, deny_reason, message, error_type) = match reason {
                         waddle_xmpp::muc::room_actor::JoinDenialReason::MembersOnly => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomMembersOnly,
                             "Membership required to join this room.",
+                            ErrorType::Auth,
                         ),
                         waddle_xmpp::muc::room_actor::JoinDenialReason::Banned => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomBan,
                             "You are banned from this room.",
+                            ErrorType::Auth,
+                        ),
+                        // XEP-0045 §7.2.10: a locked room does not (yet)
+                        // exist for anyone but its creator.
+                        waddle_xmpp::muc::room_actor::JoinDenialReason::Locked => (
+                            waddle_xmpp::telemetry::attributes::StanzaErrorCondition::ItemNotFound,
+                            waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomLocked,
+                            "Requested item not found.",
+                            ErrorType::Cancel,
                         ),
                     };
                     return deny_join_admission(
@@ -2106,7 +2128,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
                         JoinAdmissionDenial {
                             condition,
                             deny_reason,
-                            error_type: ErrorType::Auth,
+                            error_type,
                             resolver_outcome,
                             message,
                         },

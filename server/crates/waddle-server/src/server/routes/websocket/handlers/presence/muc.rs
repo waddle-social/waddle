@@ -1278,7 +1278,7 @@ mod occupancy_projection_handler_tests {
         presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
         authenticated_session: Option<&Session>,
     ) -> Vec<String> {
-        super::handle_muc_join(
+        let responses = super::handle_muc_join(
             state,
             domain,
             room_jid,
@@ -1291,7 +1291,12 @@ mod occupancy_projection_handler_tests {
                 authenticated_session,
             },
         )
-        .await
+        .await;
+        crate::server::routes::websocket::tests::unlock_room_the_join_created(
+            state, room_jid, &responses,
+        )
+        .await;
+        responses
     }
 
     async fn handle_muc_leave(

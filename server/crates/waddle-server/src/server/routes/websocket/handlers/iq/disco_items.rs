@@ -1982,7 +1982,9 @@ async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> InstantRoom 
         Err(_) => return InstantRoom::Unknown,
     };
     let config = &snapshot.room.config;
-    if !config.public_room || config.group_dm {
+    // XEP-0045 §10.1.1: a locked room does not (yet) exist; the service
+    // listing is shared by every asker, so it is left out for all of them.
+    if snapshot.room.is_locked() || !config.public_room || config.group_dm {
         return InstantRoom::NotListed;
     }
     let name = if config.name.trim().is_empty() {

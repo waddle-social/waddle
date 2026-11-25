@@ -403,6 +403,22 @@ impl Hosted {
         }
     }
 
+    /// Delete the channel catalog row of the room `id`, if it has one: the
+    /// instant-room form that unlocks a created room writes it.
+    pub async fn forget_catalog_row(&self, id: &str) {
+        self.state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(waddle_server::db::actor::DbExecute {
+                sql: "DELETE FROM channels WHERE id = ?".to_owned(),
+                params: vec![id.into()],
+            })
+            .await
+            .expect("delete channel catalog row");
+    }
+
     /// Insert the channel catalog row of the room `id`, as the admin
     /// commands write it, with whether MUC service discovery lists it
     /// (`public_room`), whether it is open to accounts at other servers
@@ -415,6 +431,8 @@ impl Hosted {
         federated: bool,
         channel_type: &str,
     ) {
+        // A room unlocked by its creator already has a row; this one replaces it.
+        self.forget_catalog_row(id).await;
         let now = chrono::Utc::now().to_rfc3339();
         self.state
             .deps
@@ -800,7 +818,18 @@ pub async fn local_join(client: &mut WsXmppClient, room: &str, nick: &str) -> El
         })
         .await
         .expect("join presence");
-    frame.parse().expect("presence XML")
+    let presence: Element = frame.parse().expect("presence XML");
+    let created = presence.children().any(|child| {
+        child.name() == "x"
+            && child.ns() == "http://jabber.org/protocol/muc#user"
+            && child
+                .children()
+                .any(|status| status.name() == "status" && status.attr("code") == Some("201"))
+    });
+    if created {
+        waddle_ws_test_support::iq::unlock_created_room(client, room).await;
+    }
+    presence
 }
 
 /// A local client's groupchat message to `room`.

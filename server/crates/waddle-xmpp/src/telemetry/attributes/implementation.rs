@@ -2050,6 +2050,9 @@ pub enum MucJoinDenyReason {
     /// The session is already in the room under a different nickname
     /// (XEP-0045 §7.6, nicknames locked to identity).
     NickLocked,
+    /// The room is locked until its owner configures it (XEP-0045
+    /// §10.1.1).
+    RoomLocked,
 }
 
 impl sealed::Sealed for MucJoinDenyReason {}
@@ -2081,6 +2084,7 @@ impl MetricAttribute for MucJoinDenyReason {
             Self::RoomCreationNotPermitted => "room_creation_not_permitted",
             Self::NickConflict => "nick_conflict",
             Self::NickLocked => "nick_locked",
+            Self::RoomLocked => "room_locked",
         }
     }
 }

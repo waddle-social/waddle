@@ -45,7 +45,7 @@ async fn handle_muc_join_with_occupancy_session(
     connection: (OccupancySessionGeneration, Option<&crate::auth::Session>),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;
-    handle_muc_join_real(
+    let responses = handle_muc_join_real(
         state,
         domain,
         room_jid,
@@ -58,7 +58,12 @@ async fn handle_muc_join_with_occupancy_session(
             authenticated_session,
         },
     )
-    .await
+    .await;
+    crate::server::routes::websocket::tests::unlock_room_the_join_created(
+        state, room_jid, &responses,
+    )
+    .await;
+    responses
 }
 
 /// A raw 1:1 intent with NO sid fences: only its producing node's

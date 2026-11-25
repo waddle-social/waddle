@@ -115,6 +115,7 @@ impl kameo::message::Message<GetOrRestoreDurableRoom> for RoomRegistryActor {
             channel_id: snapshot.channel_id,
             config: snapshot.config,
             initial_affiliations: Vec::new(),
+            locked: false,
             live_room_restore: None,
         });
         let (guard, _) = match self
@@ -125,6 +126,7 @@ impl kameo::message::Message<GetOrRestoreDurableRoom> for RoomRegistryActor {
                     channel_id: spec.channel_id.clone(),
                     config: spec.config.clone(),
                     initial_affiliations: Vec::new(),
+                    locked: false,
                     live_room_restore: None,
                 },
                 &fence,
