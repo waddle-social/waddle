@@ -19,8 +19,15 @@ use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tracing::{debug, warn};
+use thiserror::Error;
+use tracing::warn;
+use url::Url;
+use uuid::Uuid;
+
+use crate::db::actor::{DbExecute, DbQueryOne};
+use crate::db::Value;
 use waddle_xmpp::pubsub::{AccessModel, PubSubStorage, StoredItem};
+use waddle_xmpp_core::calendar_subscription::is_loopback_url;
 use waddle_xmpp_core::icalendar::calendar_text;
 use waddle_xmpp_core::xcal::CalendarItem;
 
@@ -28,8 +35,8 @@ use super::auth::AuthState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const TOKEN_VERSION: &str = "v1";
-const TOKEN_CONTEXT: &[u8] = b"waddle:calendar-feed:v1";
+const TOKEN_PREFIX: &str = "v2.";
+const TOKEN_CONTEXT: &[u8] = b"waddle:calendar-feed:v2";
 const ICS_CONTENT_TYPE: &str = "text/calendar; charset=utf-8";
 const CALENDAR_FEED_MAX_ITEMS: usize = 1_000;
 const CALENDAR_FEED_RAW_ITEM_SCAN_LIMIT: u32 = 10_000;
@@ -43,6 +50,14 @@ pub struct CalendarFeedState {
     token_key: Arc<[u8]>,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum CalendarSubscriptionError {
+    #[error("Calendar subscriptions require a local account and an open calendar")]
+    Forbidden,
+    #[error("Calendar subscription service is unavailable")]
+    Unavailable,
+}
+
 impl CalendarFeedState {
     pub fn new(
         auth_state: Arc<AuthState>,
@@ -54,6 +69,117 @@ impl CalendarFeedState {
             pubsub_storage,
             token_key: Arc::from(token_key.as_ref()),
         }
+    }
+
+    fn local_owner(&self, owner: &BareJid) -> bool {
+        owner.node().is_some()
+            && owner.domain() == self.auth_state.caps_server_domain.as_jid().domain()
+    }
+
+    pub(crate) async fn subscription_url(
+        &self,
+        owner: &BareJid,
+    ) -> Result<Url, CalendarSubscriptionError> {
+        if !self.local_owner(owner) {
+            return Err(CalendarSubscriptionError::Forbidden);
+        }
+        let community = expected_community_jid(&self.auth_state.xmpp_domain)
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        if self
+            .pubsub_storage
+            .get_node(&community, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
+            .await
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?
+            .is_some_and(|node| node.config.access_model != AccessModel::Open)
+        {
+            return Err(CalendarSubscriptionError::Forbidden);
+        }
+        let mut url = Url::parse(&self.auth_state.base_url)
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        let secure_origin =
+            url.scheme() == "https" || (url.scheme() == "http" && is_loopback_url(&url));
+        if !secure_origin
+            || !url.has_host()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(CalendarSubscriptionError::Unavailable);
+        }
+
+        // One statement returns the existing subscription even when two pods
+        // issue the first link concurrently. Revocation deletes this row.
+        let row = self
+            .auth_state
+            .session_manager
+            .actor_ref()
+            .ask(DbQueryOne {
+                sql: "INSERT INTO calendar_feed_subscriptions (owner_jid, subscription_id)
+                  VALUES (?, ?) ON CONFLICT (owner_jid) DO UPDATE SET owner_jid = excluded.owner_jid
+                  RETURNING subscription_id"
+                    .to_owned(),
+                params: vec![owner.as_str().into(), Uuid::new_v4().to_string().into()],
+            })
+            .await
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        let Some(Value::Text(stored)) = row.as_ref().and_then(|row| row.first()) else {
+            return Err(CalendarSubscriptionError::Unavailable);
+        };
+        let id = Uuid::parse_str(stored).map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        url.path_segments_mut()
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?
+            .pop_if_empty()
+            .extend([
+                "api",
+                "calendar",
+                "community",
+                &sign_feed_token(&self.token_key, id),
+                "events.ics",
+            ]);
+        Ok(url)
+    }
+
+    pub(crate) async fn revoke_subscription(
+        &self,
+        owner: &BareJid,
+    ) -> Result<(), CalendarSubscriptionError> {
+        if !self.local_owner(owner) {
+            return Err(CalendarSubscriptionError::Forbidden);
+        }
+        self.auth_state
+            .session_manager
+            .actor_ref()
+            .ask(DbExecute {
+                sql: "DELETE FROM calendar_feed_subscriptions WHERE owner_jid = ?".to_owned(),
+                params: vec![owner.as_str().into()],
+            })
+            .await
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        Ok(())
+    }
+
+    async fn accepts_token(&self, token: &str) -> Result<bool, CalendarSubscriptionError> {
+        let Some(id) = verify_feed_token(&self.token_key, token) else {
+            return Ok(false);
+        };
+        let row = self
+            .auth_state
+            .session_manager
+            .actor_ref()
+            .ask(DbQueryOne {
+                sql: "SELECT owner_jid FROM calendar_feed_subscriptions WHERE subscription_id = ?"
+                    .to_owned(),
+                params: vec![id.to_string().into()],
+            })
+            .await
+            .map_err(|_| CalendarSubscriptionError::Unavailable)?;
+        let Some(Value::Text(owner)) = row.as_ref().and_then(|row| row.first()) else {
+            return Ok(false);
+        };
+        Ok(owner
+            .parse::<BareJid>()
+            .is_ok_and(|owner| self.local_owner(&owner)))
     }
 }
 
@@ -105,21 +231,21 @@ async fn community_feed_url_handler(
             "missing session cookie",
         );
     };
-    match state
+    let session = match state
         .auth_state
         .session_manager
         .validate_session(&session_id)
         .await
     {
-        Ok(_) => {}
-        Err(error) => {
+        Ok(session) => session,
+        Err(_) => {
             return json_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
-                error.to_string(),
+                "Invalid session",
             );
         }
-    }
+    };
 
     let requested = match query.community_jid.parse::<BareJid>() {
         Ok(jid) => jid,
@@ -145,12 +271,30 @@ async fn community_feed_url_handler(
         );
     }
 
-    let token = sign_feed_token(&state.token_key, &requested);
-    let url = format!(
-        "{}/api/calendar/community/{}/events.ics",
-        state.auth_state.base_url.trim_end_matches('/'),
-        token,
-    );
+    let Ok(owner) = session.user_jid.parse::<BareJid>() else {
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_session",
+            "Session has no valid account",
+        );
+    };
+    let url = match state.subscription_url(&owner).await {
+        Ok(url) => url.to_string(),
+        Err(CalendarSubscriptionError::Forbidden) => {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "calendar_unavailable",
+                "Calendar feed unavailable",
+            )
+        }
+        Err(CalendarSubscriptionError::Unavailable) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "calendar_unavailable",
+                "Calendar feed unavailable",
+            )
+        }
+    };
     (
         StatusCode::OK,
         [(header::CACHE_CONTROL, NO_STORE)],
@@ -163,14 +307,17 @@ async fn community_feed_handler(
     State(state): State<Arc<CalendarFeedState>>,
     Path(token): Path<String>,
 ) -> Response {
-    let community_jid = match verify_feed_token(&state.token_key, &token) {
-        Ok(jid) => jid,
-        Err(error) => {
-            debug!(error = %error, "Rejected invalid calendar feed token");
-            return text_response(StatusCode::NOT_FOUND, "Not found");
+    match state.accepts_token(&token).await {
+        Ok(true) => {}
+        Ok(false) => return text_response(StatusCode::NOT_FOUND, "Not found"),
+        Err(_) => {
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Calendar feed unavailable",
+            )
         }
-    };
-    let expected = match expected_community_jid(&state.auth_state.xmpp_domain) {
+    }
+    let community_jid = match expected_community_jid(&state.auth_state.xmpp_domain) {
         Ok(jid) => jid,
         Err(error) => {
             warn!(error = %error, "Calendar feed unavailable: invalid community service JID");
@@ -180,9 +327,6 @@ async fn community_feed_handler(
             );
         }
     };
-    if community_jid != expected {
-        return text_response(StatusCode::NOT_FOUND, "Not found");
-    }
 
     let items = match load_calendar_items(&state, &community_jid).await {
         Ok(Some(items)) => items,
@@ -235,6 +379,16 @@ async fn load_calendar_items(
             &[],
         )
         .await?;
+    // The ACL and items are separate storage reads. A node that became
+    // private while the item query ran must not expose its new contents.
+    if !state
+        .pubsub_storage
+        .get_node(community_jid, node)
+        .await?
+        .is_some_and(|meta| meta.config.access_model == AccessModel::Open)
+    {
+        return Ok(None);
+    }
     let mut items = parse_stored_calendar_items(&stored_items);
     if items.len() > CALENDAR_FEED_MAX_ITEMS {
         let drop_count = items.len() - CALENDAR_FEED_MAX_ITEMS;
@@ -300,59 +454,32 @@ fn build_icalendar(items: &[StoredCalendarItem]) -> String {
     )
 }
 
-fn sign_feed_token(key: &[u8], community_jid: &BareJid) -> String {
-    let community = community_jid.to_string();
-    let community_b64 = URL_SAFE_NO_PAD.encode(community.as_bytes());
-    let signature = sign_token_payload(key, community.as_bytes());
-    format!(
-        "{TOKEN_VERSION}.{community_b64}.{}",
-        URL_SAFE_NO_PAD.encode(signature)
-    )
-}
-
-fn verify_feed_token(key: &[u8], token: &str) -> Result<BareJid, String> {
-    let mut parts = token.split('.');
-    let version = parts.next().ok_or_else(|| "missing version".to_string())?;
-    let community_b64 = parts.next().ok_or_else(|| "missing payload".to_string())?;
-    let signature_b64 = parts
-        .next()
-        .ok_or_else(|| "missing signature".to_string())?;
-    if parts.next().is_some() {
-        return Err("too many token parts".to_string());
-    }
-    if version != TOKEN_VERSION {
-        return Err("unsupported token version".to_string());
-    }
-
-    let community_bytes = URL_SAFE_NO_PAD
-        .decode(community_b64)
-        .map_err(|error| format!("invalid payload encoding: {error}"))?;
-    let signature = URL_SAFE_NO_PAD
-        .decode(signature_b64)
-        .map_err(|error| format!("invalid signature encoding: {error}"))?;
-    verify_token_signature(key, &community_bytes, &signature)?;
-    let community = String::from_utf8(community_bytes)
-        .map_err(|error| format!("invalid community utf8: {error}"))?;
-    community
-        .parse::<BareJid>()
-        .map_err(|error| format!("invalid community jid: {error}"))
-}
-
-fn sign_token_payload(key: &[u8], community: &[u8]) -> Vec<u8> {
+fn subscription_mac(key: &[u8], id: Uuid) -> HmacSha256 {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC supports any key");
     mac.update(TOKEN_CONTEXT);
     mac.update(&[0]);
-    mac.update(community);
-    mac.finalize().into_bytes().to_vec()
+    mac.update(id.as_bytes());
+    mac
 }
 
-fn verify_token_signature(key: &[u8], community: &[u8], signature: &[u8]) -> Result<(), String> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC supports any key");
-    mac.update(TOKEN_CONTEXT);
-    mac.update(&[0]);
-    mac.update(community);
-    mac.verify_slice(signature)
-        .map_err(|_| "invalid signature".to_string())
+fn sign_feed_token(key: &[u8], id: Uuid) -> String {
+    let mut payload = [0; 48];
+    payload[..16].copy_from_slice(id.as_bytes());
+    payload[16..].copy_from_slice(&subscription_mac(key, id).finalize().into_bytes());
+    format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload))
+}
+
+fn verify_feed_token(key: &[u8], token: &str) -> Option<Uuid> {
+    let mut payload = [0; 48];
+    let encoded = token.strip_prefix(TOKEN_PREFIX)?;
+    if encoded.len() != 64 || URL_SAFE_NO_PAD.decode_slice(encoded, &mut payload).ok()? != 48 {
+        return None;
+    }
+    let id = Uuid::from_slice(&payload[..16]).ok()?;
+    subscription_mac(key, id)
+        .verify_slice(&payload[16..])
+        .ok()?;
+    Some(id)
 }
 
 fn expected_community_jid(xmpp_domain: &str) -> Result<BareJid, String> {
@@ -455,18 +582,34 @@ mod tests {
         ))
     }
 
+    async fn issue_test_token(state: &CalendarFeedState) -> String {
+        let owner = format!("alice@{}", state.auth_state.xmpp_domain);
+        let session = Session::new(&owner, "alice", "alice");
+        state
+            .auth_state
+            .session_manager
+            .create_session(&session)
+            .await
+            .unwrap();
+        let url = state
+            .subscription_url(&owner.parse().unwrap())
+            .await
+            .unwrap();
+        url.path_segments().unwrap().nth_back(1).unwrap().to_owned()
+    }
+
     #[test]
     fn feed_token_round_trips_and_rejects_tampering() {
-        let community: BareJid = "community.localhost".parse().unwrap();
-        let token = sign_feed_token(feed_secret(), &community);
-        assert_eq!(verify_feed_token(feed_secret(), &token).unwrap(), community);
+        let id = Uuid::new_v4();
+        let token = sign_feed_token(feed_secret(), id);
+        assert_eq!(verify_feed_token(feed_secret(), &token), Some(id));
 
         let mut tampered = token.clone();
         tampered.push('x');
-        assert!(verify_feed_token(feed_secret(), &tampered).is_err());
+        assert!(verify_feed_token(feed_secret(), &tampered).is_none());
         let mut other_secret = *feed_secret();
         other_secret[0] ^= 1;
-        assert!(verify_feed_token(&other_secret, &token).is_err());
+        assert!(verify_feed_token(&other_secret, &token).is_none());
     }
 
     #[test]
@@ -584,7 +727,7 @@ mod tests {
             storage,
             feed_secret(),
         ));
-        let token = sign_feed_token(feed_secret(), &community);
+        let token = issue_test_token(&state).await;
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -619,6 +762,20 @@ mod tests {
             .get_or_create_node(&community, waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS)
             .await
             .unwrap();
+        let state = Arc::new(CalendarFeedState::new(
+            auth_state.clone(),
+            Arc::clone(&storage),
+            feed_secret(),
+        ));
+        storage
+            .update_node_config(
+                &community,
+                waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS,
+                &NodeConfig::spaces_public(),
+            )
+            .await
+            .unwrap();
+        let token = issue_test_token(&state).await;
         let mut config = NodeConfig::spaces_public();
         config.access_model = AccessModel::Whitelist;
         storage
@@ -629,13 +786,12 @@ mod tests {
             )
             .await
             .unwrap();
-
-        let state = Arc::new(CalendarFeedState::new(
-            auth_state.clone(),
-            storage,
-            feed_secret(),
+        assert!(matches!(
+            state
+                .subscription_url(&"alice@localhost".parse().unwrap())
+                .await,
+            Err(CalendarSubscriptionError::Forbidden)
         ));
-        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -700,7 +856,7 @@ mod tests {
             storage,
             feed_secret(),
         ));
-        let token = sign_feed_token(feed_secret(), &community);
+        let token = issue_test_token(&state).await;
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -783,7 +939,7 @@ mod tests {
             storage,
             feed_secret(),
         ));
-        let token = sign_feed_token(feed_secret(), &community);
+        let token = issue_test_token(&state).await;
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -866,7 +1022,7 @@ mod tests {
             storage,
             feed_secret(),
         ));
-        let token = sign_feed_token(feed_secret(), &community);
+        let token = issue_test_token(&state).await;
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -926,7 +1082,7 @@ mod tests {
             storage,
             feed_secret(),
         ));
-        let token = sign_feed_token(feed_secret(), &community);
+        let token = issue_test_token(&state).await;
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -984,6 +1140,165 @@ mod tests {
         let url = json["url"].as_str().unwrap();
         assert!(url.starts_with("https://server.example.com/api/calendar/community/"));
         assert!(url.ends_with("/events.ics"));
+    }
+
+    #[tokio::test]
+    async fn subscription_rejects_public_http_and_accepts_loopback_http() {
+        let mut auth = test_auth_state().await;
+        let owner = "alice@localhost".parse().unwrap();
+        let session = Session::new("alice@localhost", "alice", "alice");
+        auth.session_manager.create_session(&session).await.unwrap();
+        for (base, allowed) in [
+            ("http://server.example.com", false),
+            ("http://10.0.0.1", false),
+            ("http://localhost.example.com", false),
+            ("http://localhost:8888", true),
+            ("http://127.42.1.2:8888", true),
+            ("http://[::1]:8888", true),
+        ] {
+            Arc::get_mut(&mut auth)
+                .expect("unique fixture state")
+                .base_url = base.to_owned();
+            let state = CalendarFeedState::new(
+                Arc::clone(&auth),
+                Arc::new(InMemoryPubSubStorage::new()),
+                feed_secret(),
+            );
+            match state.subscription_url(&owner).await {
+                Ok(url) => assert!(allowed && url.as_str().starts_with(base), "{base}"),
+                Err(err) => assert!(
+                    !allowed && matches!(err, CalendarSubscriptionError::Unavailable),
+                    "{base}"
+                ),
+            }
+        }
+    }
+
+    async fn read_feed(state: &Arc<CalendarFeedState>, url: &Url) -> StatusCode {
+        router(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .uri(url.path())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn subscription_is_shared_by_http_and_xmpp_and_revoked_per_account() {
+        let auth = test_auth_state().await;
+        let storage: Arc<dyn PubSubStorage> = Arc::new(InMemoryPubSubStorage::new());
+        let first = Arc::new(CalendarFeedState::new(
+            Arc::clone(&auth),
+            Arc::clone(&storage),
+            feed_secret(),
+        ));
+        let second = Arc::new(CalendarFeedState::new(
+            Arc::clone(&auth),
+            storage,
+            feed_secret(),
+        ));
+        let a = Session::new("alice@localhost", "alice", "alice");
+        let b = Session::new("bob@localhost", "bob", "bob");
+        auth.session_manager.create_session(&a).await.unwrap();
+        auth.session_manager.create_session(&b).await.unwrap();
+        let alice = a.user_jid.parse().unwrap();
+        let bob = b.user_jid.parse().unwrap();
+        let (first_a, other_a, b_url) = tokio::join!(
+            first.subscription_url(&alice),
+            second.subscription_url(&alice),
+            second.subscription_url(&bob)
+        );
+        let (a_url, b_url) = (first_a.unwrap(), b_url.unwrap());
+        assert_eq!(other_a.unwrap(), a_url);
+        assert_ne!(a_url, b_url);
+
+        let response = router(Arc::clone(&second))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/calendar/community-feed-url?community_jid=community.localhost")
+                    .header(header::HOST, "untrusted.example")
+                    .header("x-forwarded-host", "untrusted.example")
+                    .header(SESSION_ID_HEADER, a.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["url"],
+            a_url.as_str()
+        );
+
+        first.revoke_subscription(&alice).await.unwrap();
+        first.revoke_subscription(&alice).await.unwrap();
+        assert_eq!(read_feed(&second, &a_url).await, StatusCode::NOT_FOUND);
+        assert_eq!(read_feed(&second, &b_url).await, StatusCode::OK);
+        assert_eq!(second.subscription_url(&bob).await.unwrap(), b_url);
+        let fresh = second.subscription_url(&alice).await.unwrap();
+        assert_ne!(fresh, a_url);
+        assert_eq!(read_feed(&first, &fresh).await, StatusCode::OK);
+
+        let (issued, revoked) = tokio::join!(
+            first.subscription_url(&alice),
+            second.revoke_subscription(&alice)
+        );
+        revoked.unwrap();
+        assert_eq!(read_feed(&first, &fresh).await, StatusCode::NOT_FOUND);
+        let issued = issued.unwrap();
+        assert_eq!(
+            read_feed(&first, &issued).await,
+            if issued == fresh {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            }
+        );
+        let old_format = Url::parse("https://server.example.com/api/calendar/community/v1.Y29tbXVuaXR5LmxvY2FsaG9zdA.invalid/events.ics").unwrap();
+        assert_eq!(read_feed(&first, &old_format).await, StatusCode::NOT_FOUND);
+        assert!(matches!(
+            first
+                .subscription_url(&"alice@external.example".parse().unwrap())
+                .await,
+            Err(CalendarSubscriptionError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deleting_and_recreating_the_account_does_not_revive_its_feed() {
+        let auth = test_auth_state().await;
+        let state = Arc::new(CalendarFeedState::new(
+            Arc::clone(&auth),
+            Arc::new(InMemoryPubSubStorage::new()),
+            feed_secret(),
+        ));
+        let session = Session::new("alice@localhost", "alice", "alice");
+        auth.session_manager.create_session(&session).await.unwrap();
+        let alice = session.user_jid.parse().unwrap();
+        let old = state.subscription_url(&alice).await.unwrap();
+        auth.session_manager
+            .actor_ref()
+            .ask(DbExecute {
+                sql: "DELETE FROM users WHERE jid = ?".into(),
+                params: vec![alice.as_str().into()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(read_feed(&state, &old).await, StatusCode::NOT_FOUND);
+        let recreated = Session::new("alice@localhost", "alice", "alice");
+        auth.session_manager
+            .create_session(&recreated)
+            .await
+            .unwrap();
+        let new = state.subscription_url(&alice).await.unwrap();
+        assert_ne!(old, new);
+        assert_eq!(read_feed(&state, &old).await, StatusCode::NOT_FOUND);
+        assert_eq!(read_feed(&state, &new).await, StatusCode::OK);
     }
 
     #[tokio::test]

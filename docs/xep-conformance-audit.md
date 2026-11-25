@@ -254,6 +254,12 @@ to XEP-0045 §10 (affiliations) and §9.1 (kick role-change to none).
 wire-affiliation vocabulary, the public-by-default default, and result-form
 shape.
 
+## Private live calendar subscriptions
+
+The home server advertises two single-stage commands through XEP-0030 command discovery. Both accept an empty XEP-0050 execute request from a bound local account. The issuer's XEP-0004 result contains the private iCalendar URL. Revocation applies to the authenticated account's feed on every device. The wire contract and field names are documented in [the Flutter client guide](../apps/flutter/README.md#live-calendar-subscriptions).
+
+The WebSocket suite exercises discovery, form validation, account isolation and revocation across a server restart. [Calendar subscription conformance tests](../server/crates/waddle-server/tests/xep0050_calendar_subscription_ws.rs)
+
 ## Audit log
 
 (empty — first audit starts at XEP-0004 unless a higher-impact target is chosen first)

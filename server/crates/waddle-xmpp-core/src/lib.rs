@@ -3,6 +3,7 @@
 #![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
 #![warn(clippy::fn_params_excessive_bools, clippy::must_use_candidate)]
 
+pub mod calendar_subscription;
 pub mod carbons;
 pub mod connection;
 pub mod disco;

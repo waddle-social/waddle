@@ -761,7 +761,14 @@ CREATE TABLE extension_bot_rooms (
 );
 "#;
 
-/// Get all global migrations in order
+const V0016_CALENDAR_FEED_SUBSCRIPTIONS: &str = r#"
+CREATE TABLE calendar_feed_subscriptions (
+    owner_jid TEXT NOT NULL PRIMARY KEY REFERENCES users(jid) ON DELETE CASCADE,
+    subscription_id TEXT NOT NULL UNIQUE
+);
+"#;
+
+/// Get all global migrations in order.
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -856,6 +863,12 @@ pub fn all() -> Vec<Migration> {
             description: "Record rooms where extension bots have posted".to_string(),
             sql_sqlite: V0015_EXTENSION_BOT_ROOMS,
             sql_postgres: V0015_EXTENSION_BOT_ROOMS,
+        },
+        Migration {
+            version: 16,
+            description: "Revocable per-account calendar feed subscriptions".to_string(),
+            sql_sqlite: V0016_CALENDAR_FEED_SUBSCRIPTIONS,
+            sql_postgres: V0016_CALENDAR_FEED_SUBSCRIPTIONS,
         },
     ]
 }

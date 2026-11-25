@@ -560,12 +560,17 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         routes::extension_webhooks::router(Arc::clone(&websocket_state));
     let livekit_webhook_router = routes::livekit_webhook::router(Arc::clone(&websocket_state));
     let websocket_router = routes::websocket::router(websocket_state.clone());
-    let calendar_feed_router =
-        routes::calendar_feed::router(Arc::new(routes::calendar_feed::CalendarFeedState::new(
-            Arc::clone(&auth_state),
-            Arc::clone(&websocket_state.deps.protocol.pubsub_storage),
-            server_config.session_key.as_bytes(),
-        )));
+    let calendar_feed_state = Arc::new(routes::calendar_feed::CalendarFeedState::new(
+        Arc::clone(&auth_state),
+        Arc::clone(&websocket_state.deps.protocol.pubsub_storage),
+        server_config.session_key.as_bytes(),
+    ));
+    super::calendar_commands::register(
+        &websocket_state.deps.protocol.command_registry,
+        Arc::clone(&calendar_feed_state),
+    )
+    .await;
+    let calendar_feed_router = routes::calendar_feed::router(calendar_feed_state);
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));

@@ -1,4 +1,5 @@
 mod acme;
+mod calendar_commands;
 pub(crate) mod caps_resolution;
 mod config;
 pub(crate) mod dual_registration;
