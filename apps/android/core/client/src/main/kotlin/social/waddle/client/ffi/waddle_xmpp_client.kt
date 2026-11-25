@@ -8330,7 +8330,7 @@ data class WaddleArchivedMessage (
     var `markupSpans`: List<WaddleMarkupSpan>
     ,
     /**
-     * XEP-0372 broadcast mention URI, when present.
+     * XEP-0513 room-wide mention (`everyone` or `here`), when present.
      */
     var `broadcastMention`: kotlin.String?
     ,
@@ -11091,7 +11091,7 @@ data class WaddleMentionDirectory (
     var `targets`: List<WaddleMentionTarget>
     ,
     /**
-     * Resolve `@everyone` / `@here` to broadcast mention URIs.
+     * Resolve `@everyone` / `@here` to XEP-0513 `#channel` mentions.
      */
     var `broadcasts`: kotlin.Boolean
 
@@ -11282,8 +11282,8 @@ data class WaddleMessage (
     var `markupSpans`: List<WaddleMarkupSpan>
     ,
     /**
-     * XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
-     * one of the mention references targets the whole room.
+     * XEP-0513 room-wide mention: `everyone`, or `here` for an
+     * `active='true'` `#channel` mention.
      */
     var `broadcastMention`: kotlin.String?
     ,

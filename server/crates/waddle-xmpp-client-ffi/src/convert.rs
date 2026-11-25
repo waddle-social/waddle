@@ -1761,35 +1761,30 @@ mod tests {
     }
 
     #[test]
-    fn xep0372_references_and_broadcast_mention_survive_inbound_to_ffi() {
+    fn xep0372_references_and_xep0513_broadcast_mention_survive_inbound_to_ffi() {
         let ffi = inbound_to_ffi(parse_message(
             "<message xmlns='jabber:client' type='groupchat' from='room@conf.waddle.test/alice'>\
                <body>hi @bob and @everyone, see https://example.com</body>\
+               <markup xmlns='urn:xmpp:markup:0'>\
+                 <span start='12' end='21'>\
+                   <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel'/>\
+                 </span>\
+               </markup>\
                <reference xmlns='urn:xmpp:reference:0' type='mention' \
                   uri='xmpp:bob@waddle.test' begin='3' end='7'/>\
-               <reference xmlns='urn:xmpp:reference:0' type='mention' \
-                  uri='xmpp:@everyone' begin='12' end='21' \
-                  anchor='@everyone'/>\
                <reference xmlns='urn:xmpp:reference:0' type='data' \
                   uri='https://example.com' begin='27' end='46'/>\
              </message>",
         ));
-        assert_eq!(
-            ffi.mention_uris,
-            vec![
-                "xmpp:bob@waddle.test".to_string(),
-                "xmpp:@everyone".to_string(),
-            ]
-        );
-        assert_eq!(ffi.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
-        assert_eq!(ffi.references.len(), 3);
+        assert_eq!(ffi.mention_uris, vec!["xmpp:bob@waddle.test".to_string()]);
+        assert_eq!(ffi.broadcast_mention.as_deref(), Some("everyone"));
+        assert_eq!(ffi.references.len(), 2);
         assert_eq!(ffi.references[0].ref_type, WaddleReferenceType::Mention);
         assert_eq!(ffi.references[0].uri, "xmpp:bob@waddle.test");
         assert_eq!(ffi.references[0].begin, 3);
         assert_eq!(ffi.references[0].end, 7);
-        assert_eq!(ffi.references[1].anchor.as_deref(), Some("@everyone"));
-        assert_eq!(ffi.references[2].ref_type, WaddleReferenceType::Data);
-        assert!(ffi.references[2].anchor.is_none());
+        assert_eq!(ffi.references[1].ref_type, WaddleReferenceType::Data);
+        assert!(ffi.references[1].anchor.is_none());
     }
 
     #[test]

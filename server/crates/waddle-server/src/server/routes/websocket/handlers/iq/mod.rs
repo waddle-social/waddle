@@ -104,7 +104,6 @@ mod last_activity;
 mod link_preview_lookup;
 pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
-mod mentions_permissions;
 mod muc_admin;
 pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
@@ -178,7 +177,6 @@ use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
-use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
@@ -220,8 +218,8 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 pub(super) use super::super::{build_iq_error_xml_typed, build_iq_error_xml_with_payload};
 
 use super::super::{
-    build_iq_result_xml, element_to_xml, get_room_actor, get_room_actor_result, iq_to_xml,
-    is_muc_room_jid, stanza_to_xml, WebSocketState,
+    build_iq_result_xml, get_room_actor, get_room_actor_result, iq_to_xml, is_muc_room_jid,
+    stanza_to_xml, WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, host_grant_read_still_admitted, resolve_muc_room_archive_access,

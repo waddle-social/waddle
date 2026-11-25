@@ -1,13 +1,14 @@
-//! XEP-0372 mention references resolved from plain-text `@label` tokens.
+//! Mentions resolved from plain-text `@label` tokens.
 //!
 //! Composers write mentions as body text (`@alice`). Receivers decide
-//! "this message mentions me" from `<reference type='mention'/>` elements
-//! only, so a body token without a reference is invisible to row
-//! highlighting, notifications, mention counters and push. The builder
-//! closes that gap: given the sender's [`MentionDirectory`] it emits one
-//! mention reference per resolvable token, with body offsets in Unicode
-//! scalar values (`begin` at the `@`, `end` exclusive), the same unit the
-//! reply fallback and markup offsets use.
+//! "this message mentions me" from structured payloads only, so a body
+//! token without one is invisible to row highlighting, notifications,
+//! mention counters and push. The builder closes that gap: given the
+//! sender's [`MentionDirectory`] it emits, per resolvable token, either a
+//! XEP-0372 `<reference type='mention'/>` for a member or an XEP-0513
+//! `urn:xmpp:mentions:0#channel` mention for `@everyone` / `@here`. Body
+//! offsets are Unicode scalar values (`begin` at the `@`, `end`
+//! exclusive), the same unit the reply fallback and markup offsets use.
 
 use jid::BareJid;
 
@@ -16,17 +17,63 @@ use super::types::{MarkupSpanData, ReferenceData, SendMessageOptions};
 /// XEP-0372 `type` attribute value for a mention reference.
 pub const REFERENCE_TYPE_MENTION: &str = "mention";
 
-/// Broadcast mention URI addressing every member of a room.
-pub const MENTION_URI_EVERYONE: &str = "xmpp:@everyone";
+/// A room-wide mention, sent as an XEP-0513 `#channel` mention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastMention {
+    /// `@everyone`: every occupant of the room.
+    Everyone,
+    /// `@here`: only occupants who are currently active
+    /// (`active='true'` on the wire).
+    Here,
+}
 
-/// Broadcast mention URI addressing the occupants currently present.
-pub const MENTION_URI_HERE: &str = "xmpp:@here";
+impl BroadcastMention {
+    /// Broadcast kinds, in the order composers list them.
+    pub const ALL: [Self; 2] = [Self::Everyone, Self::Here];
 
-/// Broadcast labels and their URIs, in the order composers list them.
-const BROADCASTS: [(&str, &str); 2] = [
-    ("everyone", MENTION_URI_EVERYONE),
-    ("here", MENTION_URI_HERE),
-];
+    /// The label typed after `@`, and the value surfaced to applications
+    /// as `broadcast_mention` on inbound messages.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Everyone => "everyone",
+            Self::Here => "here",
+        }
+    }
+
+    /// Classify an inbound XEP-0513 `#channel` mention.
+    #[must_use]
+    pub fn from_channel_mention(active: bool) -> Self {
+        if active {
+            Self::Here
+        } else {
+            Self::Everyone
+        }
+    }
+}
+
+/// A resolved `@everyone` / `@here` token and its body range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BroadcastSpan {
+    pub(crate) kind: BroadcastMention,
+    pub(crate) begin: u32,
+    pub(crate) end: u32,
+}
+
+/// What typed `@label` tokens resolved to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ResolvedMentions {
+    /// Member mentions, sent as XEP-0372 references.
+    pub(crate) references: Vec<ReferenceData>,
+    /// Room-wide mentions, sent as XEP-0513 `#channel` mentions.
+    pub(crate) broadcasts: Vec<BroadcastSpan>,
+}
+
+#[derive(Clone)]
+enum Target {
+    Member(String),
+    Broadcast(BroadcastMention),
+}
 
 /// Markup span types whose text is literal and never carries mentions.
 const LITERAL_SPAN_TYPES: [&str; 2] = ["code", "code_block"];
@@ -55,7 +102,7 @@ pub struct MentionDirectory {
 
 struct Candidate {
     label: Vec<char>,
-    uri: String,
+    target: Target,
 }
 
 /// Mention references for every resolvable `@label` token in `body` that
@@ -65,17 +112,17 @@ pub(crate) fn resolve_typed_mentions(
     body: &str,
     directory: &MentionDirectory,
     options: &SendMessageOptions,
-) -> Vec<ReferenceData> {
+) -> ResolvedMentions {
     let candidates = candidates_of(directory);
+    let mut resolved = ResolvedMentions::default();
     if candidates.is_empty() {
-        return Vec::new();
+        return resolved;
     }
     let chars: Vec<char> = body.chars().collect();
     let excluded = excluded_ranges(options);
-    let mut resolved = Vec::new();
     let mut index = 0;
     while index < chars.len() {
-        let Some((end, uri)) = match_at(&chars, index, &candidates) else {
+        let Some((end, target)) = match_at(&chars, index, &candidates) else {
             index += 1;
             continue;
         };
@@ -86,13 +133,20 @@ pub(crate) fn resolve_typed_mentions(
             .iter()
             .any(|&(start, stop)| begin < stop && start < end_u32)
         {
-            resolved.push(ReferenceData {
-                ref_type: REFERENCE_TYPE_MENTION.to_string(),
-                uri: uri.to_string(),
-                begin,
-                end: end_u32,
-                anchor: None,
-            });
+            match target {
+                Target::Member(uri) => resolved.references.push(ReferenceData {
+                    ref_type: REFERENCE_TYPE_MENTION.to_string(),
+                    uri: uri.clone(),
+                    begin,
+                    end: end_u32,
+                    anchor: None,
+                }),
+                Target::Broadcast(kind) => resolved.broadcasts.push(BroadcastSpan {
+                    kind: *kind,
+                    begin,
+                    end: end_u32,
+                }),
+            }
         }
         index = end;
     }
@@ -101,38 +155,44 @@ pub(crate) fn resolve_typed_mentions(
 
 /// Candidates ordered longest label first so `@Ann Lee` wins over `@Ann`.
 fn candidates_of(directory: &MentionDirectory) -> Vec<Candidate> {
-    let mut by_label: Vec<(String, Option<String>)> = Vec::new();
-    let mut insert = |label: String, uri: String| match by_label
+    let mut by_label: Vec<(String, Option<Target>)> = Vec::new();
+    let mut insert = |label: String, target: Target| match by_label
         .iter_mut()
         .find(|(existing, _)| *existing == label)
     {
         Some((_, slot)) => {
-            if slot.as_deref() != Some(uri.as_str()) {
+            if !slot
+                .as_ref()
+                .is_some_and(|known| same_target(known, &target))
+            {
                 *slot = None;
             }
         }
-        None => by_label.push((label, Some(uri))),
+        None => by_label.push((label, Some(target))),
     };
-    let broadcast_labels: Vec<&str> = BROADCASTS.iter().map(|(label, _)| *label).collect();
     for target in &directory.targets {
         let label = canonical_label(&target.label);
         // Member labels never shadow broadcasts (web composer parity).
-        if label.is_empty() || broadcast_labels.contains(&label.as_str()) {
+        if label.is_empty()
+            || BroadcastMention::ALL
+                .iter()
+                .any(|kind| kind.label() == label)
+        {
             continue;
         }
-        insert(label, format!("xmpp:{}", target.jid));
+        insert(label, Target::Member(format!("xmpp:{}", target.jid)));
     }
     if directory.broadcasts {
-        for (label, uri) in BROADCASTS {
-            insert(label.to_string(), uri.to_string());
+        for kind in BroadcastMention::ALL {
+            insert(kind.label().to_string(), Target::Broadcast(kind));
         }
     }
     let mut candidates: Vec<Candidate> = by_label
         .into_iter()
-        .filter_map(|(label, uri)| {
-            uri.map(|uri| Candidate {
+        .filter_map(|(label, target)| {
+            target.map(|target| Candidate {
                 label: label.chars().collect(),
-                uri,
+                target,
             })
         })
         .collect();
@@ -140,12 +200,20 @@ fn candidates_of(directory: &MentionDirectory) -> Vec<Candidate> {
     candidates
 }
 
-/// `(end, uri)` of the candidate whose `@label` token starts at `index`.
+fn same_target(left: &Target, right: &Target) -> bool {
+    match (left, right) {
+        (Target::Member(left), Target::Member(right)) => left == right,
+        (Target::Broadcast(left), Target::Broadcast(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `(end, target)` of the candidate whose `@label` token starts at `index`.
 fn match_at<'a>(
     chars: &[char],
     index: usize,
     candidates: &'a [Candidate],
-) -> Option<(usize, &'a str)> {
+) -> Option<(usize, &'a Target)> {
     if chars[index] != '@' || !boundary_before(chars, index) {
         return None;
     }
@@ -157,7 +225,7 @@ fn match_at<'a>(
             .iter()
             .zip(&candidate.label)
             .all(|(typed, label)| typed.to_lowercase().eq(label.to_lowercase()));
-        (matches && boundary_after(chars, end)).then_some((end, candidate.uri.as_str()))
+        (matches && boundary_after(chars, end)).then_some((end, &candidate.target))
     })
 }
 
@@ -240,12 +308,25 @@ mod tests {
         options: &SendMessageOptions,
     ) -> Vec<(u32, u32, String)> {
         resolve_typed_mentions(body, directory, options)
+            .references
             .into_iter()
             .map(|reference| {
                 assert_eq!(reference.ref_type, REFERENCE_TYPE_MENTION);
                 assert_eq!(reference.anchor, None);
                 (reference.begin, reference.end, reference.uri)
             })
+            .collect()
+    }
+
+    fn broadcasts(
+        body: &str,
+        directory: &MentionDirectory,
+        options: &SendMessageOptions,
+    ) -> Vec<(u32, u32, BroadcastMention)> {
+        resolve_typed_mentions(body, directory, options)
+            .broadcasts
+            .into_iter()
+            .map(|span| (span.begin, span.end, span.kind))
             .collect()
     }
 
@@ -325,33 +406,28 @@ mod tests {
     #[test]
     fn broadcasts_only_resolve_when_enabled() {
         let mut directory = room(&[]);
+        let options = SendMessageOptions::default();
         assert_eq!(
-            spans(
-                "@everyone and @here",
-                &directory,
-                &SendMessageOptions::default()
-            ),
+            broadcasts("@everyone and @here", &directory, &options),
             vec![
-                (0, 9, MENTION_URI_EVERYONE.to_string()),
-                (14, 19, MENTION_URI_HERE.to_string()),
+                (0, 9, BroadcastMention::Everyone),
+                (14, 19, BroadcastMention::Here),
             ]
         );
+        assert!(spans("@everyone and @here", &directory, &options).is_empty());
         directory.broadcasts = false;
-        assert!(spans(
-            "@everyone and @here",
-            &directory,
-            &SendMessageOptions::default()
-        )
-        .is_empty());
+        assert!(broadcasts("@everyone and @here", &directory, &options).is_empty());
     }
 
     #[test]
     fn member_labels_never_shadow_broadcasts() {
         let directory = room(&[("here", "here@example.com")]);
+        let options = SendMessageOptions::default();
         assert_eq!(
-            spans("@here", &directory, &SendMessageOptions::default()),
-            vec![(0, 5, MENTION_URI_HERE.to_string())]
+            broadcasts("@here", &directory, &options),
+            vec![(0, 5, BroadcastMention::Here)]
         );
+        assert!(spans("@here", &directory, &options).is_empty());
     }
 
     #[test]

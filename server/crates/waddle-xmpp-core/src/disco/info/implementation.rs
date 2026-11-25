@@ -716,29 +716,14 @@ pub fn muc_room_features(
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::hats(),
-        // XEP-0513 §292 + §303: advertising `urn:xmpp:mentions:0` and
-        // `urn:xmpp:mentions:0#channel` is binding — once advertised,
-        // the room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST
-        // return a form with `mentions#count` + `mentions#individual`
-        // (always required) and `mentions#channel` (if and only if
-        // `#channel` is advertised). Slices 3a/3b enforce a hardcoded
-        // server policy (`mentions#count = 5`, `mentions#individual
-        // = participants`, `mentions#channel = moderators`) at T0
-        // candidate classification; slice 3c wires the §295 IQ
-        // surface so the form on the wire matches the policy in
-        // effect. Per CLAUDE.md XEP conformance hard rule, advertising
-        // the namespaces only becomes safe once the IQ form is
-        // implemented — see
-        // `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/mentions_permissions.rs`
-        // (the §295 IQ handler in the `waddle-server` crate) for the
-        // handler that backs these advertised features.
-        //
-        // TODO(#525-followup): §303 also SHOULDs that the
-        // `mentions#*` form fields be mirrored into the room's
-        // `muc#roominfo` extension form (xeps/xep-0513.xml line 303).
-        // Deferred — adding fields to muc#roominfo is a separate
-        // slice; the dedicated §295 IQ form is the primary discovery
-        // path and is conformant on its own.
+        // XEP-0513 (xep-0513.xml:92): "An entity implementing this
+        // specification MUST advertise 'urn:xmpp:mentions:0' as a XEP-0030
+        // feature. Subsequent OPTIONAL features in this document MUST also
+        // advertise support, if implemented." `#channel` is advertised
+        // because `<mention type='urn:xmpp:mentions:0#channel'/>` is
+        // handled. The current specification has no permissions query or
+        // form; group-mention abuse limits (xep-0513.xml:267) are local
+        // server policy.
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
         Feature::muc_nonanonymous(),
