@@ -711,9 +711,11 @@ public final class SessionCoordinator {
         }
         guard let route = account.route(message) else { return }
         if let pin = message.pinEvent {
-            if route.conversation.isRoom {
-                pins.apply(pin, in: route.conversation.jid)
-            }
+            // In a conversation of two the server tells both people, the
+            // pinner too, with a chat message from the pinner to the
+            // other: the route files it under the other person either way.
+            // It has words in it and is still no message.
+            pins.apply(pin, in: route.conversation.jid)
             return
         }
         trackChatState(message, route: route)

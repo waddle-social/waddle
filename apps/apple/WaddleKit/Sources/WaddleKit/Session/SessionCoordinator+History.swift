@@ -34,8 +34,9 @@ extension SessionCoordinator {
                 in: timelines.timeline(for: conversation).feedItems, unreadCount: unreadAtOpen)
         }
         await markDisplayedIfVisible(conversation)
+        // A room's pins, or those of a conversation of two: one query, to the room or to the other person.
+        await refreshPins(in: conversation.jid)
         if conversation.isRoom {
-            await refreshPins(in: conversation.jid)
             await refreshRoomBots(in: conversation.jid)
         }
     }

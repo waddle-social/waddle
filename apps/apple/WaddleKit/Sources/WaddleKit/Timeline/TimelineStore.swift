@@ -98,6 +98,10 @@ public final class TimelineStore {
     @discardableResult
     public func ingest(_ message: WireMessage, route: MessageRoute, receivedAt: Date = Date()) -> TimelineIngestResult {
         let conversation = route.conversation
+        // A notice that something was pinned changes the pins, where it is
+        // live; from the archive it is history of a list we read whole. It
+        // has a body in a conversation of two and is never a row.
+        if message.pinEvent != nil { return .ignored }
         if let mutation = MessageMutation.of(message, isMine: route.isMine) {
             apply(mutation, in: conversation, timestamp: message.timestamp)
             return .mutation

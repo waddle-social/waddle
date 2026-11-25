@@ -138,9 +138,9 @@ struct MessageActionsTests {
 
     // MARK: Pinning
 
-    @Test func ownersAndAdminsMayPinMembersMightDirectMessagesCannot() {
+    @Test func ownersAndAdminsMayPinMembersMightAndInADirectMessageEitherPersonMay() {
         let coordinator = SessionCoordinator(account: me, port: FakePort())
-        #expect(coordinator.pinAccess(in: bobConversation) == .denied)
+        #expect(coordinator.pinAccess(in: bobConversation) == .allowed)
         // Not in the room: web offers no Pin there either.
         #expect(coordinator.pinAccess(in: roomConversation) == .denied)
         for (affiliation, expected) in [(RoomAffiliation.owner, PinAccess.allowed), (.admin, .allowed), (.member, .unknown)] {

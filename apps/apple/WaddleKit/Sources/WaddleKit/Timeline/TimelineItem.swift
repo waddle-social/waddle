@@ -207,7 +207,23 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return identity.all
     }
 
-    /// The id for reactions (XEP-0444), replies (XEP-0461) and pins: in a
+    /// The id a pin is asked for by (`urn:waddle:pin:0`): in a room the
+    /// room-assigned stanza id; in 1:1 the message's `@id`, the one id
+    /// both people have for it and the one the server names a pin by. The
+    /// server does not look a pin up by origin-id.
+    public var pinTargetID: String? {
+        conversation.isRoom ? roomStanzaID : identity.messageID
+    }
+
+    /// Every id a pin of this message may be named by. In 1:1 the server
+    /// names it by `@id`, and falls back to an archive id for a row that
+    /// has none.
+    public var pinnedIDs: [String] {
+        if conversation.isRoom { return roomStanzaID.map { [$0] } ?? [] }
+        return [identity.messageID].compactMap(\.self) + identity.stanzaIDs.map(\.id)
+    }
+
+    /// The id for reactions (XEP-0444) and replies (XEP-0461): in a
     /// room strictly the room-assigned stanza id; in 1:1 the origin-id if
     /// present, else `@id`. Our own server's archive id never reached the
     /// peer, so it is never used in 1:1.

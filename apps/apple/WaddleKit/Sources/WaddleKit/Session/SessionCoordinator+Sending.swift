@@ -437,13 +437,12 @@ extension SessionCoordinator {
     }
 
     public func setPinned(_ pinned: Bool, _ item: TimelineItem) async -> Bool {
-        guard let target = item.actionTargetID else { return false }
+        guard let target = item.pinTargetID else { return false }
         return await port.setPinned(pinned, targetID: target, in: item.conversation)
     }
 
     public func isPinned(_ item: TimelineItem) -> Bool {
-        guard item.conversation.isRoom, let target = item.actionTargetID else { return false }
-        return pins.isPinned(target, in: item.conversation.jid)
+        item.pinnedIDs.contains { pins.isPinned($0, in: item.conversation.jid) }
     }
 
     // MARK: - Typing (XEP-0085)

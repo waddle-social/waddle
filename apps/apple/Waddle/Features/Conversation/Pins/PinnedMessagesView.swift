@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// Pinned messages of a room (`urn:waddle:pin:0`). Shown in the inspector
+/// Pinned messages of a room or of a conversation of two (`urn:waddle:pin:0`). Shown in the inspector
 /// on iPad and Mac and as a sheet on iPhone.
 struct PinnedMessagesView: View {
     @Environment(SessionCoordinator.self) private var session
@@ -25,14 +25,8 @@ struct PinnedMessagesView: View {
 
     @ViewBuilder
     private var content: some View {
-        let pins = conversation.isRoom ? session.pins.pins(in: conversation.jid) : []
-        if !conversation.isRoom {
-            EmptyStateView(
-                title: "No pinned messages",
-                message: "Pinning is available in rooms and group chats.",
-                symbol: "pin.slash"
-            )
-        } else if pins.isEmpty {
+        let pins = session.pins.pins(in: conversation.jid)
+        if pins.isEmpty {
             EmptyStateView(
                 title: "No pinned messages",
                 message: "Pin important messages to keep them here.",
