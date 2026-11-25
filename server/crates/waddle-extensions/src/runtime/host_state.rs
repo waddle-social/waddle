@@ -72,6 +72,7 @@ impl wasmtime::ResourceLimiter for AggregateStoreLimits {
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
+        self.last_pending_delta = 0;
         let delta = desired.saturating_sub(current);
         let next_total = self.allocated_memory_bytes.saturating_add(delta);
         if next_total > self.max_total_memory_bytes {

@@ -24,7 +24,8 @@ use waddle_broker_core::quotas::TenantMemoryTracker;
 /// Interval at which the Wasmtime engine epoch counter advances.
 const EPOCH_TICK_INTERVAL_MS: u64 = 50;
 
-/// Background epoch ticker stopped cleanly when the last [`WasmRuntime`] drops.
+/// Background epoch ticker stopped cleanly when the last [`WasmRuntime`] and
+/// [`LoadedExtension`] drop.
 struct EpochTickerGuard {
     stop_tx: mpsc::Sender<()>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -105,6 +106,7 @@ pub struct LoadedExtension {
     linker: Linker<HostState>,
     http: super::http::HttpRuntime,
     limits: RuntimeLimits,
+    _epoch_ticker: Arc<EpochTickerGuard>,
 }
 
 impl std::fmt::Debug for LoadedExtension {
@@ -152,6 +154,7 @@ impl LoadedExtension {
             linker,
             http: runtime.http.clone(),
             limits: RuntimeLimits::default(),
+            _epoch_ticker: Arc::clone(&runtime._epoch_ticker),
         })
     }
 
@@ -652,6 +655,53 @@ mod limit_tests {
         let error = tokio::time::timeout(Duration::from_secs(2), spin.call_async(&mut store, ()))
             .await
             .expect("epoch ticker must interrupt spinning guest")
+            .expect_err("epoch deadline must trap");
+        assert_eq!(
+            classify_runtime_error(error),
+            crate::types::ObservationFailure::DeadlineExceeded
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_interruption_remains_active_after_wasm_runtime_is_dropped() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        let wat_path = std::env::temp_dir().join(format!(
+            "waddle-epoch-ticker-drop-test-{}.wat",
+            std::process::id()
+        ));
+        std::fs::write(&wat_path, "(component)").expect("write minimal component");
+        let loaded = LoadedExtension::load(&runtime, &wat_path)
+            .expect("load component")
+            .with_limits(RuntimeLimits {
+                invocation_timeout_ms: 100,
+                http_timeout_ms: 100,
+                wasm_fuel: 1_000_000_000,
+                ..RuntimeLimits::default()
+            })
+            .expect("limits");
+        let _ = std::fs::remove_file(&wat_path);
+
+        // Mirrors ExtensionManager::from_config_with_host_tools dropping WasmRuntime
+        // immediately after loading all extensions.
+        drop(runtime);
+
+        let module = wasmtime::Module::new(
+            &loaded.engine,
+            r#"(module (func (export "spin") (loop br 0)))"#,
+        )
+        .expect("module");
+        let mut store = Store::new(&loaded.engine, HostState::for_init());
+        loaded.configure_store(&mut store).expect("configure store");
+
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin");
+        let error = tokio::time::timeout(Duration::from_secs(2), spin.call_async(&mut store, ()))
+            .await
+            .expect("epoch ticker must remain alive after WasmRuntime is dropped")
             .expect_err("epoch deadline must trap");
         assert_eq!(
             classify_runtime_error(error),
