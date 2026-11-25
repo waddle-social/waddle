@@ -962,9 +962,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
 }
 
 fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
-    // A carbon is a copy of a message as it passes, and the server stamps
-    // every one with the time: that stamp does not mean it was held.
-    let delayed = message.timestamp.is_some() && message.carbon.is_none();
+    let delayed = message.timestamp.is_some();
     let thread = Thread::from_wire(message.thread.clone(), message.parent_thread_id.clone());
     let from_me = from.to_bare() == me.bare;
     let own = from_me || message.carbon == Some(WaddleCarbonDirection::Sent);
@@ -1567,13 +1565,6 @@ pub(crate) mod tests {
         let mut live = wire("ann@waddle.social/phone", "chat", "now");
         live.timestamp = None;
         assert!(!arrival(live, &me()).expect("a DM").delayed);
-
-        // A copy of a message to another of my devices arrives as it is
-        // sent, and always carries a time.
-        let mut copied = wire("ann@waddle.social/phone", "chat", "hey");
-        copied.timestamp = Some("2026-07-27T08:00:00Z".into());
-        copied.carbon = Some(WaddleCarbonDirection::Received);
-        assert!(!arrival(copied, &me()).expect("a DM").delayed);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Application stanza dispatch and request-result correlation inside the runtime.
 
+use crate::carbons::NS_CARBONS;
 use crate::messaging::CarbonDirection;
 use crate::messaging::MessageRejection;
 use crate::messaging::MessagingEvent;
@@ -209,7 +210,6 @@ impl XmppRuntime {
     }
 }
 
-use crate::carbons::NS_CARBONS;
 /// XEP-0297 stanza forwarding namespace (`<forwarded/>`).
 const NS_FORWARD: &str = "urn:xmpp:forward:0";
 /// XEP-0203 delayed delivery namespace (forwarded-level `<delay/>`).

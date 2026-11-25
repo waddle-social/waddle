@@ -66,6 +66,8 @@ pub struct XmppRuntime {
     pub(in crate::runtime) requests: RequestTracker,
     pub(in crate::runtime) bootstrap: BootstrapState,
     pub(in crate::runtime) next_bootstrap_stanza: u64,
+    /// XEP-0280: a fresh bind has not yet asked for carbons.
+    pub(in crate::runtime) carbons_enable_owed: bool,
     pub(in crate::runtime) sm_state: SmState,
     pub(in crate::runtime) sm_negotiation: SmNegotiationState,
     pub(in crate::runtime) sm_advertised: bool,
@@ -159,6 +161,7 @@ impl XmppRuntime {
             requests: RequestTracker::default(),
             bootstrap: BootstrapState::Idle,
             next_bootstrap_stanza: 0,
+            carbons_enable_owed: false,
             sm_state,
             sm_negotiation: SmNegotiationState::Inactive,
             sm_advertised: false,
@@ -1085,19 +1088,13 @@ impl XmppRuntime {
             // fresh `<enabled/>`.
             self.flush_pending_fallback_retries(events);
         }
-
-        // XEP-0280: ask to be copied in on the account's other resources.
-        // Here and not in each host, because it is owed exactly when this
-        // runs: the server keeps the setting across a stream resumption,
-        // which does not come through here, and forgets it on a fresh bind,
-        // which does. After the XEP-0198 `<enable/>`, so that it is counted
-        // like any other stanza of the session. The answer is not waited
-        // for: an empty result, and a server that refuses leaves this
-        // resource as it was, without copies.
-        let carbons_id = self.next_carbons_stanza_id()?;
-        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-            TransportMessage::Element(crate::carbons::build_carbons_enable_iq(carbons_id.as_str())),
-        )));
+        // XEP-0280: this bind owes a carbons enable. With no stream
+        // management to wait for it goes now; otherwise once the server has
+        // answered the XEP-0198 `<enable/>`.
+        self.carbons_enable_owed = true;
+        if !self.awaits_sm_enable_answer() {
+            self.send_owed_carbons_enable(events)?;
+        }
 
         Ok(())
     }
@@ -1171,13 +1168,44 @@ impl XmppRuntime {
         StanzaId::try_new(format!("bind-{}", self.next_bootstrap_stanza))
     }
 
-    /// Shares the bootstrap counter, so no two stanzas of a session's setup have one id.
-    fn next_carbons_stanza_id(&mut self) -> ClientResult<StanzaId> {
+    /// Whether `finish_binding` sent a XEP-0198 `<enable/>` whose answer is still to come.
+    fn awaits_sm_enable_answer(&self) -> bool {
+        let sm_cfg = &self.config.session.stream_management;
+        sm_cfg.enable_stream_management && self.sm_advertised
+    }
+
+    /// XEP-0280: asks to be copied in on the account's other resources,
+    /// once for each fresh bind.
+    ///
+    /// Here and not in each host, because it is owed exactly when a session
+    /// is bound: the server keeps the setting across a stream resumption,
+    /// which binds nothing, and forgets it on a fresh bind.
+    ///
+    /// It waits for the answer to the XEP-0198 `<enable/>`, as every stanza
+    /// of the hosts does. Written before that answer, it would be counted
+    /// and its acknowledgement requested for a stream management session
+    /// the server may yet refuse, and the `<a/>` that came back for a
+    /// refused session would end the stream as a protocol violation.
+    ///
+    /// The answer to this IQ is not waited for: an empty result, and a
+    /// server that refuses leaves this resource as it was, without copies.
+    pub(in crate::runtime) fn send_owed_carbons_enable(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        if !std::mem::take(&mut self.carbons_enable_owed) {
+            return Ok(());
+        }
+        // Shares the bootstrap counter, so no two stanzas of a session's setup have one id.
         self.next_bootstrap_stanza = self
             .next_bootstrap_stanza
             .checked_add(1)
             .ok_or(ClientError::RequestIdExhausted)?;
-        StanzaId::try_new(format!("carbons-{}", self.next_bootstrap_stanza))
+        let id = StanzaId::try_new(format!("carbons-{}", self.next_bootstrap_stanza))?;
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(crate::carbons::build_carbons_enable_iq(id.as_str())),
+        )));
+        Ok(())
     }
 
     pub(in crate::runtime) fn push_state_change(

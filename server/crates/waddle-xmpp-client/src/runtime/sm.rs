@@ -166,6 +166,7 @@ impl XmppRuntime {
                     StreamManagementEvent::Enabled { previd },
                 )));
                 self.flush_pending_fallback_retries(events);
+                self.send_owed_carbons_enable(events)?;
             }
             crate::stream_management::SmInboundControl::Resumed { h, previd } => {
                 if !matches!(self.bootstrap, BootstrapState::AwaitingResume)
@@ -208,6 +209,8 @@ impl XmppRuntime {
                     )));
                     self.sm_advertised = false;
                     self.flush_pending_fallback_retries(events);
+                    // The session goes on without stream management, and still wants its copies.
+                    self.send_owed_carbons_enable(events)?;
                 }
             }
         }

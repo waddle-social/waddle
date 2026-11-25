@@ -68,7 +68,7 @@ describe("XEP-0280 carbons enable is the shared core's (#754)", () => {
 
     // Real connect order: transport up first, then session-ready.
     callbacks.onConnected?.();
-    callbacks.onSessionLifecycle?.("connected");
+    callbacks.onSessionLifecycle?.("fresh");
     await flushAsync();
 
     expect(enableCarbons.mock.calls.length).toBe(0);

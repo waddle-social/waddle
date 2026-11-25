@@ -4019,3 +4019,91 @@ fn invalid_forbidden_stream_error() -> Element {
         .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-streams").build())
         .build()
 }
+
+/// Drives a runtime whose server offers XEP-0198 through a fresh bind and
+/// the write of its `<enable/>`, returning what the bind asked to be sent.
+fn bind_fresh_with_stream_management(runtime: &mut XmppRuntime) -> Vec<ClientEvent> {
+    drive_to_authenticated_stream(runtime);
+    let bind_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let bind_id = bind_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::ResourceBindingRequested(request)) => {
+                Some(request.stanza_id.clone())
+            }
+            _ => None,
+        })
+        .expect("fresh bind requested");
+    let ready_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            bind_result(&bind_id),
+        )))
+        .unwrap();
+    let enable = ready_events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) if element.name() == "enable" && element.ns() == crate::stream_management::NS_SM => {
+                Some(element.clone())
+            }
+            _ => None,
+        })
+        .expect("stream management enable after the bind");
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            enable,
+        )))
+        .unwrap();
+    ready_events
+}
+
+/// XEP-0280 with XEP-0198: like every stanza of the hosts, the carbons
+/// enable waits for the answer to the stream management `<enable/>`.
+#[test]
+fn carbons_enable_waits_for_stream_management_to_be_enabled() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let ready_events = bind_fresh_with_stream_management(&mut runtime);
+    assert_eq!(
+        carbons_enables(&ready_events),
+        0,
+        "nothing is written between <enable/> and its answer"
+    );
+
+    let enabled_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert_eq!(carbons_enables(&enabled_events), 1);
+}
+
+/// A server that refuses stream management leaves a session that still
+/// wants its copies; and nothing was counted for a session it never had.
+#[test]
+fn carbons_enable_follows_a_refused_stream_management_enable() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let ready_events = bind_fresh_with_stream_management(&mut runtime);
+    assert_eq!(carbons_enables(&ready_events), 0);
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert_eq!(carbons_enables(&failed_events), 1);
+    assert!(
+        !failed_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "r"
+        )),
+        "no acknowledgement is asked of a session that was refused"
+    );
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Established);
+}
