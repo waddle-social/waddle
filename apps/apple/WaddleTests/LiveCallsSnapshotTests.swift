@@ -50,6 +50,15 @@ final class LiveCallsSnapshotTests: XCTestCase {
         assertList([call("design", people("Ada", "Linus"), action: .open)])
     }
 
+    /// A call of two that our phone answered: this device can open the conversation, not the call.
+    func testACallOnAnotherOfOurDevicesBesideARoomsCall() {
+        let ada = CallElsewhere(sid: "s1", peer: BareJID(parsing: "ada@waddle.test")!, media: CallMedia(audio: true, video: true))
+        assertList([
+            call("design", people("Linus", "Grace")),
+            LiveCall(elsewhere: ada, name: "Ada Lovelace"),
+        ])
+    }
+
     func testALongRoomNameInTheNarrowestSidebar() {
         assertList(
             [call("quarterly planning and retrospective", people("Ada", "Linus", "Grace"), video: true)],

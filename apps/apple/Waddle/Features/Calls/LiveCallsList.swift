@@ -113,7 +113,7 @@ struct LiveCallsHost: View {
     private static let maxHeight: CGFloat = 232
 
     var body: some View {
-        let calls = LiveCalls.list(rooms, state: session.calls.state)
+        let calls = LiveCalls.list(rooms, elsewhere: elsewhere, state: session.calls.state)
         ZStack {
             if !calls.isEmpty {
                 let list = LiveCallsList(calls: calls, choose: choose)
@@ -152,10 +152,17 @@ struct LiveCallsHost: View {
         }
     }
 
+    /// The calls of two our other devices are in, each with the other person's name.
+    private var elsewhere: [(call: CallElsewhere, name: String)] {
+        session.calls.elsewhere.calls.map { call in
+            (call, ConversationHeaderText.make(for: .direct(call.peer), session: session).name)
+        }
+    }
+
     private func choose(_ call: LiveCall) {
-        navigation.open(.room(call.room))
-        guard call.action == .join else { return }
+        navigation.open(call.conversation)
+        guard call.action == .join, call.kind == .room else { return }
         // As the room's own banner joins: with the microphone, and the camera for the person to turn on.
-        Task { await session.joinGroupCall(in: call.room, video: false) }
+        Task { await session.joinGroupCall(in: call.conversation.jid, video: false) }
     }
 }

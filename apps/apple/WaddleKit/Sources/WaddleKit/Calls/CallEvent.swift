@@ -38,10 +38,14 @@ public enum JingleReason: Hashable, Sendable, CaseIterable {
 /// A parsed live XEP-0353 invitation or XEP-0166 session event.
 public struct CallEvent: Hashable, Sendable {
     public let from: JID
+    /// Who it was sent to, when the stanza said: what tells a copy of
+    /// something another of our devices sent whom it was for.
+    public let to: JID?
     public let sid: String
     public let kind: Kind
-    public init(from: JID, sid: String, kind: Kind) {
+    public init(from: JID, to: JID? = nil, sid: String, kind: Kind) {
         self.from = from
+        self.to = to
         self.sid = sid
         self.kind = kind
     }
