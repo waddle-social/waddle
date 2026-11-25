@@ -307,6 +307,7 @@ pub struct Item {
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<Attachment>,
     pub scores: Option<Scores>,
+    pub score_badges: Vec<&'static str>,
     pub origin_id: Option<String>,
     pub message_id: Option<String>,
     pub archive_id: Option<String>,

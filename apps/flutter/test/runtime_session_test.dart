@@ -193,6 +193,86 @@ Future<void> _until(bool Function() condition, String operation) async {
 
 void main() {
   test(
+    'restoring a custom server never sends the default server its session',
+    () async {
+      final store = _Storage();
+      store.values.addAll({
+        'serverOrigin': 'https://club.example',
+        'server:https://club.example:session': 'club-session',
+        'session': 'default-session',
+      });
+      final original = _Auth();
+      final club = _Auth()
+        ..readSession = (id) async {
+          expect(id, 'club-session');
+          return null;
+        };
+      final app = SessionRuntime(
+        transportFactory: () async => _Transport(),
+        storage: store,
+        auth: original,
+        authForServer: (origin) {
+          expect(origin.origin, 'https://club.example');
+          return club;
+        },
+        platformInvoker: (_, _) async => null,
+      );
+      addTearDown(app.dispose);
+      await app.start();
+      expect(app.session['serverOrigin'], 'https://club.example');
+      expect(store.values['session'], 'default-session');
+      expect(original.sessionReads, 0);
+      expect(club.sessionReads, 1);
+    },
+  );
+
+  test(
+    'Activity keeps separate thread identities from the XMPP inbox',
+    () async {
+      final transport = _Transport();
+      transport.responses['fetch_inbox'] = {
+        'conversations': [
+          for (final thread in ['root-a', 'root-b'])
+            {
+              'partner': 'friend@example.org',
+              'kind': 'direct',
+              'thread_id': thread,
+              'unread': 1,
+            },
+        ],
+      };
+      final runtime = SessionRuntime(
+        storage: _Storage()..values['session'] = 'private-token',
+        auth: _Auth(),
+        transportFactory: () async => transport,
+        platformInvoker: (_, _) async => null,
+      );
+      addTearDown(runtime.dispose);
+      final events = <Map<String, dynamic>>[];
+      final subscription = runtime.events.listen(events.add);
+      addTearDown(subscription.cancel);
+      await runtime.start();
+      await _flush();
+      transport.controller.add({'type': 'connected', 'data': null});
+      bool hasThreads() => events.any(
+        (event) =>
+            event['topic'] == 'activity' &&
+            runtimeRows(runtimeMap(event['data'])['entries']).length == 2,
+      );
+      await _until(hasThreads, 'thread inbox projection');
+      final entries = runtimeRows(
+        runtimeMap(
+          events.lastWhere((e) => e['topic'] == 'activity')['data'],
+        )['entries'],
+      );
+      expect(
+        entries.map((entry) => entry['threadId']),
+        unorderedEquals(['root-a', 'root-b']),
+      );
+    },
+  );
+
+  test(
     'hidden push delivery pauses the socket and foreground resumes a fresh handle',
     () async {
       final storage = _Storage()..values['session'] = 'private-token';

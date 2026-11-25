@@ -453,12 +453,13 @@ class SettingsScreen extends StatelessWidget {
                 'Let people know when you read a message.',
                 'readReceiptsEnabled',
               ),
-              ListTile(
-                leading: const Icon(Icons.notifications_active_outlined),
-                title: const Text('Notification settings'),
-                trailing: const Icon(Icons.open_in_new_rounded),
-                onTap: () => _command(context, bridge, 'push.settings'),
-              ),
+              if (delivery['localDeliveryOnly'] != true)
+                ListTile(
+                  leading: const Icon(Icons.notifications_active_outlined),
+                  title: const Text('Notification settings'),
+                  trailing: const Icon(Icons.open_in_new_rounded),
+                  onTap: () => _command(context, bridge, 'push.settings'),
+                ),
             ]),
             _Section('Background delivery', [
               ListTile(
@@ -472,37 +473,45 @@ class SettingsScreen extends StatelessWidget {
                     'Checking delivery status',
                   ),
                 ),
-                trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () async {
-                  if (delivery['fcmAvailable'] != true) {
-                    await _command(context, bridge, 'push.choose');
-                    return;
-                  }
-                  final method = await showModalBottomSheet<String>(
-                    context: context,
-                    showDragHandle: true,
-                    builder: (context) => SafeArea(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          ListTile(
-                            leading: const Icon(Icons.notifications_outlined),
-                            title: const Text('Google Play push'),
-                            onTap: () => Navigator.pop(context, 'push.fcm'),
+                trailing: delivery['localDeliveryOnly'] == true
+                    ? null
+                    : const Icon(Icons.chevron_right_rounded),
+                onTap: delivery['localDeliveryOnly'] == true
+                    ? null
+                    : () async {
+                        if (delivery['fcmAvailable'] != true) {
+                          await _command(context, bridge, 'push.choose');
+                          return;
+                        }
+                        final method = await showModalBottomSheet<String>(
+                          context: context,
+                          showDragHandle: true,
+                          builder: (context) => SafeArea(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ListTile(
+                                  leading: const Icon(
+                                    Icons.notifications_outlined,
+                                  ),
+                                  title: const Text('Google Play push'),
+                                  onTap: () =>
+                                      Navigator.pop(context, 'push.fcm'),
+                                ),
+                                ListTile(
+                                  leading: const Icon(Icons.cloud_outlined),
+                                  title: const Text('UnifiedPush distributor'),
+                                  onTap: () =>
+                                      Navigator.pop(context, 'push.choose'),
+                                ),
+                              ],
+                            ),
                           ),
-                          ListTile(
-                            leading: const Icon(Icons.cloud_outlined),
-                            title: const Text('UnifiedPush distributor'),
-                            onTap: () => Navigator.pop(context, 'push.choose'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                  if (method != null && context.mounted) {
-                    await _command(context, bridge, method);
-                  }
-                },
+                        );
+                        if (method != null && context.mounted) {
+                          await _command(context, bridge, method);
+                        }
+                      },
               ),
               if (delivery['stayConnectedSupported'] == true)
                 SwitchListTile(
@@ -1630,7 +1639,8 @@ class ActivityScreen extends StatelessWidget {
     this.embedded = true,
   });
   final WaddleBridge bridge;
-  final void Function(String jid, String title, bool group) onOpen;
+  final void Function(String jid, String title, bool group, {String? threadId})
+  onOpen;
   final bool embedded;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -1680,6 +1690,7 @@ class ActivityScreen extends StatelessWidget {
                                 _text(row['jid'] ?? row['conversationJid']),
                                 _text(row['title'] ?? row['name']),
                                 row['group'] != false,
+                                threadId: row['threadId'] as String?,
                               ),
                             ),
                           )
@@ -1692,8 +1703,14 @@ class ActivityScreen extends StatelessWidget {
                         final jid = _text(row['jid'] ?? row['conversationJid']);
                         final name = _text(row['name'] ?? row['title'], jid);
                         return ListTile(
-                          leading: PersonAvatar(name: name),
-                          title: Text(name),
+                          leading: row['threadId'] == null
+                              ? PersonAvatar(name: name)
+                              : const CircleAvatar(
+                                  child: Icon(Icons.forum_outlined),
+                                ),
+                          title: Text(
+                            row['threadId'] == null ? name : 'Thread in $name',
+                          ),
                           subtitle: row['body'] == null
                               ? null
                               : Text(
@@ -1710,6 +1727,7 @@ class ActivityScreen extends StatelessWidget {
                             row['group'] == true ||
                                 row['groupDm'] == true ||
                                 jid.contains('@muc.'),
+                            threadId: row['threadId'] as String?,
                           ),
                         );
                       }).toList(),

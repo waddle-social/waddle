@@ -593,6 +593,7 @@
         switch (method) {
           case "admin_channels_delete":
           case "admin_spaces_delete": parameters=[{...args,confirm:"yes"}];break;
+          case "fetch_dm_thread_history": target="fetch_dm_history_by_thread";parameters=[args.peer_jid,args.thread_id,args.max_messages,args.before_id ?? null];break;
           case "fetch_room_thread_history": target="fetch_room_history_by_thread";parameters=[args.room_jid,args.thread_id,args.max_messages,args.before_id ?? null];break;
           case "fetch_status_preference": target="status_preference_fetch";parameters=[];break;
           case "fetch_inbox": parameters=[{only_unread:args.read_filter === "unread_only",no_messages:args.message_content === "omit"}];break;

@@ -1,5 +1,7 @@
 //! JavaScript client methods for roster, profiles, avatars, and account discovery.
 
+use waddle_xmpp_client::xep::threads::bindings::fetch_threads_query_from_options;
+
 use super::{
     bare_jid, build_disco_info_iq, build_disco_items_iq, build_fetch_bookmarks_iq,
     build_fetch_dm_bookmarks_iq, build_fetch_threads_iq, build_fetch_vcard4_iq,
@@ -12,18 +14,16 @@ use super::{
     parse_muc_affiliation, parse_pep_activity, parse_pep_mood, parse_pep_tune, parse_pep_vcard4,
     parse_push_vapid_from_disco_info, parse_roster_result, parse_threads_response,
     read_dm_bookmark_notify, send_inbox_query_command, send_iq_command,
-    send_iq_command_stanza_aware, send_stanza_command, to_js_value, wasm_bindgen, BareJid,
-    BookmarkItem, ClientError, Element, FetchThreadsQuery, JsValue, MucAdminAffiliationItem,
-    Promise, PushVapidDiscoParseError, Rc, RefCell, RegisterPushDeviceOptions, Serialize,
-    SetDmNotificationModeOptions, SetRoomNotificationModeOptions, ThreadSort, ThreadStatusFilter,
-    VCard4, WaddleActivityOpts, WaddleActivityResult, WaddleBookmarkItem, WaddleClient,
-    WaddleClientInner, WaddleDmBookmarkItem, WaddleFetchInboxOptions, WaddleFetchThreadsOptions,
-    WaddleInboxMarkRead, WaddleMoodOpts, WaddleMoodResult, WaddlePepProfile,
-    WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomMember, WaddleRosterContact,
-    WaddleServerVersion, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
-    WaddleThreadCallAnchor, WaddleThreadCallEnded, WaddleThreadEntry, WaddleThreadSort,
-    WaddleThreadStatusFilter, WaddleThreadsPage, WaddleTuneOpts, WaddleTuneResult, WaddleVCard4,
-    WaddleVapidAdvertisement, NS_CLIENT, NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
+    send_iq_command_stanza_aware, send_stanza_command, to_js_value, wasm_bindgen, BookmarkItem,
+    ClientError, Element, JsValue, MucAdminAffiliationItem, Promise, PushVapidDiscoParseError, Rc,
+    RefCell, RegisterPushDeviceOptions, Serialize, SetDmNotificationModeOptions,
+    SetRoomNotificationModeOptions, VCard4, WaddleActivityOpts, WaddleActivityResult,
+    WaddleBookmarkItem, WaddleClient, WaddleClientInner, WaddleDmBookmarkItem,
+    WaddleFetchInboxOptions, WaddleFetchThreadsOptions, WaddleInboxMarkRead, WaddleMoodOpts,
+    WaddleMoodResult, WaddlePepProfile, WaddleRegisterDeviceResult, WaddleRoomBot,
+    WaddleRoomMember, WaddleRosterContact, WaddleServerVersion, WaddleSetDmNotificationModeOutcome,
+    WaddleSetRoomNotificationModeOutcome, WaddleThreadsPage, WaddleTuneOpts, WaddleTuneResult,
+    WaddleVCard4, WaddleVapidAdvertisement, NS_CLIENT, NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
 };
 use crate::state::InboxPage;
 
@@ -582,35 +582,7 @@ impl WaddleClient {
                 Ok(result) => parse_threads_response(&result).unwrap_or_default(),
                 Err(_) => Default::default(),
             };
-            let payload = WaddleThreadsPage {
-                total: page.total,
-                unread_threads: page.unread_threads,
-                entries: page
-                    .entries
-                    .into_iter()
-                    .map(|e| WaddleThreadEntry {
-                        channel: e.channel,
-                        thread_id: e.thread_id,
-                        last_stanza_id: e.last_stanza_id,
-                        last_activity: e.last_activity,
-                        unread: e.unread,
-                        reply_count: e.reply_count,
-                        has_unread: e.has_unread,
-                        root_author: e.root_author,
-                        preview: e.preview,
-                        thread_title: e.thread_title,
-                        call_thread: e.call_thread.map(|c| WaddleThreadCallAnchor {
-                            kind: c.kind.as_token().to_owned(),
-                            media: c.media.token_list(),
-                        }),
-                        call_thread_ended: e.call_thread_ended.map(|c| WaddleThreadCallEnded {
-                            ended: c.ended,
-                            duration: c.duration,
-                        }),
-                    })
-                    .collect(),
-                next_cursor: page.next_cursor,
-            };
+            let payload = WaddleThreadsPage::from(page);
             to_js_value(&payload)
         })
     }
@@ -938,46 +910,6 @@ fn parse_dm_bookmarks_response(iq: &Element) -> Vec<WaddleDmBookmarkItem> {
             },
         })
         .collect()
-}
-
-fn fetch_threads_query_from_options(
-    opts: &WaddleFetchThreadsOptions,
-) -> Result<FetchThreadsQuery<'_>, String> {
-    let status = match opts.status {
-        Some(WaddleThreadStatusFilter::All) | None => ThreadStatusFilter::All,
-        Some(WaddleThreadStatusFilter::Unread) => ThreadStatusFilter::Unread,
-        Some(WaddleThreadStatusFilter::Following) => ThreadStatusFilter::Following,
-    };
-    let sort = match opts.sort {
-        Some(WaddleThreadSort::Recent) | None => ThreadSort::Recent,
-        Some(WaddleThreadSort::Unread) => ThreadSort::Unread,
-        Some(WaddleThreadSort::Replies) => ThreadSort::Replies,
-    };
-    let active_since = match opts.active_since.as_deref() {
-        Some(raw) => Some(
-            chrono::DateTime::parse_from_rfc3339(raw)
-                .map_err(|err| format!("invalid active_since: {err}"))?
-                .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
-    let channel = match opts.channel.as_deref() {
-        Some(raw) if !raw.trim().is_empty() => Some(
-            raw.parse::<BareJid>()
-                .map_err(|err| format!("invalid channel: {err}"))?,
-        ),
-        _ => None,
-    };
-
-    Ok(FetchThreadsQuery {
-        page_size: opts.page_size,
-        after_cursor: opts.after_cursor.as_deref(),
-        status,
-        active_since,
-        channel,
-        search: opts.search.as_deref(),
-        sort,
-    })
 }
 
 /// Surface one DM-bookmark `<notify/>` into the JS-facing

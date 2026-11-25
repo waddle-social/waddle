@@ -413,6 +413,20 @@ fn project(item: &TimelineItem, metadata: &[&Metadata]) -> Item {
                 }),
             })
             .collect(),
+        score_badges: item.scores.as_ref().map_or_else(Vec::new, |scores| {
+            let mut badges = Vec::new();
+            if let Some(leading) = scores.leading() {
+                badges.push(leading.category.label());
+            }
+            if scores
+                .notable()
+                .iter()
+                .any(|score| score.category == SafetyCategory::IsQuestion)
+            {
+                badges.push(SafetyCategory::IsQuestion.label());
+            }
+            badges
+        }),
         scores: item.scores.as_ref().map(|scores| Scores {
             model_version: scores.model_version.clone(),
             scores: scores

@@ -187,16 +187,24 @@ class NotificationService {
 
   void _snapshot([String? status]) => _emit('delivery', {
     'resolved': _resolved,
-    'pushEnabled': _state['enabled'] == true && _permissionGranted,
+    'pushEnabled':
+        _backend.supported && _state['enabled'] == true && _permissionGranted,
+    'localDeliveryOnly': _backend.localDeliveryOnly,
     'fcmAvailable': false,
     'stayConnectedSupported': _backend.supportsBackground,
     'stayConnected': _background,
-    'distributorLabel': _backend.supported
+    'distributorLabel': _backend.localDeliveryOnly
+        ? 'Desktop notifications'
+        : _backend.supported
         ? 'Web Push'
         : 'Push unavailable on this platform',
     'status':
         status ??
-        (!_permissionGranted
+        (_backend.localDeliveryOnly
+            ? (_permissionGranted
+                  ? 'Receive notifications while Waddle is running'
+                  : 'Desktop notification service unavailable')
+            : !_permissionGranted
             ? 'Notifications are blocked in system settings'
             : _state['enabled'] == true
             ? 'Push delivery enabled'

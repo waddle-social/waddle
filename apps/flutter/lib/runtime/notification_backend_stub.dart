@@ -5,6 +5,8 @@ Future<NotificationBackend> initializeForwarder() async => createBackend();
 
 class UnsupportedNotifications implements NotificationBackend {
   @override
+  bool get localDeliveryOnly => false;
+  @override
   bool get supported => false;
   @override
   bool get supportsBackground => false;

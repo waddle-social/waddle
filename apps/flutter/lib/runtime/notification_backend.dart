@@ -17,7 +17,9 @@ class NotificationNotice {
 }
 
 abstract interface class NotificationBackend {
+  /// Can register a remote push endpoint.
   bool get supported;
+  bool get localDeliveryOnly;
   bool get supportsBackground;
   Future<void> initialize(void Function(NotificationPlatformEvent) emit);
   Future<void> account(

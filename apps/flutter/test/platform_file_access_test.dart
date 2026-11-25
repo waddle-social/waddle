@@ -39,7 +39,7 @@ void main() {
     const channel = MethodChannel('plugins.flutter.io/path_provider');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) {
-          expect(call.method, 'getTemporaryDirectory');
+          expect(call.method, 'getApplicationCacheDirectory');
           return ++calls == 1
               ? initialPath.future
               : Future.value(directory.path);
@@ -59,7 +59,13 @@ void main() {
     await oldPreparation;
     await oldCleanup;
     await newPreparation;
-    expect(await Directory('${directory.path}/waddle-open').exists(), isTrue);
+    final sessions = await Directory(
+      '${directory.path}/waddle-open',
+    ).list().toList();
+    expect(sessions, hasLength(1));
+    if (Platform.isLinux) {
+      expect((await sessions.single.stat()).mode & 0x3f, 0);
+    }
     expect(calls, 2);
   });
 }

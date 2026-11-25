@@ -12,11 +12,24 @@ use url::Url;
 #[cfg(feature = "serde")]
 mod flutter_lifecycle;
 #[cfg(feature = "serde")]
+mod flutter_threads;
+#[cfg(feature = "serde")]
+pub use waddle_xmpp_client::xep::threads::bindings::{
+    WaddleFetchThreadsOptions, WaddleThreadsPage,
+};
+#[cfg(feature = "serde")]
 mod serde_support;
 
 mod boundary_convert;
 mod calls;
 mod community_admin;
+#[cfg(feature = "serde")]
+mod community_surfaces;
+#[cfg(feature = "serde")]
+pub use community_surfaces::{
+    WaddleAttendee, WaddleCalendarItemInput, WaddleFeedEntry, WaddleFeedEntryInput, WaddleStory,
+    WaddleStoryInput, WaddleStoryReads, WaddleStoryReadsInput, WaddleVEvent, WaddleVEventInput,
+};
 mod consistent_color;
 mod convert;
 mod error;

@@ -11,11 +11,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:unifiedpush/unifiedpush.dart';
 
 import 'notification_backend.dart';
+import 'notification_backend_linux.dart';
 import 'notification_backend_stub.dart';
 import 'notification_owner_io.dart';
 
-NotificationBackend createBackend() =>
-    Platform.isAndroid ? AndroidNotifications() : UnsupportedNotifications();
+NotificationBackend createBackend() {
+  if (Platform.isAndroid) return AndroidNotifications();
+  if (Platform.isLinux) return LinuxNotifications();
+  return UnsupportedNotifications();
+}
 
 Future<NotificationBackend> initializeForwarder() async {
   final backend = createBackend();
@@ -57,6 +61,8 @@ class AndroidNotifications implements NotificationBackend {
   final _notifications = FlutterLocalNotificationsPlugin();
   bool _disposed = false;
   bool _callStarted = false;
+  @override
+  bool get localDeliveryOnly => false;
   @override
   bool get supported => true;
   @override

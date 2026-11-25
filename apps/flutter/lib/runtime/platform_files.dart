@@ -154,6 +154,12 @@ class PlatformFileService {
 
   Future<dynamic> invoke(String method, Map<String, dynamic> args) async {
     switch (method) {
+      case 'file.pickStoryMedia':
+        final generation = context.generation;
+        final picked = await _pick(images: true);
+        requireGeneration(context, generation);
+        if (picked == null) return null;
+        return upload(picked, encrypt: false);
       case 'file.pickAndUpload':
         final picked = await _pick();
         if (picked == null) {

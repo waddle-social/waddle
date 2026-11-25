@@ -18,10 +18,11 @@ required-features = ["uniffi-bindgen-bin"]
 
 [features]
 # Opt-in JSON I/O for the independent Flutter runtime; existing UniFFI clients are unchanged.
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:waddle-xmpp-client-community"]
 uniffi-bindgen-bin = ["uniffi/cli"]
 
 [dependencies]
+waddle-xmpp-client-community = { path = "../waddle-xmpp-client-community", optional = true }
 serde = { workspace = true, optional = true }
 waddle-xmpp-client = { path = "../waddle-xmpp-client" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }

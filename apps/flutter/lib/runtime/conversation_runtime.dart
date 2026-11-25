@@ -657,15 +657,16 @@ class ConversationRuntime {
     view.paging = true;
     _emit(view);
     try {
-      final method = view.thread != null && view.group
-          ? 'fetch_room_thread_history'
-          : view.group
-          ? 'fetch_room_history'
-          : 'fetch_dm_history';
+      final method = switch ((view.group, view.thread)) {
+        (true, null) => 'fetch_room_history',
+        (false, null) => 'fetch_dm_history',
+        (true, _) => 'fetch_room_thread_history',
+        (false, _) => 'fetch_dm_thread_history',
+      };
       final page = runtimeMap(
         await _rpc(method, {
           if (view.group) 'room_jid': view.jid else 'peer_jid': view.jid,
-          if (view.thread != null && view.group) 'thread_id': view.thread,
+          'thread_id': ?view.thread,
           'max_messages': 50,
           'before_id': view.cursor,
         }),
@@ -834,7 +835,7 @@ class ConversationRuntime {
     options['shared_files'] = files;
     options['sticker'] = sticker;
     if (view.thread != null) {
-      options['thread'] = {'id': view.thread, 'parent': null};
+      options['thread'] = _threadTarget(view, view.thread!);
     }
     var wire = composed.body;
     if (reply != null) {
@@ -879,10 +880,12 @@ class ConversationRuntime {
           )
           .toList();
       final thread =
-          _optional(reply['thread']) ?? (!view.group ? target : view.thread);
+          view.thread ??
+          _optional(reply['thread']) ??
+          (!view.group ? target : null);
       if (thread != null) {
         _checkThread(view, thread);
-        options['thread'] = {'id': thread, 'parent': null};
+        options['thread'] = _threadTarget(view, thread);
       }
       wire = '$prefix${composed.body}';
     }
@@ -1697,7 +1700,6 @@ class ConversationRuntime {
         _active != view.id ||
         !view.visible ||
         !view.atNewest ||
-        view.thread != null ||
         view.loading ||
         view.paging ||
         !_connected) {
@@ -1708,7 +1710,7 @@ class ConversationRuntime {
       return;
     }
     final generation = context.generation;
-    final work = _markRead(view);
+    final work = view.thread == null ? _markRead(view) : _markThreadRead(view);
     _reads[view.jid] = work;
     unawaited(
       work.then<void>(
@@ -1739,6 +1741,29 @@ class ConversationRuntime {
         },
       ),
     );
+  }
+
+  Future<bool> _markThreadRead(_View view) async {
+    // A thread has its own inbox row. Conversation-wide displayed markers
+    // would also acknowledge messages outside the thread.
+    final items = _snapshots[view.jid] ?? [];
+    final latest = items.reversed
+        .where(
+          (row) =>
+              _belongsToThread(row, view.thread!) &&
+              row['own'] != true &&
+              row['reference_id'] is String,
+        )
+        .firstOrNull;
+    final id = latest?['reference_id'] as String?;
+    if (id == null || id == view.lastThreadRead) return false;
+    await _rpc('mark_inbox_read', {
+      'partner_jid': view.jid,
+      'thread_id': view.thread,
+    });
+    if (!_valid(view)) return false;
+    view.lastThreadRead = id;
+    return true;
   }
 
   Future<bool> _markRead(_View view) async {
@@ -1911,6 +1936,23 @@ class ConversationRuntime {
         1) {
       throw StateError('The message reference is ambiguous');
     }
+  }
+
+  Map<String, dynamic> _threadTarget(_View view, String thread) {
+    // A subthread starts at a message in its parent thread. Archive pages also
+    // carry the XEP-0201 parent on replies when the root has not loaded.
+    final rows = _snapshots[view.jid] ?? [];
+    final root = rows.where((row) => row['reference_id'] == thread).firstOrNull;
+    final parents = <String>{
+      if (_optional(root?['thread']) case final String parent) parent,
+      for (final row in rows)
+        if (row['thread'] == thread && row['parent_thread_id'] is String)
+          row['parent_thread_id'] as String,
+    }..removeWhere((parent) => parent.isEmpty || parent == thread);
+    return {
+      'id': thread,
+      'parent': parents.length == 1 ? parents.single : null,
+    };
   }
 
   void _checkThread(_View view, String? thread) {
@@ -2202,7 +2244,7 @@ class ConversationRuntime {
         : (_snapshots[view.jid] ?? [])
               .where(
                 (row) =>
-                    row['thread'] == view.thread ||
+                    _belongsToThread(row, view.thread!) ||
                     _identities(row).contains(view.thread),
               )
               .toList();

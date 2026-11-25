@@ -18,7 +18,8 @@ class SessionRuntime implements RuntimeContext {
   SessionRuntime({
     required this.transportFactory,
     required this.storage,
-    required this.auth,
+    required AuthGateway auth,
+    this.authForServer,
     required PlatformInvoker platformInvoker,
     this.rawEventObserver,
     this.accountChangedObserver,
@@ -26,7 +27,8 @@ class SessionRuntime implements RuntimeContext {
     Duration Function(int attempt)? reconnectDelay,
     Future<void> Function(Duration duration)? delay,
     DateTime Function()? now,
-  }) : _visible = initiallyVisible,
+  }) : _auth = auth,
+       _visible = initiallyVisible,
        _platformInvoker = platformInvoker,
        _reconnectDelay = reconnectDelay ?? _backoff,
        _delay = delay ?? Future<void>.delayed,
@@ -36,7 +38,14 @@ class SessionRuntime implements RuntimeContext {
   }
   final Future<RustTransport> Function() transportFactory;
   final RuntimeStorage storage;
-  final AuthGateway auth;
+  AuthGateway _auth;
+  AuthGateway get auth => _auth;
+  final AuthGateway Function(Uri)? authForServer;
+  Uri _server = HttpAuthGateway.defaultBaseUri;
+  String _serverKey(String key) => _server == HttpAuthGateway.defaultBaseUri
+      ? key
+      : 'server:${_server.origin}:$key';
+
   final PlatformInvoker _platformInvoker;
   final void Function(Map<String, dynamic>)? rawEventObserver;
   final void Function()? accountChangedObserver;
@@ -285,6 +294,14 @@ class SessionRuntime implements RuntimeContext {
   Future<void> _start() async {
     emit('session', _session);
     try {
+      final createAuth = authForServer;
+      if (createAuth != null) {
+        final origin = await storage.read('serverOrigin');
+        if (_disposed) return;
+        if (origin != null) {
+          _selectAuth(HttpAuthGateway.serverOrigin(origin), createAuth);
+        }
+      }
       final storedPrefs = await storage.read('preferences');
       if (_disposed) {
         return;
@@ -323,7 +340,7 @@ class SessionRuntime implements RuntimeContext {
     try {
       _session = {'state': 'loading'};
       emit('session', _session);
-      final id = await storage.read('session');
+      final id = await storage.read(_serverKey('session'));
       if (!_currentLogin(ticket, captured)) {
         return;
       }
@@ -401,7 +418,7 @@ class SessionRuntime implements RuntimeContext {
     _generation++;
     final captured = generation;
     _credentials = Map.of(credentials);
-    final stored = await storage.read('account:${bareJid(owner)}');
+    final stored = await storage.read(_serverKey('account:${bareJid(owner)}'));
     if (_disposed || generation != captured) {
       return;
     }
@@ -420,7 +437,7 @@ class SessionRuntime implements RuntimeContext {
     conversations.onAccountChanged();
     surfaces.onAccountChanged();
     accountChangedObserver?.call();
-    await storage.write('session', id);
+    await storage.write(_serverKey('session'), id);
     if (_disposed || generation != captured) {
       return;
     }
@@ -843,7 +860,7 @@ class SessionRuntime implements RuntimeContext {
     final encoded = jsonEncode(_persistent);
     final write = _storageTail.catchError((Object _) {}).then((_) async {
       if (!_disposed && captured == generation && jid == owner) {
-        await storage.write('account:$owner', encoded);
+        await storage.write(_serverKey('account:$owner'), encoded);
       }
     });
     _storageTail = write;
@@ -1127,12 +1144,52 @@ class SessionRuntime implements RuntimeContext {
               'jid': entry['partner'],
               'name': '${entry['partner']}'.split('@').first,
               'body': entry['preview'],
+              'threadId': ?entry['thread_id'],
               'unread': entry['unread'],
               'group': entry['kind'] == 'muc',
             },
           )
           .toList(),
     });
+  }
+
+  void _selectAuth(Uri server, AuthGateway Function(Uri) create) {
+    if (server == _server) return;
+    final previous = _auth;
+    _auth = create(server);
+    _server = server;
+    if (previous is ClosableAuthGateway) {
+      (previous as ClosableAuthGateway).close();
+    }
+  }
+
+  Future<void>? _serverChange;
+
+  Future<void> _changeServer(String address) async {
+    final create = authForServer;
+    if (create == null || session['state'] != 'signedOut') {
+      throw StateError('Sign out before changing servers.');
+    }
+    final selected = HttpAuthGateway.serverOrigin(address);
+    emit('login', {'state': 'loading'});
+    final ticket = ++_loginTicket;
+    final captured = generation;
+    final operation = _lifecycleTail.catchError((Object _) {}).then((_) async {
+      if (!_currentLogin(ticket, captured)) return;
+      await storage.write('serverOrigin', selected.toString());
+      if (!_currentLogin(ticket, captured)) return;
+      _selectAuth(selected, create);
+      _providers = [];
+      _session = {..._session, 'serverOrigin': selected.origin};
+      emit('session', _session);
+    });
+    _serverChange = _lifecycleTail = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_serverChange, operation)) _serverChange = null;
+    }
+    if (_currentLogin(ticket, captured)) await _loadProviders();
   }
 
   Future<void> _loadProviders() async {
@@ -1289,10 +1346,14 @@ class SessionRuntime implements RuntimeContext {
         }
         unawaited(start());
         return null;
+      case 'login.server':
+        return _changeServer(args['address'] as String);
       case 'login.providers':
+        if (_serverChange != null) return null;
         unawaited(_loadProviders());
         return null;
       case 'login.select':
+        if (_serverChange != null) return null;
         final id = args['id'];
         if (id is! String || id.isEmpty) {
           throw ArgumentError('Choose a provider.');
@@ -1300,6 +1361,7 @@ class SessionRuntime implements RuntimeContext {
         unawaited(_login(id));
         return null;
       case 'login.cancel':
+        if (_serverChange != null) return null;
         _loginTicket++;
         emit('login', {
           'state': 'providers',
@@ -1338,6 +1400,27 @@ class SessionRuntime implements RuntimeContext {
       default:
         if (jid == null || _credentials == null) {
           throw StateError('Sign in first.');
+        }
+        if (method == 'threads.list') {
+          final page = runtimeMap(await surfaces.invoke(method, args));
+          if (page['entries'] is! List) {
+            throw StateError('Invalid thread listing.');
+          }
+          return {
+            ...page,
+            'entries': [
+              for (final entry in runtimeRows(page['entries']))
+                {
+                  ...entry,
+                  'group':
+                      _inbox['${entry['channel']}\u0000${entry['thread_id']}']?['kind'] ==
+                          'muc' ||
+                      _channels.any(
+                        (room) => room['room_jid'] == entry['channel'],
+                      ),
+                },
+            ],
+          };
         }
         if (method.startsWith('conversation.')) {
           return conversations.invoke(method, args);
@@ -1437,7 +1520,10 @@ class SessionRuntime implements RuntimeContext {
     _loginTicket++;
     _credentials = null;
     _persistent = {};
-    _session = {'state': 'signedOut'};
+    _session = {
+      'state': 'signedOut',
+      if (authForServer != null) 'serverOrigin': _server.origin,
+    };
     _clearAccountProjections();
     conversations.onAccountChanged();
     surfaces.onAccountChanged();
@@ -1451,9 +1537,9 @@ class SessionRuntime implements RuntimeContext {
         await _retire();
       } finally {
         await _storageTail.catchError((Object _) {});
-        await storage.write('session', null);
+        await storage.write(_serverKey('session'), null);
         if (owner != null) {
-          await storage.write('account:$owner', null);
+          await storage.write(_serverKey('account:$owner'), null);
         }
       }
     });

@@ -25,6 +25,7 @@ class _View {
   String? cursor;
   String upload = 'idle';
   String? unreadAnchor;
+  String? lastThreadRead;
   Map<String, dynamic>? reply;
   Map<String, dynamic>? edit;
   int editAttempt = 0;
@@ -68,6 +69,9 @@ class _RuntimeLease {
     }
   }
 }
+
+bool _belongsToThread(Map<String, dynamic> row, String thread) =>
+    (row['thread'] ?? runtimeMap(row['reply'])['target_id']) == thread;
 
 Set<String> _identities(Map<String, dynamic> row) => {
   for (final field in [

@@ -180,6 +180,20 @@
     },
     "result": "bool"
   },
+  "feed_items": {
+    "args": {
+      "spaces_jid": "String",
+      "max_items": "Option<u32>"
+    },
+    "result": "Result<Vec<WaddleFeedEntry>, WaddleError>"
+  },
+  "feed_publish": {
+    "args": {
+      "spaces_jid": "String",
+      "entry": "WaddleFeedEntryInput"
+    },
+    "result": "Result<WaddleFeedEntry, WaddleError>"
+  },
   "fetch_dm_bookmarks": {
     "args": {},
     "result": "Result<Vec<WaddleDmBookmarkItem>, WaddleError>"
@@ -191,6 +205,15 @@
       "before_id": "Option<String>"
     },
     "result": "WaddleMamPage"
+  },
+  "fetch_dm_thread_history": {
+    "args": {
+      "peer_jid": "String",
+      "thread_id": "String",
+      "max_messages": "u32",
+      "before_id": "Option<String>"
+    },
+    "result": "Result<WaddleMamPage, WaddleError>"
   },
   "fetch_external_services": {
     "args": {},
@@ -259,6 +282,12 @@
       "owner_jid": "Option<String>"
     },
     "result": "Result<Vec<WaddleStickerPack>, WaddleError>"
+  },
+  "fetch_threads": {
+    "args": {
+      "opts": "WaddleFetchThreadsOptions"
+    },
+    "result": "Result<WaddleThreadsPage, WaddleError>"
   },
   "fetch_user_bookmarks": {
     "args": {},
@@ -724,6 +753,30 @@
     },
     "result": "Result<WaddleSetRoomNotificationModeOutcome, WaddleError>"
   },
+  "stories_items": {
+    "args": {
+      "community_jid": "String",
+      "max_items": "Option<u32>"
+    },
+    "result": "Result<Vec<WaddleStory>, WaddleError>"
+  },
+  "stories_publish": {
+    "args": {
+      "community_jid": "String",
+      "input": "WaddleStoryInput"
+    },
+    "result": "Result<WaddleStory, WaddleError>"
+  },
+  "story_reads_fetch": {
+    "args": {},
+    "result": "Result<WaddleStoryReads, WaddleError>"
+  },
+  "story_reads_publish": {
+    "args": {
+      "input": "WaddleStoryReadsInput"
+    },
+    "result": "Result<WaddleStoryReads, WaddleError>"
+  },
   "submit_extension_command_form": {
     "args": {
       "service_jid": "String",
@@ -774,5 +827,44 @@
       "flags": "WaddleInCallPresenceFlags"
     },
     "result": "Result<(), WaddleError>"
+  },
+  "xcal_items": {
+    "args": {
+      "community_jid": "String",
+      "max_items": "Option<u32>"
+    },
+    "result": "Result<Vec<WaddleVEvent>, WaddleError>"
+  },
+  "xcal_publish": {
+    "args": {
+      "community_jid": "String",
+      "input": "WaddleVEventInput"
+    },
+    "result": "Result<WaddleVEvent, WaddleError>"
+  },
+  "xcal_publish_item": {
+    "args": {
+      "community_jid": "String",
+      "item_id": "String",
+      "input": "WaddleCalendarItemInput"
+    },
+    "result": "Result<WaddleVEvent, WaddleError>"
+  },
+  "xcal_retract": {
+    "args": {
+      "community_jid": "String",
+      "item_id": "String"
+    },
+    "result": "Result<bool, WaddleError>"
+  },
+  "xcal_rsvp": {
+    "args": {
+      "community_jid": "String",
+      "master_uid": "String",
+      "self_localpart": "String",
+      "self_jid": "String",
+      "partstat": "String"
+    },
+    "result": "Result<WaddleAttendee, WaddleError>"
   }
 }

@@ -1369,6 +1369,20 @@ class _ConversationScreenState extends State<ConversationScreen>
                         ],
                       ),
                     ),
+                  if (!deleted && message['scoreBadges'] is List)
+                    Wrap(
+                      spacing: 6,
+                      children: [
+                        for (final label
+                            in (message['scoreBadges'] as List)
+                                .whereType<String>())
+                          ActionChip(
+                            label: Text(label),
+                            onPressed: () =>
+                                _safetyScores(message['safetyScores']),
+                          ),
+                      ],
+                    ),
                   if (!deleted && reactions.isNotEmpty)
                     Wrap(
                       spacing: 6,
@@ -2154,12 +2168,21 @@ class _ConversationScreenState extends State<ConversationScreen>
                 ),
               if (mutable) ...[
                 _actionTile(context, 'Reply', Icons.reply, 'reply'),
-                _actionTile(
-                  context,
-                  'Reply in thread',
-                  Icons.forum_outlined,
-                  'thread',
-                ),
+                if (widget.threadId == null)
+                  _actionTile(
+                    context,
+                    'Reply in thread',
+                    Icons.forum_outlined,
+                    'thread',
+                  )
+                else if (message['subthreadTargetId'] != null &&
+                    message['subthreadTargetId'] != widget.threadId)
+                  _actionTile(
+                    context,
+                    'Start subthread',
+                    Icons.forum_outlined,
+                    'subthread',
+                  ),
               ],
               if (message['deleted'] != true &&
                   _str(message['body']).isNotEmpty)
@@ -2227,6 +2250,8 @@ class _ConversationScreenState extends State<ConversationScreen>
           _edit = null;
         });
         _focus.requestFocus();
+      case 'subthread':
+        await _thread(message['subthreadTargetId'] as String);
       case 'thread':
         await _thread(
           _str(

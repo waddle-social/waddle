@@ -265,6 +265,121 @@ void main() {
       {'key': 'wallpaperColors', 'value': true},
     );
   });
+  testWidgets('Activity opens the selected unread thread', (tester) async {
+    final bridge = WaddleBridge(
+      events: const Stream<dynamic>.empty(),
+      commandInvoker: (method, args) async => null,
+    );
+    addTearDown(bridge.dispose);
+    bridge.acceptEvent({
+      'topic': 'session',
+      'data': {'state': 'ready', 'jid': 'me@example.org'},
+    });
+    bridge.acceptEvent({
+      'topic': 'home',
+      'data': {'settled': true},
+    });
+    bridge.acceptEvent({
+      'topic': 'activity',
+      'data': {
+        'entries': [
+          {
+            'jid': 'alex@example.org',
+            'name': 'Alex',
+            'group': false,
+            'threadId': 'archive-42',
+            'unread': 2,
+          },
+        ],
+      },
+    });
+    await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
+    await tester.tap(find.text('Activity').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Thread in Alex'));
+    await tester.pumpAndSettle();
+    final page = tester.widget<ConversationScreen>(
+      find.byType(ConversationScreen),
+    );
+    expect(page.jid, 'alex@example.org');
+    expect(page.threadId, 'archive-42');
+    expect(page.group, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+    'global Threads filters on the server, pages without duplicate rows and opens the room thread',
+    (tester) async {
+      final calls = <(String, Map<String, dynamic>)>[];
+      final bridge = WaddleBridge(
+        events: const Stream<dynamic>.empty(),
+        commandInvoker: (method, args) async {
+          calls.add((method, Map.of(args)));
+          if (method != 'threads.list') return null;
+          final extra = args['after_cursor'] == 'cursor';
+          return {
+            'entries': [
+              {
+                'channel': 'general@rooms.example.org',
+                'thread_id': 'root',
+                'preview': 'Root thread',
+                'unread': 1,
+                'reply_count': 5,
+              },
+              if (extra)
+                {
+                  'channel': 'alex@example.org',
+                  'thread_id': 'dm-thread',
+                  'preview': 'DM thread',
+                  'reply_count': 1,
+                },
+            ],
+            'next_cursor': extra ? null : 'cursor',
+          };
+        },
+      );
+      addTearDown(bridge.dispose);
+      bridge.acceptEvent({
+        'topic': 'session',
+        'data': {'state': 'ready', 'jid': 'me@example.org'},
+      });
+      bridge.acceptEvent({
+        'topic': 'home',
+        'data': {
+          'settled': true,
+          'rooms': [
+            {'jid': 'general@rooms.example.org', 'name': 'General'},
+          ],
+        },
+      });
+      await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
+      await tester.tap(find.text('Activity').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Threads'));
+      await tester.pumpAndSettle();
+      expect(find.text('Root thread'), findsOneWidget);
+      await tester.tap(find.byTooltip('Thread status'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Following').last);
+      await tester.pumpAndSettle();
+      expect(calls.last.$2['status'], 'following');
+      await tester.tap(find.text('Load more threads'));
+      await tester.pumpAndSettle();
+      expect(calls.last.$2['after_cursor'], 'cursor');
+      expect(find.text('DM thread'), findsOneWidget);
+      expect(find.text('Root thread'), findsOneWidget);
+      await tester.tap(find.text('Root thread'));
+      await tester.pumpAndSettle();
+      final page = tester.widget<ConversationScreen>(
+        find.byType(ConversationScreen),
+      );
+      expect(page.jid, 'general@rooms.example.org');
+      expect(page.group, isTrue);
+      expect(page.threadId, 'root');
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets(
     'thread notification opens and deduplicates its restored thread route',
     (tester) async {

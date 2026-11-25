@@ -53,11 +53,7 @@ impl WaddleClient {
         before_id: Option<String>,
     ) -> Result<WaddleMamPage, WaddleError> {
         let room: BareJid = room_jid.parse().map_err(|_| WaddleError::InvalidJid)?;
-        let thread = ThreadId::try_new(thread_id).ok_or(WaddleError::InvalidArgument)?;
-        let before = match before_id {
-            Some(id) => Some(ArchivedMessageId::try_new(id).ok_or(WaddleError::InvalidArgument)?),
-            None => None,
-        };
+        let (thread, before) = thread_page(thread_id, before_id)?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
         };
@@ -344,4 +340,36 @@ impl WaddleClient {
             }
         }
     }
+}
+
+#[cfg(feature = "serde")]
+impl WaddleClient {
+    /// Fetch a page of replies to one thread in the account archive for this peer.
+    pub async fn fetch_dm_thread_history(
+        &self,
+        peer_jid: String,
+        thread_id: String,
+        max_messages: u32,
+        before_id: Option<String>,
+    ) -> Result<WaddleMamPage, WaddleError> {
+        let peer: BareJid = peer_jid.parse().map_err(|_| WaddleError::InvalidJid)?;
+        let (thread, before) = thread_page(thread_id, before_id)?;
+        let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
+        handle
+            .fetch_dm_history_by_thread(&peer, &thread, max_messages, before.as_ref())
+            .await
+            .map(mam_page_to_ffi)
+            .map_err(|e| client_error_to_waddle(&e))
+    }
+}
+
+fn thread_page(
+    thread_id: String,
+    before_id: Option<String>,
+) -> Result<(ThreadId, Option<ArchivedMessageId>), WaddleError> {
+    let thread = ThreadId::try_new(thread_id).ok_or(WaddleError::InvalidArgument)?;
+    let before = before_id
+        .map(|id| ArchivedMessageId::try_new(id).ok_or(WaddleError::InvalidArgument))
+        .transpose()?;
+    Ok((thread, before))
 }

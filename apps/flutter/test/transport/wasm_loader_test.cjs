@@ -11,6 +11,7 @@ function fixture() {
     async disconnect(){this.disconnected=true;if(!this.holdDisconnect)this.callbacks.disconnected?.();}
     async disconnect_and_wait(){await this.disconnect();await this.closedProof;}
     free(){this.freed++;}
+    async fetch_dm_history_by_thread(...args){this.calls.push(['dm-thread',args]);return {messages:[],complete:true};}
     async fetch_room_history_by_thread(...args){this.calls.push(['thread',args]);return {messages:[],complete:true};}
     async status_preference_fetch(){return {mode:'manual',status:'away'};}
     async flutter_rpc(...args){this.calls.push(['native-rpc',args]);}
@@ -117,6 +118,8 @@ test('adapts profile, administrative records and read-cursor field aliases',asyn
  assert.deepEqual(await adapter.rpc('fetch_status_preference'),{type:'manual',status:'away'});
  await adapter.rpc('fetch_room_thread_history',{room_jid:'room@muc.test',thread_id:'thread1',max_messages:50,before_id:'cursor'});
  assert.deepEqual(f.clients[0].calls.at(-1),['thread',['room@muc.test','thread1',50,'cursor']]);
+ await adapter.rpc('fetch_dm_thread_history',{peer_jid:'bob@test',thread_id:'thread1',max_messages:50});
+ assert.deepEqual(f.clients[0].calls.at(-1),['dm-thread',['bob@test','thread1',50,null]]);
  await adapter.rpc('publish_vcard4',{vcard:{full_name:'Alice Example',nickname:'alice'}});
  assert.deepEqual(f.clients[0].calls.at(-1),['vcard',[{fn:'Alice Example',nickname:'alice'}]]);
  await adapter.rpc('publish_mds_displayed',{chat_jid:'bob@example.test',stanza_id:'read1',stanza_id_by:'example.test'});

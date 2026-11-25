@@ -4,6 +4,8 @@
 //! `waddle-server/src/threads/wire.rs`. The chat client uses the IQ
 //! builder/parser to drive the global Threads view.
 
+pub mod bindings;
+
 use crate::xep::call_thread::{CallThreadKind, CallThreadMedia};
 use chrono::{DateTime, SecondsFormat, Utc};
 use jid::BareJid;

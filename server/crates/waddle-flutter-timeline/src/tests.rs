@@ -441,6 +441,13 @@ fn judgment_authority_and_exact_revision_survive_both_binding_enum_shapes() {
         valid.items[0].scores.as_ref().expect("scores").scores.len(),
         1
     );
+    assert_eq!(valid.items[0].score_badges, ["Hate speech"]);
+    let question = ingest(
+        &mut store,
+        json!([make_scores(ROOM, ROOM, "IsQuestion")]),
+        false,
+    );
+    assert_eq!(question.items[0].score_badges, ["Question"]);
 }
 
 #[test]

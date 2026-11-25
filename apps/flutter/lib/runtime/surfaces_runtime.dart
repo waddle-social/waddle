@@ -7,6 +7,8 @@ import 'package:http/http.dart' as http;
 
 import 'context.dart';
 
+part 'community_runtime.dart';
+
 /// Presentation commands are translated into the shared Rust client's typed
 /// verbs. Dart retains only account-fenced caches and UI projections.
 class SurfaceRuntime {
@@ -32,6 +34,7 @@ class SurfaceRuntime {
   final _avatars = <String, Map<String, Uint8List>>{};
   final _avatarCurrent = <String, String>{};
   final _forms = <String, Set<String>>{};
+  Future<void> _storyReadWrite = Future.value();
   List<Map<String, dynamic>>? _commands;
   List<Map<String, dynamic>> _packs = [];
   static final _commandOwner = Object();
@@ -97,6 +100,23 @@ class SurfaceRuntime {
       throw StateError('This controller is closed.');
     }
     switch (method) {
+      case 'community.feed':
+      case 'community.stories':
+      case 'community.events':
+      case 'community.post':
+      case 'community.publishStory':
+      case 'community.readStory':
+      case 'community.createEvent':
+      case 'community.rsvp':
+      case 'community.cancelEvent':
+        return _community(method, args);
+      case 'threads.list':
+        return _rpc('fetch_threads', {'opts': args});
+      case 'threads.markRead':
+        return _rpc('mark_inbox_read', {
+          'partner_jid': _required(args, 'jid'),
+          'thread_id': _required(args, 'threadId'),
+        });
       case 'directory.search':
         final result = await _rpc('search_users', {
           'query': args['query'] ?? '',

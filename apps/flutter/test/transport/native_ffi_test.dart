@@ -86,6 +86,21 @@ void main() {
             'pin_permission': 'anyone',
           },
         },
+        'fetch_threads': {
+          'opts': {
+            'status': 'following',
+            'sort': 'recent',
+            'page_size': 30,
+            'after_cursor': 'older',
+            'channel': 'room@muc.example.test',
+          },
+        },
+        'fetch_dm_thread_history': {
+          'peer_jid': 'alex@example.test',
+          'thread_id': 'thread-1',
+          'max_messages': 50,
+          'before_id': null,
+        },
         'register_push_device': {
           'push_service_jid': 'push.example.test',
           'app_id': 'social.waddle.flutter',

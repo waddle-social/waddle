@@ -6,6 +6,8 @@ import 'bridge.dart';
 import 'design.dart';
 import 'features/conversation.dart';
 import 'features/surfaces.dart';
+import 'features/threads.dart';
+import 'features/community.dart';
 
 List<Map<String, dynamic>> records(dynamic value) => value is List
     ? value
@@ -114,6 +116,51 @@ class _LoginState extends State<_Login> {
             'Your community is one sign-in away.',
             style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
           ),
+          if (widget.bridge.session['serverOrigin'] case final String origin)
+            TextButton.icon(
+              icon: const Icon(Icons.dns_outlined),
+              label: Text(Uri.parse(origin).authority),
+              onPressed: state == 'verifying' || state == 'completing'
+                  ? null
+                  : () async {
+                      var value = origin;
+                      final address = await showDialog<String>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Community server'),
+                          content: TextFormField(
+                            autofocus: true,
+                            initialValue: origin,
+                            keyboardType: TextInputType.url,
+                            decoration: const InputDecoration(
+                              labelText: 'Server address',
+                            ),
+                            onChanged: (text) => value = text,
+                            onFieldSubmitted: (text) =>
+                                Navigator.pop(context, text),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton(
+                              onPressed: () => Navigator.pop(context, value),
+                              child: const Text('Connect'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (context.mounted && address != null) {
+                        await perform(
+                          context,
+                          () => widget.bridge.invoke('login.server', {
+                            'address': address,
+                          }),
+                        );
+                      }
+                    },
+            ),
           const SizedBox(height: 28),
           if (state == 'verifying') ...[
             const Text('Approve sign-in in your browser. Your code:'),
@@ -376,6 +423,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
         group: arguments['group'] == true,
         threadId: arguments['threadId'] as String?,
       ),
+      'threads' => ThreadsScreen(bridge: bridge, onOpen: _open),
       'settings' => SettingsScreen(bridge: bridge),
       'profile' => ProfileScreen(
         bridge: bridge,
@@ -655,9 +703,15 @@ class _CommunityState extends State<_Community> with RestorationMixin {
     Navigator.of(context).restorablePushNamed(name, arguments: arguments);
   }
 
-  void _open(String jid, String title, bool group) {
+  void _open(String jid, String title, bool group, {String? threadId}) {
     _push(
-      ConversationScreen(bridge: bridge, jid: jid, title: title, group: group),
+      ConversationScreen(
+        bridge: bridge,
+        jid: jid,
+        title: title,
+        group: group,
+        threadId: threadId,
+      ),
     );
   }
 
@@ -731,6 +785,13 @@ class _CommunityState extends State<_Community> with RestorationMixin {
               )
             : Text(titles[_tab], maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          if (_tab == 2)
+            IconButton(
+              tooltip: 'Threads',
+              icon: const Icon(Icons.forum_outlined),
+              onPressed: () =>
+                  Navigator.of(context).restorablePushNamed('threads'),
+            ),
           IconButton(
             tooltip: 'People',
             icon: const Icon(Icons.people_outline_rounded),
@@ -923,6 +984,13 @@ class _CommunityState extends State<_Community> with RestorationMixin {
                 label:
                     '${rooms.length} ${rooms.length == 1 ? 'room' : 'rooms'}',
               ),
+              for (final section in CommunitySection.values)
+                _CommunityPill(
+                  icon: section.icon,
+                  label: section.title,
+                  onTap: () =>
+                      _push(CommunityScreen(bridge: bridge, section: section)),
+                ),
               if (totalUnread > 0)
                 _CommunityPill(
                   icon: Icons.mark_chat_unread_outlined,

@@ -1107,6 +1107,43 @@ mod query {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn xep0313_dm_thread_history_scopes_each_page_to_account_peer_and_thread() {
+        let peer: jid::BareJid = "bob@example.com".parse().expect("peer JID");
+        let thread = waddle_xmpp_core::mam::ThreadId::try_new("thread-42").expect("thread id");
+        for cursor in [None, super::ArchivedMessageId::try_new("archive-cursor")] {
+            let (handle, cmd_rx, _evt_tx) = make_bound_handle();
+            let stanza_rx = spawn_fin_responder(cmd_rx);
+            let page = timeout(
+                Duration::from_secs(2),
+                handle.fetch_dm_history_by_thread(&peer, &thread, 30, cursor.as_ref()),
+            )
+            .await
+            .expect("thread query should finish")
+            .expect("thread query should succeed");
+            assert!(page.is_complete);
+            let stanza = stanza_rx.await.expect("sent IQ");
+            assert_eq!(stanza.attr("to"), Some("alice@example.com"));
+            assert_eq!(
+                form_field_value(&stanza, "with").as_deref(),
+                Some(peer.as_str())
+            );
+            assert_eq!(
+                form_field_value(&stanza, WADDLE_MAM_THREAD_FIELD).as_deref(),
+                Some(thread.as_str())
+            );
+            let before = stanza
+                .get_child("query", MAM_NS)
+                .and_then(|query| query.get_child("set", RSM_NS))
+                .and_then(|set| set.get_child("before", RSM_NS))
+                .expect("RSM backward pagination");
+            assert_eq!(
+                before.text(),
+                cursor.as_ref().map_or("", super::ArchivedMessageId::as_str)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn search_dm_history_targets_account_archive_and_filters_peer() {
         let (handle, cmd_rx, _evt_tx) = make_bound_handle();
         let stanza_rx = spawn_fin_responder(cmd_rx);

@@ -28,6 +28,20 @@ class AuthFailure implements Exception {
 /// Waddle clients. All application/protocol operations stay on XMPP.
 class HttpAuthGateway implements AuthGateway, ClosableAuthGateway {
   static final defaultBaseUri = Uri.parse('https://xmpp.waddle.social');
+  static Uri serverOrigin(String address) {
+    final value = address.trim();
+    final uri = Uri.tryParse(value.contains('://') ? value : 'https://$value');
+    if (uri == null ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        (uri.scheme != 'https' &&
+            !(uri.scheme == 'http' &&
+                {'localhost', '127.0.0.1', '::1'}.contains(uri.host)))) {
+      throw const FormatException('Enter an HTTPS server address.');
+    }
+    return Uri.parse(uri.origin);
+  }
+
   HttpAuthGateway({required Uri baseUri, http.Client? client})
     : _base = baseUri.replace(
         path: '${baseUri.path.replaceAll(RegExp(r'/+$'), '')}/',

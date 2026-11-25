@@ -165,6 +165,7 @@ class _Context implements RuntimeContext {
         return {'items': items};
       case 'fetch_room_history':
       case 'fetch_room_thread_history':
+      case 'fetch_dm_thread_history':
       case 'fetch_dm_history':
         return {
           'messages': [],
@@ -622,6 +623,79 @@ void main() {
       });
       await _flush();
       expect(context.recorded('send_displayed'), hasLength(before));
+    },
+  );
+
+  test(
+    'DM threads page separately, acknowledge only their own inbox row, and keep nested replies in context',
+    () async {
+      const peer = 'alex@example.org';
+      const args = {
+        'jid': peer,
+        'group': false,
+        'threadId': 'child',
+        'viewId': 'child',
+        'atNewestEdge': false,
+      };
+      final context = _Context();
+      context.responses['fetch_dm_thread_history'] = {
+        'messages': [
+          for (final thread in ['other', 'parent', 'child'])
+            {
+              ..._message(thread == 'parent' ? 'child' : 'reply-$thread'),
+              'from': peer,
+              'to': own,
+              'message_type': 'chat',
+              'stanza_id_by': own,
+              'is_muc': false,
+              'thread': thread,
+            },
+        ],
+        'is_complete': false,
+        'first_id': 'older-cursor',
+      };
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await _start(runtime);
+      await runtime.invoke('conversation.open', args);
+      await _until(() => context.conversation['loading'] == false);
+      expect(context.recorded('fetch_dm_history'), isEmpty);
+      expect(context.recorded('fetch_dm_thread_history').single, {
+        'peer_jid': peer,
+        'thread_id': 'child',
+        'max_messages': 50,
+        'before_id': null,
+      });
+      expect(
+        runtimeRows(context.conversation['messages']).map((row) => row['id']),
+        unorderedEquals(['child', 'reply-child']),
+      );
+      expect(context.recorded('mark_inbox_read'), isEmpty);
+      await runtime.invoke('conversation.read', {
+        ...args,
+        'atNewestEdge': true,
+      });
+      await _flush();
+      expect(context.recorded('mark_inbox_read'), [
+        {'partner_jid': peer, 'thread_id': 'child'},
+      ]);
+      expect(context.recorded('send_displayed'), isEmpty);
+      expect(context.recorded('publish_mds_displayed'), isEmpty);
+      await runtime.invoke('conversation.history', args);
+      expect(
+        context.recorded('fetch_dm_thread_history').last['before_id'],
+        'older-cursor',
+      );
+      expect(context.recorded('mark_inbox_read'), hasLength(1));
+      await runtime.invoke('conversation.send', {
+        ...args,
+        'body': 'Nested reply',
+      });
+      await _until(() => context.recorded('send_chat_message').isNotEmpty);
+      final options = runtimeMap(
+        context.recorded('send_chat_message').single['options'],
+      );
+      expect(options['thread'], {'id': 'child', 'parent': 'parent'});
     },
   );
 

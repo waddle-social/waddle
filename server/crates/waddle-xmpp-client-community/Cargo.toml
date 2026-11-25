@@ -1,0 +1,21 @@
+[package]
+name = "waddle-xmpp-client-community"
+description = "Shared native and browser client bindings for community pubsub surfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+jid.workspace = true
+minidom.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+waddle-xmpp-client = { path = "../waddle-xmpp-client", default-features = false }
+waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+
+[lints]
+workspace = true

@@ -54,10 +54,7 @@ use waddle_xmpp_client::transport::{
 };
 use waddle_xmpp_client::xep::reply::{FallbackRange, ReplyMarker};
 use waddle_xmpp_client::xep::thread::ThreadRef;
-use waddle_xmpp_client::xep::threads::{
-    build_fetch_threads_iq, parse_threads_response, FetchThreadsQuery, ThreadSort,
-    ThreadStatusFilter,
-};
+use waddle_xmpp_client::xep::threads::{build_fetch_threads_iq, parse_threads_response};
 use waddle_xmpp_client::xep::xep0292::{
     build_fetch_vcard4_iq, build_publish_vcard4_iq, parse_pep_vcard4, VCard4,
 };

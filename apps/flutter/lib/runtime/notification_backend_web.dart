@@ -14,6 +14,8 @@ Future<NotificationBackend> initializeForwarder() async => createBackend();
 class BrowserNotifications implements NotificationBackend {
   bool _supported = false, _disposed = false;
   @override
+  bool get localDeliveryOnly => false;
+  @override
   bool get supported => _supported;
   @override
   bool get supportsBackground => false;

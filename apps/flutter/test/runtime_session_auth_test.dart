@@ -6,6 +6,32 @@ import 'package:http/testing.dart';
 import 'package:waddle_flutter/runtime/session_auth.dart';
 
 void main() {
+  test('community server addresses resolve to a secure origin', () {
+    expect(
+      HttpAuthGateway.serverOrigin('example.org:8443').toString(),
+      'https://example.org:8443',
+    );
+    expect(
+      HttpAuthGateway.serverOrigin('https://example.org/login?x=1').toString(),
+      'https://example.org',
+    );
+    expect(
+      HttpAuthGateway.serverOrigin('http://localhost:8080').origin,
+      'http://localhost:8080',
+    );
+    for (final address in [
+      'https://me:secret@example.org',
+      'http://example.org',
+      'file:///tmp/server',
+      '',
+    ]) {
+      expect(
+        () => HttpAuthGateway.serverOrigin(address),
+        throwsFormatException,
+      );
+    }
+  });
+
   test(
     'device auth uses existing REST endpoints and canonical snake-case bodies',
     () async {

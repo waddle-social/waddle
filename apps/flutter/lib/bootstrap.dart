@@ -76,6 +76,7 @@ Future<void> bootWaddle({
     initiallyVisible: !headless,
     storage: const SecureRuntimeStorage(),
     auth: HttpAuthGateway(baseUri: HttpAuthGateway.defaultBaseUri),
+    authForServer: (uri) => HttpAuthGateway(baseUri: uri),
     platformInvoker: (method, args) =>
         method.startsWith('push.') || method == 'app.visibility'
         ? notifications.invoke(method, args)

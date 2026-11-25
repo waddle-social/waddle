@@ -145,6 +145,7 @@ Map<String, dynamic> _projectRow(
     ).toIso8601String(),
     'threadId': row['thread'],
     'threadTargetId': row['thread'] ?? row['reference_id'] ?? row['id'],
+    'subthreadTargetId': row['reference_id'],
     'replyTo': reply['target_id'],
     if (reply.isNotEmpty)
       'replyPreview': {
@@ -185,6 +186,7 @@ Map<String, dynamic> _projectRow(
     if (call.isNotEmpty) 'call': call,
     if (ended.isNotEmpty) 'callEnded': ended,
     if (scores.isNotEmpty) 'safetyScores': _scorePresentation(scores),
+    if (scores.isNotEmpty) 'scoreBadges': row['score_badges'],
   };
 }
 

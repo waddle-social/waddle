@@ -19,9 +19,11 @@ class FakeNotificationBackend implements NotificationBackend {
   String? lastInstance;
   Map<String, dynamic>? initialAction;
   @override
-  bool get supported => true;
+  bool localDeliveryOnly = false;
   @override
-  bool get supportsBackground => true;
+  bool get supported => !localDeliveryOnly;
+  @override
+  bool get supportsBackground => !localDeliveryOnly;
   @override
   Future<void> initialize(void Function(Map<String, dynamic>) callback) async {
     emit = callback;
@@ -190,6 +192,44 @@ ready({
 }
 
 void main() {
+  test(
+    'desktop messages use the active session without registering for push',
+    () async {
+      final context = FakeNotificationContext();
+      final backend = FakeNotificationBackend()..localDeliveryOnly = true;
+      final service = NotificationService(context, backend: backend);
+      final delivery = <Map<String, dynamic>>[];
+      final subscription = service.events.listen((event) {
+        if (event['topic'] == 'delivery') {
+          delivery.add(Map<String, dynamic>.from(event['data'] as Map));
+        }
+      });
+      addTearDown(subscription.cancel);
+      addTearDown(service.dispose);
+      await service.initialize();
+      service.onEvent({'type': 'connected'});
+      await service.idle;
+      await service.invoke('app.visibility', {'visible': false});
+      service.onEvent({
+        'type': 'message',
+        'data': {
+          'body': 'Hello',
+          'from': 'alex@example.org/phone',
+          'message_type': 'chat',
+          'stanza_ids': [
+            {'by': context.jid, 'id': 'a1'},
+          ],
+        },
+      });
+      await service.idle;
+      expect(backend.notices.single.payload['item'], 'a1');
+      expect(delivery.last['localDeliveryOnly'], isTrue);
+      expect(delivery.last['pushEnabled'], isFalse);
+      expect(delivery.last['status'], contains('while Waddle is running'));
+      expect(context.calls.where((call) => call.$1.contains('push')), isEmpty);
+    },
+  );
+
   test(
     'validated incoming call notifies without autoaccept and fences actions by SID',
     () async {

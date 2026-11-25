@@ -365,6 +365,36 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('notable Jev badges open the scored message breakdown', (
+    tester,
+  ) async {
+    final harness = _ConversationHarness()
+      ..timeline([
+        {
+          ..._message('question', 0),
+          'scoreBadges': ['Spam', 'Question'],
+          'safetyScores': {
+            'modelVersion': 'jev-v1',
+            'scores': [
+              {
+                'category': 'is-question',
+                'probability': .91,
+                'taxonomyVersion': 'v1',
+              },
+            ],
+          },
+        },
+      ]);
+    await _mount(tester, harness);
+    expect(find.widgetWithText(ActionChip, 'Spam'), findsOneWidget);
+    await tester.tap(find.widgetWithText(ActionChip, 'Question'));
+    await tester.pumpAndSettle();
+    expect(find.text('Model: jev-v1'), findsOneWidget);
+    expect(find.text('91.0%'), findsOneWidget);
+    expect(find.text('Taxonomy: v1'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   for (final state in ['pending', 'deleted']) {
     testWidgets(
       '$state message safety details are explicit and absent from the feed',
@@ -814,6 +844,41 @@ void main() {
     );
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'Start subthread opens the selected reply as a child and back returns to its parent',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot(messages: true);
+      await _mount(tester, harness);
+      await tester.tap(find.text('1 reply'));
+      await tester.pumpAndSettle();
+      harness.timeline([
+        {
+          ..._message('reply-to-root', 0),
+          'threadId': 'old-thread',
+          'subthreadTargetId': 'reply-to-root',
+        },
+      ]);
+      await tester.pump();
+      await tester.tap(find.byTooltip('Message actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Start subthread'));
+      await tester.pumpAndSettle();
+      expect(
+        harness.calls('conversation.open').last['threadId'],
+        'reply-to-root',
+      );
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ConversationScreen>(find.byType(ConversationScreen))
+            .threadId,
+        'old-thread',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets('thread actions retain route arguments after restoration', (
     tester,

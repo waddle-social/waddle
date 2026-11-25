@@ -11,6 +11,7 @@ description = "WebAssembly bindings for Waddle's native XMPP client"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+waddle-xmpp-client-community = { path = "../waddle-xmpp-client-community" }
 base64 = { workspace = true }
 waddle-xmpp-client = { path = "../waddle-xmpp-client", default-features = false, features = ["wasm"] }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }

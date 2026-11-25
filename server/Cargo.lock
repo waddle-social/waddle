@@ -7984,6 +7984,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-xmpp-client-community"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jid",
+ "minidom",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+ "waddle-xmpp-client",
+ "waddle-xmpp-core",
+]
+
+[[package]]
 name = "waddle-xmpp-client-ffi"
 version = "0.1.0"
 dependencies = [
@@ -7997,6 +8011,7 @@ dependencies = [
  "url",
  "uuid",
  "waddle-xmpp-client",
+ "waddle-xmpp-client-community",
  "waddle-xmpp-core",
  "xmpp-parsers",
 ]
@@ -8020,6 +8035,7 @@ dependencies = [
  "uuid",
  "waddle-flutter-timeline",
  "waddle-xmpp-client",
+ "waddle-xmpp-client-community",
  "waddle-xmpp-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",

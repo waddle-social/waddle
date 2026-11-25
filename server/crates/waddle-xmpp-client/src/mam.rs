@@ -195,6 +195,19 @@ pub trait MamExt {
         before: Option<&'a ArchivedMessageId>,
     ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
 
+    /// Fetch one DM thread from the bound account's archive, restricted to its peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a connection error for an unbound session or a failed archive query.
+    fn fetch_dm_history_by_thread<'a>(
+        &'a self,
+        peer: &'a BareJid,
+        thread: &'a ThreadId,
+        max: u32,
+        before: Option<&'a ArchivedMessageId>,
+    ) -> impl std::future::Future<Output = ClientResult<MamPage>> + Send + 'a;
+
     /// Full-text search of a MUC room archive via the XEP-0313 extended
     /// form field `{urn:xmpp:fulltext:0}fulltext` (Clark notation per
     /// XEP-0068). Returns the newest matching page first.
@@ -264,6 +277,25 @@ impl MamExt for ClientHandle {
         let iq_id = Uuid::new_v4().to_string();
 
         let iq = build_room_thread_history_iq(&iq_id, &query_id, max, room, thread, before);
+        run_mam_query(self, iq, &query_id).await
+    }
+
+    async fn fetch_dm_history_by_thread(
+        &self,
+        peer: &BareJid,
+        thread: &ThreadId,
+        max: u32,
+        before: Option<&ArchivedMessageId>,
+    ) -> ClientResult<MamPage> {
+        let binding = self.snapshot().binding.ok_or(ClientError::Disconnected)?;
+        let query_id = Uuid::new_v4().to_string();
+        let iq_id = Uuid::new_v4().to_string();
+        let iq = MamIqBuilder::new(&iq_id, &query_id, max)
+            .to_jid(binding.jid.to_bare().as_str())
+            .with_jid(peer.as_str())
+            .thread_id(thread.as_str())
+            .before(before.map_or("", ArchivedMessageId::as_str))
+            .build();
         run_mam_query(self, iq, &query_id).await
     }
 

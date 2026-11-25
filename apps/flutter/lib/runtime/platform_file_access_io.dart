@@ -1,7 +1,9 @@
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -13,13 +15,31 @@ Future<Directory> _directory() {
   final previousCleanup = _cleanup;
   return _ready = () async {
     await previousCleanup;
-    final root = await getTemporaryDirectory();
+    final root = await getApplicationCacheDirectory();
     final directory = Directory('${root.path}/waddle-open');
     if (await directory.exists()) {
       await directory.delete(recursive: true);
     }
     await directory.create(recursive: true);
-    return directory;
+    if (!Platform.isLinux) return directory.createTemp('session-');
+    // mkdtemp creates the directory with mode 0700 before any plaintext is written.
+    final mkdtemp = DynamicLibrary.process()
+        .lookupFunction<
+          Pointer<Utf8> Function(Pointer<Utf8>),
+          Pointer<Utf8> Function(Pointer<Utf8>)
+        >('mkdtemp');
+    final template = '${directory.path}/session-XXXXXX'.toNativeUtf8();
+    try {
+      if (mkdtemp(template) == nullptr) {
+        throw FileSystemException(
+          'Could not create private attachment directory',
+          directory.path,
+        );
+      }
+      return Directory(template.toDartString());
+    } finally {
+      malloc.free(template);
+    }
   }();
 }
 

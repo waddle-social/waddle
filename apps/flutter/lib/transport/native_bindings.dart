@@ -49,13 +49,19 @@ class FfiRustBindings implements NativeRustBindings {
     try {
       return FfiRustBindings(DynamicLibrary.process());
     } on ArgumentError {
-      // Android/Linux/Windows bundle the cdylib; Apple may link the symbols into the process.
+      // Android and desktop runners bundle the cdylib; Apple may link the symbols into the process.
     }
-    final name = Platform.isWindows
-        ? 'waddle_flutter_runtime.dll'
-        : Platform.isMacOS || Platform.isIOS
-        ? 'libwaddle_flutter_runtime.dylib'
-        : 'libwaddle_flutter_runtime.so';
+    final String name;
+    if (Platform.isLinux) {
+      final bundle = File(Platform.resolvedExecutable).parent;
+      name = '${bundle.path}/lib/libwaddle_flutter_runtime.so';
+    } else if (Platform.isWindows) {
+      name = 'waddle_flutter_runtime.dll';
+    } else if (Platform.isMacOS || Platform.isIOS) {
+      name = 'libwaddle_flutter_runtime.dylib';
+    } else {
+      name = 'libwaddle_flutter_runtime.so';
+    }
     try {
       return FfiRustBindings(DynamicLibrary.open(name));
     } on ArgumentError {
