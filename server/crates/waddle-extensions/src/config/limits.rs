@@ -51,7 +51,7 @@ pub struct RuntimeLimits {
     pub invocation_timeout_ms: u32,
     /// Wasmtime instruction-fuel budget for one invocation.
     pub wasm_fuel: u64,
-    /// Per linear memory, with at most four memories per store.
+    /// Total linear memory budget across all memories in one store (at most four memories).
     pub memory_bytes: usize,
     /// Maximum elapsed time for each outbound HTTP request, in milliseconds.
     pub http_timeout_ms: u32,

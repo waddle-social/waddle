@@ -35,6 +35,8 @@ impl ExtensionManager {
             feature_namespaces: Vec::new(),
             route_descriptors: Vec::new(),
             launch_signing_key: None,
+            tenant_id: None,
+            resource_controller: None,
         }
     }
 
@@ -50,6 +52,8 @@ impl ExtensionManager {
             feature_namespaces: Vec::new(),
             route_descriptors: routes,
             launch_signing_key: None,
+            tenant_id: None,
+            resource_controller: None,
         }
     }
 }

@@ -34,7 +34,8 @@ fn observation() -> ExtensionEvent {
 
 fn context() -> InvocationContext {
     InvocationContext {
-        waddle_id: WaddleId::try_new("local").expect("waddle"),
+        tenant_id: None,
+        waddle_id: WaddleId::try_new("test-waddle").expect("waddle"),
         plugin_id: PluginId::try_new("jev-judgments").expect("plugin"),
         requester: None,
         source_room: Some("room@muc.example.com".parse().expect("room")),

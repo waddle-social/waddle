@@ -160,6 +160,8 @@ pub struct ExtensionManager {
     feature_namespaces: Vec<String>,
     route_descriptors: Vec<ExtensionRouteDescriptor>,
     launch_signing_key: Option<Vec<u8>>,
+    tenant_id: Option<waddle_broker_core::identity::TenantId>,
+    resource_controller: Option<Arc<waddle_broker_core::quotas::TenantResourceController>>,
 }
 
 mod construction;

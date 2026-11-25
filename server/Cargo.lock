@@ -8945,6 +8945,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "waddle-broker-core",
  "wasmtime",
  "wasmtime-wasi",
  "xmpp-parsers",

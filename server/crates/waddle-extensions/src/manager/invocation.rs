@@ -35,6 +35,7 @@ impl ExtensionManager {
             return Vec::new();
         };
         let dispatch_node = command_node.clone();
+        let dispatch_waddle_id = waddle_id.clone();
         let event = ExtensionEvent::Command(CommandInvocation {
             waddle_id,
             room,
@@ -49,7 +50,12 @@ impl ExtensionManager {
             if actor.has_grant(ExtensionCapability::Commands)
                 && actor.manifest().declares_command(&command_node)
             {
-                return match timeout(EXTENSION_COMMAND_TIMEOUT, actor.handle_event(event)).await {
+                return match timeout(
+                    EXTENSION_COMMAND_TIMEOUT,
+                    actor.handle_event_for_waddle(event, dispatch_waddle_id),
+                )
+                .await
+                {
                     Ok(effects) => self.sign_effects(effects),
                     Err(_) => vec![ExtensionEffect::HostWarning(
                         DisplayText::try_new(format!("Extension command {command_node} timed out"))
@@ -103,6 +109,7 @@ impl ExtensionManager {
             );
             return Vec::new();
         }
+        let launch_waddle_id = context.waddle_id.clone();
         let event = ExtensionEvent::Launch(LaunchInvocation {
             context,
             requester,
@@ -116,7 +123,8 @@ impl ExtensionManager {
             if actor.has_grant(ExtensionCapability::Launch)
                 && actor.manifest().id.as_str() == plugin_name
             {
-                return self.sign_effects(actor.handle_event(event).await);
+                return self
+                    .sign_effects(actor.handle_event_for_waddle(event, launch_waddle_id).await);
             }
         }
         Vec::new()

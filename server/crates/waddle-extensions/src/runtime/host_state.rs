@@ -20,6 +20,133 @@ use crate::host_tools::{
     InvocationContext, InvocationKind,
 };
 use crate::types::{DisplayText, ExtensionCapability, PluginId, WaddleId};
+use waddle_broker_core::quotas::TenantMemoryTracker;
+
+/// `wasmtime::ResourceLimiter` enforcing an aggregate linear memory ceiling across
+/// **all** memories in a single store (preventing `memories(4) * memory_size(N)`
+/// multiplication) and optionally charging a shared per-tenant [`TenantMemoryTracker`].
+pub(super) struct AggregateStoreLimits {
+    inner: wasmtime::StoreLimits,
+    max_total_memory_bytes: usize,
+    allocated_memory_bytes: usize,
+    last_pending_delta: usize,
+    tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+}
+
+impl AggregateStoreLimits {
+    pub(super) fn new(
+        max_total_memory_bytes: usize,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> Self {
+        let inner = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(max_total_memory_bytes)
+            .table_elements(20_000)
+            .tables(8)
+            .memories(4)
+            .instances(16)
+            .trap_on_grow_failure(true)
+            .build();
+        Self {
+            inner,
+            max_total_memory_bytes,
+            allocated_memory_bytes: 0,
+            last_pending_delta: 0,
+            tenant_memory_tracker,
+        }
+    }
+}
+
+impl Drop for AggregateStoreLimits {
+    fn drop(&mut self) {
+        if let Some(tracker) = &self.tenant_memory_tracker {
+            tracker.release(self.allocated_memory_bytes);
+        }
+        self.allocated_memory_bytes = 0;
+    }
+}
+
+impl wasmtime::ResourceLimiter for AggregateStoreLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let delta = desired.saturating_sub(current);
+        let next_total = self.allocated_memory_bytes.saturating_add(delta);
+        if next_total > self.max_total_memory_bytes {
+            return Err(wasmtime::format_err!(
+                "store aggregate linear memory limit ({} bytes) exceeded",
+                self.max_total_memory_bytes
+            ));
+        }
+        if let Some(tracker) = &self.tenant_memory_tracker {
+            tracker.try_reserve(delta).map_err(|_| {
+                wasmtime::format_err!(
+                    "tenant aggregate Wasm linear memory limit ({} bytes) exceeded",
+                    tracker.max_bytes()
+                )
+            })?;
+        }
+        match self.inner.memory_growing(current, desired, maximum) {
+            Ok(true) => {
+                self.allocated_memory_bytes = next_total;
+                self.last_pending_delta = delta;
+                Ok(true)
+            }
+            Ok(false) => {
+                if let Some(tracker) = &self.tenant_memory_tracker {
+                    tracker.release(delta);
+                }
+                self.last_pending_delta = 0;
+                Ok(false)
+            }
+            Err(err) => {
+                if let Some(tracker) = &self.tenant_memory_tracker {
+                    tracker.release(delta);
+                }
+                self.last_pending_delta = 0;
+                Err(err)
+            }
+        }
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        let delta = std::mem::take(&mut self.last_pending_delta);
+        if delta > 0 {
+            self.allocated_memory_bytes = self.allocated_memory_bytes.saturating_sub(delta);
+            if let Some(tracker) = &self.tenant_memory_tracker {
+                tracker.release(delta);
+            }
+        }
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
+}
 
 /// The Foundation delivery key remains inside the server implementation. This
 /// table entry has no public constructor, representation, or receipt operation.
@@ -39,13 +166,14 @@ pub struct HostState {
     pub config: String,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
-    pub(super) limits: wasmtime::StoreLimits,
+    pub(super) limits: AggregateStoreLimits,
     runtime_limits: RuntimeLimits,
     http: super::http::HttpRuntime,
     http_requests: u32,
 }
 
 impl HostState {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         tools: Arc<dyn ExtensionHostTools>,
         context: InvocationContext,
@@ -54,20 +182,14 @@ impl HostState {
         allowed_http_origins: Vec<String>,
         runtime_limits: RuntimeLimits,
         http: super::http::HttpRuntime,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
     ) -> Self {
         let mut wasi_builder = WasiCtxBuilder::new();
         if context.kind != InvocationKind::RoomMessageObserve {
             wasi_builder.inherit_stderr();
         }
         let wasi = wasi_builder.build();
-        let limits = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(runtime_limits.memory_bytes)
-            .table_elements(20_000)
-            .tables(8)
-            .memories(4)
-            .instances(16)
-            .trap_on_grow_failure(true)
-            .build();
+        let limits = AggregateStoreLimits::new(runtime_limits.memory_bytes, tenant_memory_tracker);
         Self {
             wasi,
             table: ResourceTable::new(),
@@ -131,6 +253,7 @@ impl HostState {
         Self::new(
             Arc::new(DenyingExtensionHostTools),
             InvocationContext {
+                tenant_id: None,
                 waddle_id: WaddleId::try_new("init").expect("static waddle id is valid"),
                 plugin_id: PluginId::try_new("initializing-extension")
                     .expect("static plugin id is valid"),
@@ -144,6 +267,7 @@ impl HostState {
             Vec::new(),
             limits,
             http,
+            None,
         )
     }
 

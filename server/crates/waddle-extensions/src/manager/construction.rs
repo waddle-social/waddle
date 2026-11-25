@@ -47,6 +47,8 @@ impl ExtensionManager {
                 feature_namespaces: Vec::new(),
                 route_descriptors: Vec::new(),
                 launch_signing_key: None,
+                tenant_id: None,
+                resource_controller: None,
             });
         }
         config.validate().map_err(anyhow::Error::msg)?;
@@ -162,7 +164,47 @@ impl ExtensionManager {
             feature_namespaces,
             route_descriptors,
             launch_signing_key: None,
+            tenant_id: None,
+            resource_controller: None,
         })
+    }
+
+    /// Load configured components bound to a specific canonical [`waddle_broker_core::identity::TenantId`]
+    /// and per-tenant [`waddle_broker_core::quotas::TenantResourceController`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid configuration, artifact loading/verification
+    /// failures, Wasm initialization failures, invalid manifests/routes, or duplicate
+    /// extension identifiers.
+    pub async fn from_config_for_tenant(
+        tenant_id: waddle_broker_core::identity::TenantId,
+        config: ExtensionConfig,
+        host_tools: Arc<dyn ExtensionHostTools>,
+        resource_controller: Arc<waddle_broker_core::quotas::TenantResourceController>,
+    ) -> Result<Self> {
+        let mut mgr = Self::from_config_with_host_tools(config, host_tools).await?;
+        mgr.tenant_id = Some(tenant_id.clone());
+        mgr.resource_controller = Some(Arc::clone(&resource_controller));
+        mgr.actors = mgr
+            .actors
+            .into_iter()
+            .map(|actor| match Arc::try_unwrap(actor) {
+                Ok(inner) => Arc::new(
+                    inner
+                        .with_tenant_id(tenant_id.clone())
+                        .with_resource_controller(Arc::clone(&resource_controller)),
+                ),
+                Err(shared) => shared,
+            })
+            .collect();
+        Ok(mgr)
+    }
+
+    /// Return the canonical [`waddle_broker_core::identity::TenantId`] bound to this manager, if any.
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<&waddle_broker_core::identity::TenantId> {
+        self.tenant_id.as_ref()
     }
 
     /// Install a nonempty launch-signing key; an empty key leaves the existing key unchanged.

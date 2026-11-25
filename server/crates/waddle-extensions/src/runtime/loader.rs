@@ -17,35 +17,81 @@ use crate::host_tools::{
     DeliveryInvocation, ExtensionDeliveryCapability, ExtensionHostTools, InvocationContext,
 };
 use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, ExtensionResponse};
+use std::sync::mpsc;
+use std::time::Duration;
+use waddle_broker_core::quotas::TenantMemoryTracker;
+
+/// Interval at which the Wasmtime engine epoch counter advances.
+const EPOCH_TICK_INTERVAL_MS: u64 = 50;
+
+/// Background epoch ticker stopped cleanly when the last [`WasmRuntime`] drops.
+struct EpochTickerGuard {
+    stop_tx: mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for EpochTickerGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochTickerGuard").finish_non_exhaustive()
+    }
+}
+
+impl Drop for EpochTickerGuard {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Shared wasmtime engine used for all loaded extensions.
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
     engine: Engine,
     http: super::http::HttpRuntime,
+    _epoch_ticker: Arc<EpochTickerGuard>,
 }
 
 impl WasmRuntime {
-    /// Create the fuel-metered component engine and policy-constrained HTTP client shared
-    /// by loaded extensions.
+    /// Create the fuel-metered, epoch-interruptible component engine and policy-constrained
+    /// HTTP client shared by loaded extensions.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Wasmtime engine or HTTP client cannot be initialized.
+    /// Returns an error if the Wasmtime engine, epoch ticker thread, or HTTP client cannot
+    /// be initialized.
     pub fn try_new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)
             .map_err(anyhow::Error::from)
             .context("failed to create wasmtime engine")?;
+        let ticker_engine = engine.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("wasm-epoch-ticker".to_owned())
+            .spawn(move || {
+                let interval = Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(interval) {
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .context("failed to spawn wasm epoch ticker thread")?;
         Ok(Self {
             engine,
             http: super::http::HttpRuntime::try_new()?,
+            _epoch_ticker: Arc::new(EpochTickerGuard {
+                stop_tx,
+                handle: Some(handle),
+            }),
         })
     }
 
-    /// Borrow the shared Wasmtime engine configured for components and fuel metering.
+    /// Borrow the shared Wasmtime engine configured for components, fuel metering, and
+    /// epoch interruption.
     #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -124,6 +170,11 @@ impl LoadedExtension {
         store.limiter(|state| &mut state.limits);
         store.set_fuel(self.limits.wasm_fuel)?;
         store.fuel_async_yield_interval(Some(10_000))?;
+        let deadline_ticks = u64::from(self.limits.invocation_timeout_ms)
+            .div_ceil(EPOCH_TICK_INTERVAL_MS)
+            .max(1);
+        store.set_epoch_deadline(deadline_ticks);
+        store.epoch_deadline_trap();
         Ok(())
     }
 
@@ -186,12 +237,43 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> Result<ExtensionResponse> {
+        self.call_handle_event_with_memory_tracker(
+            event,
+            tools,
+            context,
+            config,
+            grants,
+            allowed_http_origins,
+            None,
+        )
+        .await
+    }
+
+    /// Same as [`Self::call_handle_event`], charging linear memory growth against an
+    /// optional per-tenant [`TenantMemoryTracker`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_handle_event_with_memory_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> Result<ExtensionResponse> {
         self.invoke_with_deadline(
             event,
             tools,
             InvocationBinding {
                 context,
                 delivery: None,
+                tenant_memory_tracker,
             },
             config,
             grants,
@@ -228,6 +310,7 @@ impl LoadedExtension {
             InvocationBinding {
                 context,
                 delivery: None,
+                tenant_memory_tracker: None,
             },
             config,
             grants,
@@ -252,12 +335,69 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
+        self.call_handle_event_typed_with_delivery_and_tracker(
+            event,
+            tools,
+            invocation,
+            config,
+            grants,
+            allowed_http_origins,
+            None,
+        )
+        .await
+    }
+
+    /// Invoke with server-owned authority and optional per-tenant memory tracking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_handle_event_typed_with_delivery_and_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        invocation: DeliveryInvocation,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
             InvocationBinding {
                 context: invocation.context,
                 delivery: Some(invocation.capability),
+                tenant_memory_tracker,
+            },
+            config,
+            grants,
+            allowed_http_origins,
+        )
+        .await
+        .map_err(|(failure, _)| failure)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_handle_event_typed_with_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
+        self.invoke_with_deadline(
+            event,
+            tools,
+            InvocationBinding {
+                context,
+                delivery: None,
+                tenant_memory_tracker,
             },
             config,
             grants,
@@ -313,6 +453,7 @@ impl LoadedExtension {
                 allowed_http_origins,
                 self.limits.clone(),
                 self.http.clone(),
+                invocation.tenant_memory_tracker,
             ),
         );
         if let Some(capability) = invocation.delivery {
@@ -370,6 +511,7 @@ impl LoadedExtension {
 struct InvocationBinding {
     context: InvocationContext,
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
+    tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
 }
 
 fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
@@ -385,13 +527,10 @@ fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
 }
 
 fn classify_runtime_error(error: wasmtime::Error) -> ObservationFailure {
-    if matches!(
-        error.downcast_ref::<wasmtime::Trap>(),
-        Some(wasmtime::Trap::OutOfFuel)
-    ) {
-        ObservationFailure::ResourceLimit
-    } else {
-        ObservationFailure::RuntimeFailure
+    match error.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::OutOfFuel) => ObservationFailure::ResourceLimit,
+        Some(wasmtime::Trap::Interrupt) => ObservationFailure::DeadlineExceeded,
+        _ => ObservationFailure::RuntimeFailure,
     }
 }
 
@@ -410,6 +549,7 @@ mod limit_tests {
         let mut store = Store::new(runtime.engine(), HostState::for_init());
         store.set_fuel(20_000).expect("fuel");
         store.fuel_async_yield_interval(Some(1_000)).expect("yield");
+        store.set_epoch_deadline(100);
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .expect("instance");
@@ -439,13 +579,12 @@ mod limit_tests {
         )
         .expect("module");
         let mut state = HostState::for_init();
-        state.limits = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(65_536)
-            .trap_on_grow_failure(true)
-            .build();
+        state.limits = super::super::host_state::AggregateStoreLimits::new(65_536, None);
         let mut store = Store::new(runtime.engine(), state);
         store.limiter(|state| &mut state.limits);
         store.set_fuel(10_000).expect("fuel");
+        store.set_epoch_deadline(100);
+        store.epoch_deadline_trap();
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .expect("instance");
@@ -453,5 +592,70 @@ mod limit_tests {
             .get_typed_func::<(), i32>(&mut store, "grow")
             .expect("grow");
         assert!(grow.call_async(&mut store, ()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn multi_memory_wasm_module_is_capped_by_aggregate_limit() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        // Two 1-page memories = 131,072 bytes > 65,536 byte aggregate cap.
+        let module = wasmtime::Module::new(runtime.engine(), r#"(module (memory 1) (memory 1))"#)
+            .expect("module");
+        let tenant = waddle_broker_core::identity::TenantId::parse("mem.example").expect("valid");
+        let tracker = Arc::new(TenantMemoryTracker::new(tenant, 65_536));
+        let mut state = HostState::for_init();
+        state.limits =
+            super::super::host_state::AggregateStoreLimits::new(65_536, Some(Arc::clone(&tracker)));
+        let mut store = Store::new(runtime.engine(), state);
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(100_000).expect("fuel");
+        store.set_epoch_deadline(100);
+        store.epoch_deadline_trap();
+
+        let err = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect_err("second memory must exceed aggregate store limit");
+        assert!(
+            err.to_string().contains("aggregate") || err.to_string().contains("memory"),
+            "unexpected error: {err}"
+        );
+        drop(store);
+        assert_eq!(
+            tracker.allocated_bytes(),
+            0,
+            "tenant memory tracker must release all reserved bytes on store drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_interruption_traps_abundant_fuel_guest_as_deadline_exceeded() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        let module = wasmtime::Module::new(
+            runtime.engine(),
+            r#"(module (func (export "spin") (loop br 0)))"#,
+        )
+        .expect("module");
+        let mut store = Store::new(runtime.engine(), HostState::for_init());
+        // Abundant fuel so fuel cannot exhaust before epoch deadline fires.
+        store.set_fuel(1_000_000_000).expect("fuel");
+        store
+            .fuel_async_yield_interval(Some(10_000))
+            .expect("yield");
+        store.set_epoch_deadline(2);
+        store.epoch_deadline_trap();
+
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin");
+        let error = tokio::time::timeout(Duration::from_secs(2), spin.call_async(&mut store, ()))
+            .await
+            .expect("epoch ticker must interrupt spinning guest")
+            .expect_err("epoch deadline must trap");
+        assert_eq!(
+            classify_runtime_error(error),
+            crate::types::ObservationFailure::DeadlineExceeded
+        );
     }
 }

@@ -20,6 +20,8 @@ use crate::types::{
     ConfiguredRoomObserver, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent,
     ExtensionManifest, ExtensionResponse, ObservationFailure, RoomMessageObserve, WaddleId,
 };
+use waddle_broker_core::identity::TenantId;
+use waddle_broker_core::quotas::TenantResourceController;
 
 /// Host admission is distinct from any error after entering the runtime.
 pub(crate) enum ObservationInvocationError {
@@ -40,6 +42,8 @@ pub struct WasmExtensionActor {
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
     room_observer: Option<ConfiguredRoomObserver>,
     observation_permits: Arc<tokio::sync::Semaphore>,
+    tenant_id: Option<TenantId>,
+    resource_controller: Option<Arc<TenantResourceController>>,
 }
 
 impl std::fmt::Debug for WasmExtensionActor {
@@ -75,6 +79,8 @@ impl WasmExtensionActor {
             provider_room_grants: Vec::new(),
             room_observer: None,
             observation_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+            tenant_id: None,
+            resource_controller: None,
         })
     }
 
@@ -148,8 +154,30 @@ impl WasmExtensionActor {
         self.room_observer.as_ref()
     }
 
+    /// Bind this extension actor to a canonical [`TenantId`].
+    #[must_use]
+    pub fn with_tenant_id(mut self, tenant_id: TenantId) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Return the canonical [`TenantId`] bound to this actor, if configured.
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
+    }
+
+    /// Attach a per-tenant [`TenantResourceController`] enforced before Wasm
+    /// store creation and instantiation.
+    #[must_use]
+    pub fn with_resource_controller(mut self, controller: Arc<TenantResourceController>) -> Self {
+        self.resource_controller = Some(controller);
+        self
+    }
+
     pub(crate) async fn observe_room_message(
         &self,
+        waddle_id: WaddleId,
         event: RoomMessageObserve,
         delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
     ) -> Result<ExtensionResponse, ObservationInvocationError> {
@@ -158,9 +186,18 @@ impl WasmExtensionActor {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ObservationInvocationError::NotInvoked)?;
+        let wasm_permit = match (&self.resource_controller, &self.tenant_id) {
+            (Some(controller), Some(tenant_id)) => Some(
+                controller
+                    .try_acquire_wasm_invocation(tenant_id, 0)
+                    .map_err(|_| ObservationInvocationError::NotInvoked)?,
+            ),
+            _ => None,
+        };
+        let memory_tracker = wasm_permit.as_ref().map(|p| p.memory_tracker());
         let context = InvocationContext {
-            // This is a display/runtime context only, never tenant authority.
-            waddle_id: WaddleId::try_new("room-observation").expect("static context"),
+            tenant_id: self.tenant_id.clone(),
+            waddle_id,
             plugin_id: self.manifest.id.clone(),
             requester: None,
             source_room: Some(event.source.room.clone()),
@@ -169,7 +206,7 @@ impl WasmExtensionActor {
         };
         let result = if let Some(capability) = delivery {
             self.extension
-                .call_handle_event_typed_with_delivery(
+                .call_handle_event_typed_with_delivery_and_tracker(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
                     DeliveryInvocation {
@@ -179,17 +216,19 @@ impl WasmExtensionActor {
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
+                    memory_tracker,
                 )
                 .await
         } else {
             self.extension
-                .call_handle_event_typed(
+                .call_handle_event_typed_with_tracker(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
                     context,
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
+                    memory_tracker,
                 )
                 .await
         };
@@ -225,18 +264,6 @@ impl WasmExtensionActor {
         effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
     }
 
-    /// Run an event in the default `local` community and return only permitted effects;
-    /// guest failures become host warnings.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the fixed nonblank `local` community identifier violates the
-    /// identifier constructor invariant.
-    pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
-        self.handle_event_for_waddle(event, WaddleId::try_new("local").expect("static waddle id"))
-            .await
-    }
-
     /// Run an event in the specified community, deriving requester authority from the event.
     pub async fn handle_event_for_waddle(
         &self,
@@ -268,7 +295,31 @@ impl WasmExtensionActor {
                 return effects;
             }
         }
+        let wasm_permit = match (&self.resource_controller, &self.tenant_id) {
+            (Some(controller), Some(tenant_id)) => {
+                match controller.try_acquire_wasm_invocation(tenant_id, 0) {
+                    Ok(permit) => Some(permit),
+                    Err(err) => {
+                        warn!(
+                            plugin = %self.manifest.id,
+                            error = %err,
+                            "extension invocation rejected before instantiation by tenant quota"
+                        );
+                        return vec![ExtensionEffect::HostWarning(
+                            DisplayText::try_new(format!(
+                                "Extension {} resource limit exceeded",
+                                self.manifest.id
+                            ))
+                            .expect("quota warning is non-empty"),
+                        )];
+                    }
+                }
+            }
+            _ => None,
+        };
+        let memory_tracker = wasm_permit.as_ref().map(|p| p.memory_tracker());
         let context = InvocationContext {
+            tenant_id: self.tenant_id.clone(),
             waddle_id,
             plugin_id: self.manifest.id.clone(),
             requester: requester.or_else(|| requester_for_event(&event)),
@@ -286,13 +337,14 @@ impl WasmExtensionActor {
         }
         match self
             .extension
-            .call_handle_event(
+            .call_handle_event_with_memory_tracker(
                 event,
                 Arc::clone(&self.host_tools),
                 context,
                 self.config.clone(),
                 self.grants.clone(),
                 self.allowed_http_origins.clone(),
+                memory_tracker,
             )
             .await
         {
