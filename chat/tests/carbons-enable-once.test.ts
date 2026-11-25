@@ -71,7 +71,7 @@ describe("XEP-0280 carbons enable is the shared core's (#754)", () => {
     callbacks.onSessionLifecycle?.("fresh");
     await flushAsync();
 
-    expect(enableCarbons.mock.calls.length).toBe(0);
+    expect(enableCarbons.mock.calls).toHaveLength(0);
     expect(carbonsEnables(sendRawIq)).toBe(0);
   });
 
@@ -82,7 +82,7 @@ describe("XEP-0280 carbons enable is the shared core's (#754)", () => {
     callbacks.onSessionLifecycle?.("resumed");
     await flushAsync();
 
-    expect(enableCarbons.mock.calls.length).toBe(0);
+    expect(enableCarbons.mock.calls).toHaveLength(0);
     expect(carbonsEnables(sendRawIq)).toBe(0);
   });
 });
