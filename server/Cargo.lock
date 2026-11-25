@@ -9085,6 +9085,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-tenancy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "hex",
+ "libc",
+ "lru 0.18.0",
+ "ring",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "turso",
+ "uuid",
+ "waddle-broker-core",
+ "x509-parser 0.18.1",
+]
+
+[[package]]
 name = "waddle-ws-test-support"
 version = "0.1.0"
 dependencies = [
