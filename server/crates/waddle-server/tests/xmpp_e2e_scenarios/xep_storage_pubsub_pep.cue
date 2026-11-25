@@ -58,7 +58,7 @@ scenario: #Scenario & {
 				"urn:xmpp:mam:2#extended",
 				"urn:xmpp:fulltext:0",
 				"http://jabber.org/protocol/pubsub",
-				"http://jabber.org/protocol/pubsub#pep",
+				"Personal Eventing Protocol",
 				"http://jabber.org/protocol/pubsub#auto-create",
 				"http://jabber.org/protocol/pubsub#auto-subscribe",
 				"http://jabber.org/protocol/pubsub#access-presence",

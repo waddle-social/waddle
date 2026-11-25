@@ -463,6 +463,11 @@ async fn pep_publish_fans_event_with_owner_jid_as_from() {
     )
     .await;
     assert!(sub.contains(r#"type='result'"#), "subscribe: {sub}");
+    // XEP-0163 §4: the new subscriber is first sent the last published item.
+    let replay = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
+        .await
+        .expect("new subscriber receives the last published item");
+    assert!(replay.contains(r#"id='seed'"#), "expected seed: {replay}");
 
     let pub_resp = iq_set_to(
         &mut admin,
@@ -1640,6 +1645,11 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
     )
     .await;
     assert!(sub.contains(r#"type='result'"#), "subscribe: {sub}");
+    // XEP-0163 §4: the new subscriber is first sent the last published item.
+    let on_sub = wait_for_event_message(&mut bob, publish_node, Duration::from_secs(2))
+        .await
+        .expect("new subscriber receives the last published item");
+    assert!(on_sub.contains(r#"id='seed'"#), "expected seed: {on_sub}");
 
     // Bob also advertises +notify in CAPS.
     let notify_var = format!("{publish_node}+notify");
@@ -2468,6 +2478,219 @@ async fn pep_vcard4_node_on_presence_model_readable_by_presence_subscriber() {
     assert!(
         read.contains(r#"type='result'"#) && read.contains("Alice"),
         "contact must read presence-model vcard4: {read}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+// ============================================================================
+// XEP-0163 §4: last published item on subscription, node discovery access,
+// cancellation on loss of access
+// ============================================================================
+
+async fn publish_mood_like(alice: &mut WsXmppClient, id: &str, node: &str, item: &str) {
+    let alice_bare = format!("alice@{DOMAIN}");
+    let publish = iq_set_to(
+        alice,
+        id,
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><publish node="{node}"><item id="{item}"><mood xmlns="{node}"><happy/></mood></item></publish></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(publish.contains(r#"type='result'"#), "publish: {publish}");
+}
+
+/// XEP-0163 §4: "a PEP service MUST send the last published item to all new
+/// subscribers". `on_sub_and_presence` is the PEP default; `never` suppresses.
+#[tokio::test]
+async fn pep_explicit_subscribe_sends_last_published_item_with_delay() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-last-1", "bob-last-1").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let sent_node = "http://jabber.org/protocol/mood";
+    let never_node = "http://jabber.org/protocol/tune";
+
+    publish_mood_like(&mut alice, "last-pub-1", sent_node, "last-item-1").await;
+    publish_mood_like(&mut alice, "last-pub-2", never_node, "never-item-1").await;
+    let configured = iq_set_to(
+        &mut alice,
+        "last-never-cfg",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{never_node}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#send_last_published_item"><value>never</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        configured.contains(r#"type='result'"#),
+        "configure: {configured}"
+    );
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let subscribed = iq_set_to(
+        &mut bob,
+        "last-sub-1",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{sent_node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribed.contains(r#"type='result'"#),
+        "subscribe: {subscribed}"
+    );
+    let event = wait_for_event_message(&mut bob, sent_node, Duration::from_secs(3))
+        .await
+        .expect("the last item is sent to the new subscriber");
+    assert!(event.contains("last-item-1"), "{event}");
+    assert!(event.contains(&format!("from='{alice_bare}")), "{event}");
+    assert!(
+        event.contains("urn:xmpp:delay") && event.contains("stamp="),
+        "the replayed item carries a XEP-0203 delay: {event}"
+    );
+
+    let subscribed = iq_set_to(
+        &mut bob,
+        "last-sub-2",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{never_node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribed.contains(r#"type='result'"#),
+        "subscribe: {subscribed}"
+    );
+    assert!(
+        wait_for_event_message(&mut bob, never_node, Duration::from_millis(700))
+            .await
+            .is_none(),
+        "send_last_published_item=never sends nothing on subscribe"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+/// XEP-0163 §"Node Discovery": the server "MUST check the access model for
+/// each of the account owner's PEP nodes and MUST return as service discovery
+/// items only those nodes to which the contact is allowed".
+#[tokio::test]
+async fn pep_account_disco_items_lists_only_nodes_the_requester_may_read() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-disco-1", "bob-disco-1").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let readable = "http://jabber.org/protocol/mood";
+    let hidden = "http://jabber.org/protocol/tune";
+
+    publish_mood_like(&mut alice, "disco-pub-1", readable, "disco-item-1").await;
+    publish_mood_like(&mut alice, "disco-pub-2", hidden, "disco-item-2").await;
+    let configured = iq_set_to(
+        &mut alice,
+        "disco-cfg",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{hidden}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#access_model"><value>whitelist</value></field></x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        configured.contains(r#"type='result'"#),
+        "configure: {configured}"
+    );
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let items = iq_get_to(
+        &mut bob,
+        "disco-items-bob",
+        &alice_bare,
+        r#"<query xmlns="http://jabber.org/protocol/disco#items"/>"#,
+    )
+    .await;
+    assert!(items.contains(readable), "presence-model node: {items}");
+    assert!(
+        !items.contains(hidden),
+        "whitelist node must not be listed: {items}"
+    );
+
+    let own = iq_get_to(
+        &mut alice,
+        "disco-items-alice",
+        &alice_bare,
+        r#"<query xmlns="http://jabber.org/protocol/disco#items"/>"#,
+    )
+    .await;
+    assert!(
+        own.contains(readable) && own.contains(hidden),
+        "the owner sees every node: {own}"
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
+/// XEP-0163 §"Presence Sharing": "If the modification results in a loss of
+/// access, the service MUST cancel the entity's subscription."
+#[tokio::test]
+async fn pep_subscription_is_cancelled_when_presence_subscription_is_lost() {
+    let _serial = TEST_SERIAL.lock().await;
+    let (_server, mut alice, mut bob) = presence_pair("alice-cancel-1", "bob-cancel-1").await;
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let node = "http://jabber.org/protocol/mood";
+
+    publish_mood_like(&mut alice, "cancel-pub", node, "cancel-item").await;
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+    let subscribed = iq_set_to(
+        &mut bob,
+        "cancel-sub",
+        &alice_bare,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{node}" jid="{bob_bare}"/></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        subscribed.contains(r#"type='result'"#),
+        "subscribe: {subscribed}"
+    );
+    let held = iq_get_to(
+        &mut alice,
+        "cancel-subs-before",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><subscriptions node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(held.contains(&bob_bare), "bob is subscribed: {held}");
+
+    alice
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="unsubscribed" to="{bob_bare}"/>"#
+        ))
+        .await
+        .expect("alice revokes bob's presence subscription");
+    let _ = bob
+        .recv_matching(|f| f.contains(r#"type='unsubscribed'"#))
+        .await
+        .expect("bob is told");
+
+    let after = iq_get_to(
+        &mut alice,
+        "cancel-subs-after",
+        &alice_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><subscriptions node="{node}"/></pubsub>"#),
+    )
+    .await;
+    assert!(
+        !after.contains(&bob_bare),
+        "bob's subscription is cancelled with his access: {after}"
     );
 
     let _ = bob.close().await;

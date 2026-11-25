@@ -158,26 +158,13 @@ async fn replay_owner_nodes(
             }
         };
 
-        let mut item: PubSubItem = stored.to_pubsub_item();
-        item.publisher = item.publisher.filter(|publisher| publisher != owner);
-        if !record.config.deliver_payloads {
-            item.payload = None;
-        }
-        let from = Jid::from(owner.clone());
-        let mut message = build_pubsub_event(
-            &from,
+        let message = last_item_message(
+            owner,
             &Jid::from(recipient.clone()),
-            &PubSubEvent::new(node.clone(), vec![item]),
+            &node,
+            &record,
+            &stored,
         );
-        // XEP-0163 example: the replayed notification carries the
-        // publication time as a XEP-0203 delay.
-        message
-            .payloads
-            .push(minidom::Element::from(xmpp_parsers::delay::Delay {
-                from: Some(from),
-                stamp: xmpp_parsers::date::DateTime(stored.published_at.fixed_offset()),
-                data: None,
-            }));
 
         match state
             .deps
@@ -195,6 +182,73 @@ async fn replay_owner_nodes(
             ),
         }
     }
+}
+
+/// Build the notification carrying a node's last published item for
+/// `recipient`: the XEP-0060 event message plus the publication time as a
+/// XEP-0203 delay (XEP-0163 example "Last item on presence"; XEP-0060 §12.20
+/// `pubsub#send_last_published_item`).
+fn last_item_message(
+    owner: &BareJid,
+    recipient: &Jid,
+    node: &str,
+    record: &PubSubNode,
+    stored: &waddle_xmpp::pubsub::StoredItem,
+) -> xmpp_parsers::message::Message {
+    let mut item: PubSubItem = stored.to_pubsub_item();
+    item.publisher = item.publisher.filter(|publisher| publisher != owner);
+    if !record.config.deliver_payloads {
+        item.payload = None;
+    }
+    let from = Jid::from(owner.clone());
+    let mut message = build_pubsub_event(
+        &from,
+        recipient,
+        &PubSubEvent::new(node.to_string(), vec![item]),
+    );
+    message
+        .payloads
+        .push(minidom::Element::from(xmpp_parsers::delay::Delay {
+            from: Some(from),
+            stamp: xmpp_parsers::date::DateTime(stored.published_at.fixed_offset()),
+            data: None,
+        }));
+    message
+}
+
+/// XEP-0060 §6.1.4 / XEP-0163 §4: the notification a new subscription is
+/// owed when the node's `pubsub#send_last_published_item` is `on_sub` or
+/// `on_sub_and_presence`. `None` when the node has no item or the setting is
+/// `never`. Access has already been decided by the subscribe request.
+pub(crate) async fn last_item_for_new_subscription(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    subscriber: &Jid,
+) -> Option<xmpp_parsers::message::Message> {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let record = match storage.get_node(owner, node).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return None,
+        Err(error) => {
+            warn!(owner = %owner, node, error = %error, "Failed to load node for on-subscription last item");
+            return None;
+        }
+    };
+    if !matches!(
+        record.config.send_last_published_item,
+        SendLastPublishedItem::OnSub | SendLastPublishedItem::OnSubAndPresence
+    ) {
+        return None;
+    }
+    let stored = match storage.get_items(owner, node, Some(1), &[]).await {
+        Ok(mut items) => items.pop()?,
+        Err(error) => {
+            warn!(owner = %owner, node, error = %error, "Failed to read last item for new subscriber");
+            return None;
+        }
+    };
+    Some(last_item_message(owner, subscriber, node, &record, &stored))
 }
 
 /// Whether `reader` may be told of the node's items. The owner's own

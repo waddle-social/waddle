@@ -1088,6 +1088,15 @@ async fn avatar_removal_fans_out_empty_metadata_event_to_subscriber() {
         sub_resp.contains(r#"type='result'"#),
         "subscribe must succeed (Open access): {sub_resp}"
     );
+    // XEP-0163 §4: the new subscriber is first sent the last published
+    // item, the seeded avatar's metadata, with a XEP-0203 delay.
+    let replay = wait_for_event_message(&mut bob, NS_AVATAR_METADATA, Duration::from_secs(2))
+        .await
+        .expect("bob receives the last published metadata on subscribing");
+    assert!(
+        replay.contains("<info") && replay.contains("urn:xmpp:delay"),
+        "replay carries the seeded avatar metadata with a delay: {replay}"
+    );
 
     // OIDC removal — empty `<metadata/>` published; fan-out MUST
     // deliver the event to bob.

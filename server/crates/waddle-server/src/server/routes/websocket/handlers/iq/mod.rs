@@ -36,8 +36,7 @@ use waddle_xmpp::pubsub::{
     build_pubsub_error, build_pubsub_items_result, build_pubsub_owner_subscriptions_result,
     build_pubsub_publish_result, build_pubsub_subscribe_result, build_pubsub_success,
     is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq, pep_features, PubSubError,
-    PubSubItem, PubSubRequest, SubId, SubscriptionState, PEP_NODE_AVATAR_DATA,
-    PEP_NODE_AVATAR_METADATA,
+    PubSubItem, PubSubRequest, SubId, SubscriptionState,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::roster::{

@@ -324,7 +324,7 @@ async fn websocket_private_xml_set_then_get_roundtrips() {
 }
 
 #[tokio::test]
-async fn websocket_private_xml_get_without_child_returns_bad_format() {
+async fn websocket_private_xml_get_without_child_returns_not_acceptable() {
     let (_server, mut client) = setup().await;
 
     let get_iq = private_storage_iq("ws-private-empty", "get", None, []);
@@ -334,8 +334,8 @@ async fn websocket_private_xml_get_without_child_returns_bad_format() {
         .await
         .expect("private empty get response");
     assert!(
-        response.contains("bad-request"),
-        "expected bad-request for empty private get, got: {response}"
+        response.contains("not-acceptable"),
+        "expected not-acceptable for empty private get, got: {response}"
     );
 
     let _ = client.close().await;
@@ -1082,8 +1082,7 @@ async fn iq_get_reply(client: &mut WsXmppClient, to: &str, id: &str, payload_xml
         .expect("the IQ is answered")
 }
 
-/// The server answered the request itself: neither blocking refusal applies
-/// (an account with no vCard answers `item-not-found`).
+/// The server answered the request itself: neither blocking refusal applies.
 fn assert_not_gated(reply: &str) {
     assert!(
         !reply.contains("service-unavailable") && !reply.contains("not-acceptable"),
@@ -1101,6 +1100,28 @@ const PEP_ITEMS_GET: &str = r#"<pubsub xmlns="http://jabber.org/protocol/pubsub"
 #[tokio::test]
 async fn websocket_blocking_gates_server_answered_bare_jid_iqs() {
     let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    // An account with no vCard answers `service-unavailable` to others
+    // (XEP-0054), which the gate also uses, so give alice one.
+    alice
+        .send(
+            r#"<iq xmlns="jabber:client" type="set" id="gate-vcard-set"><vCard xmlns="vcard-temp"><FN>Alice</FN></vCard></iq>"#,
+        )
+        .await
+        .expect("send vcard set");
+    alice
+        .recv_matching(|frame| frame.contains("gate-vcard-set") && frame.contains("result"))
+        .await
+        .expect("vcard set result");
+
+    bob.send(
+        r#"<iq xmlns="jabber:client" type="set" id="gate-vcard-set-bob"><vCard xmlns="vcard-temp"><FN>Bob</FN></vCard></iq>"#,
+    )
+    .await
+    .expect("send vcard set");
+    bob.recv_matching(|frame| frame.contains("gate-vcard-set-bob") && frame.contains("result"))
+        .await
+        .expect("vcard set result");
 
     let open = iq_get_reply(&mut bob, "alice@localhost", "gate-open-vcard", VCARD_GET).await;
     assert_not_gated(&open);
@@ -1622,6 +1643,59 @@ async fn websocket_storage_bookmarks_is_generic_private_storage_not_pep() {
         !pep.contains(room),
         "storage:bookmarks must not populate the XEP-0402 node: {pep}"
     );
+
+    let _ = client.close().await;
+}
+
+/// XEP-0054 "Viewing Another User's vCard": whether no vCard exists or the
+/// user does not exist, "the same error condition" `<service-unavailable/>`
+/// is returned; retrieving one's own missing vCard stays `item-not-found`.
+#[tokio::test]
+async fn websocket_vcard_get_of_other_user_without_vcard_is_service_unavailable() {
+    let (_server, mut alice, mut bob) = connect_alice_bob().await;
+
+    let other = iq_get_reply(&mut bob, "alice@localhost", "vc-other-missing", VCARD_GET).await;
+    assert!(other.contains("service-unavailable"), "{other}");
+    assert!(!other.contains("item-not-found"), "{other}");
+
+    let unknown = iq_get_reply(&mut bob, "nobody@localhost", "vc-unknown-user", VCARD_GET).await;
+    assert!(unknown.contains("service-unavailable"), "{unknown}");
+    assert!(!unknown.contains("item-not-found"), "{unknown}");
+
+    let own = iq_get_reply(&mut alice, "alice@localhost", "vc-own-missing", VCARD_GET).await;
+    assert!(own.contains("item-not-found"), "{own}");
+    assert!(!own.contains("service-unavailable"), "{own}");
+
+    let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+/// XEP-0049 "Elements": a child that inherits `jabber:iq:private` has no
+/// namespace of its own, so "the server MUST respond with a 'Not Acceptable'
+/// error" and nothing is stored.
+#[tokio::test]
+async fn websocket_private_xml_unnamespaced_child_returns_not_acceptable() {
+    let (_server, mut client) = setup().await;
+
+    for (id, kind) in [
+        ("ws-private-inherit-set", "set"),
+        ("ws-private-inherit-get", "get"),
+    ] {
+        client
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="{kind}" id="{id}"><query xmlns="jabber:iq:private"><prefs/></query></iq>"#
+            ))
+            .await
+            .expect("send private iq");
+        let response = client
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("private response");
+        assert!(
+            response.contains("not-acceptable"),
+            "{id}: expected not-acceptable, got: {response}"
+        );
+    }
 
     let _ = client.close().await;
 }

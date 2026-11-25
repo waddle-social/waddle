@@ -45,7 +45,7 @@ mod caps;
 mod last_item;
 
 use caps::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
-pub(crate) use last_item::replay_last_published_items;
+pub(crate) use last_item::{last_item_for_new_subscription, replay_last_published_items};
 
 mod implementation;
 pub use implementation::fan_out_publish;
@@ -55,3 +55,24 @@ use implementation::FanOutMetrics;
 pub use implementation::FanOutRequest;
 pub use implementation::FanOutRetractRequest;
 pub use implementation::{fan_out_delete, fan_out_pep_retract, fan_out_purge};
+
+/// Cancel `contact`'s subscriptions to `owner`'s PEP nodes that its current
+/// roster standing no longer allows (XEP-0163, XEP-0060 §4.5.1). Failures are
+/// logged; the fan-out re-check keeps delivery closed regardless.
+pub(crate) async fn revoke_lost_pep_subscriptions(
+    state: &WebSocketState,
+    owner: &jid::BareJid,
+    contact: &jid::BareJid,
+) {
+    let contacts = crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool);
+    if let Err(error) = crate::pubsub_authz::revoke_lost_pep_subscriptions(
+        &state.deps.protocol.pubsub_storage,
+        &contacts,
+        owner,
+        contact,
+    )
+    .await
+    {
+        tracing::warn!(owner = %owner, contact = %contact, error = %error, "Failed to cancel PEP subscriptions after access loss");
+    }
+}

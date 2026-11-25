@@ -194,10 +194,9 @@ pub fn build_pep_identity() -> Identity {
 
 /// Shared PEP feature advertisement.
 ///
-/// XEP-0163 §6 mandates `http://jabber.org/protocol/pubsub#pep`
-/// on the user's bare-JID disco#info as the canonical PEP-support
-/// signal — without it, clients fall back to per-node `+notify`
-/// probing or skip PEP-driven features entirely.
+/// XEP-0163 §6 (Determining Support) signals PEP with the `pubsub/pep`
+/// identity ([`build_pep_identity`]) plus the supported XEP-0060 features
+/// listed here; it defines no feature of its own.
 /// Note: `urn:waddle:dnd:0+notify` is deliberately NOT advertised
 /// here. The DND PEP node defaults to `AccessModel::Whitelist` +
 /// `SendLastPublishedItem::Never` (see [`super::node::NodeConfig::waddle_dnd_defaults`])
@@ -207,7 +206,6 @@ pub fn build_pep_identity() -> Identity {
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),
-        Feature::pep(),
         Feature::pubsub_access_open(),
         Feature::pubsub_access_presence(),
         Feature::pubsub_access_roster(),

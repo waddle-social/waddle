@@ -838,6 +838,19 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
         subscribe_summaries.contains("type='result'"),
         "summary node subscription should succeed after node creation: {subscribe_summaries}"
     );
+    // XEP-0060 §12.20: the new subscriber is first sent the node's last
+    // published item (the seeded story's summary) with a XEP-0203 delay.
+    let summary_replay = wait_for_event_message(
+        &mut alice,
+        STORY_SUMMARY_NODE,
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("the last summary item is sent on subscribing");
+    assert!(
+        summary_replay.contains("urn:xmpp:delay"),
+        "replay is the summary item with a delay: {summary_replay}"
+    );
 
     let story_id = format!("story-{}", uuid::Uuid::new_v4());
     let owner_story = iq_set_to(
