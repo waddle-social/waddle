@@ -18,6 +18,7 @@ pub struct DatabasePool {
     global_db: Database,
     roster_storage: super::roster::DatabaseRosterStorage,
     blocking_storage: super::blocking::DatabaseBlockingStorage,
+    entity_caps: super::entity_caps::EntityCapsStore,
 }
 
 impl DatabasePool {
@@ -90,11 +91,14 @@ impl DatabasePool {
         let roster_storage = super::roster::DatabaseRosterStorage::new(global_db.clone());
         let blocking_storage = super::blocking::DatabaseBlockingStorage::new(global_db.clone());
 
+        let entity_caps = super::entity_caps::EntityCapsStore::new(global_db.clone());
+
         Self {
             global_actor,
             global_db,
             roster_storage,
             blocking_storage,
+            entity_caps,
         }
     }
 
@@ -110,6 +114,11 @@ impl DatabasePool {
     /// Shared XEP-0191 blocking storage backed directly by the global database pool.
     pub fn blocking_storage(&self) -> &super::blocking::DatabaseBlockingStorage {
         &self.blocking_storage
+    }
+
+    /// The verified XEP-0115 capabilities every replica shares.
+    pub fn entity_caps(&self) -> &super::entity_caps::EntityCapsStore {
+        &self.entity_caps
     }
 
     /// Return the ingress admission lane over the same private backend as

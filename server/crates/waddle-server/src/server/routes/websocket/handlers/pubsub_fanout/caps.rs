@@ -160,8 +160,11 @@ pub(super) async fn owner_self_caps_fan_out(
 }
 
 /// Deliver the event to every presence-AVAILABLE resource of `target`
-/// whose cached CAPS include `notify_filter`, skipping anything in
-/// `already_delivered`.
+/// whose CAPS include `notify_filter`, skipping anything in
+/// `already_delivered`. A resource's CAPS come from the replica-local
+/// mapping when this process holds its socket, otherwise from the `<c/>` in
+/// its replicated presence resolved through the shared `entity_caps` store,
+/// so a contact connected to another replica is notified like a local one.
 ///
 /// XEP-0163 §3 is presence-driven: a resource that has explicitly gone
 /// `<presence type="unavailable"/>` MUST NOT receive PEP notifications
@@ -187,16 +190,17 @@ async fn deliver_to_user_resources(
     already_delivered: &mut HashSet<FullJid>,
     metrics: &mut FanOutMetrics,
 ) {
-    let resources: Vec<FullJid> =
-        crate::server::routes::websocket::handlers::account_reads::available_resources(
+    // The account's resources on every replica, with the presence each
+    // announced: the coordinator replicates the `<c/>` this filter needs,
+    // while the capabilities this process resolved cover only the sockets
+    // it holds.
+    let resources =
+        crate::server::routes::websocket::handlers::account_reads::available_resources_with_presence(
             state, target,
         )
-        .await
-        .into_iter()
-        .map(|(jid, _priority)| jid)
-        .collect();
+        .await;
 
-    for resource in resources {
+    for (resource, presence) in resources {
         if blocked_by_owner
             .is_some_and(|blocklist| blocklist.contains_jid(&Jid::from(resource.clone())))
         {
@@ -205,11 +209,20 @@ async fn deliver_to_user_resources(
         if already_delivered.contains(&resource) {
             continue;
         }
+        let payloads = presence
+            .as_ref()
+            .map(|presence| presence.payloads.as_slice())
+            .unwrap_or_default();
         let Some(cached) = state
             .deps
             .protocol
             .caps_resolver
-            .info_for_resource(&resource)
+            .info_for_presence(
+                state.deps.app_state.db_pool.entity_caps(),
+                &resource,
+                payloads,
+            )
+            .await
         else {
             continue;
         };

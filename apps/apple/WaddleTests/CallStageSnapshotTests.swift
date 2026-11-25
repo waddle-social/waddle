@@ -13,10 +13,6 @@ import XCTest
 final class CallStageSnapshotTests: XCTestCase {
     /// Buttons in a snapshot are only drawn, never pressed.
     private static let noAction: @MainActor () -> Void = { /* nothing to do */ }
-    private static let actions = CallStageActions(
-        toggleMicrophone: noAction, toggleCamera: noAction, toggleHand: noAction, setViewMode: { _ in /* drawn only */ },
-        toggleSelfView: noAction, hangUp: noAction
-    )
     /// Stands in for a camera: a flat colour where the video would be.
     private static let cameras = CallTileSource(
         video: { tile in AnyView(tile.isSelf ? Theme.Colors.halo : Theme.Colors.seaShallow) },
@@ -40,21 +36,40 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    private static func stageControls(
+        status: CallSessionStatus, presentation: CallStagePresentation,
+        participants: [CallParticipantRow]? = nil, isMicrophoneOn: Bool = true, isCameraOn: Bool = false,
+        isHandRaised: Bool? = false, size: CallSurface.Size = .split, isSharingScreen: Bool? = nil
+    ) -> CallControls {
+        CallControls(
+            devices: .init(
+                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
+                hasMedia: status.hasMedia, isSharingScreen: isSharingScreen
+            ),
+            isHandRaised: isHandRaised, viewMode: presentation.viewMode, isSelfViewHidden: presentation.isSelfViewHidden,
+            size: size, showsParticipants: participants != nil, canReact: status.hasMedia
+        )
+    }
+
     private func assertStage(
-        title: String = "#design", subtitle: String = "2 others in call", status: CallStageStatus = .inCall(since: nil),
+        title: String = "#design", subtitle: String = "2 others in call", status: CallSessionStatus = .connected,
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, issues: [CallMediaIssue] = [],
         checkingIssues: Set<CallMediaIssue.Kind> = [],
         stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
+        let controls = Self.stageControls(
+            status: status, presentation: presentation, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
+            isHandRaised: isHandRaised, size: stageSize
+        )
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
-                promotedSpeaker: promotedSpeaker, size: stageSize, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
-                isHandRaised: isHandRaised, issues: issues, checkingIssues: checkingIssues, tileSource: Self.cameras, announcesChanges: false,
-                actions: Self.actions
+                promotedSpeaker: promotedSpeaker, controls: controls, issues: issues, checkingIssues: checkingIssues,
+                tileSource: Self.cameras, announcesChanges: false,
+                perform: { _ in }
             )
             .frame(width: size.width, height: size.height),
             width: size.width + 2 * Theme.Spacing.l,
@@ -163,16 +178,18 @@ final class CallStageSnapshotTests: XCTestCase {
 
     /// We share our screen: the strip says so and shows what everyone sees; our screen is not a tile.
     func testRoomWhileWeShareOurScreen() {
+        let status: CallSessionStatus = .connected
+        let presentation = CallStagePresentation()
+        let controls = Self.stageControls(status: status, presentation: presentation, size: .expanded, isSharingScreen: true)
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
-                title: "#design", subtitle: "2 others in call", status: .inCall(since: nil),
-                tiles: [Self.you, Self.linus, Self.grace], size: .expanded, isMicrophoneOn: true, isHandRaised: false,
-                isSharingScreen: true,
+                title: "#design", subtitle: "2 others in call", status: status,
+                tiles: [Self.you, Self.linus, Self.grace], presentation: presentation, controls: controls,
                 ownScreen: CallStageTile(
                     identity: Self.you.identity, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
                 ),
-                tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             )
             .frame(width: 1000, height: 640),
             width: 1000 + 2 * Theme.Spacing.l
@@ -221,12 +238,15 @@ final class CallStageSnapshotTests: XCTestCase {
         _ quality: CallConnectionQuality, title: String = "#design", size: CGSize = CGSize(width: 760, height: 360),
         testName: String = #function, line: UInt = #line
     ) {
+        let status: CallSessionStatus = .connected
+        let presentation = CallStagePresentation()
+        let controls = Self.stageControls(status: status, presentation: presentation)
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
-                title: title, subtitle: "2 others in call", status: .inCall(since: nil),
-                tiles: [Self.you, Self.linus, Self.grace], isMicrophoneOn: true, isHandRaised: false,
-                connection: quality, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                title: title, subtitle: "2 others in call", status: status,
+                tiles: [Self.you, Self.linus, Self.grace], presentation: presentation, controls: controls,
+                connection: quality, tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             )
             .frame(width: size.width, height: size.height),
             width: size.width + 2 * Theme.Spacing.l, testName: testName, line: line
@@ -277,11 +297,16 @@ final class CallStageSnapshotTests: XCTestCase {
     private func assertParticipants(
         tiles: [CallStageTile] = roster, coverTiles: Bool, size: CGSize, testName: String = #function, line: UInt = #line
     ) async throws {
+        let status: CallSessionStatus = .connected
+        let presentation = CallStagePresentation()
+        let participants = Self.rows(of: tiles)
+        let controls = Self.stageControls(status: status, presentation: presentation, participants: participants, size: .expanded)
         try await assertScreenSnapshot(
             of: CallStageView(
-                title: "#design", subtitle: "3 others in call", status: .inCall(since: nil), tiles: tiles,
-                size: .expanded, participants: Self.rows(of: tiles), canResetVolumes: true, participantsCoverTiles: coverTiles, isMicrophoneOn: true,
-                isHandRaised: false, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                title: "#design", subtitle: "3 others in call", status: status, tiles: tiles,
+                presentation: presentation, controls: controls, participants: participants, canResetVolumes: true,
+                participantsCoverTiles: coverTiles,
+                tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             ),
             size: size, testName: testName, line: line
         )
@@ -325,13 +350,17 @@ final class CallStageSnapshotTests: XCTestCase {
         isSharingScreen: Bool? = nil, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false,
         testName: String = #function, line: UInt = #line
     ) {
+        let controls = CallControls(
+            devices: .init(
+                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
+                hasMedia: hasMedia, isSharingScreen: isSharingScreen
+            ),
+            isHandRaised: isHandRaised, viewMode: viewMode, size: size,
+            chatUnread: chatUnread, showsChat: showsChat, canReact: canReact
+        )
         assertHuddleSnapshot(
             precision: 0.97,
-            of: CallControlBar(
-                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
-                viewMode: viewMode, size: size, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
-                showsChat: showsChat, canReact: canReact, actions: Self.actions
-            )
+            of: CallControlBar(controls: controls, perform: { _ in })
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
             .environment(\.colorScheme, .dark),

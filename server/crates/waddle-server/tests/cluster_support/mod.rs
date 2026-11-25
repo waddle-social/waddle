@@ -741,6 +741,52 @@ pub async fn wait_for_cross_node_stanza(
         .expect("close the receiving mesh probe");
 }
 
+/// A URL of the database at `postgres_url` whose connections use a new,
+/// empty schema, so the nodes started on it build their schema at protocol
+/// epoch 0 whatever epoch the shared schema has reached. Below the mailbox
+/// epoch the ordered relay, not the durable mailbox, carries room copies and
+/// direct stanzas to a user another node hosts, which the scenarios that
+/// fault the relay depend on. The epoch only ever advances, and the shared
+/// schema reaches epoch 2 as soon as any test activates it.
+///
+/// Schemas an earlier scenario left under `prefix` are dropped first; the
+/// scenarios of a binary run one at a time.
+pub async fn epoch_zero_schema_url(postgres_url: &str, prefix: &str) -> String {
+    let admin = sqlx::PgPool::connect(postgres_url)
+        .await
+        .expect("connect PostgreSQL admin pool");
+    let stale: Vec<String> = sqlx::query_scalar(
+        "SELECT nspname::text FROM pg_catalog.pg_namespace WHERE starts_with(nspname, $1)",
+    )
+    .bind(prefix)
+    .fetch_all(&admin)
+    .await
+    .expect("list scenario schemas");
+    for schema in stale {
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop an earlier scenario schema");
+    }
+    let schema = format!("{prefix}{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create the scenario schema");
+    admin.close().await;
+    let mut url = url::Url::parse(postgres_url).expect("parse PostgreSQL URL");
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    url.to_string()
+}
+
 /// Advance the shared database to the mailbox protocol epoch, at which
 /// nodes that select the mailbox carry remote room requests and direct
 /// stanzas as mailbox entries instead of ordered-relay messages.
@@ -794,7 +840,21 @@ pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, ni
     );
     // The first occupant creates the room locked (XEP-0045 §10.1.1) and
     // unlocks it so the joins that follow are admitted.
-    if replies.iter().any(|frame| frame.contains("code=\"201\"")) {
+    // The server serializes attributes with either quote style, so the
+    // status is read from the parsed stanza rather than matched as text.
+    let created = replies.iter().any(|frame| {
+        frame.parse::<minidom::Element>().is_ok_and(|element| {
+            element
+                .get_child("x", "http://jabber.org/protocol/muc#user")
+                .is_some_and(|x| {
+                    x.children().any(|child| {
+                        child.is("status", "http://jabber.org/protocol/muc#user")
+                            && child.attr("code") == Some("201")
+                    })
+                })
+        })
+    });
+    if created {
         waddle_ws_test_support::iq::unlock_created_room(client, room.as_str()).await;
     }
 }

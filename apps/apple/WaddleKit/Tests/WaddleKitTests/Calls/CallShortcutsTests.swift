@@ -7,29 +7,44 @@ struct CallShortcutsTests {
         #expect(CallShortcut.allCases.map(\.key) == ["m", "v", "s", "r", "f"])
     }
 
+    @Test func eachShortcutAsksForItsStageAction() {
+        let actions = CallShortcut.allCases.map { $0.action(size: .split) }
+        #expect(actions == [.toggleMicrophone, .toggleCamera, .toggleScreenShare, .toggleHand, .setSize(.expanded)])
+    }
+
+    @Test func stepUpUsesTheCurrentSize() {
+        #expect(CallShortcut.stepUp.action(size: .expanded) == .setSize(.immersive))
+    }
+
     @Test func aRoomsCallOnAMacHasEveryKey() {
-        let keys = CallShortcut.available(hasMedia: true, canShareScreen: true, hasHands: true, size: .split)
+        let controls = CallControls(devices: .init(isSharingScreen: false), isHandRaised: false)
+        let keys = CallShortcut.available(for: controls)
         #expect(keys == CallShortcut.allCases)
     }
 
     @Test func aCallStillConnectingSwitchesNoDevice() {
-        let keys = CallShortcut.available(hasMedia: false, canShareScreen: true, hasHands: true, size: .split)
+        let controls = CallControls(devices: .init(hasMedia: false, isSharingScreen: false), isHandRaised: false)
+        let keys = CallShortcut.available(for: controls)
         #expect(keys == [.hand, .stepUp])
     }
 
     @Test func aDeviceThatCannotShareLeavesSAlone() {
-        let keys = CallShortcut.available(hasMedia: true, canShareScreen: false, hasHands: true, size: .split)
+        let controls = CallControls(isHandRaised: false)
+        let keys = CallShortcut.available(for: controls)
         #expect(!keys.contains(.screenShare))
     }
 
     @Test func aCallOfTwoHasNoHandToRaise() {
-        let keys = CallShortcut.available(hasMedia: true, canShareScreen: true, hasHands: false, size: .split)
+        let controls = CallControls(devices: .init(isSharingScreen: false))
+        let keys = CallShortcut.available(for: controls)
         #expect(!keys.contains(.hand))
     }
 
     @Test func fullScreenIsAsBigAsItGets() {
-        #expect(CallShortcut.available(hasMedia: true, canShareScreen: true, hasHands: true, size: .expanded).contains(.stepUp))
-        #expect(!CallShortcut.available(hasMedia: true, canShareScreen: true, hasHands: true, size: .immersive).contains(.stepUp))
+        var controls = CallControls(devices: .init(isSharingScreen: false), isHandRaised: false, size: .expanded)
+        #expect(CallShortcut.available(for: controls).contains(.stepUp))
+        controls.size = .immersive
+        #expect(!CallShortcut.available(for: controls).contains(.stepUp))
     }
 }
 

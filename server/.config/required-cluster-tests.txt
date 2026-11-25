@@ -523,6 +523,13 @@ waddle-server clustering::claims::tests::schema_bootstrap_on_a_current_schema_do
 waddle-server::clustering_cluster_e2e room_destroy_reply_survives_janitor_ticks_between_commit_and_inline_claim
 waddle-server::clustering_cluster_e2e consecutive_room_destroys_are_each_answered_with_a_result
 
+# XEP-0163 section 3 on a cluster: a PEP publication is filtered by the caps
+# of each contact resource on the node that processed the publish, so a
+# contact resource connected to another node is notified iff it advertised
+# +notify. Only a two-node PostgreSQL run has a publisher and a contact on
+# different nodes; the shared `entity_caps` table carries the caps.
+waddle-server::clustering_cluster_e2e pep_notification_reaches_a_contact_connected_to_another_node
+
 # #1986 durable mailbox core: lane sequences must stay gap-free and unique
 # under concurrent appenders, one operation key must hold one responsibility
 # across lanes and across a replan to a new room owner, the owner must
