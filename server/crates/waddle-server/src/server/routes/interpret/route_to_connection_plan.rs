@@ -113,30 +113,59 @@ pub(in crate::server::routes::interpret) async fn remote_owner(
     }
 }
 
-pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
-    bounce_account_rejection(
-        deps,
-        stanza,
-        StanzaError::new(
-            ErrorType::Cancel,
-            DefinedCondition::ServiceUnavailable,
-            "en",
-            "Service unavailable at this address.",
-        ),
+fn nonexistent_error() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::ServiceUnavailable,
+        "en",
+        "Service unavailable at this address.",
     )
 }
 
-pub(super) fn bounce_account_lookup_failed(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
-    bounce_account_rejection(
-        deps,
-        stanza,
-        StanzaError::new(
-            ErrorType::Wait,
-            DefinedCondition::InternalServerError,
-            "en",
-            "Account lookup is temporarily unavailable.",
-        ),
+fn account_lookup_failed_error() -> StanzaError {
+    StanzaError::new(
+        ErrorType::Wait,
+        DefinedCondition::InternalServerError,
+        "en",
+        "Account lookup is temporarily unavailable.",
     )
+}
+
+pub(super) fn bounce_nonexistent(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
+    bounce_account_rejection(deps, stanza, nonexistent_error())
+}
+
+/// [`bounce_nonexistent`] for the message rejection path, which also plans the
+/// `<received/>` carbon of the bounce.
+pub(super) async fn bounce_nonexistent_with_carbons(
+    deps: &Deps<'_>,
+    stanza: &Stanza,
+) -> Vec<Stanza> {
+    bounce_account_rejection_with_carbons(deps, stanza, nonexistent_error()).await
+}
+
+pub(super) async fn bounce_account_lookup_failed(deps: &Deps<'_>, stanza: &Stanza) -> Vec<Stanza> {
+    bounce_account_rejection_with_carbons(deps, stanza, account_lookup_failed_error()).await
+}
+
+/// XEP-0280 section 6.1: the bounce of a carbons-eligible message is itself
+/// eligible, so the sender's other resources receive it as a `<received/>`
+/// carbon. The rejection plan keeps it with the bounce, so a replay or
+/// recovery of the committed denial repeats it.
+async fn bounce_account_rejection_with_carbons(
+    deps: &Deps<'_>,
+    stanza: &Stanza,
+    error: StanzaError,
+) -> Vec<Stanza> {
+    if deps.effects.is_planning() {
+        if let Stanza::Message(routed) = stanza {
+            for reply in bounce_for_account_rejection(stanza, None, error.clone()) {
+                super::super::carbon_copy_bounce(deps.connection_registry, deps, routed, &reply)
+                    .await;
+            }
+        }
+    }
+    bounce_account_rejection(deps, stanza, error)
 }
 
 /// Bounce generation may revoke a Jingle token, so defer the whole obligation.

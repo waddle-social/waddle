@@ -36,24 +36,48 @@ pub(super) fn rejection_plan(
     sender: &jid::FullJid,
 ) -> Result<IngressPlan, IngressUowError> {
     let mut rejected = plan.clone();
+    let alias_conflict = class == IngressDecisionClass::AliasConflict;
     rejected.plan.retain(|planned| {
-        matches!(
-            &planned.effect,
-            Effect::External(ExternalEffect::Delivery(
-                ExternalDeliveryEffect::Carbons { owner, kind: CarbonKind::Sent, .. }
-                | ExternalDeliveryEffect::RelayCarbons { owner, kind: CarbonKind::Sent, .. }
-            )) if owner == &sender.to_bare() && class != IngressDecisionClass::AliasConflict
-        )
+        !alias_conflict
+            && match &planned.effect {
+                Effect::External(ExternalEffect::Delivery(
+                    ExternalDeliveryEffect::Carbons {
+                        owner,
+                        kind,
+                        message,
+                        ..
+                    }
+                    | ExternalDeliveryEffect::RelayCarbons {
+                        owner,
+                        kind,
+                        message,
+                        ..
+                    },
+                )) => owner == &sender.to_bare() && retains_carbon(*kind, message),
+                _ => false,
+            }
     });
-    // A denial drops archive work. Its sender carbon still describes the
-    // offered stanza and must not depend on an archive we no longer write.
+    // A denial drops archive work. Its sender carbons still describe the
+    // offered stanza (or its bounce) and must not depend on an archive we no
+    // longer write.
     for planned in &mut rejected.plan {
         planned.dependencies.clear();
     }
+    let bounce_recipients = bounce_carbon_recipients(&rejected.plan);
     rejected.intents.retain(|intent| {
         matches!(intent, IngressEffectIntent::ErrorReply { .. })
-            || (class != IngressDecisionClass::AliasConflict
-                && sender_carbon_intent(intent, &sender.to_bare()))
+            || (!alias_conflict
+                && sender_carbon_intent(intent, &sender.to_bare())
+                && match intent {
+                    IngressEffectIntent::Carbons {
+                        carbon_recipients,
+                        kind: CarbonKind::Received,
+                        ..
+                    } => carbon_recipients
+                        .iter()
+                        .all(|recipient| bounce_recipients.contains(recipient)),
+                    _ => true,
+                })
     });
     rejected.room_execution = RoomExecutionPath::None;
     let reply = if class == IngressDecisionClass::AliasConflict {
@@ -173,20 +197,63 @@ fn refusal_plan(
     refused
 }
 
+/// XEP-0280 section 6.1: the sender's own `<sent/>` copy of the offered
+/// stanza, or a `<received/>` copy of the error bounce that stanza earned,
+/// which the sender's other resources receive so none believes the message
+/// was delivered. A rejected stanza is never delivered to its addressee, so
+/// a `<received/>` carbon to the sender's account can only carry the bounce.
+fn retains_carbon(kind: CarbonKind, message: &xmpp_parsers::message::Message) -> bool {
+    match kind {
+        CarbonKind::Sent => true,
+        CarbonKind::Received => message.type_ == xmpp_parsers::message::MessageType::Error,
+    }
+}
+
+/// Carbon recipients of the bounce copies a rejection keeps.
+fn bounce_carbon_recipients(plan: &[PlannedEffect]) -> Vec<jid::FullJid> {
+    plan.iter()
+        .filter_map(|planned| match &planned.effect {
+            Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                recipient,
+                kind: CarbonKind::Received,
+                ..
+            })) => Some(recipient.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn sender_carbon_intent(intent: &IngressEffectIntent, sender: &jid::BareJid) -> bool {
     match intent {
         IngressEffectIntent::Carbons {
-            excluded_source,
-            kind: CarbonKind::Sent,
-            ..
+            excluded_source, ..
         } => &excluded_source.to_bare() == sender,
-        IngressEffectIntent::RelayCarbons {
-            owner,
-            kind: CarbonKind::Sent,
-            ..
-        } => owner == sender,
+        IngressEffectIntent::RelayCarbons { owner, .. } => owner == sender,
         _ => false,
     }
+}
+
+/// The error a recorded denial answered its sender with, as the stanza the
+/// sender receives. Both the reply frame and the `<received/>` carbon of it
+/// are rebuilt from the recorded `ErrorReply` intent and the offered message,
+/// never from today's policy.
+pub(super) fn recorded_bounce(
+    offered: &xmpp_parsers::message::Message,
+    intents: &[IngressEffectIntent],
+) -> Option<xmpp_parsers::message::Message> {
+    if !is_recorded_rejection(intents) {
+        return None;
+    }
+    let (recipient, error) = intents.iter().find_map(|intent| match intent {
+        IngressEffectIntent::ErrorReply { recipient, error } => Some((recipient, error)),
+        _ => None,
+    })?;
+    let mut message = offered.clone();
+    message.to = Some(recipient.clone().into());
+    message.from = offered.to.clone();
+    message.type_ = xmpp_parsers::message::MessageType::Error;
+    message.payloads.push(error.to_xmpp().into());
+    Some(message)
 }
 
 pub(super) fn is_recorded_rejection(intents: &[IngressEffectIntent]) -> bool {
@@ -212,6 +279,8 @@ pub(super) fn recorded_rejection_plan(
     if !is_recorded_rejection(intents) {
         return Err(IngressUowError::EffectIntentConflict);
     }
+    let bounce = recorded_bounce(envelope.message(), intents)
+        .ok_or(IngressUowError::EffectIntentConflict)?;
     let mut plan = Vec::with_capacity(intents.len());
     let mut error_reply = None;
     for intent in intents {
@@ -222,13 +291,17 @@ pub(super) fn recorded_rejection_plan(
                 excluded_source,
                 kind,
             } => {
+                let carbon = match kind {
+                    CarbonKind::Sent => envelope.message().clone(),
+                    CarbonKind::Received => bounce.clone(),
+                };
                 for recipient in carbon_recipients {
                     plan.push(PlannedEffect::new(Effect::External(
                         ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
                             owner: excluded_source.to_bare(),
                             recipient: recipient.clone(),
                             exclude: vec![excluded_source.clone()],
-                            message: Box::new(envelope.message().clone()),
+                            message: Box::new(carbon.clone()),
                             kind: *kind,
                         }),
                     )));
@@ -245,7 +318,10 @@ pub(super) fn recorded_rejection_plan(
                         origin: None,
                         owner: owner.clone(),
                         exclude: exclude.clone(),
-                        message: Box::new(envelope.message().clone()),
+                        message: Box::new(match kind {
+                            CarbonKind::Sent => envelope.message().clone(),
+                            CarbonKind::Received => bounce.clone(),
+                        }),
                         kind: *kind,
                     }),
                 )));
@@ -411,6 +487,69 @@ mod tests {
             .expect("alias conflict");
         assert_eq!(conflict.plan.len(), 1);
         assert_eq!(conflict.intents.len(), 1);
+    }
+
+    #[test]
+    fn committed_denial_keeps_and_replays_the_bounce_carbon() {
+        let sender: jid::FullJid = "sender@example.test/device".parse().expect("sender");
+        let sibling: jid::FullJid = "sender@example.test/sibling".parse().expect("sibling");
+        let mut offered =
+            xmpp_parsers::message::Message::new(Some("ghost@example.test".parse().expect("ghost")));
+        offered.from = Some(sender.clone().into());
+        offered.type_ = xmpp_parsers::message::MessageType::Chat;
+        let mut plan =
+            crate::server::routes::interpret::reject_malformed_message(offered.clone(), &sender);
+        let bounce = match plan.error_reply.clone() {
+            Some(Stanza::Message(bounce)) => bounce,
+            other => panic!("expected an error reply, got {other:?}"),
+        };
+        plan.intents.push(IngressEffectIntent::Carbons {
+            carbon_recipients: vec![sibling.clone()],
+            excluded_source: sender.clone(),
+            kind: CarbonKind::Received,
+        });
+        plan.plan.push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                owner: sender.to_bare(),
+                recipient: sibling.clone(),
+                exclude: vec![sender.clone()],
+                message: Box::new(bounce.clone()),
+                kind: CarbonKind::Received,
+            }),
+        )));
+        // A received copy of the offered stanza itself is never kept.
+        plan.plan.push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                owner: sender.to_bare(),
+                recipient: sibling.clone(),
+                exclude: vec![sender.clone()],
+                message: Box::new(offered.clone()),
+                kind: CarbonKind::Received,
+            }),
+        )));
+        let denied =
+            rejection_plan(&plan, IngressDecisionClass::PolicyDenied, &sender).expect("denial");
+        assert_eq!(denied.plan.len(), 2, "reply frame and bounce carbon");
+        assert!(is_recorded_rejection(&denied.intents));
+        let envelope = crate::ingress_substrate::MessageEnvelope::new(offered);
+        let replay = recorded_rejection_plan(&envelope, &denied.intents).expect("replay");
+        assert_eq!(replay.intents, denied.intents);
+        let replayed = replay
+            .plan
+            .iter()
+            .find_map(|planned| match &planned.effect {
+                Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::Carbons {
+                    kind: CarbonKind::Received,
+                    message,
+                    ..
+                })) => Some(message.as_ref().clone()),
+                _ => None,
+            });
+        let replayed = replayed.expect("bounce carbon replayed");
+        assert_eq!(replayed.type_, xmpp_parsers::message::MessageType::Error);
+        assert_eq!(replayed.to, Some(sender.clone().into()));
+        assert_eq!(replayed.from, envelope.message().to);
+        assert_eq!(replayed.id, envelope.message().id);
     }
 
     #[test]

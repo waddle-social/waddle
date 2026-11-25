@@ -317,6 +317,7 @@ mod implementation;
 use implementation::apply_archive_id_rewrites;
 pub(crate) use implementation::broadcast_room_system_message;
 pub(crate) use implementation::capture_serialized_error_reply;
+use implementation::carbon_copy_bounce;
 pub(super) use implementation::emit_frame;
 pub use implementation::interpret;
 use implementation::interpret_with_depth;

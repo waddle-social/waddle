@@ -258,11 +258,18 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
         sibling_rx.try_recv().is_ok(),
         "sent carbon survives the committed bounce"
     );
-    assert!(sibling_rx.try_recv().is_err());
+    assert!(
+        sibling_rx.try_recv().is_ok(),
+        "received carbon of the bounce survives the committed denial (XEP-0280 6.1)"
+    );
+    assert!(
+        sibling_rx.try_recv().is_err(),
+        "the sibling receives exactly the sent and the received carbon"
+    );
     assert_eq!(
         fixture.count("ingress_effect_receipts").await,
-        1,
-        "only the carbon is complete before the error frame write"
+        2,
+        "only the two carbons are complete before the error frame write"
     );
     assert!(
         !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
@@ -274,7 +281,7 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
         .complete_frame_obligations(&fixture.uow, &fixture.db, std::time::Duration::from_secs(5))
         .await
         .expect("write bounce receipt"));
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
 
     // Current policy can now deliver, but the recorded rejection remains final.
     if lookup_failure {
@@ -331,8 +338,25 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
     assert_eq!(fixture.count("inbox_entries").await, 0);
     let intents = fixture.count("ingress_effect_intents").await;
     assert_eq!(
-        intents, 2,
-        "recorded error reply and sender carbon remain obligations"
+        intents, 3,
+        "recorded error reply, sender carbon and bounce carbon remain obligations"
+    );
+    let replayed_carbons = |kind: waddle_xmpp::protocol::CarbonKind| {
+        replay
+            .external
+            .iter()
+            .filter(|effect| {
+                matches!(effect, ExternalEffect::Delivery(
+                    crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect::Carbons { kind: actual, .. }
+                ) if *actual == kind)
+            })
+            .count()
+    };
+    assert_eq!(replayed_carbons(waddle_xmpp::protocol::CarbonKind::Sent), 1);
+    assert_eq!(
+        replayed_carbons(waddle_xmpp::protocol::CarbonKind::Received),
+        1,
+        "the recorded bounce carbon is replayed once"
     );
     let mut replay_report = execute_effects(
         &fixture.uow,
@@ -346,7 +370,7 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
     assert!(replay_report.receipt_failures.is_empty());
     assert!(
         sibling_rx.try_recv().is_err(),
-        "receipted carbon is not duplicated"
+        "receipted carbons are not duplicated"
     );
     assert_eq!(
         replay_report.frame_obligations.len(),
@@ -359,7 +383,7 @@ async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
         .expect("replay frame written"));
     assert_eq!(
         fixture.count("ingress_effect_receipts").await,
-        2,
+        3,
         "receipts persist once"
     );
     fixture.close().await;
