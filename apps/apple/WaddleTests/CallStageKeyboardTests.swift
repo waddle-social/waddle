@@ -12,6 +12,8 @@ final class CallStageKeyboardTests: XCTestCase {
     private var field: NSTextView!
     private var keyboard: CallStageKeyboard!
     private var microphone: [Bool] = []
+    /// What the keyboard itself says; the events below are made up.
+    private var spaceIsDown = true
 
     override func setUp() async throws {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
@@ -26,6 +28,7 @@ final class CallStageKeyboardTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         keyboard = CallStageKeyboard()
         keyboard.hasMedia = true
+        keyboard.isSpaceDown = { [unowned self] in spaceIsDown }
         keyboard.setMicrophone = { [unowned self] on in
             microphone.append(on)
             keyboard.isMicrophoneOn = on
@@ -139,6 +142,38 @@ final class CallStageKeyboardTests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(field))
         keyboard.coversConversation = true
         XCTAssertTrue(window.firstResponder === window)
+    }
+
+    /// A menu is tracked in a loop of its own: the key coming up there is never seen by the stage.
+    func testAMenuOpeningClosesAHeldMicrophone() async {
+        _ = keyboard.handle(space(.keyDown))
+        await settle()
+        NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: NSMenu())
+        await settle()
+        XCTAssertEqual(microphone, [true, false])
+    }
+
+    func testAKeyThatCameUpUnseenIsNoticedAtTheNextEvent() async {
+        _ = keyboard.handle(space(.keyDown))
+        await settle()
+        spaceIsDown = false
+        _ = keyboard.handle(click(at: NSPoint(x: 200, y: 20)))
+        await settle()
+        XCTAssertEqual(microphone, [true, false])
+    }
+
+    /// Reached with Tab or Full Keyboard Access: without this Space would be that control's for good.
+    func testAClickOnTheStageTakesTheKeyboardFromAControlToo() async {
+        let button = FocusableView(frame: NSRect(x: 0, y: 50, width: 80, height: 30))
+        window.contentView?.addSubview(button)
+        XCTAssertTrue(window.makeFirstResponder(button))
+        _ = keyboard.handle(click(at: NSPoint(x: 200, y: 200)))
+        await settle()
+        XCTAssertTrue(window.firstResponder === window)
+    }
+
+    private final class FocusableView: NSView {
+        override var acceptsFirstResponder: Bool { true }
     }
 }
 #endif

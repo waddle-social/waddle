@@ -7,11 +7,30 @@ import WaddleKit
 struct CallShortcutKeys: View {
     let shortcuts: [CallShortcut]
     let perform: @MainActor (CallShortcut) -> Void
+    @State private var repeats = CallShortcutRepeats()
+
+    /// A key held down presses its button again and again: only the first counts.
+    private func pressed(_ shortcut: CallShortcut) {
+        let isFresh = repeats.isFreshPress(of: shortcut, at: ProcessInfo.processInfo.systemUptime)
+        #if os(macOS)
+        // A Mac's keyboard says which presses are repeats, and two quick
+        // presses of F are two steps. Timing is for when it does not say.
+        if let event = NSApp.currentEvent, event.type == .keyDown {
+            if event.isARepeat { return }
+        } else if !isFresh {
+            return
+        }
+        #else
+        // An iPad's keyboard does not say which presses are repeats.
+        guard isFresh else { return }
+        #endif
+        perform(shortcut)
+    }
 
     var body: some View {
         ZStack {
             ForEach(shortcuts, id: \.key) { shortcut in
-                Button(shortcut.title) { perform(shortcut) }
+                Button(shortcut.title) { pressed(shortcut) }
                     .keyboardShortcut(KeyEquivalent(shortcut.key), modifiers: [])
             }
         }

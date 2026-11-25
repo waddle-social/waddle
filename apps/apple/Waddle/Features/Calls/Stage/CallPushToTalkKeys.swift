@@ -63,7 +63,7 @@ private struct CallKeyboardReader: NSViewRepresentable {
 /// stage is clicked or grows over the conversation.
 @MainActor
 final class CallStageKeyboard {
-    private static let spaceKeyCode: UInt16 = 49
+    fileprivate static let spaceKeyCode: UInt16 = 49
 
     var hasMedia = false
     var isMicrophoneOn = false
@@ -75,7 +75,11 @@ final class CallStageKeyboard {
     private var talk = CallPushToTalk()
     private weak var view: NSView?
     private var monitor: Any?
-    private var resignObserver: (any NSObjectProtocol)?
+    private var observers: [any NSObjectProtocol] = []
+    /// Whether Space is down on the keyboard itself, whoever got its events.
+    var isSpaceDown: @MainActor () -> Bool = {
+        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(CallStageKeyboard.spaceKeyCode))
+    }
     /// Opening and closing in the order they were asked for: a quick tap
     /// of Space must not close the microphone before it has opened.
     private var work: Task<Void, Never>?
@@ -86,21 +90,27 @@ final class CallStageKeyboard {
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .leftMouseDown]) { [weak self] event in
             MainActor.assumeIsolated { self?.handle(event) ?? event }
         }
-        resignObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            MainActor.assumeIsolated {
-                guard let self, let window = self.view?.window, note.object as? NSWindow === window else { return }
-                self.letGo()
-            }
-        }
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let window = self.view?.window, note.object as? NSWindow === window else { return }
+                    self.letGo()
+                }
+            },
+            // A menu takes the keyboard without the window losing it, and
+            // a key that comes up while it is open is never seen here.
+            center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.letGo() }
+            },
+        ]
     }
 
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
-        resignObserver = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         // The stage went away with the key down.
         letGo()
     }
@@ -108,6 +118,8 @@ final class CallStageKeyboard {
     /// What becomes of an event in this app: `nil` when it was ours alone.
     func handle(_ event: NSEvent) -> NSEvent? {
         guard let window = view?.window else { return event }
+        // Whatever else swallowed the key coming up, the keyboard knows it is up.
+        if talk.isHolding, event.type != .keyUp, !isSpaceDown() { letGo() }
         switch event.type {
         case .leftMouseDown:
             if event.window === window, isOnStage(event.locationInWindow) {
@@ -164,13 +176,17 @@ final class CallStageKeyboard {
         return view.bounds.contains(view.convert(pointInWindow, from: nil))
     }
 
-    /// Takes the keyboard out of a text field, so that the stage's keys are
-    /// not typed into a message. A field on the stage itself keeps it.
+    /// Takes the keyboard from whatever has it, a message being written or
+    /// a list or button reached with Tab, so that the stage's keys are the
+    /// call's. Something on the stage itself keeps it.
     private func leaveTextBehind(onlyOutsideStage: Bool) {
-        guard let view, let window = view.window, let text = window.firstResponder as? NSText else { return }
+        guard let view, let window = view.window, let holder = window.firstResponder as? NSView else { return }
         if onlyOutsideStage {
-            let frame = view.convert(text.convert(text.bounds, to: nil), from: nil)
+            let frame = view.convert(holder.convert(holder.bounds, to: nil), from: nil)
             if view.bounds.intersects(frame) { return }
+        } else if !(holder is NSText) {
+            // Grown over the conversation: only its composer is hidden under the stage.
+            return
         }
         window.makeFirstResponder(nil)
     }

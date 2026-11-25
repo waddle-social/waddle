@@ -96,3 +96,32 @@ struct CallPushToTalkTests {
         #expect(outcome14 == .passOn)
     }
 }
+
+struct CallShortcutRepeatsTests {
+    @Test func aKeyHeldDownIsOnePress() {
+        var repeats = CallShortcutRepeats()
+        let first = repeats.isFreshPress(of: .microphone, at: 0)
+        #expect(first)
+        // The keyboard starts repeating after half a second, then every few hundredths, for as long as it is held.
+        var time = 0.5
+        while time < 5 {
+            let fresh = repeats.isFreshPress(of: .microphone, at: time)
+            #expect(!fresh)
+            time += 0.08
+        }
+    }
+
+    @Test func pressingAgainLaterIsANewPress() {
+        var repeats = CallShortcutRepeats()
+        _ = repeats.isFreshPress(of: .microphone, at: 0)
+        let again = repeats.isFreshPress(of: .microphone, at: 1)
+        #expect(again)
+    }
+
+    @Test func anotherKeyIsItsOwnPress() {
+        var repeats = CallShortcutRepeats()
+        _ = repeats.isFreshPress(of: .microphone, at: 0)
+        let camera = repeats.isFreshPress(of: .camera, at: 0.1)
+        #expect(camera)
+    }
+}

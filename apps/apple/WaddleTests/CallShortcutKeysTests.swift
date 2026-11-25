@@ -34,13 +34,14 @@ final class CallShortcutKeysTests: XCTestCase {
         window = nil
     }
 
-    private func press(_ key: String, modifiers: NSEvent.ModifierFlags = []) {
+    private func press(_ key: String, modifiers: NSEvent.ModifierFlags = [], isRepeat: Bool = false) {
         let event = NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: window.windowNumber, context: nil, characters: key, charactersIgnoringModifiers: key,
-            isARepeat: false, keyCode: 0
+            isARepeat: isRepeat, keyCode: 0
         )!
-        window.sendEvent(event)
+        // As the app delivers it, so that it is the current event while the button acts.
+        NSApp.sendEvent(event)
     }
 
     func testALetterWithNobodyTypingIsItsShortcut() {
@@ -73,6 +74,18 @@ final class CallShortcutKeysTests: XCTestCase {
         window.makeFirstResponder(nil)
         press("m", modifiers: .command)
         XCTAssertEqual(pressed, [], "Command-M minimises the window")
+    }
+
+    /// A held key repeats: it must not flap the microphone or run F up to full screen.
+    func testAKeyHeldDownIsPressedOnce() {
+        _ = makeWindow(CallShortcut.allCases)
+        window.makeFirstResponder(nil)
+        press("m")
+        press("m", isRepeat: true)
+        press("m", isRepeat: true)
+        press("f")
+        press("f", isRepeat: true)
+        XCTAssertEqual(pressed, [.microphone, .stepUp])
     }
 }
 #endif

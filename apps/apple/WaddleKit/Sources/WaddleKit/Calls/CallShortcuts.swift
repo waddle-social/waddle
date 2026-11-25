@@ -47,6 +47,29 @@ public enum CallShortcut: CaseIterable, Equatable, Sendable {
     }
 }
 
+/// A key held down repeats, and a repeat must not toggle anything again
+/// (web: `input.repeat`). For a keyboard that does not say which presses
+/// are repeats, an iPad's: a press of the same key that follows the last
+/// one this closely is taken for one. A Mac's keyboard says, and is believed.
+public struct CallShortcutRepeats: Equatable, Sendable {
+    /// Longer than the longest wait before a held key starts repeating.
+    public static let window: Double = 0.7
+
+    private var last: CallShortcut?
+    private var lastAt: Double = -.infinity
+
+    public init() { /* nothing pressed yet */ }
+
+    /// Whether a press at `seconds`, on any steady clock, is one of its own.
+    /// A repeat extends the wait, so a key held for a minute is one press.
+    public mutating func isFreshPress(of shortcut: CallShortcut, at seconds: Double) -> Bool {
+        let isRepeat = shortcut == last && seconds - lastAt < Self.window
+        last = shortcut
+        lastAt = seconds
+        return !isRepeat
+    }
+}
+
 /// Holding Space to talk (web `installCallShortcuts`): the microphone is
 /// open for as long as the key is down, and closed again when it comes up.
 ///
