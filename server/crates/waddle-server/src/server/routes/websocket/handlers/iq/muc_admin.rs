@@ -1138,7 +1138,7 @@ pub enum AdminListDenial {
 /// wire shape as a local one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdminListAnswer {
-    Affiliations(Vec<(BareJid, Affiliation)>),
+    Affiliations(Vec<waddle_xmpp::muc::AdminAffiliationEntry>),
     Roles(Vec<AdminRoleEntry>),
     Denied(AdminListDenial),
 }
@@ -1245,7 +1245,17 @@ async fn answer_host_grant_admin_list_get(
     }
     let filter = query.items.iter().find_map(|item| item.affiliation);
     match host_grant_affiliation_list(room, sender_jid, evidence, filter) {
-        Ok(list) => AdminListAnswer::Affiliations(list),
+        Ok(list) => {
+            let snapshot = match room_actor
+                .ask(GetSnapshot)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => snapshot.room,
+                Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
+            };
+            AdminListAnswer::Affiliations(snapshot.affiliation_list_entries(list))
+        }
         Err(_) => AdminListAnswer::Denied(AdminListDenial::Forbidden),
     }
 }

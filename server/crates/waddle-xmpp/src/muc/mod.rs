@@ -28,8 +28,9 @@ mod subject;
 pub use admin::{
     build_admin_result, build_admin_set_result, build_role_result, is_affiliation_change_query,
     is_muc_admin_get, is_muc_admin_iq, is_muc_admin_set, is_muc_owner_get, is_muc_owner_set,
-    is_role_change_query, parse_admin_query, AdminItem, AdminQuery, AffiliationChangeResult,
-    KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN, NS_MUC_OWNER,
+    is_role_change_query, parse_admin_query, AdminAffiliationEntry, AdminItem, AdminQuery,
+    AffiliationChangeResult, KickBanInfo, MucStatusCode, RoleChangeResult, NS_MUC_ADMIN,
+    NS_MUC_OWNER,
 };
 pub use durable::{
     AdminMutationId, AdminMutationReceipt, AdminPresenceKind,

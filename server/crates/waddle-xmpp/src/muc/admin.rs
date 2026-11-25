@@ -238,29 +238,55 @@ pub fn role_to_str(role: Role) -> &'static str {
     }
 }
 
+/// One entry of a muc#admin affiliation list result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdminAffiliationEntry {
+    pub jid: BareJid,
+    pub affiliation: Affiliation,
+    /// The affiliated user's room nick when it is known. Never emitted for an
+    /// outcast.
+    pub nick: Option<String>,
+}
+
+impl AdminAffiliationEntry {
+    /// An entry whose nick is not known.
+    pub fn new(jid: BareJid, affiliation: Affiliation) -> Self {
+        Self {
+            jid,
+            affiliation,
+            nick: None,
+        }
+    }
+}
+
 /// Build an admin query result response.
 ///
-/// Creates an IQ result with a list of JID+affiliation items.
+/// XEP-0045 §9.5: an affiliation result MUST NOT carry `role`, MUST carry
+/// `affiliation` and `jid`, and SHOULD carry `nick` except for an outcast.
 pub fn build_admin_result(
     iq_id: &str,
     from_room_jid: &BareJid,
     to_jid: &Jid,
-    items: &[(BareJid, Affiliation)],
+    items: &[AdminAffiliationEntry],
 ) -> Iq {
     let mut query = Element::builder("query", NS_MUC_ADMIN);
 
-    for (jid, affiliation) in items {
-        let item = Element::builder("item", NS_MUC_ADMIN)
+    for entry in items {
+        let mut item = Element::builder("item", NS_MUC_ADMIN)
             .attr(
                 minidom::rxml::xml_ncname!("jid").to_owned(),
-                jid.to_string(),
+                entry.jid.to_string(),
             )
             .attr(
                 minidom::rxml::xml_ncname!("affiliation").to_owned(),
-                affiliation_to_str(*affiliation),
-            )
-            .build();
-        query = query.append(item);
+                affiliation_to_str(entry.affiliation),
+            );
+        if entry.affiliation != Affiliation::Outcast {
+            if let Some(nick) = &entry.nick {
+                item = item.attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick.clone());
+            }
+        }
+        query = query.append(item.build());
     }
 
     Iq::Result {

@@ -1,7 +1,7 @@
 use super::{
     build_admin_result, build_admin_set_result, build_role_result, is_muc_admin_get,
     is_muc_admin_iq, is_muc_admin_set, parse_admin_query, parse_muc_affiliation, parse_muc_role,
-    Affiliation, BareJid, Element, Iq, Jid, Role, XmppError, NS_MUC_ADMIN,
+    AdminAffiliationEntry, Affiliation, BareJid, Element, Iq, Jid, Role, XmppError, NS_MUC_ADMIN,
 };
 use crate::{StanzaErrorCondition, StanzaErrorType};
 
@@ -153,8 +153,8 @@ fn test_parse_role() {
 #[test]
 fn test_build_admin_result() {
     let items = vec![
-        ("user1@example.com".parse().unwrap(), Affiliation::Member),
-        ("user2@example.com".parse().unwrap(), Affiliation::Admin),
+        AdminAffiliationEntry::new("user1@example.com".parse().unwrap(), Affiliation::Member),
+        AdminAffiliationEntry::new("user2@example.com".parse().unwrap(), Affiliation::Admin),
     ];
 
     let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
@@ -170,6 +170,45 @@ fn test_build_admin_result() {
             ..
         }
     ));
+}
+
+#[test]
+fn test_build_admin_result_includes_nick_except_for_outcast() {
+    let entry = |jid: &str, affiliation, nick: Option<&str>| AdminAffiliationEntry {
+        jid: jid.parse().unwrap(),
+        affiliation,
+        nick: nick.map(str::to_owned),
+    };
+    let items = vec![
+        entry(
+            "hag66@shakespeare.lit",
+            Affiliation::Member,
+            Some("thirdwitch"),
+        ),
+        entry("offline@shakespeare.lit", Affiliation::Member, None),
+        entry(
+            "banned@shakespeare.lit",
+            Affiliation::Outcast,
+            Some("ghost"),
+        ),
+    ];
+    let room_jid: BareJid = "room@muc.example.com".parse().unwrap();
+    let to_jid: Jid = "requester@example.com".parse().unwrap();
+    let Iq::Result {
+        payload: Some(query),
+        ..
+    } = build_admin_result("n-1", &room_jid, &to_jid, &items)
+    else {
+        panic!("expected result payload");
+    };
+    let items: Vec<_> = query.children().collect();
+    assert_eq!(items[0].attr("nick"), Some("thirdwitch"));
+    assert_eq!(items[1].attr("nick"), None);
+    assert_eq!(items[2].attr("nick"), None, "outcast items carry no nick");
+    for item in items {
+        assert!(item.attr("role").is_none());
+        assert!(item.attr("jid").is_some() && item.attr("affiliation").is_some());
+    }
 }
 
 #[test]
