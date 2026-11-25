@@ -11,9 +11,8 @@
 //! 2. The Jingle session-initiate / session-accept embedding of
 //!    `<muji room='…'/>` per XEP-0272 §Joining "Jingle
 //!    session-initiate referencing a Muji conference".
-//! 3. The XEP-0167 §3.2 minimal-`<description>` rule (only `media`
-//!    required — no payload-types — because LiveKit dictates the
-//!    codecs below the signaling layer).
+//! 3. The participant's `<description/>` payload map is relayed
+//!    verbatim; the server never synthesises payload-types.
 //! 4. CallId convention for the Muji branch of the JingleHandler.
 //!
 //! Room-actor-side semantics (originator multi-resource clearing,
@@ -42,14 +41,6 @@ use xmpp_parsers::jingle::{
     Action, Content, ContentId, Creator as JingleCreator, Jingle, SessionId, Transport,
 };
 use xmpp_parsers::stanza_error::DefinedCondition;
-
-fn audio_muji() -> Muji {
-    Muji::with_contents(vec![MujiContent::new(
-        "audio",
-        Creator::Initiator,
-        MediaKind::Audio,
-    )])
-}
 
 fn audio_video_muji() -> Muji {
     Muji::with_contents(vec![
@@ -158,58 +149,48 @@ fn ignores_non_muji_children() {
 }
 
 #[test]
-fn rtp_description_emits_canonical_opus_payload_type_for_audio() {
-    // XEP-0167 §3.1 / XEP-0272 §Joining examples include
-    // `<payload-type/>` children. Waddle emits the canonical
-    // LiveKit-supported Opus codec (PT 111, 48 kHz, 2 channels)
-    // so a strict Muji peer reading the presence sees a valid
-    // codec offer. LiveKit still dictates the actual encoding
-    // negotiation below the XMPP signaling layer.
-    let muji = audio_muji();
-    let elem = muji.to_element();
-    let content = elem
-        .children()
-        .find(|c| c.name() == "content")
-        .expect("content present");
-    let desc = content
-        .children()
-        .find(|c| c.name() == "description")
-        .expect("description present");
-    assert_eq!(desc.ns(), "urn:xmpp:jingle:apps:rtp:1");
-    assert_eq!(desc.attr("media"), Some("audio"));
-    let payload = desc
-        .children()
-        .find(|c| c.name() == "payload-type")
-        .expect("description must advertise at least one payload-type per XEP-0167 §3.1 examples");
-    assert_eq!(payload.attr("name"), Some("opus"));
-    assert_eq!(payload.attr("id"), Some("111"));
-    assert_eq!(payload.attr("clockrate"), Some("48000"));
-    assert_eq!(payload.attr("channels"), Some("2"));
+fn constructed_content_does_not_synthesise_payload_types() {
+    // The server must not invent a codec map for a participant: a
+    // content built without payload types re-emits a bare
+    // `<description media='…'/>` (XEP-0167 §3.2).
+    for (media, name) in [(MediaKind::Audio, "audio"), (MediaKind::Video, "video")] {
+        let elem = Muji::with_contents(vec![MujiContent::new(name, Creator::Initiator, media)])
+            .to_element();
+        let desc = elem
+            .children()
+            .find(|c| c.name() == "content")
+            .and_then(|content| content.children().find(|c| c.name() == "description"))
+            .expect("description present");
+        assert_eq!(desc.ns(), "urn:xmpp:jingle:apps:rtp:1");
+        assert_eq!(desc.attr("media"), Some(media.as_str()));
+        assert_eq!(desc.children().count(), 0, "no synthesised payload-type");
+    }
 }
 
 #[test]
-fn rtp_description_emits_canonical_vp8_payload_type_for_video() {
-    let muji = Muji::with_contents(vec![MujiContent::new(
-        "video",
-        Creator::Initiator,
-        MediaKind::Video,
-    )]);
-    let elem = muji.to_element();
-    let content = elem
-        .children()
-        .find(|c| c.name() == "content")
-        .expect("content present");
-    let desc = content
-        .children()
-        .find(|c| c.name() == "description")
-        .expect("description present");
-    let payload = desc
-        .children()
-        .find(|c| c.name() == "payload-type")
-        .expect("video description must advertise VP8 payload-type");
-    assert_eq!(payload.attr("name"), Some("VP8"));
-    assert_eq!(payload.attr("id"), Some("96"));
-    assert_eq!(payload.attr("clockrate"), Some("90000"));
+fn participant_payload_map_round_trips_unchanged_through_rebroadcast() {
+    // XEP-0272: "When a client adds a payload ID to a content
+    // description, it MUST have the same codec name and receiving
+    // parameters as the corresponding entries in other participants'
+    // payload maps". A speex PT 97 participant must be re-emitted as
+    // authored, not rewritten to opus/VP8.
+    let xml = "<muji xmlns='urn:xmpp:jingle:muji:0'>\
+                 <content creator='initiator' name='audio'>\
+                   <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='audio'>\
+                     <payload-type id='97' name='speex' clockrate='16000'/>\
+                   </description>\
+                 </content>\
+               </muji>";
+    let elem: Element = xml.parse().unwrap();
+    let muji = Muji::try_from(&elem).expect("parses");
+    let rebroadcast = Muji::try_from(&muji.to_element()).expect("rebroadcast reparses");
+    let desc = rebroadcast.contents[0].description();
+    let payloads: Vec<_> = desc.children().collect();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].attr("id"), Some("97"));
+    assert_eq!(payloads[0].attr("name"), Some("speex"));
+    assert_eq!(payloads[0].attr("clockrate"), Some("16000"));
+    assert!(desc.children().all(|c| c.attr("name") != Some("opus")));
 }
 
 // ── §Joining (Jingle session-initiate embedding) ──────────────────────────
@@ -1636,4 +1617,243 @@ fn muji_initiate_without_registration_expectation_fails_closed() {
     );
     assert!(!sfu.has_call_participant(&call, &identity));
     assert!(!has_session_accept_to(&events, TEST_INITIATOR));
+}
+
+// ── Mixer follow-up actions (XEP-0166 §6.6, §6.7, §7.2) ───────────────────
+
+const ROOM: &str = "room@muc.waddle.test";
+
+fn mixer_str() -> String {
+    calls_mixer_jid(TEST_DOMAIN).to_string()
+}
+
+/// A follow-up Jingle IQ to the mixer with NO `<muji/>` child, as a
+/// standards-following peer sends it (XEP-0272 puts `<muji/>` only on
+/// the session-initiate).
+fn plain_jingle_iq(action: Action, sid: &str, children: Vec<Element>) -> Iq {
+    let jingle = Jingle::new(action, SessionId(sid.into()));
+    let mut elem: Element = jingle.into();
+    for child in children {
+        elem.append_child(child);
+    }
+    Iq::Set {
+        from: Some(TEST_INITIATOR.parse().unwrap()),
+        to: Some(mixer_str().parse().unwrap()),
+        id: format!("plain-{sid}"),
+        payload: elem,
+    }
+}
+
+fn joined_handler(sid: &str) -> (JingleHandler, Arc<dyn SfuService>, jid::FullJid) {
+    let sfu = fixture_sfu();
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let jid = test_full_jid();
+    let initiate = muji_session_initiate_iq(TEST_INITIATOR, &mixer_str(), ROOM, sid);
+    let events = handler.handle(&initiate, &ctx(&jid));
+    assert!(has_session_accept_to(&events, TEST_INITIATOR), "{events:?}");
+    (handler, sfu, jid)
+}
+
+fn is_registered(sfu: &Arc<dyn SfuService>, jid: &jid::FullJid) -> bool {
+    sfu.has_call_participant(
+        &CallId::try_new(ROOM).expect("room call id"),
+        &Identity::from_jid(jid.clone()),
+    )
+}
+
+fn only_result_ack(events: &[OutboundEvent]) -> bool {
+    matches!(
+        events,
+        [OutboundEvent::SendStanza(stanza)]
+            if matches!(stanza.as_ref(), Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { payload: None, .. }))
+    )
+}
+
+#[test]
+fn plain_session_terminate_to_mixer_is_acked_and_unregisters() {
+    // XEP-0166 §6.7: "Upon receiving session-terminate message, the
+    // other party MUST then acknowledge termination of the session".
+    // The terminate carries no `<muji/>`.
+    let (handler, sfu, jid) = joined_handler("plain-term");
+    assert!(is_registered(&sfu, &jid));
+    let events = handler.handle(
+        &plain_jingle_iq(Action::SessionTerminate, "plain-term", vec![]),
+        &ctx(&jid),
+    );
+    assert!(
+        only_result_ack(&events),
+        "expected one result ack: {events:?}"
+    );
+    assert!(!is_registered(&sfu, &jid), "terminate must unregister");
+
+    // The session is gone: a repeat is unknown-session.
+    let again = handler.handle(
+        &plain_jingle_iq(Action::SessionTerminate, "plain-term", vec![]),
+        &ctx(&jid),
+    );
+    assert_eq!(
+        first_error_condition(&again),
+        Some(DefinedCondition::ItemNotFound)
+    );
+    assert_eq!(
+        first_error_application_condition(&again).map(|e| e.name()),
+        Some("unknown-session")
+    );
+}
+
+#[test]
+fn plain_follow_up_with_unknown_sid_is_unknown_session() {
+    let (handler, sfu, jid) = joined_handler("known-sid");
+    for action in [Action::SessionTerminate, Action::SessionInfo] {
+        let events = handler.handle(&plain_jingle_iq(action, "other-sid", vec![]), &ctx(&jid));
+        assert_eq!(
+            first_error_condition(&events),
+            Some(DefinedCondition::ItemNotFound)
+        );
+        assert_eq!(
+            first_error_application_condition(&events).map(|e| e.name()),
+            Some("unknown-session")
+        );
+    }
+    assert!(is_registered(&sfu, &jid), "unknown sid must not tear down");
+}
+
+#[test]
+fn plain_terminate_from_another_resource_cannot_end_the_session() {
+    let (handler, sfu, jid) = joined_handler("owned-sid");
+    let other: jid::FullJid = "alice@waddle.test/mobile".parse().unwrap();
+    let events = handler.handle(
+        &plain_jingle_iq(Action::SessionTerminate, "owned-sid", vec![]),
+        &ctx(&other),
+    );
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::ItemNotFound)
+    );
+    assert!(is_registered(&sfu, &jid));
+}
+
+#[test]
+fn empty_session_info_ping_to_mixer_is_acked() {
+    // XEP-0166 §6.6: "If either party receives an empty session-info
+    // message for an active session, it MUST send an empty IQ result".
+    let (handler, _sfu, jid) = joined_handler("ping-sid");
+    let events = handler.handle(
+        &plain_jingle_iq(Action::SessionInfo, "ping-sid", vec![]),
+        &ctx(&jid),
+    );
+    assert!(
+        only_result_ack(&events),
+        "expected one result ack: {events:?}"
+    );
+}
+
+#[test]
+fn session_info_with_unknown_payload_is_unsupported_info() {
+    // XEP-0166 §6.6: an informational payload the recipient does not
+    // understand gets <feature-not-implemented/> + <unsupported-info/>.
+    let (handler, _sfu, jid) = joined_handler("info-sid");
+    let ringing: Element = "<ringing xmlns='urn:xmpp:jingle:apps:rtp:info:1'/>"
+        .parse()
+        .unwrap();
+    let events = handler.handle(
+        &plain_jingle_iq(Action::SessionInfo, "info-sid", vec![ringing]),
+        &ctx(&jid),
+    );
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::FeatureNotImplemented)
+    );
+    let app = first_error_application_condition(&events).expect("jingle error condition");
+    assert_eq!(app.name(), "unsupported-info");
+    assert_eq!(app.ns(), "urn:xmpp:jingle:errors:1");
+}
+
+#[test]
+fn content_add_to_mixer_is_acked_then_rejected() {
+    // XEP-0166 §7.2: the recipient of a content-add "MUST send a
+    // content-accept ... if not, it MUST send a content-reject".
+    let (handler, sfu, jid) = joined_handler("add-sid");
+    let content: Element = "<content xmlns='urn:xmpp:jingle:1' creator='initiator' name='video'>\
+        <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='video'/></content>"
+        .parse()
+        .unwrap();
+    let events = handler.handle(
+        &plain_jingle_iq(Action::ContentAdd, "add-sid", vec![content]),
+        &ctx(&jid),
+    );
+    assert_eq!(events.len(), 2, "{events:?}");
+    let OutboundEvent::SendStanza(first) = &events[0] else {
+        panic!("{events:?}")
+    };
+    assert!(matches!(first.as_ref(), Stanza::Iq(iq) if matches!(iq.as_ref(), Iq::Result { .. })));
+    let OutboundEvent::SendStanza(second) = &events[1] else {
+        panic!("{events:?}")
+    };
+    let Stanza::Iq(iq) = second.as_ref() else {
+        panic!("{events:?}")
+    };
+    let Iq::Set {
+        payload, from, to, ..
+    } = iq.as_ref()
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(from.as_ref().map(|j| j.to_string()), Some(mixer_str()));
+    assert_eq!(
+        to.as_ref().map(|j| j.to_string()),
+        Some(TEST_INITIATOR.into())
+    );
+    assert_eq!(payload.attr("action"), Some("content-reject"));
+    assert_eq!(payload.attr("sid"), Some("add-sid"));
+    let rejected: Vec<_> = payload
+        .children()
+        .filter(|c| c.name() == "content")
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].attr("name"), Some("video"));
+    assert!(
+        is_registered(&sfu, &jid),
+        "content-reject keeps the session"
+    );
+}
+
+#[test]
+fn muji_initiate_without_session_disposition_is_bad_request_and_mints_nothing() {
+    // XEP-0166 §7.2: "if this rule is violated, the responder MUST
+    // return a <bad-request/> error" (at least one content MUST have
+    // disposition "session").
+    let sfu = fixture_sfu();
+    let jid = test_full_jid();
+    let iq = muji_session_initiate_iq(TEST_INITIATOR, &mixer_str(), ROOM, "early-only");
+    let Iq::Set {
+        from,
+        to,
+        id,
+        payload,
+    } = iq
+    else {
+        unreachable!()
+    };
+    let mut jingle = Jingle::try_from(payload).expect("initiate parses");
+    for content in &mut jingle.contents {
+        content.disposition = xmpp_parsers::jingle::Disposition::EarlySession;
+    }
+    // The `<muji/>` child rides along in `Jingle::other`.
+    let payload: Element = jingle.into();
+    assert!(find_muji(&payload).is_some());
+    let iq = Iq::Set {
+        from,
+        to,
+        id,
+        payload,
+    };
+    let handler = JingleHandler::new(Arc::clone(&sfu));
+    let events = handler.handle(&iq, &ctx(&jid));
+    assert_eq!(
+        first_error_condition(&events),
+        Some(DefinedCondition::BadRequest)
+    );
+    assert!(!has_session_accept_to(&events, TEST_INITIATOR));
+    assert!(!is_registered(&sfu, &jid), "no registration or token");
 }

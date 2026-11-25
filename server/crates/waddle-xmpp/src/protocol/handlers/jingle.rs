@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
-use xmpp_parsers::jingle::{Action, Content, Jingle, SessionId, Transport};
+use xmpp_parsers::jingle::{Action, Content, Disposition, Jingle, SessionId, Transport};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use waddle_sfu::{
@@ -1057,7 +1057,7 @@ mod tests {
             &muji_transport_info_iq("general@muc.waddle.test", "muji-ti-1"),
             &ctx(&jid),
         );
-        assert_error_condition(&first, DefinedCondition::BadRequest);
+        assert_error_condition(&first, DefinedCondition::FeatureNotImplemented);
 
         let second = handler.handle(
             &muji_transport_info_iq("general@muc.waddle.test", "muji-ti-2"),

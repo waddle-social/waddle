@@ -8,7 +8,7 @@ use super::PendingCallSetupRoute;
 use super::Stanza;
 use super::NS_JINGLE;
 use super::{find_muji, Muji};
-use super::{Action, Content, Jingle, SessionId, Transport};
+use super::{Action, Content, Disposition, Jingle, SessionId, Transport};
 use super::{Arc, Mutex, MutexGuard};
 use super::{BareJid, Jid};
 use super::{
@@ -156,7 +156,27 @@ pub struct JingleHandler {
         Arc<SessionInitiateRateLimit>,
     pub(in crate::protocol::handlers::jingle) terminate_rate_limit: Arc<TerminateRateLimit>,
     pub(in crate::protocol::handlers::jingle) muji_action_rate_limit: Arc<MujiActionRateLimit>,
+    /// Muji sessions this mixer has accepted, keyed by the initiator's
+    /// full JID and the Jingle `sid`. XEP-0166 identifies every
+    /// follow-up action by `sid` alone, and XEP-0272 puts `<muji/>`
+    /// only on the session-initiate, so a standards-following peer's
+    /// plain `session-terminate` / `session-info` to the mixer is
+    /// resolved to its room through this map.
+    pub(in crate::protocol::handlers::jingle) mixer_sessions:
+        Arc<Mutex<HashMap<MixerSessionKey, BareJid>>>,
 }
+
+/// Identity of one accepted mixer session: the initiator's full JID
+/// and the Jingle `sid` it chose.
+pub(in crate::protocol::handlers::jingle) type MixerSessionKey = (jid::FullJid, String);
+
+/// Prune dead mixer-session entries once the map grows past this many
+/// rows. Entries are only recorded after a session-initiate has
+/// registered the participant with the SFU and passed the
+/// session-initiate rate limit, so the map is already bounded by the
+/// registry; pruning drops rows whose registration was swept by the
+/// webhook or reconciler.
+const MIXER_SESSION_PRUNE_THRESHOLD: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub(in crate::protocol::handlers::jingle) struct PendingDmInvite {
@@ -204,6 +224,7 @@ impl JingleHandler {
             session_initiate_rate_limit: Arc::new(SessionInitiateRateLimit::with_defaults()),
             terminate_rate_limit: Arc::new(TerminateRateLimit::with_defaults()),
             muji_action_rate_limit: Arc::new(MujiActionRateLimit::with_defaults()),
+            mixer_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -219,6 +240,7 @@ impl JingleHandler {
             session_initiate_rate_limit: rate_limit,
             terminate_rate_limit: Arc::new(TerminateRateLimit::with_defaults()),
             muji_action_rate_limit: Arc::new(MujiActionRateLimit::with_defaults()),
+            mixer_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -235,6 +257,7 @@ impl JingleHandler {
             session_initiate_rate_limit,
             terminate_rate_limit,
             muji_action_rate_limit,
+            mixer_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -336,6 +359,15 @@ impl IqHandler for JingleHandler {
                 }
             };
             return self.handle_muji_jingle(iq, jingle, muji, peer, ctx);
+        }
+
+        // XEP-0166 identifies every action after the session-initiate by
+        // `sid`; XEP-0272 puts `<muji/>` only on the initiate. A plain
+        // follow-up addressed to the mixer therefore resolves to its
+        // room through the session recorded at session-initiate.
+        if jingle.action != Action::SessionInitiate && peer.to_bare() == calls_mixer_jid(ctx.domain)
+        {
+            return self.handle_mixer_session_action(iq, jingle, ctx);
         }
 
         match jingle.action {
@@ -565,9 +597,18 @@ impl JingleHandler {
     ///   marker per XEP-0298.
     /// - `session-terminate`: unregister the participant. Reply
     ///   `<iq type='result'/>` per XEP-0166 §6.7.
-    /// - Anything else: reject with `<bad-request/>` — Muji peer
-    ///   exchanges (transport-info etc.) aren't meaningful when the
-    ///   peer is a focus that brokers tokens.
+    /// - empty `session-info`: empty IQ result (XEP-0166 §6.6 ping);
+    ///   any other `session-info` payload: `<feature-not-implemented/>`
+    ///   + `<unsupported-info/>`.
+    /// - `content-add`: IQ result, then a `content-reject` (the media
+    ///   plane is fixed at session-initiate).
+    /// - Anything else: `<feature-not-implemented/>` — transport-info
+    ///   etc. aren't meaningful when the peer is a focus that brokers
+    ///   tokens.
+    ///
+    /// Follow-ups carry the `sid` but, per XEP-0272, no `<muji/>`;
+    /// those are resolved to their room by
+    /// [`JingleHandler::handle_mixer_session_action`].
     pub(in crate::protocol::handlers::jingle) fn handle_muji_jingle(
         &self,
         iq: &Iq,
@@ -656,6 +697,83 @@ impl JingleHandler {
             );
         }
 
+        self.dispatch_muji_action(iq, jingle, room_jid, ctx, attempt)
+    }
+
+    /// Resolve a plain (`<muji/>`-less) follow-up to the mixer through
+    /// the session recorded at session-initiate, then run it through
+    /// the same action dispatch a `<muji/>`-bearing stanza gets.
+    fn handle_mixer_session_action(
+        &self,
+        iq: &Iq,
+        jingle: Jingle,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        let Some(room_jid) = self.resolve_mixer_session(ctx.full_jid, &jingle.sid.0) else {
+            return unknown_session_reply(iq);
+        };
+        self.dispatch_muji_action(iq, jingle, room_jid, ctx, CallSetupAttempt::open(false))
+    }
+
+    /// The room of the live mixer session `(full_jid, sid)`, or `None`
+    /// when no such session is recorded or its SFU registration is gone
+    /// or now belongs to a different `sid` (a rejoin supersedes it). Dead
+    /// rows are dropped on the way.
+    fn resolve_mixer_session(&self, full_jid: &jid::FullJid, sid: &str) -> Option<BareJid> {
+        let key = (full_jid.clone(), sid.to_owned());
+        let room = self.lock_mixer_sessions().get(&key).cloned()?;
+        let live = CallId::try_new(room.to_string()).is_ok_and(|call_id| {
+            let identity = Identity::from_jid(full_jid.clone());
+            self.sfu.has_call_participant(&call_id, &identity)
+                && self
+                    .sfu
+                    .participant_session_binding(&call_id, &identity)
+                    .is_none_or(|bound| {
+                        SessionBinding::try_new(sid.to_owned()).is_ok_and(|s| s == bound)
+                    })
+        });
+        if live {
+            Some(room)
+        } else {
+            self.lock_mixer_sessions().remove(&key);
+            None
+        }
+    }
+
+    fn record_mixer_session(&self, full_jid: &jid::FullJid, sid: &str, room: &BareJid) {
+        let mut sessions = self.lock_mixer_sessions();
+        if sessions.len() >= MIXER_SESSION_PRUNE_THRESHOLD {
+            sessions.retain(|(jid, _), room| {
+                CallId::try_new(room.to_string()).is_ok_and(|call_id| {
+                    self.sfu
+                        .has_call_participant(&call_id, &Identity::from_jid(jid.clone()))
+                })
+            });
+        }
+        sessions.insert((full_jid.clone(), sid.to_owned()), room.clone());
+    }
+
+    fn forget_mixer_session(&self, full_jid: &jid::FullJid, sid: &str) {
+        self.lock_mixer_sessions()
+            .remove(&(full_jid.clone(), sid.to_owned()));
+    }
+
+    fn lock_mixer_sessions(&self) -> MutexGuard<'_, HashMap<MixerSessionKey, BareJid>> {
+        self.mixer_sessions
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    }
+
+    /// Dispatch an action on an accepted Muji session whose room is
+    /// known (from `<muji room/>` or from the recorded session).
+    fn dispatch_muji_action(
+        &self,
+        iq: &Iq,
+        jingle: Jingle,
+        room_jid: BareJid,
+        ctx: &StanzaContext<'_>,
+        attempt: CallSetupAttempt,
+    ) -> Vec<OutboundEvent> {
         match jingle.action {
             Action::SessionInitiate => {
                 self.handle_muji_session_initiate(iq, jingle, room_jid, ctx, attempt)
@@ -689,11 +807,15 @@ impl JingleHandler {
                         "Muji action rate limit exceeded",
                     );
                 }
-                error_reply(
-                    iq,
-                    DefinedCondition::BadRequest,
-                    "Muji Jingle supports only session-initiate and session-terminate",
-                )
+                match jingle.action {
+                    Action::SessionInfo => self.handle_muji_session_info(iq, &jingle, ctx),
+                    Action::ContentAdd => self.handle_muji_content_add(iq, jingle, ctx),
+                    _ => error_reply(
+                        iq,
+                        DefinedCondition::FeatureNotImplemented,
+                        "the Muji mixer does not negotiate this Jingle action",
+                    ),
+                }
             }
         }
     }
@@ -720,6 +842,21 @@ impl JingleHandler {
                 iq,
                 DefinedCondition::BadRequest,
                 "Muji session-initiate requires at least one content definition",
+            );
+        }
+        // XEP-0166 §7.2: at least one content of a session-initiate MUST
+        // have disposition "session"; otherwise the responder (this
+        // mixer) MUST return <bad-request/>.
+        if !jingle
+            .contents
+            .iter()
+            .any(|content| content.disposition == Disposition::Session)
+        {
+            attempt.failed(CallSetupFailureReason::BadRequest);
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "Muji session-initiate requires at least one content with disposition \"session\"",
             );
         }
         let call_id = match CallId::try_new(room_jid.to_string()) {
@@ -868,6 +1005,8 @@ impl JingleHandler {
                 responder.to_string(),
             );
         // 1. `<muji room='…'/>` first per XEP-0272 §Joining example.
+        let room_for_session = room_jid.clone();
+        let jingle_sid = jingle.sid.0.clone();
         jingle_builder = jingle_builder.append(Muji::for_room(room_jid).to_element());
         // 2. XEP-0298 §3.1 focus marker — also a direct child of
         //    `<jingle/>`. Stamped on the accept so the client can
@@ -899,6 +1038,7 @@ impl JingleHandler {
             payload: accept_elem,
         };
 
+        self.record_mixer_session(ctx.full_jid, &jingle_sid, &room_for_session);
         attempt.ok();
         vec![
             OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(ack)))),
@@ -993,6 +1133,7 @@ impl JingleHandler {
                 return unknown_session_reply(iq);
             }
         }
+        self.forget_mixer_session(ctx.full_jid, &jingle.sid.0);
         // Empty IQ result per XEP-0166 §6.7.
         let mixer: Jid = calls_mixer_jid(ctx.domain).into();
         let reply = Iq::Result {
@@ -1004,6 +1145,86 @@ impl JingleHandler {
         vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
             reply,
         ))))]
+    }
+
+    /// Empty IQ result from the mixer to the sender of `iq`.
+    fn mixer_ack(iq: &Iq, ctx: &StanzaContext<'_>) -> Vec<OutboundEvent> {
+        let reply = Iq::Result {
+            from: Some(calls_mixer_jid(ctx.domain).into()),
+            to: Some(ctx.full_jid.clone().into()),
+            id: iq.id().to_string(),
+            payload: None,
+        };
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
+    }
+
+    /// XEP-0166 §6.6: an empty `session-info` for an active session
+    /// "MUST" be answered with an empty IQ result (a session-vitality
+    /// ping). A payload the mixer does not understand gets
+    /// `<feature-not-implemented/>` + `<unsupported-info/>`.
+    fn handle_muji_session_info(
+        &self,
+        iq: &Iq,
+        jingle: &Jingle,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        let has_payload = jingle
+            .other
+            .iter()
+            .any(|child| !(child.name() == "muji" && child.ns() == crate::xep::xep0272::NS_MUJI));
+        if !has_payload {
+            return Self::mixer_ack(iq, ctx);
+        }
+        let mut error = StanzaError::new(
+            ErrorType::Modify,
+            DefinedCondition::FeatureNotImplemented,
+            "en",
+            "unsupported session-info payload",
+        );
+        error.other = Some(
+            Element::builder("unsupported-info", crate::xep::xep0166::NS_JINGLE_ERRORS).build(),
+        );
+        let reply = Iq::Error {
+            from: iq.to().cloned(),
+            to: iq.from().cloned(),
+            id: iq.id().to_string(),
+            error,
+            payload: None,
+        };
+        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reply,
+        ))))]
+    }
+
+    /// XEP-0166 §7.2 content-add: the recipient "MUST send a
+    /// content-accept ... if not, it MUST send a content-reject". The
+    /// mixer's media plane is fixed at session-initiate (one LiveKit
+    /// identity per participant), so it acknowledges the IQ and then
+    /// rejects the added content with a separate content-reject.
+    fn handle_muji_content_add(
+        &self,
+        iq: &Iq,
+        jingle: Jingle,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        let mut reject = Jingle::new(Action::ContentReject, jingle.sid);
+        for content in jingle.contents {
+            reject = reject.add_content(Content::new(content.creator, content.name));
+        }
+        let mixer: Jid = calls_mixer_jid(ctx.domain).into();
+        let reject_iq = Iq::Set {
+            from: Some(mixer),
+            to: Some(ctx.full_jid.clone().into()),
+            id: format!("muji-content-reject-{}", uuid::Uuid::new_v4()),
+            payload: Element::from(reject),
+        };
+        let mut events = Self::mixer_ack(iq, ctx);
+        events.push(OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+            reject_iq,
+        )))));
+        events
     }
 
     /// Handle a 1:1 `session-terminate` (#1131).

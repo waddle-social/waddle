@@ -175,9 +175,9 @@ fn capability_manifest_references_vendored_xeps_and_existing_evidence() {
 #[test]
 fn advertised_feature_claims_exist_in_runtime_feature_vectors() {
     use waddle_xmpp::disco::info::{
-        call_features, community_service_features, muc_room_features, muc_service_features,
-        pubsub_service_features, push_service_features, server_features, spaces_service_features,
-        upload_service_features,
+        call_features, calls_mixer_features, community_service_features, muc_room_features,
+        muc_service_features, pubsub_service_features, push_service_features, server_features,
+        spaces_service_features, upload_service_features,
     };
 
     let mut advertised = BTreeSet::new();
@@ -196,6 +196,7 @@ fn advertised_feature_claims_exist_in_runtime_feature_vectors() {
             waddle_xmpp_core::types::Moderation::Moderated,
         ))
         .chain(call_features())
+        .chain(calls_mixer_features())
     {
         advertised.insert(feature.0);
     }

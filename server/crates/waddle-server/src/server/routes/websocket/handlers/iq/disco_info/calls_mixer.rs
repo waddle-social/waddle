@@ -10,7 +10,7 @@
 
 use super::{
     build_disco_info_response, item_not_found_iq_error, DiscoInfoRequest, DiscoInfoResponse,
-    Feature, Identity,
+    Identity,
 };
 
 /// Handle a disco#info query targeted at `calls.<server-domain>`.
@@ -45,15 +45,7 @@ pub(super) fn handle_calls_mixer_disco_info<'a>(
     // Features the mixer accepts on the wire. `Feature::muji()` is
     // the load-bearing one (XEP-0272); the rest document the
     // shape of the Jingle session-initiate the mixer accepts.
-    let features = vec![
-        Feature::disco_info(),
-        Feature::muji(),
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_rtp_audio(),
-        Feature::jingle_rtp_video(),
-        Feature::waddle_livekit_transport(),
-    ];
+    let features = waddle_xmpp::disco::info::calls_mixer_features();
 
     let response = build_disco_info_response(req.request_iq, &identities, &features, None);
     Some(DiscoInfoResponse::iq(response))
