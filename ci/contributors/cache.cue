@@ -2,6 +2,16 @@ package contributors
 
 import "github.com/cuenv/cuenv/schema"
 
+// Nix's per-invocation scratch paths otherwise become part of the action
+// key. Confined tasks run with a private /tmp mounted by cuenv.
+#NixSandboxScratch: schema.#Environment & {
+	NIX_BUILD_TOP: "/tmp"
+	TMP:           "/tmp"
+	TMPDIR:        "/tmp"
+	TEMP:          "/tmp"
+	TEMPDIR:       "/tmp"
+}
+
 // Shared Namespace Bazel remote cache settings. Default-safe read-only in
 // CUE (`upload: false`); #NamespaceBazelCache enables remote uploads via
 // $GITHUB_ENV only on trusted `push` events to `refs/heads/main` and isolates

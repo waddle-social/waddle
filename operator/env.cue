@@ -12,10 +12,17 @@ let _rustInputs = [
 	"crates/**",
 	"scripts/**",
 	schema.#ModuleFiles & {paths: [
+		"ci/cache/nix-shell-hook.sh",
 		"flake.nix",
 		"flake.lock",
 	]},
 ]
+
+let _crdDrift = {
+	command: "bash"
+	args:    ["-euo", "pipefail", "-c", "waddle-operator-crd | diff -u config/crd/waddleservers.waddle.social.yaml -"]
+	inputs:  [for input in _rustInputs {input}, "config/crd/waddleservers.waddle.social.yaml"]
+}
 
 schema.#Project & {
 	name: "waddle-operator"
@@ -23,9 +30,12 @@ schema.#Project & {
 	runtime: {
 		type:  "nix"
 		flake: ".."
+		output: "operator"
 	}
 
 	cache: remote: wc.#NamespaceRemoteCache
+	contexts: nixSandbox: schema.#TaskFilter & {name: "ciCheckCrdDrift"}
+	env: context: nixSandbox: wc.#NixSandboxScratch
 
 	ci: providers: ["github"]
 	ci: contributors: [
@@ -45,6 +55,11 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
+		// The cache benchmark runs this task on two separate runners.
+		cacheVerification: {
+			when: manual: true
+			"tasks": [tasks.ciCheckCrdDrift]
+		}
 		default: {
 			when: {
 				branch: ["main"]
@@ -58,7 +73,7 @@ schema.#Project & {
 				tasks.clippy,
 				tasks.test,
 				tasks.doctest,
-				tasks.checkCrdDrift,
+				tasks.ciCheckCrdDrift,
 			]
 		}
 		pullRequest: {
@@ -73,7 +88,7 @@ schema.#Project & {
 				tasks.clippy,
 				tasks.test,
 				tasks.doctest,
-				tasks.checkCrdDrift,
+				tasks.ciCheckCrdDrift,
 			]
 		}
 	}
@@ -116,10 +131,13 @@ schema.#Project & {
 			inputs: _rustInputs
 		}
 
-		checkCrdDrift: schema.#Task & {
-			command: "bash"
-			args: ["-c", "diff -u config/crd/waddleservers.waddle.social.yaml <(cargo run -p waddle-operator --locked -- crd)"]
-			inputs: ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "crates/**", "config/crd/waddleservers.waddle.social.yaml"]
+		checkCrdDrift: schema.#Task & _crdDrift
+
+		// Both Linux CI pipelines use the same confined action. Developers
+		// can also check the CRD on hosts without Linux namespace support.
+		ciCheckCrdDrift: schema.#Task & _crdDrift & {
+			cache: mode:       "read-write"
+			hermetic: sandbox: "strict"
 		}
 	}
 }

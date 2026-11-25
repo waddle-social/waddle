@@ -10,6 +10,8 @@ on:
     - '*.cue'
     - .github/workflows/waddle-operator-default.yml
     - ci/*.cue
+    - ci/cache/nix-shell-hook.sh
+    - ci/cache/nix-shell-hook.sh/**
     - ci/contributors/*.cue
     - cue.mod/**
     - flake.lock

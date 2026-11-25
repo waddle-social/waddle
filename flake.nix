@@ -1119,9 +1119,32 @@
             '';
           };
 
+          operator =
+            let
+              toolchain = pkgs.rust-bin.fromRustupToolchainFile ./operator/rust-toolchain.toml;
+              vendor = (crane.mkLib pkgs).vendorCargoDeps { cargoLock = ./operator/Cargo.lock; };
+              generateCrd = pkgs.writeShellScriptBin "waddle-operator-crd" ''
+                # Rust's bundled lld wrapper resolves /proc/self/exe, which is
+                # unavailable inside the network-isolated cuenv Linux sandbox.
+                exec ${toolchain}/bin/cargo run --config ${vendor}/config.toml \
+                  --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C", "linker-features=-lld"]' \
+                  --offline --locked -p waddle-operator -- crd
+              '';
+            in
+            pkgs.mkShell {
+              shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
+              packages = [
+                toolchain
+                generateCrd
+                pkgs.cargo-nextest
+                pkgs.python3
+              ];
+            };
+
           # Linux desktop client (apps/linux): its own shell so GTK never
           # enters the server's CI closure.
           linux = pkgs.mkShell {
+            shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
             packages = [
               rustToolchain
               pkgs.pkg-config

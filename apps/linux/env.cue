@@ -36,6 +36,8 @@ schema.#Project & {
 	}
 
 	cache: remote: wc.#NamespaceRemoteCache
+	contexts: nixSandbox: schema.#TaskFilter & {name: "validateData"}
+	env: context: nixSandbox: wc.#NixSandboxScratch
 
 	ci: providers: ["github"]
 	ci: contributors: [
@@ -106,7 +108,7 @@ schema.#Project & {
 			args: ["-c", "desktop-file-validate data/social.waddle.Waddle.desktop && appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml"]
 			cache: mode: "read-write"
 			hermetic: sandbox: "auto"
-			inputs: ["data/**"]
+			inputs: ["data/**", schema.#ModuleFiles & {paths: ["ci/cache/nix-shell-hook.sh"]}]
 		}
 	}
 }

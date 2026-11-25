@@ -23,6 +23,8 @@ on:
     - apps/linux/rust-toolchain.toml/**
     - apps/linux/src/**
     - ci/*.cue
+    - ci/cache/nix-shell-hook.sh
+    - ci/cache/nix-shell-hook.sh/**
     - ci/contributors/*.cue
     - cue.mod/**
     - flake.lock

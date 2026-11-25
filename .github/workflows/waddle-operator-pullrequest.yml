@@ -11,6 +11,8 @@ on:
     - .github/workflows/waddle-operator-pullrequest.yml
     - .github/workflows/waddle-operator-pullrequest.yml/**
     - ci/*.cue
+    - ci/cache/nix-shell-hook.sh
+    - ci/cache/nix-shell-hook.sh/**
     - ci/contributors/*.cue
     - cue.mod/**
     - flake.lock
