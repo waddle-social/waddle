@@ -23,8 +23,8 @@ mod room_broadcast;
 pub mod room_registry_actor;
 pub mod room_registry_handle;
 pub mod roominfo;
-pub mod voice;
 mod subject;
+pub mod voice;
 
 pub use admin::{
     build_admin_result, build_admin_set_result, build_role_result, is_affiliation_change_query,

@@ -9,7 +9,7 @@
 //! ingress pipeline.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use jid::{BareJid, FullJid, Jid};
@@ -54,7 +54,7 @@ pub(crate) fn is_voice_form(message: &Message, muc_domain: &str) -> bool {
 fn admit_voice_request(room: &BareJid, requester: &BareJid, now: Instant) -> bool {
     let mut recent = RECENT_VOICE_REQUESTS
         .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     if recent.len() >= VOICE_REQUEST_TRACKED_LIMIT {
         recent.retain(|_, at| now.duration_since(*at) < VOICE_REQUEST_MIN_INTERVAL);
     }
