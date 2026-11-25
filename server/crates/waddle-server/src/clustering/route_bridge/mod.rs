@@ -84,6 +84,7 @@ mod mailbox;
 pub(crate) use mailbox::ensure_room_occupancy_seated;
 pub use mailbox::spawn_mailbox_poller;
 mod muc_admin_query;
+mod muc_voice_form;
 mod presence;
 mod reassert;
 mod recipient_inventory;

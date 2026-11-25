@@ -11,12 +11,12 @@ use super::{
     refresh_relay_registration, remote_resource_compat, send_error, Arc, CancellationToken,
     Duration, NodeId, OrderedRelayDeliveryBridge, RelayActor, RelayAskError, RelayDeliverOrdered,
     RelayEchoStanza, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelayMucAdminQuery,
-    RelayMucAdminQueryItem, RelayMucAdminQueryReply, RelayPing, RelayRegisterAttempt,
-    RelayRemoteUserSideEffect, RelayRemoteUserSideEffectStatus, RelayResourcePresence,
-    RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure, RelayTraceContext,
-    RemoteResourceOutboundFrame, RemoteSendError, RemoteStanza, RemoteStanzaEnvelope,
-    RemoteUserSideEffect, ResumeStealBridge, RoomLocalClaims, SharedNodeIdentity, Spawn,
-    REREGISTER_INTERVAL, RESPAWN_BACKOFF,
+    RelayMucAdminQueryItem, RelayMucAdminQueryReply, RelayMucVoiceForm, RelayMucVoiceFormReply,
+    RelayPing, RelayRegisterAttempt, RelayRemoteUserSideEffect, RelayRemoteUserSideEffectStatus,
+    RelayResourcePresence, RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure,
+    RelayTraceContext, RemoteResourceOutboundFrame, RemoteSendError, RemoteStanza,
+    RemoteStanzaEnvelope, RemoteUserSideEffect, ResumeStealBridge, RoomLocalClaims,
+    SharedNodeIdentity, Spawn, REREGISTER_INTERVAL, RESPAWN_BACKOFF,
 };
 use crate::clustering::claims::{NodeLeaseStore, OrphanedSmSessionClaim};
 use crate::clustering::ordered_relay::{
@@ -424,6 +424,64 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
     let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
         actor_remote_id: "actor".into(),
         message_remote_id: "waddle.clustering.relay.muc_admin_query.v2".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "a peer that predates the message is a no-effect failure: {old_peer:?}"
+    );
+}
+
+/// A voice request or approval forwarded to the room owner is a NEW message
+/// id; the ordered-relay envelope is untouched. An old peer's
+/// `UnknownMessage` is a no-effect failure.
+#[test]
+fn muc_voice_form_is_a_new_message_id_with_round_tripping_shapes() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayMucVoiceForm>>::REMOTE_ID,
+        "waddle.clustering.relay.muc_voice_form.v1"
+    );
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
+        "waddle.clustering.relay.deliver_ordered.v16",
+        "a new relay message must not bump the ordered-relay envelope id"
+    );
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let sender: jid::FullJid = "romeo@example.test/phone".parse().expect("sender");
+    let mut form = xmpp_parsers::message::Message::new(Some(jid::Jid::from(room.clone())));
+    form.from = Some(jid::Jid::from(sender.clone()));
+    let message = RelayMucVoiceForm {
+        room: room.clone(),
+        sender: sender.clone(),
+        message: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Message(form)),
+        trace: RelayTraceContext::default(),
+    };
+    let decoded: RelayMucVoiceForm =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).expect("encode form"))
+            .expect("decode form");
+    assert_eq!(decoded.room, room);
+    assert_eq!(decoded.sender, sender);
+    assert_eq!(decoded.message, message.message);
+
+    for reply in [
+        RelayMucVoiceFormReply::Handled(Vec::new()),
+        RelayMucVoiceFormReply::Handled(vec![message.message.clone()]),
+        RelayMucVoiceFormReply::NotOwner,
+    ] {
+        let decoded: RelayMucVoiceFormReply =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
+                .expect("decode reply");
+        assert_eq!(decoded, reply);
+    }
+
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.muc_voice_form.v1".into(),
     });
     assert!(
         matches!(

@@ -2127,6 +2127,10 @@ impl Inner {
         match stanza {
             Stanza::Presence(_) => {}
             Stanza::Message(message) if message.type_ == MessageType::Groupchat => {}
+            // XEP-0045 §8.6: a remote moderator is asked to approve a voice
+            // request with the room's own form, which is no private message.
+            Stanza::Message(message)
+                if waddle_xmpp::muc::voice::is_voice_approval_form(message) => {}
             Stanza::Message(_) | Stanza::Iq(_) => return None,
         }
         let room = stanza_from(stanza)?.to_bare();
