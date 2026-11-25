@@ -52,6 +52,24 @@ struct CallStageView: View {
     var announcesChanges = true
     let actions: CallStageActions
 
+    /// The letter keys that do something on this stage as it is.
+    private var shortcuts: [CallShortcut] {
+        CallShortcut.available(
+            hasMedia: status != .connecting, canShareScreen: isSharingScreen != nil, hasHands: isHandRaised != nil,
+            size: size
+        )
+    }
+
+    private func perform(_ shortcut: CallShortcut) {
+        switch shortcut {
+        case .microphone: actions.toggleMicrophone()
+        case .camera: actions.toggleCamera()
+        case .screenShare: actions.toggleScreenShare()
+        case .hand: actions.toggleHand()
+        case .stepUp: actions.setSize(size.steppedUp)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             CallStageHeader(title: title, subtitle: subtitle, status: status, connection: connectionChip)
@@ -99,6 +117,7 @@ struct CallStageView: View {
             .padding(.bottom, Theme.Spacing.l)
         }
         .background(Theme.Colors.seaDeep)
+        .background(CallShortcutKeys(shortcuts: shortcuts, perform: perform))
         .environment(\.huddleGround, Theme.Colors.seaDeep)
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)

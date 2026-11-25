@@ -900,7 +900,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             if enabled { await turnCameraOn(in: room) }
         }
         // The SDK toggles one publication per device. Off means all of them.
-        if !enabled {
+        // And a device turned off while it was still starting is off: the
+        // choice as it stands now, not as it stood when the start was asked
+        // for, as when Space held to talk came up before the microphone had opened.
+        if !enabled || captureChoices[kind] == false {
             for publication in publications(of: kind, in: room) where !publication.isMuted {
                 try? await publication.mute()
             }
