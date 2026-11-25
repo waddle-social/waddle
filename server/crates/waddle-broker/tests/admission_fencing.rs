@@ -15,8 +15,8 @@ use tempfile::TempDir;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use waddle_broker::admission::invocation::{
-    validate_principal_and_payer, InvocationError, InvocationPrincipal, PayerSelection,
-    SignedInferenceInvocation,
+    validate_principal_and_payer, validate_signed_invocation, InvocationError, InvocationPrincipal,
+    PayerSelection, SignedInferenceInvocation,
 };
 use waddle_broker::admission::postgres::SqliteCompatAdmissionLedgerStore;
 use waddle_broker::admission::replica_fence::BrokerReplicaFence;
@@ -1527,4 +1527,337 @@ async fn e2e_gate2_dual_broker_race_single_provider_dispatch_and_pobserve() {
     let jsonl = trace.to_jsonl();
     assert_secret_free(&jsonl, &["sk-test-secret"]).expect("secret-free");
     verify_jsonl_trace(&jsonl).expect("PObserve trace valid");
+}
+
+#[tokio::test]
+async fn signed_invocation_binding_rejects_cross_account_signer_and_tampered_fields() {
+    let ledger = Arc::new(
+        SqliteCompatAdmissionLedgerStore::in_memory()
+            .await
+            .expect("sqlite compat"),
+    );
+    let perms = Arc::new(LocalPermissionBackend::new(AuthzCallerRole::Broker));
+    let tenant = test_tenant("acme.example");
+    perms.provision_tenant_store(&tenant).await.expect("prov");
+
+    let alice = AccountId::new_v4();
+    let bob = AccountId::new_v4();
+    let alice_cred_id = Uuid::new_v4();
+    perms
+        .write_tuples(
+            &tenant,
+            AuthzModule::Inference,
+            &[AuthzTuple {
+                object: AuthzObject {
+                    object_type: AuthzObjectType::UserCredential,
+                    id: alice_cred_id.to_string(),
+                },
+                relation: AuthzRelation::new("owner"),
+                subject: AuthzSubject {
+                    subject_type: AuthzSubjectType::Account,
+                    id: alice.to_string(),
+                    relation: None,
+                },
+            }],
+        )
+        .await
+        .expect("grant alice cred");
+
+    let clock = Arc::new(FakeBootClock::new(Duration::from_secs(10)));
+    let fence = Arc::new(BrokerReplicaFence::new(
+        Uuid::new_v4(),
+        Arc::clone(&ledger) as Arc<dyn waddle_broker::admission::ReplicaFenceStore>,
+        clock,
+    ));
+    fence.tick_once().await.expect("tick");
+
+    let device_keys = Arc::new(DeviceKeyRegistry::new());
+    let (alice_dev_id, alice_signing_key) = enroll_test_device(&device_keys, &tenant, alice);
+    let (bob_dev_id, bob_signing_key) = enroll_test_device(&device_keys, &tenant, bob);
+    let trace = TraceRecorder::new();
+
+    let svc = BrokerAdmissionService::new(
+        "broker-binding",
+        Arc::clone(&ledger),
+        Arc::clone(&perms) as Arc<dyn PermissionBackend>,
+        Arc::clone(&device_keys),
+        Arc::clone(&fence),
+        trace.clone(),
+    );
+
+    let room_a = RoomScopeKey {
+        scope_id: "room-a".to_owned(),
+    };
+    let room_b = RoomScopeKey {
+        scope_id: "room-b".to_owned(),
+    };
+    let alice_payer = PayerSelection::Member {
+        account_id: alice,
+        credential_id: alice_cred_id,
+    };
+    let now = now_ms();
+    let exp = now + 60_000;
+    let budget = default_budget();
+
+    // 1. Direct validator rejects Bob's device key signing Alice's member payer.
+    let bob_forged_signed = build_signed_invocation(SignedInvocationParams {
+        tenant: &tenant,
+        account_id: bob,
+        device_key_id: bob_dev_id,
+        signing_key: &bob_signing_key,
+        room: &room_a,
+        payer: alice_payer,
+        nonce: [1u8; 32],
+        expires_at_ms: exp,
+        budget,
+    });
+    assert!(matches!(
+        validate_signed_invocation(&device_keys, &bob_forged_signed, now),
+        Err(InvocationError::MemberAccountMismatch)
+    ));
+
+    // 2. Service rejects Bob's signed invocation submitted with Alice as principal/payer.
+    let make_input =
+        |nonce: [u8; 32],
+         room: RoomScopeKey,
+         expires_at_ms: i64,
+         req_budget: BudgetLimits,
+         signed: SignedInferenceInvocation| AdmitInvocationInput {
+            attempt_id: AttemptId::new_v4(),
+            run_id: RunId::new_v4(),
+            step_id: StepId::new(0),
+            tenant_id: tenant.clone(),
+            principal: InvocationPrincipal::LocalMember {
+                account_id: alice,
+                provenance: AuthProvenance::ExternalIdp,
+            },
+            payer: alice_payer,
+            room_or_space: room,
+            holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-a"),
+            invocation_nonce: nonce,
+            expires_at_ms,
+            reserved_spend_microcents: 100,
+            budget: req_budget,
+            signed_invocation: Some(signed),
+            now_ms: now,
+        };
+
+    assert!(matches!(
+        svc.admit_invocation(make_input(
+            [1u8; 32],
+            room_a.clone(),
+            exp,
+            budget,
+            bob_forged_signed
+        ))
+        .await,
+        Err(AdmissionServiceError::Invocation(
+            InvocationError::SignedInvocationBindingMismatch
+        ))
+    ));
+
+    // 3. Valid Alice signature for room_a / budget / exp, tampered in AdmitInvocationInput:
+    let alice_signed = build_signed_invocation(SignedInvocationParams {
+        tenant: &tenant,
+        account_id: alice,
+        device_key_id: alice_dev_id,
+        signing_key: &alice_signing_key,
+        room: &room_a,
+        payer: alice_payer,
+        nonce: [2u8; 32],
+        expires_at_ms: exp,
+        budget,
+    });
+
+    // 3a. Tampered room_scope
+    assert!(matches!(
+        svc.admit_invocation(make_input(
+            [2u8; 32],
+            room_b,
+            exp,
+            budget,
+            alice_signed.clone()
+        ))
+        .await,
+        Err(AdmissionServiceError::Invocation(
+            InvocationError::SignedInvocationBindingMismatch
+        ))
+    ));
+
+    // 3b. Tampered budget
+    let mut tampered_budget = budget;
+    tampered_budget.max_spend_microcents += 1_000_000;
+    assert!(matches!(
+        svc.admit_invocation(make_input(
+            [2u8; 32],
+            room_a.clone(),
+            exp,
+            tampered_budget,
+            alice_signed.clone()
+        ))
+        .await,
+        Err(AdmissionServiceError::Invocation(
+            InvocationError::SignedInvocationBindingMismatch
+        ))
+    ));
+
+    // 3c. Tampered expires_at_ms
+    assert!(matches!(
+        svc.admit_invocation(make_input(
+            [2u8; 32],
+            room_a.clone(),
+            exp + 10_000,
+            budget,
+            alice_signed.clone()
+        ))
+        .await,
+        Err(AdmissionServiceError::Invocation(
+            InvocationError::SignedInvocationBindingMismatch
+        ))
+    ));
+
+    assert!(
+        trace.records().is_empty(),
+        "rejected tampered invocations must not emit dispatch trace"
+    );
+
+    // 4. Exact matching fields admit cleanly.
+    svc.admit_invocation(make_input([2u8; 32], room_a, exp, budget, alice_signed))
+        .await
+        .expect("untampered signed invocation succeeds");
+}
+
+async fn exercise_cross_tenant_run_id_hijack_denied<S>(store: &S)
+where
+    S: AdmissionLedgerStore + AdmissionQueryStore,
+{
+    let tenant_a = test_tenant("alpha.example");
+    let tenant_b = test_tenant("beta.example");
+    let cred_a = CredentialKey {
+        credential_id: Uuid::new_v4(),
+        scope: CredentialScope::Tenant,
+    };
+    let cred_b = CredentialKey {
+        credential_id: Uuid::new_v4(),
+        scope: CredentialScope::Tenant,
+    };
+    let room = RoomScopeKey {
+        scope_id: "room-shared-name".to_owned(),
+    };
+    let snap_a = store
+        .snapshot_fences(&tenant_a, &cred_a, &room)
+        .await
+        .expect("snap a");
+    let snap_b = store
+        .snapshot_fences(&tenant_b, &cred_b, &room)
+        .await
+        .expect("snap b");
+
+    let shared_run_id = RunId::new_v4();
+    let req_a = AdmitAttemptRequest {
+        attempt_id: AttemptId::new_v4(),
+        run_id: shared_run_id,
+        step_id: StepId::new(0),
+        tenant_id: tenant_a,
+        credential: cred_a,
+        room_or_space: room.clone(),
+        holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-a"),
+        expected_fences: snap_a,
+        invocation_nonce: [0xA1; 32],
+        expires_at_ms: now_ms() + 60_000,
+        reserved_spend_microcents: 250,
+        budget: default_budget(),
+    };
+    store
+        .admit_attempt(&req_a)
+        .await
+        .expect("tenant A admits run");
+
+    let req_b = AdmitAttemptRequest {
+        attempt_id: AttemptId::new_v4(),
+        run_id: shared_run_id,
+        step_id: StepId::new(1),
+        tenant_id: tenant_b,
+        credential: cred_b,
+        room_or_space: room,
+        holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-b"),
+        expected_fences: snap_b,
+        invocation_nonce: [0xB2; 32],
+        expires_at_ms: now_ms() + 60_000,
+        reserved_spend_microcents: 100,
+        budget: default_budget(),
+    };
+    assert!(matches!(
+        store.admit_attempt(&req_b).await,
+        Err(AdmissionError::HolderUnauthorized)
+    ));
+
+    let run_a = store
+        .get_run_budget(shared_run_id)
+        .await
+        .expect("get run")
+        .expect("run exists");
+    assert_eq!(run_a.reserved_microcents, 250);
+    assert_eq!(run_a.steps_used, 1);
+}
+
+#[tokio::test]
+async fn cross_tenant_run_id_hijack_fails_closed_on_turso_and_sqlite_compat() {
+    let dir = TempDir::new().expect("tempdir");
+    let turso_store = TursoAdmissionLedgerStore::open(dir.path().join("run_isolation.db"))
+        .await
+        .expect("open turso");
+    exercise_cross_tenant_run_id_hijack_denied(&turso_store).await;
+
+    let sqlite_store = SqliteCompatAdmissionLedgerStore::in_memory()
+        .await
+        .expect("open sqlite compat");
+    exercise_cross_tenant_run_id_hijack_denied(&sqlite_store).await;
+}
+
+#[tokio::test]
+async fn openfga_delete_tenant_store_retains_mapping_on_transient_failure_for_retry() {
+    let fga_server = InProcessOpenFgaServer::start()
+        .await
+        .expect("start openfga");
+    let fga_backend = OpenFgaPermissionBackend::new(OpenFgaConfig {
+        endpoint: fga_server.endpoint().to_owned(),
+        bearer_token: None,
+        caller_role: AuthzCallerRole::Broker,
+        pinned_model_version: None,
+    })
+    .expect("openfga client");
+
+    let tenant = test_tenant("retry-delete.example");
+    let store_ref = fga_backend
+        .provision_tenant_store(&tenant)
+        .await
+        .expect("provision store");
+    assert!(fga_server.store_exists(&store_ref.store_id));
+
+    fga_server.fail_next_deletes(1);
+    assert!(
+        fga_backend.delete_tenant_store(&tenant).await.is_err(),
+        "first delete should fail on transient 500"
+    );
+    assert!(
+        fga_server.store_exists(&store_ref.store_id),
+        "remote store still exists after failed delete"
+    );
+
+    fga_backend
+        .delete_tenant_store(&tenant)
+        .await
+        .expect("retry delete succeeds");
+    assert!(
+        !fga_server.store_exists(&store_ref.store_id),
+        "remote store deleted on retry"
+    );
+
+    let delete_calls = fga_server
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.method == "DELETE" && r.path == format!("/stores/{}", store_ref.store_id))
+        .count();
+    assert_eq!(delete_calls, 2, "retry must send a second DELETE RPC");
 }
