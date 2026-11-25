@@ -3454,6 +3454,64 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         "a cross-node hangup must never fail: {terminate_reply}"
     );
 
+    // XEP-0272 puts `<muji/>` only on the initiate: a plain XEP-0166
+    // `session-terminate` names its session by `sid` alone. Node B never
+    // owned the registration, so it must resolve the sid to the room it
+    // relayed the initiate for and carry the hangup to node A, which clears
+    // the participant's call presence for the other occupants.
+    client_b
+        .send(&muji_active_presence(&room, "joiner-b"))
+        .await
+        .expect("client B advertises an active call");
+    client_a
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&format!("{room}/joiner-b"))
+                && frame.contains("<muji")
+        })
+        .await
+        .expect("client A sees client B's active call presence");
+    client_b
+        .send(&String::from(&muji_initiate_iq(&room, "cross-node-2")))
+        .await
+        .expect("client B re-initiates on node B");
+    client_b
+        .recv_until(|frame| frame.contains("session-accept"))
+        .await
+        .expect("client B's second session is accepted");
+    client_b
+        .send(&String::from(&plain_terminate_iq("cross-node-2")))
+        .await
+        .expect("client B sends a plain terminate against node B");
+    let plain_reply = client_b
+        .recv_matching(|frame| frame.contains("mjt-plain-cross-node-2"))
+        .await
+        .expect("the plain terminate is answered");
+    assert!(
+        !plain_reply.contains("<error"),
+        "a plain terminate of a relayed session must succeed: {plain_reply}"
+    );
+    client_a
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame.contains(&format!("{room}/joiner-b"))
+                && !frame.contains("<muji")
+        })
+        .await
+        .expect("a plain terminate clears the caller's call presence on the owner");
+    client_b
+        .send(&String::from(&plain_terminate_iq("never-initiated")))
+        .await
+        .expect("client B sends a plain terminate for an unknown session");
+    let unknown_reply = client_b
+        .recv_matching(|frame| frame.contains("mjt-plain-never-initiated"))
+        .await
+        .expect("the unknown session is answered");
+    assert!(
+        unknown_reply.contains("unknown-session"),
+        "an unknown sid stays an unknown session: {unknown_reply}"
+    );
+
     // Negative control: a room with NO claim anywhere is genuinely
     // nonexistent — the terminal room_not_found denial survives.
     let ghost = format!("muji-ghost-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
@@ -3780,6 +3838,60 @@ fn muji_terminate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
         )
         .append(jingle)
         .build()
+}
+
+/// Plain (`<muji/>`-less) XEP-0166 `session-terminate` for `sid`.
+fn plain_terminate_iq(sid: &str) -> xmpp_parsers::minidom::Element {
+    use waddle_xmpp::xep::xep0166::NS_JINGLE;
+    use xmpp_parsers::minidom::Element;
+
+    let jingle = Element::builder("jingle", NS_JINGLE)
+        .attr(
+            minidom::rxml::xml_ncname!("action").to_owned(),
+            "session-terminate",
+        )
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .build();
+    Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            format!("mjt-plain-{sid}"),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            "calls.localhost",
+        )
+        .append(jingle)
+        .build()
+}
+
+/// XEP-0272 presence advertising an active audio call from `room/nick`.
+fn muji_active_presence(room: &str, nick: &str) -> String {
+    use waddle_xmpp::xep::xep0272::NS_MUJI;
+    use xmpp_parsers::minidom::Element;
+
+    let content = Element::builder("content", NS_MUJI)
+        .attr(
+            minidom::rxml::xml_ncname!("creator").to_owned(),
+            "initiator",
+        )
+        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+        .append(
+            Element::builder("description", "urn:xmpp:jingle:apps:rtp:1")
+                .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+                .build(),
+        )
+        .build();
+    let presence = Element::builder("presence", waddle_xmpp::ns::JABBER_CLIENT)
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/{nick}"),
+        )
+        .append(Element::builder("x", "http://jabber.org/protocol/muc").build())
+        .append(Element::builder("muji", NS_MUJI).append(content).build())
+        .build();
+    String::from(&presence)
 }
 
 /// Muji `session-initiate` IQ for `room`, built with minidom builders

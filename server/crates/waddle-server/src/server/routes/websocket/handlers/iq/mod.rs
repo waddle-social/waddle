@@ -120,6 +120,8 @@ pub(crate) use spaces_remote::spaces_change_for_remote;
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
+mod muji_session_rooms;
+pub(crate) use muji_session_rooms::MujiSessionRooms;
 #[cfg(test)]
 mod muji_preparation_tests;
 mod pep_addressing;

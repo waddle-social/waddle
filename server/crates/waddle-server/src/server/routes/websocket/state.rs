@@ -1500,6 +1500,9 @@ pub struct WebSocketState {
     /// The rooms this replica's MUC service may list, read at most once at
     /// a time for each audience of its `disco#items`.
     pub(crate) room_listings: super::handlers::iq::RoomListings,
+    /// The room of each Muji Jingle session this replica accepted from a
+    /// client, so a plain `session-terminate` resolves to it.
+    pub(crate) muji_session_rooms: super::handlers::iq::MujiSessionRooms,
     /// Explicit SASL2 negotiation switch for isolated protocol fixtures.
     /// Production builds cannot set this field, and test fixtures default it
     /// off unless they opt into the dedicated SASL2 helper.
