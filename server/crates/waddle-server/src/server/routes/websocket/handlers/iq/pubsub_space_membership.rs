@@ -398,9 +398,7 @@ fn configuration_payload_setting(
             "pubsub#type" if !current.node_type.is_some_and(|kind| kind.as_str() == value) => {
                 return None
             }
-            "pubsub#max_items" if value.parse::<u32>().ok() != Some(current.max_items) => {
-                return None
-            }
+            "pubsub#max_items" if !max_items_matches(value, current.max_items) => return None,
             "pubsub#item_expire" if !item_expire_matches(value, current.item_expire) => {
                 return None
             }
@@ -424,6 +422,16 @@ fn configuration_payload_setting(
         }
     }
     Some(deliver_payloads.map_or(PayloadSetting::Unchanged, PayloadSetting::Change))
+}
+
+/// XEP-0060 §16.4.4: `pubsub#max_items` is a number of items, or `max` for
+/// an unbounded node (`u32::MAX`), the form the config form renders.
+fn max_items_matches(value: &str, current: u32) -> bool {
+    if value.eq_ignore_ascii_case("max") {
+        current == u32::MAX
+    } else {
+        value.parse::<u32>().ok() == Some(current)
+    }
 }
 
 /// XEP-0060 §16.4.4: `pubsub#item_expire` is a number of seconds, or `max`

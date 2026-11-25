@@ -315,6 +315,49 @@ async fn stories_node_follows_the_xep0501_configuration() {
 }
 
 #[tokio::test]
+async fn unbounded_max_items_is_the_max_token_in_the_node_form() {
+    // XEP-0060 §16.4.4: `pubsub#max_items` is an integer or `max`; the form
+    // must not leak the internal u32::MAX sentinel.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let published = publish_story(&mut client, "own-publish", "", "story-max").await;
+    assert!(published.contains("type='result'"), "{published}");
+
+    let read =
+        format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{STORIES_NODE}"/></pubsub>"#);
+    let form = iq(&mut client, "get", "max-get-1", "", &read).await;
+    assert!(
+        form.contains("var='pubsub#max_items'") && !form.contains("4294967295"),
+        "unbounded node must not render the numeric sentinel: {form}"
+    );
+    let compact: String = form.split_whitespace().collect();
+    assert!(
+        compact.contains("var='pubsub#max_items'><value>max</value>"),
+        "unbounded node renders max: {form}"
+    );
+
+    let submit = |value: &str| {
+        format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{STORIES_NODE}"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>http://jabber.org/protocol/pubsub#node_config</value></field><field var="pubsub#max_items"><value>{value}</value></field></x></configure></pubsub>"#
+        )
+    };
+    let bounded = iq(&mut client, "set", "max-set-5", "", &submit("5")).await;
+    assert!(bounded.contains("type='result'"), "{bounded}");
+    let form = iq(&mut client, "get", "max-get-2", "", &read).await;
+    assert!(form.contains("<value>5</value>"), "{form}");
+    let unbounded = iq(&mut client, "set", "max-set-max", "", &submit("max")).await;
+    assert!(unbounded.contains("type='result'"), "{unbounded}");
+    let form = iq(&mut client, "get", "max-get-3", "", &read).await;
+    let compact: String = form.split_whitespace().collect();
+    assert!(
+        compact.contains("var='pubsub#max_items'><value>max</value>"),
+        "max round-trips: {form}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn item_expire_is_configurable_through_the_node_form() {
     // XEP-0060 §16.4.4: `pubsub#item_expire` is a number of seconds, or `max`
     // for no limit other than a server imposed maximum.
