@@ -179,6 +179,16 @@ fn oversized_iq_frame() -> String {
     )
 }
 
+/// The RFC 7628 §3.2.2 error document carries `status` and, per XEP-0493,
+/// the discovery document URL.
+fn assert_error_status(document: &[u8], status: &str) {
+    let json: serde_json::Value = serde_json::from_slice(document).expect("JSON error document");
+    assert_eq!(json["status"], status);
+    assert!(json["openid-configuration"]
+        .as_str()
+        .is_some_and(|url| url.ends_with("/.well-known/oauth-authorization-server")));
+}
+
 #[tokio::test]
 async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_in_place() {
     let state = websocket_state_with_sasl2().await;
@@ -299,10 +309,7 @@ async fn sasl2_rejects_mismatched_authorization_identity() {
     .await;
     let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
         .expect("SASL2 authzid mismatch uses an error challenge");
-    assert_eq!(
-        challenge.data.as_bytes(),
-        br#"{"status":"invalid_request"}"#
-    );
+    assert_error_status(challenge.data.as_bytes(), "invalid_request");
     send(
         &mut peer,
         Sasl2Response {
@@ -338,7 +345,7 @@ async fn sasl2_oauth_invalid_token_uses_rfc7628_error_challenge_then_fails() {
     send(&mut peer, authenticate(bearer("invalid-token", None))).await;
     let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
         .expect("invalid token starts a SASL2 error challenge");
-    assert_eq!(challenge.data.as_bytes(), br#"{"status":"invalid_token"}"#);
+    assert_error_status(challenge.data.as_bytes(), "invalid_token");
 
     send(
         &mut peer,
@@ -377,10 +384,7 @@ async fn sasl2_oauth_malformed_mechanism_data_uses_error_challenge() {
     send(&mut peer, authenticate(vec![0xff, 0x00])).await;
     let challenge = Sasl2Challenge::from_element(&receive(&mut peer).await)
         .expect("mechanism data failure uses a SASL2 challenge");
-    assert_eq!(
-        challenge.data.as_bytes(),
-        br#"{"status":"invalid_request"}"#
-    );
+    assert_error_status(challenge.data.as_bytes(), "invalid_request");
 
     send(
         &mut peer,

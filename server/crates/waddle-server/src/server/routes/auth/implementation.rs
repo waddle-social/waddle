@@ -61,6 +61,8 @@ pub enum PendingFlow {
         client_redirect_uri: String,
         client_state: Option<String>,
         client_code_challenge: Option<String>,
+        /// The scopes the client asked for and the owner is approving.
+        scopes: Vec<waddle_xmpp::xep::xep0493::OAuthScope>,
     },
 }
 
@@ -111,6 +113,8 @@ pub struct XmppAuthCode {
     pub session_id: String,
     pub redirect_uri: String,
     pub code_challenge: Option<String>,
+    /// The scopes approved for the token this code is exchanged for.
+    pub scopes: Vec<waddle_xmpp::xep::xep0493::OAuthScope>,
     pub created_at: DateTime<Utc>,
 }
 

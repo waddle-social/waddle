@@ -200,6 +200,21 @@ impl XmppClientRedirectUri {
         }
         url
     }
+
+    /// The URL to redirect to when the authorization request is refused
+    /// (RFC 6749 §4.1.2.1), with `error` (and `state`, when present)
+    /// appended to the query.
+    pub fn with_error(&self, error: &str, state: Option<&str>) -> Url {
+        let mut url = self.url.clone();
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("error", error);
+            if let Some(state) = state {
+                query.append_pair("state", state);
+            }
+        }
+        url
+    }
 }
 
 /// An RFC 7636 S256 code challenge: base64url (no padding) of a SHA-256
