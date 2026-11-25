@@ -175,14 +175,22 @@ where
     ) -> Result<AdmittedDispatch, AdmissionServiceError> {
         validate_principal_and_payer(&input.principal, input.payer)?;
 
-        if let PayerSelection::Member { .. } = input.payer {
+        if let PayerSelection::Member {
+            account_id: cred_owner,
+            ..
+        } = input.payer
+        {
             let signed = input
                 .signed_invocation
                 .as_ref()
                 .ok_or(InvocationError::SignedInvocationRequired)?;
             if signed.tenant_id != input.tenant_id
+                || signed.account_id != cred_owner
                 || signed.payer != input.payer
+                || signed.room_scope != input.room_or_space
                 || signed.nonce != input.invocation_nonce
+                || signed.expires_at_ms != input.expires_at_ms
+                || signed.budget != input.budget
             {
                 return Err(InvocationError::SignedInvocationBindingMismatch.into());
             }

@@ -218,6 +218,12 @@ pub fn validate_signed_invocation(
     invocation: &SignedInferenceInvocation,
     now_ms: i64,
 ) -> Result<(), InvocationError> {
+    if let PayerSelection::Member { account_id, .. } = invocation.payer {
+        if invocation.account_id != account_id {
+            return Err(InvocationError::MemberAccountMismatch);
+        }
+    }
+
     if invocation.expires_at_ms <= now_ms
         || invocation.expires_at_ms - now_ms > MAX_INVOCATION_TTL_MS
     {
