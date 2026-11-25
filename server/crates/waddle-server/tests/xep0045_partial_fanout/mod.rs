@@ -3,12 +3,13 @@
 //! recovery completes the remote obligation and terminalizes the row.
 
 use super::{
-    cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db,
+    cluster_e2e_serial_lock, epoch_zero_schema_url, free_tcp_port, generate_pool, open_control_db,
     partial_room_fanout_completes_on_retransmission_after_relay_recovery, register_test_swarm_node,
     relay_for_live_peer, reset_and_enroll, spawn_cluster_server, swarm, CancellationToken,
     ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig, Duration,
 };
 
+const SCHEMA_PREFIX: &str = "waddle_test_partial_fanout_";
 const CHILD_PROCESS: &str = "WADDLE_TEST_PARTIAL_FANOUT_CHILD";
 const TEST_NAME: &str =
     "xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_terminalizes";
@@ -42,6 +43,11 @@ async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
         return;
     }
 
+    // The scenario faults the relay, which carries the remote occupant's
+    // copy only below the mailbox epoch. The shared schema is at that epoch
+    // or beyond whenever another test ran first, and the epoch never goes
+    // back, so the mesh runs on a schema of its own.
+    let postgres_url = epoch_zero_schema_url(&postgres_url, SCHEMA_PREFIX).await;
     let pool = generate_pool();
     let db = open_control_db(&postgres_url).await;
     reset_and_enroll(&db, &pool).await;
