@@ -353,10 +353,6 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
         reason: "Unread tracker is an in-memory library helper with no advertised server protocol surface.",
     },
     XepCoverageExemption {
-        xep: "XEP-0445",
-        reason: "Pre-auth registration element helper is not wired into a server registration flow yet.",
-    },
-    XepCoverageExemption {
         xep: "XEP-0448",
         reason: "Encrypted SFS payload model is client-carried message XML with no server-specific behavior.",
     },

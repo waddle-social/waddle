@@ -277,11 +277,6 @@ pub use super::xep0447::{
     Disposition, FileSharing, FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
 };
 
-pub use super::xep0445::{
-    build_preauth_element, extract_preauth, has_preauth, is_preauth_element, PreauthToken,
-    PreauthValidation, NS_PARS,
-};
-
 pub use super::xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
     is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
@@ -387,9 +382,7 @@ pub use waddle_xmpp_core::xep0501::{
 pub use super::xep0502::{ActivityTracker, RoomActivity};
 
 pub use super::xep0500::{
-    build_roominfo_slow_mode_duration_field, parse_slow_mode_duration, SlowModeCheck,
-    SlowModeConfig, SlowModeTracker, FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION,
-    SLOW_MODE_DISABLED,
+    build_roominfo_slow_mode_duration_field, FIELD_ROOMINFO_SLOW_MODE_DURATION,
 };
 
 pub use super::xep0486::{

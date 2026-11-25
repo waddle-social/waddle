@@ -101,7 +101,7 @@ async fn reply_routes_and_replays_from_mam() {
 #[tokio::test]
 async fn reply_to_unknown_target_routes_without_error() {
     // XEP-0461 imposes no server-side target-existence requirement
-    // ("It is up to receiving entities…"). The previous implementation
+    // (the server only routes the <reply/> element). The previous implementation
     // returned `<item-not-found/>` when the server hadn't archived the
     // referenced message, which would reject legitimate cross-server
     // replies, replies to messages before retention, or replies to

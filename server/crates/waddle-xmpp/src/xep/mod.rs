@@ -62,12 +62,10 @@
 //! - **XEP-0424**: Message Retraction - Retract previously sent messages
 //!   with `<retract/>` and `<retracted/>` tombstone elements.
 //! - **XEP-0425**: Moderated Message Retraction - Moderator message deletion
-//!   via `<apply-to>/<moderate>` with fastening (XEP-0422).
+//!   via a moderator `<moderate>` IQ and a `<retract>`/`<moderated>` broadcast.
 //! - **XEP-0444**: Message Reactions
 //! - **XEP-0433**: Extended Channel Search - Room discovery by keyword with
 //!   IQ-based search/result and Searchable trait for matching.
-//! - **XEP-0445**: Pre-Authenticated In-Band Registration - Invite token
-//!   validation during account registration with preauth element.
 //! - **XEP-0449**: Stickers - Sticker packs and sticker messages with
 //!   pack references, built on XEP-0446/0447 file sharing.
 //! - **Proto-calendar xCal**: Community events with scheduling, RSVP
@@ -84,8 +82,8 @@
 //!   (default 24h), media support, and active/expired filtering.
 //! - **XEP-0502**: MUC Activity Indicator - Lightweight room activity tracking
 //!   with subscribe/notify pattern and per-room activity state.
-//! - **XEP-0500**: MUC Slow Mode - Per-room rate limiting with configurable
-//!   cooldown interval, moderator exemption, and per-occupant tracking.
+//! - **XEP-0500**: MUC Slow Mode - disco#info `muc#roominfo` duration field
+//!   only (always `0`); no enforcement or room configuration.
 //! - **XEP-0488**: MUC Token Invite - Shareable invite tokens for MUC rooms
 //!   with URI generation and IQ-based token request/response.
 //! - **XEP-0447**: Stateless File Sharing - Structured file sharing with
@@ -181,7 +179,6 @@ pub mod xep0431;
 pub mod xep0433;
 pub mod xep0437;
 pub mod xep0444;
-pub mod xep0445;
 pub mod xep0446;
 pub mod xep0447;
 pub mod xep0448;
