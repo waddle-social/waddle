@@ -330,6 +330,8 @@ pub enum Janitor {
     DestroyCompletion,
     /// Account coordinators whose account holds no binding and is idle.
     AccountCoordinatorReaper,
+    /// Items past their node's `pubsub#item_expire` (XEP-0060 §16.4.4).
+    PubsubItemExpiry,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -354,6 +356,7 @@ impl MetricAttribute for Janitor {
             Self::LocalMucDeparture => "local_muc_departure",
             Self::DestroyCompletion => "destroy_completion",
             Self::AccountCoordinatorReaper => "account_coordinator_reaper",
+            Self::PubsubItemExpiry => "pubsub_item_expiry",
         }
     }
 }

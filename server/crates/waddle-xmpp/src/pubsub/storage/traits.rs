@@ -7,8 +7,8 @@ use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
 use super::{
-    PubSubNode, PublicationError, PublicationNode, PublicationVersion, PublishResult, StoredItem,
-    VersionedPublishResult,
+    ExpiredItem, PubSubNode, PublicationError, PublicationNode, PublicationVersion, PublishResult,
+    StoredItem, VersionedPublishResult,
 };
 
 /// Storage trait for PubSub nodes and items.
@@ -121,6 +121,19 @@ pub trait PubSubStorage: Send + Sync + 'static {
         _publisher: &BareJid,
     ) -> Result<bool, XmppError> {
         Err(XmppError::feature_not_implemented(None))
+    }
+
+    /// Remove every item older than its node's `pubsub#item_expire`
+    /// (XEP-0060 §16.4.4) as of `now`, returning what was removed so the
+    /// caller can send the retraction notifications.
+    ///
+    /// The default removes nothing: a backend without item-expiry support
+    /// keeps items until they are retracted or evicted.
+    async fn purge_expired_items(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ExpiredItem>, XmppError> {
+        Ok(Vec::new())
     }
 
     /// List all nodes owned by a JID.

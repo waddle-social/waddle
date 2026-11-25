@@ -434,6 +434,13 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
     }
     let form = form_builder
         .append(field("pubsub#max_items", &config.max_items.to_string()))
+        // XEP-0060 §16.4.4: seconds, or `max` for no limit.
+        .append(field(
+            "pubsub#item_expire",
+            &config
+                .item_expire
+                .map_or_else(|| "max".to_owned(), |secs| secs.to_string()),
+        ))
         .append(field(
             "pubsub#persist_items",
             if config.persist_items { "1" } else { "0" },

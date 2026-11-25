@@ -483,16 +483,14 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         if target_to == Some(community_domain) {
-            // The community pubsub service hosts exactly two
-            // well-known nodes: the XEP-0472 feed and the XEP-0501
-            // stories node. Surface both so clients can enumerate
+            // The community pubsub service hosts the XEP-0472 feed and
+            // the xCal events node. Surface both so clients can enumerate
             // before subscribing.
             if let Some(node) = query.node.as_deref() {
-                // Only the three hosted nodes exist; each lists no sub-nodes.
+                // Only the two hosted nodes exist; each lists no sub-nodes.
                 if !matches!(
                     node,
                     waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-                        | waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
                         | waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
                 ) {
                     return vec![build_iq_error_xml_typed(
@@ -512,11 +510,6 @@ pub(super) async fn handle_disco_items_iq(
                         community_domain,
                         Some("Community Feed"),
                         Some(waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED),
-                    ),
-                    DiscoItem::new(
-                        community_domain,
-                        Some("Community Stories"),
-                        Some(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES),
                     ),
                     DiscoItem::new(
                         community_domain,

@@ -4,7 +4,6 @@ use super::{
 };
 
 const FEED_NODE_LABEL: &str = "Community Feed";
-const STORIES_NODE_LABEL: &str = "Community Stories";
 const EVENTS_NODE_LABEL: &str = "Community Events";
 
 pub(super) fn handle_community_disco_info<'a>(
@@ -15,14 +14,11 @@ pub(super) fn handle_community_disco_info<'a>(
     }
 
     // Per-node disco#info — clients ask for `community.<domain>?node=<feed
-    // or stories node URI>` to learn which features each node supports.
+    // or events node URI>` to learn which features each node supports.
     if let Some(node) = req.node {
         let (label, ns_feature) = match node {
             waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED => {
                 (FEED_NODE_LABEL, Feature::social_feed())
-            }
-            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES => {
-                (STORIES_NODE_LABEL, Feature::stories())
             }
             waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS => (EVENTS_NODE_LABEL, Feature::xcal()),
             _ => {

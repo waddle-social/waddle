@@ -19,6 +19,14 @@ pub const CAPS_NODE: &str = "https://waddle.social/caps";
 /// XEP-0084 §4.1 PEP notification filter for peer avatar metadata changes.
 pub const NS_AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
 
+/// XEP-0501 §Discovery: `urn:xmpp:pubsub-social-feed:stories:0+notify`,
+/// interest in contacts' stories.
+pub const NS_STORIES_NOTIFY: &str = "urn:xmpp:pubsub-social-feed:stories:0+notify";
+/// XEP-0470 summary node of the stories node with `+notify`: interest in the
+/// reaction counts on contacts' stories.
+pub const NS_STORY_REACTIONS_SUMMARY_NOTIFY: &str =
+    "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0+notify";
+
 /// XEP-0300 §Discovering support: feature for the SHA-256 algorithm.
 pub const NS_HASH_FUNCTION_SHA256: &str = "urn:xmpp:hash-function-text-names:sha-256";
 
@@ -43,6 +51,16 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // made on one device to our other resources live. Without this the
         // node is published but no resource is ever notified.
         crate::pep::NS_STATUS_PREFERENCE_NOTIFY,
+        // XEP-0501 §Discovery: an entity that implements Pubsub Stories MUST
+        // specify the social-feed and stories features, and an entity that
+        // wants a contact's published Stories adds `+notify` to the stories
+        // node (the XEP-0163 §3 filter). The client reads and publishes
+        // stories (story_reactions.rs and the stories verbs of the bindings); contacts' stories and the XEP-0470 reaction
+        // summaries on them arrive as PEP events.
+        waddle_xmpp_core::xep0472::NS_SOCIAL_FEED,
+        waddle_xmpp_core::xep0501::NS_STORIES,
+        NS_STORIES_NOTIFY,
+        NS_STORY_REACTIONS_SUMMARY_NOTIFY,
         // #1258 implement ⇒ advertise: each of the following is
         // implemented by this client (builders + parse + UI), and its
         // XEP requires/recommends the disco feature on supporting
@@ -345,6 +363,10 @@ mod tests {
                 crate::mds::NS_MDS_NOTIFY,
                 NS_MESSAGE_CORRECT,
                 NS_MESSAGE_RETRACT,
+                NS_STORY_REACTIONS_SUMMARY_NOTIFY,
+                waddle_xmpp_core::xep0472::NS_SOCIAL_FEED,
+                waddle_xmpp_core::xep0501::NS_STORIES,
+                NS_STORIES_NOTIFY,
                 NS_REACTIONS,
                 crate::messaging::namespaces::NS_REFERENCES,
                 crate::xep::reply::NS_REPLY,
@@ -354,7 +376,7 @@ mod tests {
         );
         assert_eq!(
             client_caps_verification_string(),
-            "sd4FBsHJMqLOVGZJCBxuiwlrlMs="
+            "W59ltrn2RSYMo2lk4yTjlWcPMw4="
         );
     }
 

@@ -2084,6 +2084,7 @@ fn promote_to_serving_and_spawn_janitors(
         );
     }
     spawn_sm_expiry_janitor(websocket_state);
+    crate::pubsub_item_expiry::spawn_pubsub_item_expiry_janitor(websocket_state);
     spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);
     spawn_pending_delivery_claim_janitor(websocket_state);
     spawn_notification_outbox_janitor(websocket_state);

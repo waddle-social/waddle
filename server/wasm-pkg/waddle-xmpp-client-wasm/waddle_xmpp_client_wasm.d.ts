@@ -878,14 +878,14 @@ export class WaddleClient {
      */
     status_preference_publish(input: any): Promise<any>;
     /**
-     * Fetch the latest stories from the community stories node on
-     * `community_jid`. Returns ALL items including expired ones —
+     * Fetch the stories on the stories PEP node of `author_jid` (the
+     * user's own JID or a contact's). Returns ALL items including expired ones —
      * the chat filters active vs expired locally so a story fades
      * out as the countdown hits zero without a server roundtrip.
      */
-    stories_items(community_jid: string, max_items?: number | null): Promise<any>;
+    stories_items(author_jid: string, max_items?: number | null): Promise<any>;
     /**
-     * Publish a new story. `media_url` is required by XEP-0501; `body`
+     * Publish a new story on the user's own stories node. `media_url` is required by XEP-0501; `body`
      * is optional text content attached to that media. `expiry_hours`
      * defaults to 24.
      *
@@ -893,7 +893,7 @@ export class WaddleClient {
      * Panics if `expiry_hours` cannot be represented as a Chrono duration, or if the
      * story builder fails to retain the expiry set before publishing.
      */
-    stories_publish(community_jid: string, input: any): Promise<any>;
+    stories_publish(input: any): Promise<any>;
     /**
      * Fetch the latest read-state from the user's own PEP node.
      *

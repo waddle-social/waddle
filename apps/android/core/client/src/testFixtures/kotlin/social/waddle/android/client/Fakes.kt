@@ -896,17 +896,17 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
             id = "post-test", title = post.title, body = post.body, author = null,
             publishedMs = null, link = post.link, source = null,
         )
-    override suspend fun fetchStories(communityJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
-    override suspend fun publishStory(communityJid: String, post: WaddleStoryPost): WaddleStory =
+    override suspend fun fetchStories(authorJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
+    override suspend fun publishStory(post: WaddleStoryPost): WaddleStory =
         WaddleStory(
             id = "story-test", body = post.body, mediaUrl = post.mediaUrl, mediaType = post.mediaType,
             author = null, postedMs = null, expiresMs = null,
         )
     override suspend fun fetchStoryReads(): List<WaddleStoryRead> = emptyList()
     override suspend fun publishStoryReads(reads: List<WaddleStoryRead>) = Unit
-    override suspend fun fetchStoryReactions(communityJid: String, storyId: String): WaddleStoryReactions =
+    override suspend fun fetchStoryReactions(authorJid: String, storyId: String): WaddleStoryReactions =
         WaddleStoryReactions(reactions = emptyList(), mine = emptyList())
-    override suspend fun setStoryReactions(communityJid: String, storyId: String, emojis: List<String>) = Unit
+    override suspend fun setStoryReactions(authorJid: String, storyId: String, emojis: List<String>) = Unit
     override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
     override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
     override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit

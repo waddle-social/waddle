@@ -48,6 +48,9 @@ pub const PUBSUB_NODE_STORIES: &str = "urn:xmpp:pubsub-social-feed:stories:0";
 /// Default story expiry: 24 hours.
 pub const DEFAULT_EXPIRY_HOURS: i64 = 24;
 
+/// `pubsub#item_expire` of a stories node, in seconds: 24 hours.
+pub const STORIES_ITEM_EXPIRE_SECS: u32 = 86_400;
+
 /// MIME type attached to a story Atom enclosure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoryMediaType(String);

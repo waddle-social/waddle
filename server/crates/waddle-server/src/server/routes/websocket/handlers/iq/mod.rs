@@ -142,6 +142,7 @@ mod spaces_publish;
 mod spaces_remote;
 mod spaces_retract;
 mod story_attachments;
+pub(crate) use story_attachments::cleanup_story_attachment_state;
 #[cfg(test)]
 mod test_helpers;
 mod vcard_private;

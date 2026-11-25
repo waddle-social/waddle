@@ -83,8 +83,8 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
-    /// Community pubsub service that hosts the XEP-0472 feed and
-    /// XEP-0501 stories nodes (`community.<domain>`).
+    /// Community pubsub service that hosts the XEP-0472 feed and the
+    /// xCal events nodes (`community.<domain>`).
     #[must_use]
     pub fn community_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)

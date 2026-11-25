@@ -158,7 +158,7 @@ async fn contact_coming_online_with_notify_receives_last_item() {
     let mut p = setup(None).await;
     let f = notify_features();
     go_available_with_caps(&mut p.bob, "bob", &[&f[0], &f[1]]).await;
-    let event = wait_for_event(&mut p.bob, Duration::from_secs(3))
+    let event = wait_for_event(&mut p.bob, NODE, Duration::from_secs(3))
         .await
         .expect("XEP-0163: last published item MUST be sent to a newly-available +notify resource");
     assert!(
@@ -174,7 +174,7 @@ async fn contact_coming_online_with_notify_receives_last_item() {
         .expect("presence update");
     ping_anchor(&mut p.bob, "anchor-1").await;
     assert!(
-        wait_for_event(&mut p.bob, Duration::from_millis(300))
+        wait_for_event(&mut p.bob, NODE, Duration::from_millis(300))
             .await
             .is_none(),
         "subsequent presence must not replay"
@@ -188,7 +188,7 @@ async fn contact_without_notify_receives_no_last_item() {
     go_available_with_caps(&mut p.bob, "bob", &[NS_DISCO_INFO]).await;
     ping_anchor(&mut p.bob, "anchor-1").await;
     assert!(
-        wait_for_event(&mut p.bob, Duration::from_millis(500))
+        wait_for_event(&mut p.bob, NODE, Duration::from_millis(500))
             .await
             .is_none(),
         "resource without +notify MUST NOT receive the last item"
@@ -203,7 +203,7 @@ async fn node_with_send_last_published_item_never_is_not_replayed() {
     go_available_with_caps(&mut p.bob, "bob", &[&f[0], &f[1]]).await;
     ping_anchor(&mut p.bob, "anchor-1").await;
     assert!(
-        wait_for_event(&mut p.bob, Duration::from_millis(500))
+        wait_for_event(&mut p.bob, NODE, Duration::from_millis(500))
             .await
             .is_none(),
         "send_last_published_item=never MUST NOT replay"
@@ -225,7 +225,7 @@ async fn owner_second_resource_receives_own_last_item() {
     .expect("alice second resource");
     let f = notify_features();
     go_available_with_caps(&mut alice_b, "alice-r2", &[&f[0], &f[1]]).await;
-    let event = wait_for_event(&mut alice_b, Duration::from_secs(3))
+    let event = wait_for_event(&mut alice_b, NODE, Duration::from_secs(3))
         .await
         .expect("account owner's newly-available resource MUST receive the last item");
     assert!(event.contains(r#"id='item-1'"#), "{event}");

@@ -605,3 +605,52 @@ async fn event_planning_conditional_retraction_preserves_other_publishers_items(
         .expect("items")
         .is_empty());
 }
+
+#[tokio::test]
+async fn purge_expired_items_removes_only_items_past_the_nodes_item_expire() {
+    let storage = InMemoryPubSubStorage::new();
+    let owner: BareJid = "user@example.com".parse().expect("valid jid");
+    let mut config = NodeConfig::pep_stories();
+    config.item_expire = Some(60);
+    storage
+        .get_or_create_node(&owner, "expiring")
+        .await
+        .expect("create");
+    storage
+        .update_node_config(&owner, "expiring", &config)
+        .await
+        .expect("configure");
+    storage
+        .get_or_create_node(&owner, "forever")
+        .await
+        .expect("create");
+    for node in ["expiring", "forever"] {
+        let item = PubSubItem {
+            id: Some("one".to_owned()),
+            publisher: None,
+            payload: None,
+        };
+        storage
+            .publish_item(&owner, node, &item, None, false)
+            .await
+            .expect("publish");
+    }
+
+    let early = chrono::Utc::now() + chrono::Duration::seconds(30);
+    assert!(storage
+        .purge_expired_items(early)
+        .await
+        .expect("sweep")
+        .is_empty());
+
+    let late = chrono::Utc::now() + chrono::Duration::seconds(120);
+    let purged = storage.purge_expired_items(late).await.expect("sweep");
+    assert_eq!(purged.len(), 1);
+    assert_eq!(purged[0].node_name, "expiring");
+    assert_eq!(purged[0].item_id, "one");
+    assert!(storage
+        .purge_expired_items(late)
+        .await
+        .expect("second sweep")
+        .is_empty());
+}

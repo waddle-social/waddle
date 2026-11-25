@@ -674,6 +674,22 @@ fn parse_node_config_fields(form: &Element, reject_unknown: bool) -> CoreResult<
                     })?
                 });
             }
+            "pubsub#item_expire" => {
+                // XEP-0060 §16.4.4 + the integer-or-max datatype: seconds,
+                // or `max` for no limit other than a server imposed one.
+                config.item_expire = Some(if value.eq_ignore_ascii_case("max") {
+                    None
+                } else {
+                    match value.parse::<u32>() {
+                        Ok(secs) if secs > 0 => Some(secs),
+                        _ => {
+                            return Err(CoreError::bad_request(Some(format!(
+                                "invalid pubsub#item_expire: {value}"
+                            ))))
+                        }
+                    }
+                });
+            }
             "pubsub#persist_items" => {
                 config.persist_items = Some(match value.as_str() {
                     "0" | "false" => false,

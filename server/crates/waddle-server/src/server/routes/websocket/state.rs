@@ -1395,7 +1395,7 @@ pub struct XmppServiceDomains {
     pub extensions: String,
     pub push: String,
     /// Hosts community-wide pubsub features that are NOT space-bookmark
-    /// nodes (XEP-0472 social feed, XEP-0501 stories). Kept distinct
+    /// nodes (XEP-0472 social feed, xCal events). Kept distinct
     /// from `spaces` so the spaces disco#items enumeration only
     /// surfaces actual community spaces.
     pub community: String,

@@ -1,8 +1,9 @@
 import Foundation
 import WaddleKit
 
-/// The community feed (XEP-0472) and stories (XEP-0501) on
-/// `community.<domain>`, and the account's private "seen" state.
+/// The community feed (XEP-0472) on `community.<domain>`, the stories
+/// (XEP-0501) on each account's own PEP node, and the account's private
+/// "seen" state.
 extension FFIXmppPort {
     func communityService() throws -> String {
         guard let service = account.flatMap({ BareJID(localpart: nil, domain: "community.\($0.domain)") }) else {
@@ -27,16 +28,35 @@ extension FFIXmppPort {
         })
     }
 
+    /// The account's stories and those of its contacts: each account hosts
+    /// its own stories node (XEP-0501). A contact whose node cannot be read
+    /// (no presence relationship, nothing posted) is skipped; a failure on
+    /// the account's own node is reported.
     func fetchStories(max: Int?) async throws -> [Story] {
-        let service = try communityService()
-        let stories = try await mappingPortErrors {
-            try await client.fetchStories(communityJid: service, maxItems: max.flatMap(UInt32.init(exactly:)))
+        guard let account else { throw PortError.invalidRequest }
+        let contacts = ((try? await mappingPortErrors { try await client.fetchRosterContacts() }) ?? [])
+            .compactMap { FFIInbound.bareJID($0.jid) }
+        let authors = [account] + contacts.filter { $0 != account }
+        let limit = max.flatMap(UInt32.init(exactly:))
+        var stories: [Story] = []
+        var hosts: [String: BareJID] = [:]
+        for author in authors {
+            do {
+                let authored = try await mappingPortErrors {
+                    try await client.fetchStories(authorJid: author.description, maxItems: limit)
+                }.compactMap(FFIInbound.story)
+                for story in authored { hosts[story.id] = author }
+                stories += authored
+            } catch {
+                if author == account { throw error }
+            }
         }
-        return stories.compactMap(FFIInbound.story)
+        storyHosts.withLock { $0 = hosts }
+        return stories
     }
 
     func publishStory(_ draft: StoryDraft) async throws -> Story {
-        let service = try communityService()
+        guard let account else { throw PortError.invalidRequest }
         let post = WaddleStoryPost(
             body: draft.body,
             mediaUrl: draft.media.absoluteString,
@@ -44,10 +64,18 @@ extension FFIXmppPort {
             expiryHours: nil
         )
         let published = try await mappingPortErrors {
-            try await client.publishStory(communityJid: service, post: post)
+            try await client.publishStory(post: post)
         }
         guard let story = FFIInbound.story(published) else { throw PortError.failed }
+        storyHosts.withLock { $0[story.id] = account }
         return story
+    }
+
+    /// The author hosting `storyID`'s reactions; a story the port has not
+    /// listed or posted has no known host.
+    private func storyHost(_ storyID: String) throws -> String {
+        guard let host = storyHosts.withLock({ $0[storyID] }) else { throw PortError.invalidRequest }
+        return host.description
     }
 
     func fetchStoryReads() async throws -> [String: Date] {
@@ -66,16 +94,16 @@ extension FFIXmppPort {
     }
 
     func fetchStoryReactions(of storyID: String) async throws -> StoryReactions {
-        let service = try communityService()
+        let host = try storyHost(storyID)
         return FFIInbound.storyReactions(try await mappingPortErrors {
-            try await client.fetchStoryReactions(communityJid: service, storyId: storyID)
+            try await client.fetchStoryReactions(authorJid: host, storyId: storyID)
         })
     }
 
     func setStoryReactions(_ emojis: [String], on storyID: String) async throws {
-        let service = try communityService()
+        let host = try storyHost(storyID)
         try await mappingPortErrors {
-            try await client.setStoryReactions(communityJid: service, storyId: storyID, emojis: emojis)
+            try await client.setStoryReactions(authorJid: host, storyId: storyID, emojis: emojis)
         }
     }
 }

@@ -1,8 +1,10 @@
 //! XEP-0470 Pubsub Attachments on XEP-0501 stories.
 //!
-//! Verifies the pull-based story reaction spine: stories and story
-//! reaction attachments are member-postable, while attachment items remain
-//! self-owned.
+//! Verifies the pull-based story reaction spine on the author's PEP
+//! service (XEP-0470 hosts attachments beside the item they annotate, and
+//! XEP-0501 stories live on the author's XEP-0163 node): presence
+//! subscribers of the author may attach to a story, while attachment items
+//! remain self-owned.
 
 use waddle_ws_test_support as ws_common;
 
@@ -10,7 +12,7 @@ use tokio::sync::Mutex;
 use ws_common::{TestServer, WsXmppClient};
 
 const DOMAIN: &str = "localhost";
-const COMMUNITY_JID: &str = "community.localhost";
+const HOST_JID: &str = "admin@localhost";
 const STORIES_NODE: &str = "urn:xmpp:pubsub-social-feed:stories:0";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
@@ -56,7 +58,7 @@ async fn iq_get_to(client: &mut WsXmppClient, id: &str, to: &str, body: &str) ->
 
 fn story_attachment_node(story_id: &str) -> String {
     format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id}"
+        "{NS_ATTACHMENTS}/xmpp:admin@localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id}"
     )
 }
 
@@ -79,6 +81,48 @@ fn story_publish_body(item_id: &str, body: &str, author: &str) -> String {
           </publish>
         </pubsub>"#
     )
+}
+
+/// Make `follower` a presence subscriber of `author` (RFC 6121 subscribe
+/// plus approval), the relationship XEP-0501 stories are gated on.
+async fn befriend(author: &mut WsXmppClient, follower: &mut WsXmppClient, author_jid: &str) {
+    for (client, id) in [
+        (&mut *author, "roster-author"),
+        (&mut *follower, "roster-follower"),
+    ] {
+        client
+            .send(&format!(
+                r#"<iq xmlns="jabber:client" type="get" id="{id}"><query xmlns="jabber:iq:roster"/></iq>"#
+            ))
+            .await
+            .expect("roster get");
+        client
+            .recv_matching(|frame| frame_has_iq_id(frame, id))
+            .await
+            .expect("roster result");
+    }
+    author
+        .send(r#"<presence xmlns="jabber:client"/>"#)
+        .await
+        .expect("author presence");
+    follower
+        .send(&format!(
+            r#"<presence xmlns="jabber:client" type="subscribe" to="{author_jid}"/>"#
+        ))
+        .await
+        .expect("subscribe");
+    author
+        .recv_matching(|frame| frame.contains("type='subscribe'"))
+        .await
+        .expect("author receives subscribe");
+    author
+        .send(r#"<presence xmlns="jabber:client" type="subscribed" to="alice@localhost"/>"#)
+        .await
+        .expect("approve");
+    follower
+        .recv_matching(|frame| frame.contains("type='subscribed'"))
+        .await
+        .expect("follower receives approval");
 }
 
 async fn wait_for_event_message(
@@ -131,12 +175,13 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     )
     .await
     .expect("alice connect");
+    befriend(&mut admin, &mut alice, HOST_JID).await;
 
     let story_id = format!("story-{}", uuid::Uuid::new_v4());
     let owner_story = iq_set_to(
         &mut admin,
         "owner-story",
-        COMMUNITY_JID,
+        HOST_JID,
         &story_publish_body(&story_id, "story with reactions", "admin@localhost"),
     )
     .await;
@@ -145,10 +190,33 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         "owner story publish should succeed: {owner_story}"
     );
 
+    let attachment_node = story_attachment_node(&story_id);
+    let noticed_publish = iq_set_to(
+        &mut admin,
+        "noticed-publish",
+        HOST_JID,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB}">
+              <publish node="{attachment_node}">
+                <item id="admin@localhost">
+                  <attachments xmlns="{NS_ATTACHMENTS}">
+                    <noticed/>
+                  </attachments>
+                </item>
+              </publish>
+            </pubsub>"#
+        ),
+    )
+    .await;
+    assert!(
+        noticed_publish.contains("type='result'"),
+        "noticed attachment publish should succeed: {noticed_publish}"
+    );
+
     let subscribe_summary = iq_set_to(
         &mut alice,
         "summary-subscribe",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORY_SUMMARY_NODE}" jid="alice@localhost"/></pubsub>"#
         ),
@@ -156,30 +224,21 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     .await;
     assert!(
         subscribe_summary.contains("type='result'"),
-        "summary node subscription should succeed for a community member: {subscribe_summary}"
+        "summary node subscription should succeed for a presence subscriber: {subscribe_summary}"
     );
 
-    let member_story = iq_set_to(
+    wait_for_event_message(
         &mut alice,
-        "member-story",
-        COMMUNITY_JID,
-        &story_publish_body(
-            &format!("member-{story_id}"),
-            "member story",
-            "spoofed@localhost",
-        ),
+        STORY_SUMMARY_NODE,
+        std::time::Duration::from_secs(2),
     )
-    .await;
-    assert!(
-        member_story.contains("type='result'"),
-        "member story publish should now succeed: {member_story}"
-    );
+    .await
+    .expect("the last summary item is replayed on subscribing");
 
-    let attachment_node = story_attachment_node(&story_id);
     let reaction_publish = iq_set_to(
         &mut alice,
         "reaction-publish",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -219,7 +278,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let summary = iq_get_to(
         &mut alice,
         "reaction-summary",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
         ),
@@ -234,32 +293,10 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
         "reaction summary should contain per-emoji counts for the story: {summary}"
     );
 
-    let noticed_publish = iq_set_to(
-        &mut admin,
-        "noticed-publish",
-        COMMUNITY_JID,
-        &format!(
-            r#"<pubsub xmlns="{NS_PUBSUB}">
-              <publish node="{attachment_node}">
-                <item id="admin@localhost">
-                  <attachments xmlns="{NS_ATTACHMENTS}">
-                    <noticed/>
-                  </attachments>
-                </item>
-              </publish>
-            </pubsub>"#
-        ),
-    )
-    .await;
-    assert!(
-        noticed_publish.contains("type='result'"),
-        "noticed attachment publish should succeed: {noticed_publish}"
-    );
-
     let noticed_summary = iq_get_to(
         &mut alice,
         "noticed-summary",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
         ),
@@ -275,7 +312,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let direct_summary_publish = iq_set_to(
         &mut alice,
         "direct-summary-publish",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{STORY_SUMMARY_NODE}">
@@ -325,7 +362,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let missing_story_publish = iq_set_to(
         &mut alice,
         "reaction-missing-story",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{missing_node}">
@@ -346,12 +383,12 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     );
 
     let crafted_node = format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0evil;item={story_id}"
+        "{NS_ATTACHMENTS}/xmpp:admin@localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0evil;item={story_id}"
     );
     let crafted_publish = iq_set_to(
         &mut alice,
         "reaction-crafted-node",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{crafted_node}">
@@ -376,7 +413,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let wrong_host_publish = iq_set_to(
         &mut alice,
         "reaction-wrong-host",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{wrong_host_node}">
@@ -396,12 +433,12 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     );
 
     let extra_param_node = format!(
-        "{NS_ATTACHMENTS}/xmpp:community.localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id};foo=bar"
+        "{NS_ATTACHMENTS}/xmpp:admin@localhost?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item={story_id};foo=bar"
     );
     let extra_param_publish = iq_set_to(
         &mut alice,
         "reaction-extra-param",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{extra_param_node}">
@@ -424,7 +461,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let spoof_publish = iq_set_to(
         &mut alice,
         "reaction-spoof",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -446,7 +483,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let invalid_jid_publish = iq_set_to(
         &mut alice,
         "reaction-invalid-jid",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -468,7 +505,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let bad_payload = iq_set_to(
         &mut alice,
         "reaction-bad-payload",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -488,7 +525,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let readback = iq_get_to(
         &mut alice,
         "reaction-items",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{attachment_node}"/></pubsub>"#),
     )
     .await;
@@ -503,7 +540,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let invalid_jid_retract = iq_set_to(
         &mut alice,
         "reaction-retract-invalid-jid",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{attachment_node}"><item id="not a jid"/></retract></pubsub>"#
         ),
@@ -517,7 +554,7 @@ async fn member_can_publish_read_and_retract_story_reaction_attachment() {
     let retract = iq_set_to(
         &mut alice,
         "reaction-retract",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{attachment_node}"><item id="alice@localhost"/></retract></pubsub>"#
         ),
@@ -572,12 +609,13 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     )
     .await
     .expect("alice connect");
+    befriend(&mut admin, &mut alice, HOST_JID).await;
 
     let story_id = format!("story-{}", uuid::Uuid::new_v4());
     let owner_story = iq_set_to(
         &mut admin,
         "cleanup-story",
-        COMMUNITY_JID,
+        HOST_JID,
         &story_publish_body(&story_id, "story that will be removed", "admin@localhost"),
     )
     .await;
@@ -590,7 +628,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let reaction_publish = iq_set_to(
         &mut alice,
         "cleanup-reaction",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -612,7 +650,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let summary_before_retract = iq_get_to(
         &mut alice,
         "cleanup-summary-before",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
         ),
@@ -627,7 +665,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let subscribe_stories = iq_set_to(
         &mut alice,
         "cleanup-stories-subscribe",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORIES_NODE}" jid="alice@localhost"/></pubsub>"#
         ),
@@ -635,13 +673,13 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     .await;
     assert!(
         subscribe_stories.contains("type='result'"),
-        "stories node subscription should succeed for a community member: {subscribe_stories}"
+        "stories node subscription should succeed for a presence subscriber: {subscribe_stories}"
     );
 
     let subscribe_summaries = iq_set_to(
         &mut alice,
         "cleanup-summaries-subscribe",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORY_SUMMARY_NODE}" jid="alice@localhost"/></pubsub>"#
         ),
@@ -649,13 +687,13 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     .await;
     assert!(
         subscribe_summaries.contains("type='result'"),
-        "summary node subscription should succeed for a community member: {subscribe_summaries}"
+        "summary node subscription should succeed for a presence subscriber: {subscribe_summaries}"
     );
 
     let story_retract = iq_set_to(
         &mut admin,
         "cleanup-story-retract",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{STORIES_NODE}"><item id="{story_id}"/></retract></pubsub>"#
         ),
@@ -691,7 +729,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let story_after_retract = iq_get_to(
         &mut alice,
         "cleanup-story-after",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORIES_NODE}"><item id="{story_id}"/></items></pubsub>"#
         ),
@@ -706,7 +744,7 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let summary_after_retract = iq_get_to(
         &mut alice,
         "cleanup-summary-after",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{STORY_SUMMARY_NODE}"><item id="{story_id}"/></items></pubsub>"#
         ),
@@ -722,22 +760,22 @@ async fn retracting_story_removes_attachment_node_and_summary_item() {
     let attachment_after_retract = iq_get_to(
         &mut alice,
         "cleanup-attachment-after",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="{attachment_node}"/></pubsub>"#),
     )
     .await;
     assert!(
-        attachment_after_retract.contains("type='result'")
+        attachment_after_retract.contains("type='error'")
+            && attachment_after_retract.contains("item-not-found")
             && !attachment_after_retract.contains("alice@localhost")
-            && !attachment_after_retract.contains("<attachments")
             && !attachment_after_retract.contains("<reaction"),
-        "attachment reads should no longer surface orphaned reaction items: {attachment_after_retract}"
+        "the attachment node is deleted with its story, so reads fail with item-not-found: {attachment_after_retract}"
     );
 
     let reaction_after_retract = iq_set_to(
         &mut alice,
         "cleanup-reaction-after",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{attachment_node}">
@@ -785,12 +823,13 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
     )
     .await
     .expect("alice connect");
+    befriend(&mut admin, &mut alice, HOST_JID).await;
 
     let seeded_story_id = format!("story-{}", uuid::Uuid::new_v4());
     let seeded_story = iq_set_to(
         &mut admin,
         "no-summary-seed-story",
-        COMMUNITY_JID,
+        HOST_JID,
         &story_publish_body(
             &seeded_story_id,
             "story that seeds summary node",
@@ -806,7 +845,7 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
     let seed_reaction = iq_set_to(
         &mut alice,
         "no-summary-seed-reaction",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}">
               <publish node="{seeded_attachment_node}">
@@ -828,7 +867,7 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
     let subscribe_summaries = iq_set_to(
         &mut alice,
         "no-summary-subscribe",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><subscribe node="{STORY_SUMMARY_NODE}" jid="alice@localhost"/></pubsub>"#
         ),
@@ -856,7 +895,7 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
     let owner_story = iq_set_to(
         &mut admin,
         "no-summary-story",
-        COMMUNITY_JID,
+        HOST_JID,
         &story_publish_body(&story_id, "story with no reactions", "admin@localhost"),
     )
     .await;
@@ -868,7 +907,7 @@ async fn retracting_story_without_summary_item_does_not_fan_out_summary_retract(
     let story_retract = iq_set_to(
         &mut admin,
         "no-summary-story-retract",
-        COMMUNITY_JID,
+        HOST_JID,
         &format!(
             r#"<pubsub xmlns="{NS_PUBSUB}"><retract node="{STORIES_NODE}"><item id="{story_id}"/></retract></pubsub>"#
         ),
