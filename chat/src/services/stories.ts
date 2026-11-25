@@ -495,7 +495,7 @@ function uniqueAuthors(authors: readonly string[]): string[] {
 }
 
 function authorKey(authors: readonly string[]): string {
-  return uniqueAuthors(authors).map((author) => author.toLowerCase()).sort().join("\n");
+  return uniqueAuthors(authors).map((author) => author.toLowerCase()).sort((a, b) => a.localeCompare(b)).join("\n");
 }
 
 function optimisticSummary(
