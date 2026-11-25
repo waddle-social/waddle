@@ -2121,3 +2121,134 @@ async fn deleting_a_space_tells_its_local_subscribers_of_each_room_it_took_out()
     let here = federated.client_settle(&mut walter).await;
     assert_eq!(retracted(&here, DEV), [lounge], "{here:?}");
 }
+
+/// Whether `stanza` is a configuration change notification of `node`
+/// (XEP-0060 §8.2.4) sent by the Spaces service to `to`.
+fn is_configuration(stanza: &Element, node: &str, to: &str) -> bool {
+    stanza.name() == "message"
+        && stanza.attr("from") == Some(SPACES)
+        && stanza.attr("to") == Some(to)
+        && stanza
+            .children()
+            .filter(|child| child.is("event", s2s_spaces_support::NS_PUBSUB_EVENT))
+            .flat_map(Element::children)
+            .any(|child| child.name() == "configuration" && child.attr("node") == Some(node))
+}
+
+/// The subscription notifications of `node` among `received`, as pairs of
+/// the subscriber and its state.
+fn subscription_notices(received: &[Element], node: &str) -> Vec<(String, String)> {
+    received
+        .iter()
+        .filter(|stanza| stanza.name() == "message" && stanza.attr("from") == Some(SPACES))
+        .flat_map(Element::children)
+        .filter(|child| child.is("event", s2s_spaces_support::NS_PUBSUB_EVENT))
+        .flat_map(Element::children)
+        .filter(|child| child.name() == "subscription" && child.attr("node") == Some(node))
+        .filter_map(|child| {
+            Some((
+                child.attr("jid")?.to_owned(),
+                child.attr("subscription")?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// XEP-0503 `pubsub#notify_config`: a subscriber at another server is told
+/// of a change of the Space's configuration (XEP-0060 §8.2.4), as one here
+/// is, and of nothing when the submission changes nothing. A subscriber
+/// that the Space no longer lets read it is told nothing.
+#[tokio::test]
+async fn a_remote_subscriber_is_notified_of_a_configuration_change() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    affiliate(&federated, DEV, VICTOR, Affiliation::Owner).await;
+    let subscribed = subscribe(&federated, "cfg-sub", BOB_PHONE, BOB).await;
+    assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
+
+    let changed = round_trip(
+        &mut victor,
+        set(
+            "cfg-set",
+            SPACES,
+            configure(DEV, vec![field("pubsub#max_items", "200")]),
+        ),
+    )
+    .await;
+    assert!(is_result(&changed), "{changed:?}");
+    let notice = federated
+        .peer_receives_matching(|stanza| is_configuration(stanza, DEV, BOB))
+        .await;
+    assert_eq!(notice.attr("type"), Some("headline"));
+    let form = descendant(&notice, "x").expect("the configuration form");
+    assert_eq!(form.attr("type"), Some("result"), "{notice:?}");
+    assert_eq!(
+        form_value(form, "pubsub#max_items").as_deref(),
+        Some("200"),
+        "{notice:?}"
+    );
+
+    let received = settled(&federated, "cfg-barrier-1").await;
+    let told = received
+        .iter()
+        .filter(|stanza| is_configuration(stanza, DEV, BOB))
+        .count();
+    assert_eq!(told, 1, "one notification for one change: {received:?}");
+
+    // A submission that changes nothing is no change.
+    let same = round_trip(
+        &mut victor,
+        set(
+            "cfg-same",
+            SPACES,
+            configure(DEV, vec![field("pubsub#max_items", "200")]),
+        ),
+    )
+    .await;
+    assert!(is_result(&same), "{same:?}");
+    let received = settled(&federated, "cfg-barrier-2").await;
+    let told = received
+        .iter()
+        .filter(|stanza| is_configuration(stanza, DEV, BOB))
+        .count();
+    assert_eq!(told, 1, "an unchanged form is not told: {received:?}");
+}
+
+/// XEP-0503 `pubsub#notify_sub`: the Space's owners here are told when an
+/// account at another server subscribes and when it leaves (XEP-0060
+/// §8.9.2), with the subscription's id.
+#[tokio::test]
+async fn a_space_owner_is_told_of_a_remote_accounts_subscription() {
+    let pki = Pki::new();
+    let federated = hosting(&pki).await;
+    let mut victor = space_with_owner(&federated).await;
+    affiliate(&federated, DEV, VICTOR, Affiliation::Owner).await;
+
+    let subscribed = subscribe(&federated, "notify-sub", BOB_PHONE, BOB).await;
+    assert_eq!(subscribed.attr("type"), Some("result"), "{subscribed:?}");
+    let here = federated.client_settle(&mut victor).await;
+    assert_eq!(
+        subscription_notices(&here, DEV),
+        [(BOB.to_owned(), "subscribed".to_owned())],
+        "{here:?}"
+    );
+
+    let left = ask(
+        &federated,
+        request(
+            BOB_PHONE,
+            "notify-unsub",
+            true,
+            subscription("unsubscribe", DEV, BOB),
+        ),
+    )
+    .await;
+    assert_eq!(left.attr("type"), Some("result"), "{left:?}");
+    let here = federated.client_settle(&mut victor).await;
+    assert_eq!(
+        subscription_notices(&here, DEV),
+        [(BOB.to_owned(), "none".to_owned())],
+        "{here:?}"
+    );
+}
