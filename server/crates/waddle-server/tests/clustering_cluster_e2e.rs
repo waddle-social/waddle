@@ -70,9 +70,9 @@ use base64::Engine;
 use cluster_support::{
     activate_mailbox_epoch, cluster_e2e_serial_lock, epoch_zero_schema_url, fanout_message,
     free_tcp_port, generate_pool, join_fanout_room, muc_join_presence, open_control_db,
-    readiness_status, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server,
-    spawn_cluster_server_with_envs, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
-    CLUSTER_PEER_USERNAME,
+    readiness_status, reset_and_enroll, reset_node_lease_tables, spawn_cluster_node,
+    spawn_cluster_server, spawn_cluster_server_with_envs, wait_for_readiness, ClusterNode,
+    EnrolledPool, NodeSelectors, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
@@ -3506,14 +3506,28 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         .send(&muji_active_presence(&room, "joiner-b"))
         .await
         .expect("client B advertises an active call");
-    client_a
-        .recv_matching(|frame| {
-            frame.contains("<presence")
-                && frame.contains(&format!("{room}/joiner-b"))
-                && frame.contains("<muji")
-        })
-        .await
-        .expect("client A sees client B's active call presence");
+    // Frames A receives are kept, so a failure shows what arrived instead.
+    let mut seen_by_a = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let saw_active_call = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match client_a.recv_timeout(remaining).await {
+            Ok(frame) => {
+                let matched = frame.contains("<presence")
+                    && frame.contains(&format!("{room}/joiner-b"))
+                    && frame.contains("<muji");
+                seen_by_a.push(frame);
+                if matched {
+                    break true;
+                }
+            }
+            Err(_) => break false,
+        }
+    };
+    assert!(
+        saw_active_call,
+        "client A sees client B's active call presence; frames received: {seen_by_a:#?}"
+    );
     client_b
         .send(&String::from(&muji_initiate_iq(&room, "cross-node-2")))
         .await
@@ -3605,10 +3619,35 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
 
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, _node_a, _peer_a) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, _node_b, _peer_b) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    // The harness's server-owner accounts (`admin`, `cluster-peer`) hold the
+    // owner affiliation in every room, and XEP-0045 section 8.4 forbids
+    // revoking an owner's voice by anyone. The visitor is therefore a plain
+    // account, seeded on both nodes under one password.
+    const VISITOR_USERNAME: &str = "voice-visitor";
+    const VISITOR_PASSWORD: &str = "voice-visitor-password";
+    let accounts = [(VISITOR_USERNAME, VISITOR_PASSWORD)];
+    let ports_a = [port_b];
+    let ports_b = [port_a];
+    let (server_a, _node_a, _peer_a) = spawn_cluster_node(ClusterNode {
+        postgres_url: &postgres_url,
+        pool_env: &pool.pool_env,
+        swarm_port: port_a,
+        bootstrap_ports: &ports_a,
+        selectors: NodeSelectors::DURABLE_COORDINATOR,
+        accounts: &accounts,
+        extra_envs: &[],
+    })
+    .await;
+    let (server_b, _node_b, _peer_b) = spawn_cluster_node(ClusterNode {
+        postgres_url: &postgres_url,
+        pool_env: &pool.pool_env,
+        swarm_port: port_b,
+        bootstrap_ports: &ports_b,
+        selectors: NodeSelectors::DURABLE_COORDINATOR,
+        accounts: &accounts,
+        extra_envs: &[],
+    })
+    .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
 
@@ -3655,7 +3694,15 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         }
     };
     let mut moderator = connect_b("voice-mod").await;
-    let mut visitor = connect_b("voice-visitor").await;
+    let mut visitor = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        VISITOR_USERNAME,
+        VISITOR_PASSWORD,
+        &format!("voice-visitor-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("the visitor account connects to node B");
     for (client, nick) in [(&mut moderator, "mod-b"), (&mut visitor, "visitor-b")] {
         client
             .send(&format!(

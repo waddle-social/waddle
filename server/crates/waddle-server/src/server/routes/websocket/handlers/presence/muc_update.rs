@@ -91,6 +91,14 @@ pub(crate) fn is_muc_join_presence(presence: &Presence) -> bool {
             .any(|elem| elem.name() == "x" && elem.ns() == NS_MUC)
 }
 
+/// A presence that can only be a room entry: it carries the XEP-0045 join
+/// payload and no XEP-0272 `<muji/>`. Muji presence is in-room presence that
+/// clients stamp with the same `<x xmlns='.../muc'/>`, so a `<muji/>` child
+/// marks an occupant's update, never a fresh join.
+pub(super) fn is_plain_muc_join_presence(presence: &Presence) -> bool {
+    is_muc_join_presence(presence) && extract_muji(presence).is_none()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ReflectedMujiEntry<'a> {
     owner_jid: &'a FullJid,
@@ -200,7 +208,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     // presence without this MUC join payload. Check this BEFORE asking
     // the room registry for the room actor so every normal join avoids
     // an unnecessary registry round-trip.
-    if muji.is_none() && is_muc_join_presence(incoming) {
+    if is_plain_muc_join_presence(incoming) {
         return None;
     }
 
@@ -695,6 +703,21 @@ mod tests {
             .push(Element::builder("x", NS_MUC).build());
 
         assert!(is_muc_join_presence(&presence));
+    }
+
+    #[test]
+    fn muji_presence_with_the_join_payload_is_an_update_not_a_plain_join() {
+        let mut presence = ParsedPresence::new(PresenceType::None);
+        presence
+            .payloads
+            .push(Element::builder("x", NS_MUC).build());
+        assert!(is_plain_muc_join_presence(&presence));
+
+        presence
+            .payloads
+            .push(Element::builder("muji", NS_MUJI).build());
+        assert!(is_muc_join_presence(&presence));
+        assert!(!is_plain_muc_join_presence(&presence));
     }
 
     #[test]
