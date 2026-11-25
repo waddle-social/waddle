@@ -872,15 +872,35 @@ pub(super) async fn handle_pubsub_admin_request(
                         if already_subscribed {
                             continue;
                         }
-                        if let Err(error) = state
+                        match state
                             .deps
                             .protocol
                             .pubsub_storage
                             .subscribe(target_jid, &node, &subscriber)
                             .await
                         {
-                            warn!("PubSub owner subscription add failed: {error}");
-                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
+                            Ok(added) => {
+                                // XEP-0503 `pubsub#notify_sub`: the owners are
+                                // told of a subscription the owner added.
+                                if is_spaces_service {
+                                    pubsub_fanout::fan_out_subscription_change(
+                                        state,
+                                        target_jid,
+                                        &node,
+                                        &subscriber,
+                                        SubscriptionState::Subscribed,
+                                        Some(&added.subid),
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(error) => {
+                                warn!("PubSub owner subscription add failed: {error}");
+                                return vec![build_pubsub_error(
+                                    iq,
+                                    PubSubError::InternalServerError,
+                                )];
+                            }
                         }
                     }
                     SubscriptionState::None => {
@@ -909,7 +929,19 @@ pub(super) async fn handle_pubsub_admin_request(
                                 .unsubscribe(target_jid, &node, &subscriber, Some(typed_subid))
                                 .await
                             {
-                                Ok(true) => {}
+                                Ok(true) => {
+                                    if is_spaces_service {
+                                        pubsub_fanout::fan_out_subscription_change(
+                                            state,
+                                            target_jid,
+                                            &node,
+                                            &subscriber,
+                                            SubscriptionState::None,
+                                            Some(typed_subid),
+                                        )
+                                        .await;
+                                    }
+                                }
                                 Ok(false) => {
                                     return vec![build_pubsub_error(
                                         iq,
@@ -965,6 +997,17 @@ pub(super) async fn handle_pubsub_admin_request(
                                     iq,
                                     PubSubError::InternalServerError,
                                 )];
+                            }
+                            if is_spaces_service {
+                                pubsub_fanout::fan_out_subscription_change(
+                                    state,
+                                    target_jid,
+                                    &node,
+                                    &subscriber,
+                                    SubscriptionState::None,
+                                    Some(&matching_subid),
+                                )
+                                .await;
                             }
                         }
                     }

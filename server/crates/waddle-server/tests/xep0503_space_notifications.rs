@@ -289,3 +289,58 @@ async fn space_subscribers_hear_nothing_when_a_submission_changes_nothing() {
     let _ = alice.close().await;
     let _ = admin.close().await;
 }
+
+fn owner_subscriptions(node: &str, jid: &str, state: &str) -> String {
+    format!(
+        r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><subscriptions node="{node}"><subscription jid="{jid}" subscription="{state}"/></subscriptions></pubsub>"#
+    )
+}
+
+/// XEP-0060 §8.8.2 and §8.9.2: a subscription the owner adds or removes is
+/// a subscription change like any other, and the owners are told of it.
+#[tokio::test]
+async fn space_owner_is_told_when_an_owner_adds_or_removes_a_subscription() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("alice", &alice_password)]);
+    let password = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, "admin", &password, "owner").await;
+    let alice_jid = format!("alice@{DOMAIN}");
+
+    let added = iq(
+        &mut admin,
+        "set",
+        "owner-add",
+        &owner_subscriptions("general", &alice_jid, "subscribed"),
+    )
+    .await;
+    assert!(is_result(&added), "owner adds a subscription: {added}");
+    let notice = event(&mut admin, "subscription")
+        .await
+        .expect("the owner is told of the subscription it added");
+    let subscription = payload(&notice, "subscription");
+    assert_eq!(subscription.attr("node"), Some("general"));
+    assert_eq!(subscription.attr("jid"), Some(alice_jid.as_str()));
+    assert_eq!(subscription.attr("subscription"), Some("subscribed"));
+    assert!(subscription.attr("subid").is_some());
+
+    let removed = iq(
+        &mut admin,
+        "set",
+        "owner-remove",
+        &owner_subscriptions("general", &alice_jid, "none"),
+    )
+    .await;
+    assert!(
+        is_result(&removed),
+        "owner removes the subscription: {removed}"
+    );
+    let notice = event(&mut admin, "subscription")
+        .await
+        .expect("the owner is told of the subscription it removed");
+    let subscription = payload(&notice, "subscription");
+    assert_eq!(subscription.attr("jid"), Some(alice_jid.as_str()));
+    assert_eq!(subscription.attr("subscription"), Some("none"));
+    assert!(subscription.attr("subid").is_some());
+    let _ = admin.close().await;
+}

@@ -1560,6 +1560,17 @@ impl Asked<'_> {
                 Err(_) => self.refuse(internal()),
             };
         }
+        // XEP-0503 `pubsub#notify_sub`: the Space's owners are told of the
+        // subscription, as they are of one a local account makes.
+        super::handlers::pubsub_fanout::fan_out_subscription_change(
+            self.state,
+            &self.service,
+            node,
+            &subscriber,
+            waddle_xmpp::pubsub::SubscriptionState::Subscribed,
+            Some(&subscribed.subid),
+        )
+        .await;
         answer(build_pubsub_subscribe_result(
             self.iq,
             node,
@@ -1657,7 +1668,18 @@ impl Asked<'_> {
             return refused;
         }
         match (removed, forgotten) {
-            (Ok(true), Ok(())) => answer(build_pubsub_success(self.iq)),
+            (Ok(true), Ok(())) => {
+                super::handlers::pubsub_fanout::fan_out_subscription_change(
+                    self.state,
+                    &self.service,
+                    node,
+                    &subscriber,
+                    waddle_xmpp::pubsub::SubscriptionState::None,
+                    subid.as_ref(),
+                )
+                .await;
+                answer(build_pubsub_success(self.iq))
+            }
             (Ok(false), Ok(())) => self.refuse(not_subscribed()),
             _ => self.refuse(internal()),
         }
@@ -1840,6 +1862,17 @@ fn event_item(event: &Message) -> Option<(String, Option<Element>)> {
     Some((id, named.children().next().cloned()))
 }
 
+/// Whether `event` is a node configuration change notification
+/// (XEP-0060 §8.2.4).
+fn is_configuration_event(event: &Message) -> bool {
+    event
+        .payloads
+        .iter()
+        .filter(|payload| payload.is("event", waddle_xmpp::pubsub::NS_PUBSUB_EVENT))
+        .flat_map(Element::children)
+        .any(|child| child.name() == "configuration")
+}
+
 /// The event notification as a subscriber at another server receives it:
 /// the event as built, without the address of the account that published
 /// the item.
@@ -1986,11 +2019,23 @@ pub(crate) async fn notify_remote_subscribers(
     if subscriptions.is_empty() {
         return 0;
     }
-    let Some((item_id, item_payload)) = event_item(event) else {
+    // A configuration change names no item, so no room and no image: it is
+    // told to every subscriber that still reads the Space. It is never
+    // queued for an enrolled scope, whose events PubSub does not deliver.
+    let configuration = is_configuration_event(event);
+    if configuration && enrolled {
         return 0;
+    }
+    let (item_id, item_payload) = if configuration {
+        (String::new(), None)
+    } else {
+        let Some(item) = event_item(event) else {
+            return 0;
+        };
+        item
     };
     // The room the event names; an image of the Space names none.
-    let room = if space_image(&item_id, item_payload.as_ref()) {
+    let room = if configuration || space_image(&item_id, item_payload.as_ref()) {
         None
     } else {
         let Some(room) = bookmarked_room(state, &item_id, item_payload.as_ref()) else {
