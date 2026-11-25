@@ -128,9 +128,6 @@ impl XmppRuntime {
                 pep::parse_activity_notification(element, self.account_bare_jid())
             {
                 events.push(ClientEvent::ActivityChanged { jid, activity });
-            }
-            if let Some(pep_item) = pep::parse(element) {
-                events.push(ClientEvent::PepEvent(pep_item));
                 return events;
             }
         }
