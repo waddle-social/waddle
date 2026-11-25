@@ -35,6 +35,7 @@ struct Sidebar: View {
                     NoMatchesView(query: query)
                 }
             }
+            LiveCallsHost()
             CurrentCallCardHost()
             SidebarAccountBar()
         }
