@@ -49,8 +49,10 @@ ALTER TABLE auth_identities DROP CONSTRAINT IF EXISTS auth_identities_issuer_sub
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_identities_tenant_issuer_subject
     ON auth_identities (tenant_id, issuer, subject);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_metadata_tenant_space_node
-    ON spaces_metadata (tenant_id, space_node);
+ALTER TABLE spaces_metadata DROP CONSTRAINT IF EXISTS spaces_metadata_pkey;
+DROP INDEX IF EXISTS idx_spaces_metadata_space_node;
+ALTER TABLE spaces_metadata
+    ADD CONSTRAINT spaces_metadata_pkey PRIMARY KEY (tenant_id, space_node);
 
 ALTER TABLE extension_room_observers DROP CONSTRAINT IF EXISTS extension_room_observers_pkey;
 ALTER TABLE extension_room_observers
