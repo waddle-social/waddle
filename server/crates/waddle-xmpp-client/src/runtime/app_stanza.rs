@@ -203,7 +203,9 @@ impl XmppRuntime {
         vec![ClientEvent::MessageRejected(Box::new(rejection))]
     }
 
-    fn account_bare_jid(&self) -> &jid::BareJid {
+    /// Bare JID of the authenticated account this runtime serves.
+    #[must_use]
+    pub fn account_bare_jid(&self) -> &jid::BareJid {
         match &self.config.auth {
             AuthenticationConfig::OAuthBearer(config) => &config.account,
         }
