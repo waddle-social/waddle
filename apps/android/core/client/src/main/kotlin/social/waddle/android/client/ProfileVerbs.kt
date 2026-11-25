@@ -287,7 +287,11 @@ internal class ProfileVerbs(
     /** XEP-0108: publish an activity; the store reflects it on success. */
     suspend fun setActivity(general: String, specific: String?, text: String?): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
-        val result = unitVerb(lease) { it.publishActivity(general, specific, text, Locale.getDefault().toLanguageTag()) }
+        val lang = Locale.getDefault().toLanguageTag()
+        val result =
+            unitVerb(lease) {
+                it.publishActivity(general, specific, text, lang)
+            }
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfActivity(
                     WaddleActivity(general = general, specific = specific, text = text),
