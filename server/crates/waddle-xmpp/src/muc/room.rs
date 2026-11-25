@@ -841,6 +841,33 @@ impl MucRoom {
             .any(|o| o.real_jid.to_bare() == *bare_jid)
     }
 
+    /// Attach the current room nick to each affiliated JID for a muc#admin
+    /// affiliation list (XEP-0045 §9.5: SHOULD include `nick` except for an
+    /// outcast). Waddle stores no reserved nicks, so only a joined user has one.
+    pub fn affiliation_list_entries(
+        &self,
+        listed: Vec<(BareJid, Affiliation)>,
+    ) -> Vec<super::AdminAffiliationEntry> {
+        listed
+            .into_iter()
+            .map(|(jid, affiliation)| {
+                let nick = (affiliation != Affiliation::Outcast)
+                    .then(|| {
+                        self.occupants
+                            .values()
+                            .find(|o| o.real_jid.to_bare() == jid)
+                            .map(|o| o.nick.clone())
+                    })
+                    .flatten();
+                super::AdminAffiliationEntry {
+                    jid,
+                    affiliation,
+                    nick,
+                }
+            })
+            .collect()
+    }
+
     /// All pinned entries, newest pin first.
     pub fn pinned_entries(&self) -> &[PinnedEntry] {
         &self.pinned_entries

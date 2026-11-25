@@ -371,7 +371,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
 fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayMucAdminQuery>>::REMOTE_ID,
-        "waddle.clustering.relay.muc_admin_query.v1"
+        "waddle.clustering.relay.muc_admin_query.v2"
     );
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
@@ -398,10 +398,13 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
 
     use crate::server::routes::websocket::{AdminListAnswer, AdminListDenial, AdminRoleEntry};
     for reply in [
-        RelayMucAdminQueryReply::Answered(AdminListAnswer::Affiliations(vec![(
-            requester.to_bare(),
-            waddle_xmpp::Affiliation::Member,
-        )])),
+        RelayMucAdminQueryReply::Answered(AdminListAnswer::Affiliations(vec![
+            waddle_xmpp::muc::AdminAffiliationEntry {
+                jid: requester.to_bare(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+                nick: Some("romeo".to_owned()),
+            },
+        ])),
         RelayMucAdminQueryReply::Answered(AdminListAnswer::Roles(vec![AdminRoleEntry {
             nick: "romeo".to_owned(),
             role: waddle_xmpp::Role::Participant,
@@ -420,7 +423,7 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
 
     let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
         actor_remote_id: "actor".into(),
-        message_remote_id: "waddle.clustering.relay.muc_admin_query.v1".into(),
+        message_remote_id: "waddle.clustering.relay.muc_admin_query.v2".into(),
     });
     assert!(
         matches!(

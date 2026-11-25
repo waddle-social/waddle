@@ -206,7 +206,7 @@ pub(super) use errors::{
     jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error, not_authorized_iq_error,
     service_unavailable_iq_error,
 };
-use muc_admin::handle_muc_admin_iq;
+pub(in crate::server::routes::websocket::handlers) use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;

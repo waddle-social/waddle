@@ -1317,7 +1317,7 @@ pub enum RelayMucAdminQueryReply {
     NotOwner,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.muc_admin_query.v1")]
+#[kameo::remote_message("waddle.clustering.relay.muc_admin_query.v2")]
 impl Message<RelayMucAdminQuery> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayMucAdminQueryReply>;
 

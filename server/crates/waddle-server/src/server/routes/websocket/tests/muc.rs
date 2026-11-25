@@ -9761,7 +9761,9 @@ mod remote_owner_admin_list {
         else {
             panic!("a member gets the member list: {member:?}");
         };
-        assert!(members.contains(&(bob_jid.to_bare(), Affiliation::Member)));
+        assert!(members.iter().any(
+            |entry| entry.jid == bob_jid.to_bare() && entry.affiliation == Affiliation::Member
+        ));
 
         let stranger =
             relayed_muc_admin_query(owner.as_ref(), member_list_request(room_jid, mallory)).await;

@@ -1,5 +1,6 @@
 pub mod iq;
 pub mod message;
+pub(crate) mod muc_voice;
 pub mod presence;
 pub mod pubsub_fanout;
 

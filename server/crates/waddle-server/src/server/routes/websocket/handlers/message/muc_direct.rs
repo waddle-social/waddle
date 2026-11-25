@@ -410,7 +410,7 @@ fn pm_delivery_capture(outcome: FullJidDeliveryOutcome) -> PmDeliveryCapture {
 /// may live on another node), then the actor path with its XEP-0198
 /// detached-buffer fallback — the same reliability envelope 1:1 direct
 /// frames get.
-async fn deliver_pm_to_session(
+pub(in crate::server::routes::websocket::handlers) async fn deliver_pm_to_session(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
@@ -833,7 +833,7 @@ fn canonicalize_muc_private_payloads(
     waddle_xmpp::xep::xep0421::set_occupant_id_on_message(message, sender_occupant_id);
 }
 
-pub(super) fn message_error_frame(
+pub(in crate::server::routes::websocket::handlers) fn message_error_frame(
     incoming: &Message,
     bound_jid: &jid::FullJid,
     deps: &Deps<'_>,

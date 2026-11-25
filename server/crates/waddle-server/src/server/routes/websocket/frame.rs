@@ -1335,7 +1335,11 @@ async fn handle_xmpp_frame_impl(
                 }
                 _ => None,
             };
-            if let (Stanza::Message(message), None) = (stanza.as_ref(), &unserved_message) {
+            let voice_form = matches!(stanza.as_ref(), Stanza::Message(message)
+                if handlers::muc_voice::is_voice_form(message, &muc_domain));
+            if let (Stanza::Message(message), None, false) =
+                (stanza.as_ref(), &unserved_message, voice_form)
+            {
                 if let Some(principal) = authenticated_session
                     .as_ref()
                     .and_then(|session| session.authenticated_principal_ref().ok())
@@ -1409,6 +1413,16 @@ async fn handle_xmpp_frame_impl(
                             )
                             .await
                             .into()
+                        }
+                        None if voice_form => {
+                            handlers::muc_voice::handle_voice_form(
+                                message,
+                                state,
+                                phase,
+                                authenticated_session.as_ref(),
+                                &muc_domain,
+                            )
+                            .await
                         }
                         None => handlers::message::handle_message(
                             message,
