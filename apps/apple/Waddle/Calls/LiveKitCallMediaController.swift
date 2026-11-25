@@ -57,10 +57,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private var screenTracks: [String: SharedScreen] = [:]
     /// LiveKit can briefly clear our identity during a full reconnect.
     @ObservationIgnored private var joinedIdentity: String?
-    @ObservationIgnored private var remoteAudioTracks: [String: [RemoteAudioTrack]] = [:]
-    /// Choices follow the call even if LiveKit replaces its room or tracks.
-    @ObservationIgnored private var volumeGains: [String: Double] = [:]
-    @ObservationIgnored private let volumeUpdates = CallVolumeUpdates()
+    @ObservationIgnored private let remoteVolumes: CallRemoteVolumes
     /// What the person last asked of each device in this call. It outlives
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
@@ -83,27 +80,16 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func setVolume(_ gain: Double, of identity: String) {
-        guard let room = roomAccess.room, !identity.isEmpty, identity != joinedIdentity,
-              identity != room.localParticipant.identity?.stringValue else { return }
-        let gain = CallVolume.clamp(gain)
-        volumeGains[identity] = gain
-        for track in remoteAudioTracks[identity] ?? [] { applyVolume(gain, to: track) }
-        refreshParticipants()
+        if remoteVolumes.setVolume(gain, of: identity, joinedIdentity: joinedIdentity) {
+            refreshParticipants()
+        }
     }
 
-    /// Changes with `participants`, which every volume change refreshes.
-    var hasChangedVolumes: Bool { volumeGains.values.contains { $0 != 1 } }
+    var hasChangedVolumes: Bool { remoteVolumes.hasChangedVolumes }
 
     func resetVolumes() {
-        for identity in volumeGains.keys {
-            for track in remoteAudioTracks[identity] ?? [] { applyVolume(1, to: track) }
-        }
-        volumeGains.removeAll()
+        remoteVolumes.resetVolumes()
         refreshParticipants()
-    }
-
-    private func applyVolume(_ gain: Double, to track: RemoteAudioTrack) {
-        volumeUpdates.enqueue(for: track) { track.volume = gain }
     }
 
     @ObservationIgnored private let roomAccess = CallRoomAccess()
@@ -144,6 +130,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         self.defaults = defaults
         self.capture = capture
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
+        remoteVolumes = CallRemoteVolumes(roomAccess: roomAccess)
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
         background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
         videoMeter = CallVideoMeter(roomAccess: roomAccess)
@@ -575,8 +562,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     func forgetCaptureChoices() {
         captureChoices = [:]
         if isMicrophoneMutedByChoice { isMicrophoneMutedByChoice = false }
-        volumeUpdates.removeAll()
-        resetVolumes()
+        remoteVolumes.resetCallChoices()
+        refreshParticipants()
     }
 
     func setMicrophone(_ on: Bool) async {
@@ -798,7 +785,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         roomAccess.room = nil
         observer = nil
         joinedIdentity = nil
-        volumeUpdates.removeAll()
+        remoteVolumes.roomDidClose()
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
@@ -972,25 +959,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenTracks = screens
         }
         if dockCameraIdentities != dockCameras { dockCameraIdentities = dockCameras }
-        refreshRemoteAudio(remotes, restoringVolumes: restoringVolumes)
+        remoteVolumes.tracksChanged(remotes, restoringVolumes: restoringVolumes)
         refreshParticipants()
-    }
-
-    private func refreshRemoteAudio(_ remotes: [RemoteParticipant], restoringVolumes: Bool) {
-        var subscribed: [String: [RemoteAudioTrack]] = [:]
-        for remote in remotes {
-            guard let identity = remote.identity?.stringValue else { continue }
-            let tracks = remote.audioTracks.filter(\.isSubscribed).compactMap { $0.track as? RemoteAudioTrack }
-            guard !tracks.isEmpty else { continue }
-            subscribed[identity] = tracks
-            guard let gain = volumeGains[identity] else { continue }
-            let previous = remoteAudioTracks[identity] ?? []
-            // Set gain even on muted tracks so they have it when unmuted.
-            for track in tracks where restoringVolumes || !previous.contains(where: { $0 === track }) {
-                applyVolume(gain, to: track)
-            }
-        }
-        remoteAudioTracks = subscribed
     }
 
     /// Reads who is in the room, and who of them is speaking, as they are
@@ -1034,7 +1004,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 identity: identity, isLocal: isLocal, isCameraOn: cameraTracks[identity] != nil,
                 screenPublicationID: screenTracks[identity]?.publicationID,
                 hasMicrophoneTrack: participant.audioTracks.contains { $0.source == .microphone && $0.isLive },
-                isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : volumeGains[identity] ?? 1
+                isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : remoteVolumes.gain(for: identity)
             )
         }
         if participants != rows { participants = rows }
@@ -1075,42 +1045,6 @@ private struct SharedScreen: Equatable {
 
 private extension TrackPublication {
     var isLive: Bool { isSubscribed && !isMuted }
-}
-
-/// LiveKit waits on WebRTC's signaling thread for each write. Only one batch
-/// goes to a GCD queue at a time so a slow write can't queue up a slider drag.
-@MainActor
-final class CallVolumeUpdates {
-    private let queue = DispatchQueue(label: "waddle.call-volume", qos: .userInitiated)
-    private var pending: [ObjectIdentifier: @Sendable () -> Void] = [:]
-    private var isFlushing = false
-
-    func enqueue(for track: AnyObject, apply: @escaping @Sendable () -> Void) {
-        pending[ObjectIdentifier(track)] = apply
-        guard !isFlushing else { return }
-        isFlushing = true
-        Task { await flush() }
-    }
-
-    func removeAll() {
-        pending.removeAll()
-    }
-
-    private func flush() async {
-        defer { isFlushing = false }
-        while !pending.isEmpty {
-            try? await Task.sleep(for: .milliseconds(40))
-            let batch = Array(pending.values)
-            pending.removeAll()
-            guard !batch.isEmpty else { return }
-            await withCheckedContinuation { continuation in
-                queue.async {
-                    for apply in batch { apply() }
-                    continuation.resume()
-                }
-            }
-        }
-    }
 }
 
 enum CallMediaError: Error {
