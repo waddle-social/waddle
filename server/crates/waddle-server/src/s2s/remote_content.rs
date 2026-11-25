@@ -133,7 +133,7 @@ fn sanitize_children(element: &mut Element, served: Option<&ServedDomains>) {
                 sanitize_children(&mut child, served);
                 element.append_node(Node::Element(child));
             }
-            text @ Node::Text(_) => element.append_node(text),
+            Node::Text(text) => element.append_text(text),
         }
     }
 }
@@ -160,4 +160,22 @@ fn assigned_here(element: &Element, served: Option<&ServedDomains>) -> bool {
         served.classify(Some(&by)).unserved(),
         Some(UnservedDestination::Remote(_))
     )
+}
+
+#[cfg(test)]
+mod text_coalescing_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_children_merges_text_around_removed_child() {
+        let mut payload: Element =
+            "<x xmlns='urn:example:x'>a<received xmlns='urn:xmpp:carbons:2'/>b</x>"
+                .parse()
+                .expect("valid xml");
+        sanitize_children(&mut payload, None);
+        let expected: Element = "<x xmlns='urn:example:x'>ab</x>"
+            .parse()
+            .expect("valid xml");
+        assert_eq!(payload, expected);
+    }
 }

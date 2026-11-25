@@ -260,7 +260,9 @@ pub fn markup_has_mention(markup: &Element) -> bool {
 
 /// Remove every mention element from `markup`, then any span left without
 /// children. Returns `true` when `markup` itself is left with no children
-/// and should be dropped. Other markup is preserved.
+/// and should be dropped. Other markup is preserved. Text that surrounded a
+/// removed node is merged into one text node, as a parsed tree holds no two
+/// adjacent text nodes and `minidom` equality counts text nodes.
 pub fn strip_mentions_from_markup(markup: &mut Element) -> bool {
     if !markup.is("markup", NS_MARKUP) {
         return false;
@@ -274,14 +276,17 @@ pub fn strip_mentions_from_markup(markup: &mut Element) -> bool {
                         Node::Element(e)
                             if e.is("mention", NS_MENTIONS) || e.is("mention", NS_WADDLE_MENTIONS)
                     );
-                    if !is_mention {
-                        child.append_node(grandchild);
+                    match grandchild {
+                        _ if is_mention => {}
+                        Node::Text(text) => child.append_text(text),
+                        other => child.append_node(other),
                     }
                 }
                 if child.children().next().is_some() {
                     markup.append_child(child);
                 }
             }
+            Node::Text(text) => markup.append_text(text),
             other => markup.append_node(other),
         }
     }
@@ -466,5 +471,20 @@ mod tests {
         }])
         .expect("markup");
         assert!(strip_mentions_from_markup(&mut only));
+    }
+
+    #[test]
+    fn strip_mentions_coalesces_text_around_removed_nodes() {
+        let mut markup = parse(
+            "<markup xmlns='urn:xmpp:markup:0'>a<span start='0' end='1'>\
+             <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant' \
+             target='x'/></span>b<span start='1' end='2'>x\
+             <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#occupant' \
+             target='x'/>y<emphasis xmlns='urn:xmpp:markup:0'/></span></markup>",
+        );
+        assert!(!strip_mentions_from_markup(&mut markup));
+        let expected =
+            parse("<markup xmlns='urn:xmpp:markup:0'>ab<span start='1' end='2'>xy<emphasis xmlns='urn:xmpp:markup:0'/></span></markup>");
+        assert_eq!(markup, expected);
     }
 }
