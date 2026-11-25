@@ -501,6 +501,7 @@ description or checksum mismatch. Migrations are forward-only.
 | 2020 | `local_space_notification_order` and preference and bookmark order columns (PostgreSQL only) | `USAGE` on the sequence | A renewed preference and a new publication establish their order |
 | 2021 | Bound Space configuration trigger and operation kind (PostgreSQL only) | Existing `pubsub_nodes` and journal privileges. The trigger permits a configuration update only through the canonical writer. | Active for every enrolled Space |
 | 2022 | Space deletion tombstones, captured audiences, subscriber jobs and exact local binding jobs (PostgreSQL only) | `SELECT, INSERT` on tombstones and audiences. `SELECT, INSERT, UPDATE` on subscriber and binding jobs. | Served subscribers can receive local deletion notices through their live resources |
+| 2029 | `entity_caps` | `SELECT, INSERT, DELETE` | Empty until a resource's advertised capabilities verify |
 
 A deletion job survives a worker restart. A local job retains its first
 eligible resource snapshot and tracks custody per binding. The worker can

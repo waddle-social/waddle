@@ -417,6 +417,10 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // XEP-0493 authorization grants: inserted when a client exchanges its
     // authorization code, deleted when the account owner revokes the grant.
     ("xmpp_oauth_grants", READ_INSERT_DELETE),
+    // Verified XEP-0115 capabilities shared by every replica: inserted
+    // when a resource's disco#info answer verifies, and the oldest rows
+    // deleted when the table exceeds its bound. Never updated.
+    ("entity_caps", READ_INSERT_DELETE),
     // Roster, blocking, profile and uploads.
     ("roster_items", READ_WRITE),
     ("roster_versions", READ_WRITE),
