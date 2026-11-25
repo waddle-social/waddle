@@ -90,7 +90,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     @ObservationIgnored private lazy var deviceCatalog = CallDeviceCatalog(defaults: defaults) { [weak self] in
         guard let self else { return }
-        await camera.applyCameraChoice { self.captureChoices[.video] }
+        await camera.applyCameraChoice { [weak self] in self?.captureChoices[.video] }
     }
     var devices: CallDevices { deviceCatalog.devices }
     @ObservationIgnored private let defaults: UserDefaults
@@ -323,7 +323,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // The camera was started with the choice as it was when it was asked
         // for; a choice made while it was starting applies now that it is on.
         if kind == .video, enabled {
-            await camera.applyCameraChoice(droppingIdleTracks: false) { self.captureChoices[.video] }
+            await camera.applyCameraChoice(droppingIdleTracks: false) { [weak self] in self?.captureChoices[.video] }
         }
         // Likewise a change to the processing made while the microphone was starting.
         if kind == .audio, enabled { await microphoneProcessing.applyAudioProcessing() }
