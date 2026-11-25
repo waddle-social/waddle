@@ -2216,7 +2216,6 @@ describe("client keepalive lifecycle", () => {
         enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
         disableKeepAlive: mock(() => undefined),
         getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
-        enableCarbons: mock(async () => undefined),
         getRoster: mock(async () => ({ items: [] })),
       }) as unknown as Agent;
       (client as unknown as { xmpp: Agent }).xmpp = xmpp;

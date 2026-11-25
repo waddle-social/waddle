@@ -856,7 +856,16 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         body: msg.body,
         subject: msg.subject,
         message_type: msg.message_type,
-        timestamp: msg.timestamp.map(|t| t.to_rfc3339()),
+        // A native host takes a time on a live message to mean the server
+        // held it while the client was away: it sorts by that time and
+        // raises no notification. The server stamps every XEP-0280 carbon
+        // with the time it made the copy, so each one would be taken for
+        // held, and would sort among rows that carry no time at all. A
+        // carbon is a message as it passes: it goes to the hosts as live.
+        timestamp: msg
+            .timestamp
+            .filter(|_| msg.carbon.is_none())
+            .map(|t| t.to_rfc3339()),
         stanza_id: msg.stanza_id.as_ref().map(ToString::to_string),
         stanza_id_by: msg.stanza_id.map(|id| id.by.to_string()),
         stanza_ids: msg
@@ -2105,6 +2114,34 @@ mod tests {
              </message>",
         );
         assert_eq!(inbound_to_ffi(direct).carbon, None);
+    }
+
+    /// The server stamps every carbon with the time it copied it
+    /// (XEP-0297 `<delay/>` on the forwarded wrapper). Hosts read a time
+    /// as "held while away", so a carbon crosses the bridge without one.
+    #[test]
+    fn xep0280_carbon_reaches_hosts_as_a_live_message() {
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-07-27T08:00:00Z")
+            .expect("test time parses")
+            .with_timezone(&chrono::Utc);
+        let stamped = |carbon: Option<CarbonDirection>| {
+            let mut message = parse_message(
+                "<message xmlns='jabber:client' type='chat' id='t1' from='bob@waddle.test/desktop'>\
+                   <body>hello</body>\
+                 </message>",
+            );
+            message.carbon = carbon;
+            message.timestamp = Some(stamp);
+            inbound_to_ffi(message).timestamp
+        };
+
+        assert_eq!(stamped(Some(CarbonDirection::Sent)), None);
+        assert_eq!(stamped(Some(CarbonDirection::Received)), None);
+        assert_eq!(
+            stamped(None).as_deref(),
+            Some("2026-07-27T08:00:00+00:00"),
+            "a message the server really held keeps its time"
+        );
     }
 
     #[test]

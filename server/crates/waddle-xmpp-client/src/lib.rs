@@ -9,6 +9,7 @@ pub mod bootstrap;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod call_lifecycle;
 pub mod caps;
+pub mod carbons;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod client;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]

@@ -1112,6 +1112,27 @@ fn runtime_bootstraps_auth_bind_and_ready_state() {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding))
             if binding.jid == FullJid::from_str("alice@example.com/macbook").unwrap()
     )));
+    // XEP-0280: a fresh bind asks for carbons, once.
+    assert_eq!(carbons_enables(&ready_events), 1);
+}
+
+/// The XEP-0280 enable IQs among the stanzas `events` ask the transport to send.
+fn carbons_enables(events: &[ClientEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) => {
+                element.name() == "iq"
+                    && element.attr("type") == Some("set")
+                    && element
+                        .get_child("enable", crate::carbons::NS_CARBONS)
+                        .is_some()
+            }
+            _ => false,
+        })
+        .count()
 }
 
 #[test]
@@ -1179,6 +1200,8 @@ fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
         )))
         .unwrap();
 
+    // XEP-0280: the server kept the setting across the resumption; it is not asked for again.
+    assert_eq!(carbons_enables(&events), 0);
     assert_eq!(runtime.snapshot().phase, SessionPhase::Established);
     assert_eq!(
         runtime.snapshot().binding,
@@ -2348,6 +2371,12 @@ fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
                 TransportMessage::Element(element),
             )) if matches!(element.name(), "message" | "presence" | "iq") => Some(element.clone()),
             _ => None,
+        })
+        // The bind's own XEP-0280 enable is new on this stream, not a retry.
+        .filter(|element| {
+            element
+                .get_child("enable", crate::carbons::NS_CARBONS)
+                .is_none()
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -3843,7 +3872,9 @@ fn drive_to_authenticated_stream(runtime: &mut XmppRuntime) {
         .unwrap();
 }
 
-fn send_bound_enable(runtime: &mut XmppRuntime) {
+/// Binds afresh on a stream that offers XEP-0198 and writes the `<enable/>`.
+/// Returns what the bind itself asked to be sent.
+fn send_bound_enable(runtime: &mut XmppRuntime) -> Vec<ClientEvent> {
     drive_to_authenticated_stream(runtime);
     let bind_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -3880,6 +3911,7 @@ fn send_bound_enable(runtime: &mut XmppRuntime) {
             enable,
         )))
         .unwrap();
+    ready_events
 }
 
 fn assert_sm_protocol_violation(events: &[ClientEvent]) {
@@ -3989,4 +4021,50 @@ fn invalid_forbidden_stream_error() -> Element {
     Element::builder("error", NS_STREAMS)
         .append(Element::builder("forbidden", "urn:ietf:params:xml:ns:xmpp-streams").build())
         .build()
+}
+
+/// XEP-0280 with XEP-0198: like every stanza of the hosts, the carbons
+/// enable waits for the answer to the stream management `<enable/>`.
+#[test]
+fn carbons_enable_waits_for_stream_management_to_be_enabled() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let ready_events = send_bound_enable(&mut runtime);
+    assert_eq!(
+        carbons_enables(&ready_events),
+        0,
+        "nothing is written between <enable/> and its answer"
+    );
+
+    let enabled_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("enabled", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert_eq!(carbons_enables(&enabled_events), 1);
+}
+
+/// A server that refuses stream management leaves a session that still
+/// wants its copies; and nothing was counted for a session it never had.
+#[test]
+fn carbons_enable_follows_a_refused_stream_management_enable() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let ready_events = send_bound_enable(&mut runtime);
+    assert_eq!(carbons_enables(&ready_events), 0);
+
+    let failed_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("failed", crate::stream_management::NS_SM).build(),
+        )))
+        .unwrap();
+    assert_eq!(carbons_enables(&failed_events), 1);
+    assert!(
+        !failed_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element)
+            )) if element.name() == "r"
+        )),
+        "no acknowledgement is asked of a session that was refused"
+    );
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Established);
 }

@@ -1410,15 +1410,6 @@ export class BrowserXmppClient {
     this.onlineRecoveryListener?.();
   }
 
-  private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
-    if (xmpp.enableCarbons) {
-      try { await xmpp.enableCarbons(); } catch {}
-      return;
-    }
-    if (!xmpp.send_raw_iq) return;
-    try { await xmpp.send_raw_iq(`<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:carbons:2"/></iq>`); } catch {}
-  }
-
   /** Seam for tests: instance-level indirection over the module-level
    * WASM loader so a stalled load can be simulated. */
   private loadModule: () => Promise<WasmModule> = loadWasmModule;
@@ -3708,7 +3699,6 @@ export class BrowserXmppClient {
       // occupant presence, so the caches must survive the disconnect.
       this.clearRoomPresenceCaches();
       this.outboundQueue.clearOrdinaryInflight();
-      void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
       // fail-silent (chat works without MDS). Bound to the specific
@@ -4489,10 +4479,10 @@ export class BrowserXmppClient {
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
-    // #754: carbons enable lives in the fresh branch of `runSessionReady`
-    // only — enabling from `on_connected` too doubled the IQ on every
-    // fresh connect and re-enabled on XEP-0198 resume, where the server
-    // already preserves carbon state for the resumed session.
+    // XEP-0280 carbons are asked for by the shared core, once after every
+    // fresh bind and not after a XEP-0198 resume, where the server keeps
+    // the setting (`finish_binding` in waddle-xmpp-client). Nothing here
+    // enables them: a second IQ per connect was #754.
     xmpp.set_on_session_lifecycle?.((event: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       // A fresh bind proves the resume path failed and clears its witness.
