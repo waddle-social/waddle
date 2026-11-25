@@ -87,9 +87,9 @@ impl std::fmt::Display for ReferenceType {
 pub struct Reference {
     /// The type of reference (mention, data).
     pub ref_type: ReferenceType,
-    /// The start index (UTF-8 code units) in the body text.
+    /// The start index (Unicode code points) in the body text.
     pub begin: Option<usize>,
-    /// The end index (exclusive) in the body text.
+    /// The end index (exclusive, Unicode code points) in the body text.
     pub end: Option<usize>,
     /// The required URI of the referenced entity (e.g., `xmpp:alice@example.com`).
     pub uri: String,

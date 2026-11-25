@@ -1287,9 +1287,10 @@ fn build_outbound_message_omits_begin_end_when_no_position() {
 }
 
 #[test]
-fn build_outbound_message_resolves_typed_mentions_to_references() {
+fn build_outbound_message_resolves_typed_mentions_to_references_and_channel_mentions() {
     // XEP-0372: a typed `@nick` only addresses someone when it travels as
-    // `<reference type='mention'/>`; receivers ignore bare body text.
+    // `<reference type='mention'/>`; XEP-0513 carries `@everyone` / `@here`
+    // as `#channel` mentions (`active='true'` for `@here`).
     let options = SendMessageOptions {
         mention_directory: Some(MentionDirectory {
             targets: vec![MentionTarget {
@@ -1304,7 +1305,7 @@ fn build_outbound_message_resolves_typed_mentions_to_references() {
     let (_, stanza) = build_outbound_message(
         "room@muc.example",
         "groupchat",
-        "@rawkode and @everyone, not @randax",
+        "@rawkode and @everyone, not @randax, ping @here",
         &options,
     )
     .unwrap();
@@ -1316,35 +1317,114 @@ fn build_outbound_message_resolves_typed_mentions_to_references() {
         .collect();
     assert_eq!(
         wire,
+        vec![[
+            Some("mention"),
+            Some("xmpp:rawkode@waddle.social"),
+            Some("0"),
+            Some("8")
+        ]]
+    );
+
+    let markup = stanza.get_child("markup", NS_MARKUP).expect("markup");
+    let channel: Vec<[Option<&str>; 4]> = markup
+        .children()
+        .filter(|span| span.is("span", NS_MARKUP))
+        .map(|span| {
+            let mention = span
+                .get_child("mention", "urn:xmpp:mentions:0")
+                .expect("xep-0513 mention");
+            assert_eq!(mention.attr("target"), None);
+            [
+                span.attr("start"),
+                span.attr("end"),
+                mention.attr("type"),
+                mention.attr("active"),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        channel,
         vec![
             [
-                Some("mention"),
-                Some("xmpp:rawkode@waddle.social"),
-                Some("0"),
-                Some("8")
+                Some("13"),
+                Some("22"),
+                Some("urn:xmpp:mentions:0#channel"),
+                None
             ],
             [
-                Some("mention"),
-                Some("xmpp:@everyone"),
-                Some("13"),
-                Some("22")
+                Some("42"),
+                Some("47"),
+                Some("urn:xmpp:mentions:0#channel"),
+                Some("true")
             ],
         ]
     );
 
     // Receivers classify the same stanza as mentioning the target and
-    // carrying a broadcast.
+    // carrying a broadcast; `@everyone` outranks `@here`.
     let MessagingEvent::Message(msg) = parse(&stanza).unwrap() else {
         panic!("expected message");
     };
     assert_eq!(
         msg.mention_uris,
-        vec![
-            "xmpp:rawkode@waddle.social".to_string(),
-            "xmpp:@everyone".to_string()
-        ]
+        vec!["xmpp:rawkode@waddle.social".to_string()]
     );
-    assert_eq!(msg.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
+    assert_eq!(msg.broadcast_mention.as_deref(), Some("everyone"));
+}
+
+#[test]
+fn build_outbound_message_here_alone_is_an_active_channel_mention() {
+    let options = SendMessageOptions {
+        markup_spans: vec![MarkupSpanData {
+            span_type: "bold".to_string(),
+            start: 6,
+            end: 10,
+            uri: None,
+        }],
+        mention_directory: Some(MentionDirectory {
+            targets: Vec::new(),
+            broadcasts: true,
+        }),
+        ..Default::default()
+    };
+
+    let (_, stanza) =
+        build_outbound_message("room@muc.example", "groupchat", "@here some text", &options)
+            .unwrap();
+
+    let markup = stanza.get_child("markup", NS_MARKUP).expect("one markup");
+    assert_eq!(
+        stanza
+            .children()
+            .filter(|child| child.is("markup", NS_MARKUP))
+            .count(),
+        1
+    );
+    assert_eq!(markup.children().count(), 2, "bold span plus mention span");
+    assert!(stanza
+        .children()
+        .all(|child| !child.is("reference", NS_REFERENCES)));
+    let MessagingEvent::Message(msg) = parse(&stanza).unwrap() else {
+        panic!("expected message");
+    };
+    assert_eq!(msg.broadcast_mention.as_deref(), Some("here"));
+    assert!(msg.mention_uris.is_empty());
+}
+
+#[test]
+fn inbound_xep0372_pseudo_uri_is_not_a_broadcast_mention() {
+    // `xmpp:@everyone` is not a valid XMPP URI and carries no XEP-0513
+    // semantics; it is an ordinary (unresolvable) mention reference.
+    let el: Element = "<message xmlns='jabber:client' type='groupchat' from='room@muc.example/a'>\
+         <body>@everyone</body>\
+         <reference xmlns='urn:xmpp:reference:0' type='mention' uri='xmpp:@everyone' begin='0' end='9'/>\
+         </message>"
+        .parse()
+        .unwrap();
+    let MessagingEvent::Message(msg) = parse(&el).unwrap() else {
+        panic!("expected message");
+    };
+    assert_eq!(msg.broadcast_mention, None);
 }
 
 #[test]

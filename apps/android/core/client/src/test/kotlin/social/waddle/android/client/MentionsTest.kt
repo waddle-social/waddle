@@ -25,30 +25,16 @@ class MentionsTest {
     }
 
     @Test
-    fun `broadcast uris resolve to no bare jid`() {
-        assertNull(bareJidOfMentionUri(MENTION_URI_EVERYONE))
-        assertNull(bareJidOfMentionUri(MENTION_URI_HERE))
+    fun `broadcast kinds resolve to no bare jid`() {
+        assertNull(bareJidOfMentionUri(BROADCAST_EVERYONE))
+        assertNull(bareJidOfMentionUri(BROADCAST_HERE))
         assertNull(bareJidOfMentionUri("not a uri"))
     }
 
     @Test
-    fun `broadcast uris satisfy the rust parser's classification`() {
-        // parsing/mod.rs derives broadcast_mention from `xmpp:` URIs
-        // containing `@everyone`/`@here` — the emitted constants MUST
-        // round-trip through that check (mirrored here verbatim).
-        fun rustClassifiesAsBroadcast(uri: String): Boolean =
-            uri.startsWith("xmpp:") && (uri.contains("@everyone") || uri.contains("@here"))
-        listOf(MENTION_URI_EVERYONE, MENTION_URI_HERE).forEach { uri ->
-            assertTrue(rustClassifiesAsBroadcast(uri))
-        }
-        assertFalse(rustClassifiesAsBroadcast("xmpp:bob@waddle.test"))
-        assertFalse(rustClassifiesAsBroadcast("@everyone"))
-    }
-
-    @Test
     fun `broadcast mention addresses everyone`() {
-        assertTrue(messageMentionsBareJid(MENTION_URI_EVERYONE, emptyList(), "bob@waddle.test"))
-        assertTrue(messageMentionsBareJid(MENTION_URI_HERE, emptyList(), null))
+        assertTrue(messageMentionsBareJid(BROADCAST_EVERYONE, emptyList(), "bob@waddle.test"))
+        assertTrue(messageMentionsBareJid(BROADCAST_HERE, emptyList(), null))
     }
 
     @Test
@@ -79,7 +65,7 @@ class MentionsTest {
 
         assertEquals(listOf("everyone", "here", "alice", "bob"), candidates.map { it.display })
         assertEquals(
-            listOf(MENTION_URI_EVERYONE, MENTION_URI_HERE, "xmpp:alice@waddle.test", "xmpp:bob@waddle.test"),
+            listOf(BROADCAST_EVERYONE, BROADCAST_HERE, "xmpp:alice@waddle.test", "xmpp:bob@waddle.test"),
             candidates.map { it.uri },
         )
         assertEquals(listOf(true, true, false, false), candidates.map { it.isBroadcast })

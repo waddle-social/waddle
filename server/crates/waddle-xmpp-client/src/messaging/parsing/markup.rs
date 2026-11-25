@@ -2,8 +2,26 @@
 
 use minidom::Element;
 
+use waddle_xmpp_core::mention_markup::{mentions_from_markup, MENTION_TYPE_CHANNEL};
+
+use super::super::mentions::BroadcastMention;
 use super::super::namespaces::{NS_MARKUP, NS_WADDLE_MARKUP};
 use super::super::types::{MarkupSpan, MarkupSpanType};
+
+/// The room-wide mention carried by XEP-0513 `#channel` markup, as the
+/// label applications consume (`everyone` / `here`). `@everyone` wins when
+/// a message carries both kinds.
+pub(super) fn parse_broadcast_mention(markups_el: &Element) -> Option<String> {
+    mentions_from_markup(markups_el)
+        .into_iter()
+        .filter(|mention| mention.mentions.as_deref() == Some(MENTION_TYPE_CHANNEL))
+        .map(|mention| BroadcastMention::from_channel_mention(mention.active))
+        .min_by_key(|kind| match kind {
+            BroadcastMention::Everyone => 0,
+            BroadcastMention::Here => 1,
+        })
+        .map(|kind| kind.label().to_string())
+}
 
 fn range(el: &Element) -> Option<(usize, usize)> {
     let start: usize = el.attr("start")?.parse().ok()?;

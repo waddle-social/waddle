@@ -18,7 +18,7 @@ use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 use waddle_xmpp_core::{first_eligible_https_url_text, PreviewImageMediaType};
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
-use self::markup::parse_markup_spans;
+use self::markup::{parse_broadcast_mention, parse_markup_spans};
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
     parse_extension_envelope, parse_in_call_reaction_payload, parse_markable_marker_payload,

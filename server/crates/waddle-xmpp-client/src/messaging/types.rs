@@ -384,7 +384,8 @@ pub struct InboundMessage {
     pub shared_files: Vec<SharedFile>,
     /// Preview metadata attached to message URLs.
     pub link_previews: Vec<LinkPreviewData>,
-    /// Room-wide or channel-wide mention classification.
+    /// Room-wide mention carried by an XEP-0513 `#channel` mention:
+    /// `everyone`, or `here` when the mention is `active='true'`.
     pub broadcast_mention: Option<String>,
     /// URIs identifying the targets of explicit mentions.
     pub mention_uris: Vec<String>,
@@ -1113,7 +1114,8 @@ pub struct SendMessageOptions {
     /// XEP-0372 references such as mentions.
     pub references: Vec<ReferenceData>,
     /// Resolve plain-text `@label` tokens in the body to XEP-0372 mention
-    /// references at build time. Ranges already covered by `references`,
+    /// references (members) and XEP-0513 `#channel` mentions (`@everyone`,
+    /// `@here`) at build time. Ranges already covered by `references`,
     /// the reply fallback and code markup are left alone. `None` resolves
     /// nothing.
     pub mention_directory: Option<MentionDirectory>,
@@ -1173,6 +1175,17 @@ impl fmt::Display for InvalidLinkPreviewToken {
 }
 
 impl std::error::Error for InvalidLinkPreviewToken {}
+
+impl SendMessageOptions {
+    /// Options that resolve typed `@label` tokens through `directory`.
+    #[must_use]
+    pub fn with_mention_directory(directory: MentionDirectory) -> Self {
+        Self {
+            mention_directory: Some(directory),
+            ..Self::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Formatting kind and Unicode-character range parsed from a rich message payload.

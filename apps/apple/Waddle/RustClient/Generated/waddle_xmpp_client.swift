@@ -6420,7 +6420,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var markupSpans: [WaddleMarkupSpan]
     /**
-     * XEP-0372 broadcast mention URI, when present.
+     * XEP-0513 room-wide mention (`everyone` or `here`), when present.
      */
     public var broadcastMention: String?
     /**
@@ -6517,7 +6517,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * XEP-0394 markup spans of the inner message.
          */markupSpans: [WaddleMarkupSpan],
         /**
-         * XEP-0372 broadcast mention URI, when present.
+         * XEP-0513 room-wide mention (`everyone` or `here`), when present.
          */broadcastMention: String?,
         /**
          * XEP-0372 mention URIs, flattened from `references`.
@@ -10036,7 +10036,7 @@ public func FfiConverterTypeWaddleMdsDisplayedEntry_lower(_ value: WaddleMdsDisp
 public struct WaddleMentionDirectory: Equatable, Hashable {
     public var targets: [WaddleMentionTarget]
     /**
-     * Resolve `@everyone` / `@here` to broadcast mention URIs.
+     * Resolve `@everyone` / `@here` to XEP-0513 `#channel` mentions.
      */
     public var broadcasts: Bool
 
@@ -10044,7 +10044,7 @@ public struct WaddleMentionDirectory: Equatable, Hashable {
     // declare one manually.
     public init(targets: [WaddleMentionTarget],
         /**
-         * Resolve `@everyone` / `@here` to broadcast mention URIs.
+         * Resolve `@everyone` / `@here` to XEP-0513 `#channel` mentions.
          */broadcasts: Bool) {
         self.targets = targets
         self.broadcasts = broadcasts
@@ -10234,8 +10234,8 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var markupSpans: [WaddleMarkupSpan]
     /**
-     * XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
-     * one of the mention references targets the whole room.
+     * XEP-0513 room-wide mention: `everyone`, or `here` for an
+     * `active='true'` `#channel` mention.
      */
     public var broadcastMention: String?
     /**
@@ -10383,8 +10383,8 @@ public struct WaddleMessage: Equatable, Hashable {
          * XEP-0394 message markup spans over the body.
          */markupSpans: [WaddleMarkupSpan],
         /**
-         * XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
-         * one of the mention references targets the whole room.
+         * XEP-0513 room-wide mention: `everyone`, or `here` for an
+         * `active='true'` `#channel` mention.
          */broadcastMention: String?,
         /**
          * XEP-0372 mention URIs, flattened from `references`.

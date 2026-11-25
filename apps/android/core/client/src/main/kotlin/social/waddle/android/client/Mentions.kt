@@ -8,23 +8,24 @@ import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleUserSearchEntry
 
 /**
- * XEP-0372 mention primitives, mirroring the web client's
- * `chat/src/lib/mentions.ts` semantics: mention URIs are `xmpp:<barejid>`
- * and the broadcast conventions are the literal `xmpp:@everyone` /
- * `xmpp:@here` URIs the Rust parser classifies as `broadcast_mention`
- * (it requires the `xmpp:` scheme plus an `@everyone`/`@here` substring).
+ * Mention primitives, mirroring the web client's `chat/src/lib/mentions.ts`
+ * semantics: member mentions are XEP-0372 references whose URI is
+ * `xmpp:<barejid>`; room-wide mentions are XEP-0513 `#channel` mentions
+ * that the Rust send builder derives from a typed `@everyone` / `@here`
+ * token, and the Rust parser reports on inbound messages as
+ * `broadcast_mention` (`everyone`, or `here` for an active mention).
  */
 
-/** Broadcast mention URI addressing every member of the room. */
-const val MENTION_URI_EVERYONE = "xmpp:@everyone"
+/** `broadcast_mention` of a message addressing every member of the room. */
+const val BROADCAST_EVERYONE = "everyone"
 
-/** Broadcast mention URI addressing the currently present occupants. */
-const val MENTION_URI_HERE = "xmpp:@here"
+/** `broadcast_mention` of a message addressing the currently present occupants. */
+const val BROADCAST_HERE = "here"
 
-/** Display token (without `@`) → broadcast URI, popover order. */
+/** Display token (without `@`) → broadcast kind, popover order. */
 val BROADCAST_MENTIONS: Map<String, String> = mapOf(
-    "everyone" to MENTION_URI_EVERYONE,
-    "here" to MENTION_URI_HERE,
+    BROADCAST_EVERYONE to BROADCAST_EVERYONE,
+    BROADCAST_HERE to BROADCAST_HERE,
 )
 
 /** The XEP-0372 mention URI of [bareJid] (`xmpp:` + canonical bare JID). */
@@ -61,7 +62,11 @@ fun messageMentionsBareJid(
 data class MentionCandidate(
     /** Nick as displayed (and inserted as `@display` into the body). */
     val display: String,
-    /** The XEP-0372 mention URI a selection emits on the wire. */
+    /**
+     * The XEP-0372 mention URI a member selection emits on the wire; for a
+     * broadcast, its kind ([BROADCAST_EVERYONE] / [BROADCAST_HERE]), which
+     * is never sent as a reference.
+     */
     val uri: String,
     val isBroadcast: Boolean,
     /** The occupant's real bare JID (avatar); `null` for broadcasts. */
