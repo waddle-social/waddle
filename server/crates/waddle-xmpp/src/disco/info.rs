@@ -98,6 +98,7 @@ pub fn calls_mixer_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
         Feature::muji(),
+        Feature::coin(),
         Feature::jingle(),
         Feature::jingle_rtp(),
         Feature::jingle_rtp_audio(),
@@ -172,6 +173,7 @@ mod tests {
         let features = calls_mixer_features();
         for ns in [
             "urn:xmpp:jingle:muji:0",
+            "urn:xmpp:coin:1",
             "urn:xmpp:jingle:1",
             "urn:xmpp:jingle:apps:rtp:1",
             "urn:xmpp:jingle:apps:rtp:audio",

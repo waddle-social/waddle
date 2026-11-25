@@ -4,23 +4,25 @@
 //! a STUN entry for the requester, both pointing at the configured
 //! LiveKit TURN host. The credentials are time-limited (the TURN
 //! username is `<unix_expiry>:<identity>`, the password is an HMAC
-//! over the username); the response carries an `expires` attribute
-//! per XEP-0215 §3.6.5 so the client can refresh proactively.
+//! over the username); entries carry an `expires` attribute so the
+//! client can refresh proactively. Also answers `<credentials/>`
+//! requests (XEP-0215 "Requesting Credentials").
 
 use std::sync::Arc;
 
+use minidom::Element;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use waddle_sfu::{Identity, SfuService};
+use waddle_sfu::{Identity, SfuService, TurnCredential};
 
 use crate::protocol::event::{OutboundEvent, StanzaContext};
 use crate::protocol::handlers::session_initiate_rate_limit::TurnCredentialRateLimit;
 use crate::protocol::traits::IqHandler;
 use crate::telemetry::attributes::{CallControlRateLimitedSurface, RequestOutcome};
 use crate::xep::xep0215::{
-    build_services_result_element, build_stun_service_element, build_turn_service, ServiceType,
-    NS_EXT_DISCO,
+    build_credentials_result_element, build_credentials_service, build_services_result_element,
+    build_stun_service_element, build_turn_service, build_turns_service, ServiceKind, NS_EXT_DISCO,
 };
 use crate::Stanza;
 
@@ -69,6 +71,191 @@ impl ExtDiscoHandler {
     }
 }
 
+impl ExtDiscoHandler {
+    /// Apply the per-user rate limit and mint a TURN credential bound
+    /// to the authenticated session JID (never the client-supplied
+    /// `iq.from`, which could spoof any identity into the username).
+    /// The error arm is the ready-to-send reply.
+    fn mint_credential(
+        &self,
+        iq: &Iq,
+        ctx: &StanzaContext<'_>,
+    ) -> Result<TurnCredential, Vec<OutboundEvent>> {
+        let requester = ctx.full_jid.to_bare();
+        if let Err(exceeded) = self.turn_credential_rate_limit.check_and_record(&requester) {
+            tracing::warn!(
+                jid = %requester,
+                %exceeded,
+                "rate-limit dropped TURN credential request"
+            );
+            crate::telemetry::call::increment_call_control_rate_limited(
+                CallControlRateLimitedSurface::Turn,
+            );
+            return Err(error_reply(
+                iq,
+                DefinedCondition::PolicyViolation,
+                "TURN credential rate limit exceeded",
+            ));
+        }
+        let identity = Identity::from_jid(ctx.full_jid.clone());
+        match self.sfu.issue_turn_credentials(&identity) {
+            Ok(cred) => {
+                record_turn_credential_outcome(RequestOutcome::Success);
+                Ok(cred)
+            }
+            Err(e) => {
+                record_turn_credential_outcome(RequestOutcome::Failure);
+                tracing::error!(
+                    user = %ctx.full_jid.to_bare(),
+                    error = %e,
+                    "TURN credential mint failed"
+                );
+                Err(error_reply(
+                    iq,
+                    DefinedCondition::InternalServerError,
+                    "internal error",
+                ))
+            }
+        }
+    }
+
+    fn handle_services(
+        &self,
+        iq: &Iq,
+        query: &Element,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        // Optional `type` attribute restricts the response to services
+        // of exactly that type. Unknown values are rejected; an absent
+        // attribute returns every service.
+        let type_filter = match query.attr("type") {
+            None => None,
+            Some(value) => match ServiceKind::parse(value) {
+                Some(kind) => Some(kind),
+                None => {
+                    return error_reply(
+                        iq,
+                        DefinedCondition::BadRequest,
+                        &format!("unsupported services type filter: {value}"),
+                    );
+                }
+            },
+        };
+        let wants = |kind: ServiceKind| type_filter.is_none_or(|f| f == kind);
+
+        // Mint TURN credentials only when the response will include a
+        // credential-bearing entry.
+        let cred = if wants(ServiceKind::Turn) || wants(ServiceKind::Turns) {
+            match self.mint_credential(iq, ctx) {
+                Ok(cred) => Some(cred),
+                Err(reply) => return reply,
+            }
+        } else {
+            None
+        };
+
+        let host = self.sfu.turn_host();
+        let mut services: Vec<Element> = Vec::with_capacity(3);
+        if let Some(cred) = &cred {
+            if wants(ServiceKind::Turn) {
+                services.push(build_turn_service(host, self.turn_udp_port, cred));
+            }
+            if wants(ServiceKind::Turns) {
+                services.push(build_turns_service(host, self.turn_tls_port, cred));
+            }
+        }
+        if wants(ServiceKind::Stun) {
+            services.push(build_stun_service_element(host, self.turn_udp_port));
+        }
+        let result = build_services_result_element(type_filter.map(ServiceKind::as_str), services);
+        result_reply(iq, result)
+    }
+
+    /// XEP-0215 "Requesting Credentials": `<credentials/>` carries
+    /// `<service/>` children whose `host` and `type` MUST be present
+    /// (`port` MAY disambiguate). Services Waddle does not issue
+    /// credentials for yield `item-not-found`.
+    fn handle_credentials(
+        &self,
+        iq: &Iq,
+        query: &Element,
+        ctx: &StanzaContext<'_>,
+    ) -> Vec<OutboundEvent> {
+        let mut requested: Vec<(&str, ServiceKind, Option<u16>)> = Vec::new();
+        for child in query.children() {
+            if !child.is("service", NS_EXT_DISCO) {
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "<credentials/> may only contain <service/> children",
+                );
+            }
+            let (Some(host), Some(type_attr)) = (child.attr("host"), child.attr("type")) else {
+                return error_reply(
+                    iq,
+                    DefinedCondition::BadRequest,
+                    "<service/> requires 'host' and 'type' attributes",
+                );
+            };
+            let Some(kind) = ServiceKind::parse(type_attr) else {
+                return error_reply(iq, DefinedCondition::ItemNotFound, "unknown service type");
+            };
+            let port = match child.attr("port").map(str::parse::<u16>) {
+                None => None,
+                Some(Ok(port)) => Some(port),
+                Some(Err(_)) => {
+                    return error_reply(
+                        iq,
+                        DefinedCondition::BadRequest,
+                        "'port' must be an unsigned short",
+                    );
+                }
+            };
+            requested.push((host, kind, port));
+        }
+        if requested.is_empty() {
+            return error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "<credentials/> requires a <service/> child",
+            );
+        }
+
+        let host = self.sfu.turn_host();
+        let offered = [
+            (ServiceKind::Turn, self.turn_udp_port),
+            (ServiceKind::Turns, self.turn_tls_port),
+        ];
+        let matched: Vec<(ServiceKind, u16)> = offered
+            .into_iter()
+            .filter(|(kind, port)| {
+                requested.iter().any(|(h, k, p)| {
+                    h.eq_ignore_ascii_case(host.as_str())
+                        && k == kind
+                        && p.is_none_or(|p| p == *port)
+                })
+            })
+            .collect();
+        if matched.is_empty() {
+            return error_reply(
+                iq,
+                DefinedCondition::ItemNotFound,
+                "no credentials available for the requested service",
+            );
+        }
+
+        let cred = match self.mint_credential(iq, ctx) {
+            Ok(cred) => cred,
+            Err(reply) => return reply,
+        };
+        let services = matched
+            .into_iter()
+            .map(|(kind, port)| build_credentials_service(kind, host, port, &cred))
+            .collect();
+        result_reply(iq, build_credentials_result_element(services))
+    }
+}
+
 impl IqHandler for ExtDiscoHandler {
     fn namespace(&self) -> &'static str {
         NS_EXT_DISCO
@@ -79,109 +266,38 @@ impl IqHandler for ExtDiscoHandler {
             return error_reply(
                 iq,
                 DefinedCondition::BadRequest,
-                "extdisco services must be IQ get",
+                "extdisco requests must be IQ get",
             );
         };
-        if query.name() != "services" || query.ns() != NS_EXT_DISCO {
+        if query.ns() != NS_EXT_DISCO {
             return error_reply(
                 iq,
                 DefinedCondition::BadRequest,
-                "expected <services xmlns='urn:xmpp:extdisco:2'/>",
+                "expected <services/> or <credentials/> in urn:xmpp:extdisco:2",
             );
         }
-
-        // XEP-0215 §3.6.1: optional `type` attribute restricts the
-        // response to a single service type. Unknown values are
-        // rejected; an absent attribute returns every supported
-        // service.
-        let type_filter = match query.attr("type") {
-            None => None,
-            Some("turn") => Some(ServiceType::Turn),
-            Some("stun") => Some(ServiceType::Stun),
-            Some(other) => {
-                return error_reply(
-                    iq,
-                    DefinedCondition::BadRequest,
-                    &format!("unsupported services type filter: {other}"),
-                );
-            }
-        };
-
-        // Mint TURN credentials only when the response will actually
-        // include the TURN entry. Avoids a wasted HMAC for clients
-        // that explicitly filter to `type='stun'`.
-        let want_turn = type_filter != Some(ServiceType::Stun);
-        let want_stun = type_filter != Some(ServiceType::Turn);
-        let mut services: Vec<minidom::Element> = Vec::with_capacity(2);
-        if want_turn {
-            let requester = ctx.full_jid.to_bare();
-            if let Err(exceeded) = self.turn_credential_rate_limit.check_and_record(&requester) {
-                tracing::warn!(
-                    jid = %requester,
-                    %exceeded,
-                    "rate-limit dropped TURN credential request"
-                );
-                crate::telemetry::call::increment_call_control_rate_limited(
-                    CallControlRateLimitedSurface::Turn,
-                );
-                return error_reply(
-                    iq,
-                    DefinedCondition::PolicyViolation,
-                    "TURN credential rate limit exceeded",
-                );
-            }
-            // Mint credentials scoped to the authenticated session
-            // JID, never the client-supplied `iq.from` (which could
-            // spoof any identity into the TURN username).
-            let identity = Identity::from_jid(ctx.full_jid.clone());
-            match self.sfu.issue_turn_credentials(&identity) {
-                Ok(cred) => {
-                    record_turn_credential_outcome(RequestOutcome::Success);
-                    services.push(build_turn_service(
-                        self.sfu.turn_host(),
-                        self.turn_tls_port,
-                        &cred,
-                    ));
-                }
-                Err(e) => {
-                    record_turn_credential_outcome(RequestOutcome::Failure);
-                    tracing::error!(
-                        user = %ctx.full_jid.to_bare(),
-                        error = %e,
-                        "TURN credential mint failed"
-                    );
-                    return error_reply(
-                        iq,
-                        DefinedCondition::InternalServerError,
-                        "internal error",
-                    );
-                }
-            }
+        match query.name() {
+            "services" => self.handle_services(iq, query, ctx),
+            "credentials" => self.handle_credentials(iq, query, ctx),
+            _ => error_reply(
+                iq,
+                DefinedCondition::BadRequest,
+                "expected <services/> or <credentials/> in urn:xmpp:extdisco:2",
+            ),
         }
-        if want_stun {
-            services.push(build_stun_service_element(
-                self.sfu.turn_host(),
-                self.turn_udp_port,
-            ));
-        }
-        // The wrapper element is built manually rather than via
-        // `ServicesResult` so it can carry the manually-built
-        // `<service type='turns'/>` child — `ServicesResult.services:
-        // Vec<Service>` can only hold the typed `Stun`/`Turn`
-        // variants and would emit `type='turn'` (wrong per XEP-0215
-        // §3.6.5).
-        let type_filter_str = type_filter.map(service_type_wire_str);
-        let result = build_services_result_element(type_filter_str, services);
-        let reply = Iq::Result {
-            from: iq.to().cloned(),
-            to: iq.from().cloned(),
-            id: iq.id().to_string(),
-            payload: Some(result),
-        };
-        vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
-            reply,
-        ))))]
     }
+}
+
+fn result_reply(iq: &Iq, payload: Element) -> Vec<OutboundEvent> {
+    let reply = Iq::Result {
+        from: iq.to().cloned(),
+        to: iq.from().cloned(),
+        id: iq.id().to_string(),
+        payload: Some(payload),
+    };
+    vec![OutboundEvent::SendStanza(Box::new(Stanza::Iq(Box::new(
+        reply,
+    ))))]
 }
 
 fn record_turn_credential_outcome(outcome: RequestOutcome) {
@@ -192,17 +308,6 @@ fn record_turn_credential_outcome(outcome: RequestOutcome) {
         1,
         outcome,
     );
-}
-
-/// Wire-form `type` value for the (typed) filter on the inbound
-/// request. The TLS-protected `turns` variant is only ever emitted
-/// in the response (XEP-0215 §3.6.5); the filter on the request
-/// itself uses the typed surface, which never includes `turns`.
-fn service_type_wire_str(t: ServiceType) -> &'static str {
-    match t {
-        ServiceType::Stun => "stun",
-        ServiceType::Turn => "turn",
-    }
 }
 
 fn error_reply(original: &Iq, cond: DefinedCondition, text: &str) -> Vec<OutboundEvent> {
@@ -303,13 +408,16 @@ mod tests {
         assert_eq!(elem.ns(), NS_EXT_DISCO);
 
         let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
 
-        // XEP-0215 §3.6.5: TLS-protected TURN must go out as
-        // `type='turns'`. The manual element-building path is
-        // exactly what makes this possible — `ServicesResult`'s
-        // typed `Vec<Service>` cannot represent this value.
-        let turns = entries[0];
+        let turn = entries[0];
+        assert_eq!(turn.attr("type"), Some("turn"));
+        assert_eq!(turn.attr("transport"), Some("udp"));
+        assert_eq!(turn.attr("port"), Some("3478"));
+        assert!(turn.attr("username").is_some());
+
+        // TLS-protected TURN goes out as `type='turns'`.
+        let turns = entries[1];
         assert_eq!(turns.attr("type"), Some(TYPE_TURNS));
         assert_eq!(turns.attr("transport"), Some("tcp"));
         assert_eq!(turns.attr("port"), Some("443"));
@@ -317,7 +425,7 @@ mod tests {
         assert!(turns.attr("password").is_some());
         assert!(turns.attr("expires").is_some());
 
-        let stun = entries[1];
+        let stun = entries[2];
         assert_eq!(stun.attr("type"), Some("stun"));
         assert_eq!(stun.attr("transport"), Some("udp"));
         assert_eq!(stun.attr("port"), Some("3478"));
@@ -423,7 +531,7 @@ mod tests {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
             id: "e3".into(),
-            payload: Element::builder("credentials", NS_EXT_DISCO).build(),
+            payload: Element::builder("frobnicate", NS_EXT_DISCO).build(),
         };
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -460,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn services_query_with_type_turn_returns_only_turns_entry() {
+    fn services_query_with_type_turn_returns_only_turn_entry() {
         let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
@@ -486,9 +594,8 @@ mod tests {
         assert_eq!(elem.attr("type"), Some("turn"));
         let entries: Vec<&Element> = elem.children().filter(|c| c.name() == "service").collect();
         assert_eq!(entries.len(), 1);
-        // The filter on the request is the typed surface ("turn"),
-        // but the response is the XEP-conformant "turns" wire value.
-        assert_eq!(entries[0].attr("type"), Some(TYPE_TURNS));
+        assert_eq!(entries[0].attr("type"), Some("turn"));
+        assert_eq!(entries[0].attr("transport"), Some("udp"));
     }
 
     #[test]

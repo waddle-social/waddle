@@ -1,12 +1,8 @@
 //! XEP-0215: External Service Discovery dedicated suite.
 //!
-//! Pins the wire shape Waddle advertises on a `services` IQ — most
-//! importantly that TLS-protected TURN goes out as `type='turns'`
-//! per §3.6.5, not the typed-surface `type='turn'` that xmpp-parsers
-//! defaults to. The handler builds the `<services/>` wrapper
-//! manually for exactly this reason; the tests below are the safety
-//! net against an accidental reversion to `ServicesResult` + typed
-//! `Vec<Service>`.
+//! Pins the wire shape Waddle advertises on `services` and
+//! `credentials` IQs: `type='turn'` (UDP) and `type='turns'` (TLS)
+//! entries, exact `type` filtering, and credential requests.
 
 use chrono::Duration;
 use minidom::Element;
@@ -21,7 +17,7 @@ use waddle_xmpp::protocol::handlers::extdisco::ExtDiscoHandler;
 use waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TurnCredentialRateLimit;
 use waddle_xmpp::protocol::IqHandler;
 use waddle_xmpp::xep::xep0215::{
-    build_services, build_services_result_element, build_stun_service_element, build_turn_service,
+    build_services, build_services_result_element, build_stun_service_element, build_turns_service,
     NS_EXT_DISCO, TYPE_TURNS,
 };
 use waddle_xmpp::Stanza;
@@ -95,14 +91,9 @@ fn services_get_iq(id: &str) -> Iq {
 
 #[test]
 fn xep0215_tls_turn_is_advertised_as_turns() {
-    // The single most important wire-shape assertion: §3.6.5 says
-    // TLS-protected TURN uses `type='turns'`. xmpp-parsers' typed
-    // `ServiceType` only carries `Stun`/`Turn`, so the
-    // `build_turn_service` helper hand-builds the element to emit
-    // the literal `turns` value.
     let host = TurnHost::new("turn.waddle.social");
     let cred = fixture_cred();
-    let turn = build_turn_service(&host, 443, &cred);
+    let turn = build_turns_service(&host, 443, &cred);
 
     assert_eq!(turn.name(), "service");
     assert_eq!(turn.ns(), NS_EXT_DISCO);
@@ -118,7 +109,7 @@ fn xep0215_tls_turn_is_advertised_as_turns() {
 fn xep0215_turns_entry_carries_required_attributes() {
     let host = TurnHost::new("turn.waddle.social");
     let cred = fixture_cred();
-    let turn = build_turn_service(&host, 443, &cred);
+    let turn = build_turns_service(&host, 443, &cred);
 
     assert_eq!(turn.attr("action"), Some("add"));
     assert_eq!(turn.attr("transport"), Some("tcp"));
@@ -127,7 +118,7 @@ fn xep0215_turns_entry_carries_required_attributes() {
     assert_eq!(turn.attr("username"), Some(cred.username.as_str()));
     assert_eq!(turn.attr("password"), Some(cred.password.as_str()));
     assert!(turn.attr("expires").is_some());
-    assert_eq!(turn.attr("restricted"), Some("1"));
+    assert!(turn.attr("restricted").is_none());
 }
 
 #[test]
@@ -156,9 +147,10 @@ fn xep0215_services_wrapper_preserves_turns_child() {
         .children()
         .filter(|c| c.is("service", NS_EXT_DISCO))
         .collect();
-    assert_eq!(children.len(), 2);
-    assert_eq!(children[0].attr("type"), Some(TYPE_TURNS));
-    assert_eq!(children[1].attr("type"), Some("stun"));
+    assert_eq!(children.len(), 3);
+    assert_eq!(children[0].attr("type"), Some("turn"));
+    assert_eq!(children[1].attr("type"), Some(TYPE_TURNS));
+    assert_eq!(children[2].attr("type"), Some("stun"));
 }
 
 #[test]
@@ -167,9 +159,6 @@ fn xep0215_services_wrapper_carries_optional_type_filter_attribute() {
     let cred = fixture_cred();
     let entries = build_services(&host, 443, 3478, &cred);
     let wrapper = build_services_result_element(Some("turn"), entries);
-    // The filter on the request is the typed `turn` value; the
-    // response wrapper echoes it. Only the inner `<service/>`
-    // child uses `turns` for the TLS-protected service.
     assert_eq!(wrapper.attr("type"), Some("turn"));
 }
 
@@ -266,4 +255,216 @@ fn xep0215_turn_credential_budget_recovers_after_window() {
         },
         other => panic!("expected SendStanza, got {other:?}"),
     }
+}
+
+fn typed_get(id: &str, name: &str, type_attr: Option<&str>) -> Iq {
+    let mut builder = Element::builder(name, NS_EXT_DISCO);
+    if let Some(t) = type_attr {
+        builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), t);
+    }
+    Iq::Get {
+        from: Some("alice@waddle.social/desktop".parse().expect("valid jid")),
+        to: Some("waddle.social".parse().expect("valid jid")),
+        id: id.to_string(),
+        payload: builder.build(),
+    }
+}
+
+fn credentials_get(id: &str, services: &[(&str, &str, Option<&str>)]) -> Iq {
+    let mut builder = Element::builder("credentials", NS_EXT_DISCO);
+    for (host, ty, port) in services {
+        let mut svc = Element::builder("service", NS_EXT_DISCO)
+            .attr(minidom::rxml::xml_ncname!("host").to_owned(), *host)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), *ty);
+        if let Some(port) = port {
+            svc = svc.attr(minidom::rxml::xml_ncname!("port").to_owned(), *port);
+        }
+        builder = builder.append(svc.build());
+    }
+    Iq::Get {
+        from: Some("alice@waddle.social/desktop".parse().expect("valid jid")),
+        to: Some("waddle.social".parse().expect("valid jid")),
+        id: id.to_string(),
+        payload: builder.build(),
+    }
+}
+
+fn reply_of(iq: &Iq) -> Iq {
+    let jid = session_jid();
+    let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
+    let events = handler.handle(iq, &stanza_ctx(&jid));
+    match events.into_iter().next() {
+        Some(OutboundEvent::SendStanza(stanza)) => match *stanza {
+            Stanza::Iq(reply) => *reply,
+            other => panic!("expected IQ reply, got {other:?}"),
+        },
+        other => panic!("expected SendStanza, got {other:?}"),
+    }
+}
+
+fn result_children(reply: Iq) -> (Element, Vec<Element>) {
+    let Iq::Result {
+        payload: Some(payload),
+        ..
+    } = reply
+    else {
+        panic!("expected result reply, got {reply:?}")
+    };
+    let children = payload
+        .children()
+        .filter(|c| c.is("service", NS_EXT_DISCO))
+        .cloned()
+        .collect();
+    (payload, children)
+}
+
+fn error_condition(reply: Iq) -> DefinedCondition {
+    let Iq::Error { error, .. } = reply else {
+        panic!("expected error reply, got {reply:?}")
+    };
+    error.defined_condition
+}
+
+#[test]
+fn xep0215_type_turn_filter_returns_only_turn_entries() {
+    let (wrapper, entries) = result_children(reply_of(&typed_get("t1", "services", Some("turn"))));
+    assert_eq!(wrapper.attr("type"), Some("turn"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].attr("type"), Some("turn"));
+    assert_eq!(entries[0].attr("transport"), Some("udp"));
+    assert_eq!(entries[0].attr("port"), Some("3478"));
+    assert!(entries[0].attr("username").is_some());
+    assert!(entries[0].attr("password").is_some());
+}
+
+#[test]
+fn xep0215_type_turns_filter_returns_only_turns_entries() {
+    let (wrapper, entries) = result_children(reply_of(&typed_get("t2", "services", Some("turns"))));
+    assert_eq!(wrapper.attr("type"), Some("turns"));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].attr("type"), Some(TYPE_TURNS));
+    assert_eq!(entries[0].attr("transport"), Some("tcp"));
+    assert_eq!(entries[0].attr("port"), Some("443"));
+}
+
+#[test]
+fn xep0215_type_stun_filter_returns_only_stun_entries() {
+    let (_, entries) = result_children(reply_of(&typed_get("t3", "services", Some("stun"))));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].attr("type"), Some("stun"));
+}
+
+#[test]
+fn xep0215_type_stuns_filter_is_accepted_and_empty() {
+    let (wrapper, entries) = result_children(reply_of(&typed_get("t4", "services", Some("stuns"))));
+    assert_eq!(wrapper.attr("type"), Some("stuns"));
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn xep0215_unfiltered_services_returns_every_type() {
+    let (_, entries) = result_children(reply_of(&typed_get("t5", "services", None)));
+    let types: Vec<_> = entries.iter().filter_map(|e| e.attr("type")).collect();
+    assert_eq!(types, ["turn", "turns", "stun"]);
+}
+
+#[test]
+fn xep0215_unknown_type_filter_is_bad_request() {
+    let cond = error_condition(reply_of(&typed_get("t6", "services", Some("ftp"))));
+    assert_eq!(cond, DefinedCondition::BadRequest);
+}
+
+#[test]
+fn xep0215_credentials_request_returns_credentials_for_configured_turn() {
+    let reply = reply_of(&credentials_get(
+        "c1",
+        &[("turn.waddle.social", "turn", None)],
+    ));
+    let (payload, entries) = result_children(reply);
+    assert_eq!(payload.name(), "credentials");
+    assert_eq!(payload.ns(), NS_EXT_DISCO);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].attr("host"), Some("turn.waddle.social"));
+    assert_eq!(entries[0].attr("type"), Some("turn"));
+    assert_eq!(entries[0].attr("port"), Some("3478"));
+    assert!(entries[0].attr("username").is_some());
+    assert!(entries[0].attr("password").is_some());
+}
+
+#[test]
+fn xep0215_credentials_request_port_selects_the_matching_service() {
+    let reply = reply_of(&credentials_get(
+        "c2",
+        &[("turn.waddle.social", "turns", Some("443"))],
+    ));
+    let (_, entries) = result_children(reply);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].attr("type"), Some(TYPE_TURNS));
+    assert_eq!(entries[0].attr("port"), Some("443"));
+
+    let cond = error_condition(reply_of(&credentials_get(
+        "c3",
+        &[("turn.waddle.social", "turns", Some("9999"))],
+    )));
+    assert_eq!(cond, DefinedCondition::ItemNotFound);
+}
+
+#[test]
+fn xep0215_credentials_request_for_unknown_service_is_item_not_found() {
+    for services in [
+        &[("other.example", "turn", None)][..],
+        &[("turn.waddle.social", "stun", None)][..],
+        &[("turn.waddle.social", "ftp", None)][..],
+    ] {
+        let cond = error_condition(reply_of(&credentials_get("c4", services)));
+        assert_eq!(cond, DefinedCondition::ItemNotFound);
+    }
+}
+
+#[test]
+fn xep0215_credentials_request_requires_host_and_type() {
+    let mut iq = credentials_get("c5", &[("turn.waddle.social", "turn", None)]);
+    if let Iq::Get { payload, .. } = &mut iq {
+        let svc = Element::builder("service", NS_EXT_DISCO)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "turn")
+            .build();
+        *payload = Element::builder("credentials", NS_EXT_DISCO)
+            .append(svc)
+            .build();
+    }
+    assert_eq!(error_condition(reply_of(&iq)), DefinedCondition::BadRequest);
+
+    let empty = credentials_get("c6", &[]);
+    assert_eq!(
+        error_condition(reply_of(&empty)),
+        DefinedCondition::BadRequest
+    );
+}
+
+#[test]
+fn xep0215_credentials_request_shares_the_turn_rate_limit() {
+    let jid = session_jid();
+    let handler = ExtDiscoHandler::with_turn_credential_rate_limit(
+        fixture_sfu(),
+        443,
+        3478,
+        Arc::new(TurnCredentialRateLimit::new(1, StdDuration::from_secs(30))),
+    );
+    let iq = credentials_get("c7", &[("turn.waddle.social", "turn", None)]);
+    let first = handler.handle(&iq, &stanza_ctx(&jid));
+    assert!(matches!(
+        &first[0],
+        OutboundEvent::SendStanza(s) if matches!(s.as_ref(), Stanza::Iq(r) if matches!(&**r, Iq::Result { .. }))
+    ));
+    let second = handler.handle(&iq, &stanza_ctx(&jid));
+    let OutboundEvent::SendStanza(stanza) = &second[0] else {
+        panic!("expected SendStanza")
+    };
+    let Stanza::Iq(reply) = stanza.as_ref() else {
+        panic!("expected IQ")
+    };
+    let Iq::Error { error, .. } = &**reply else {
+        panic!("expected error")
+    };
+    assert_eq!(error.defined_condition, DefinedCondition::PolicyViolation);
 }
