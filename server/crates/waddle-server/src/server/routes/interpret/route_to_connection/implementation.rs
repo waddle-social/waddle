@@ -1790,15 +1790,13 @@ pub(crate) fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
         })));
     }
     // RFC 6120 §8.3.1: echo the offending request so the sender can
-    // correlate which stanza failed. For Jingle payloads the echo is
-    // SANITIZED first (#1444): the sender gets their own request back
-    // minus the server-injected LiveKit transport — the one element
-    // that can carry credentials they were never meant to hold.
-    let echoed = if is_jingle {
-        waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo(&payload)
-    } else {
-        payload
-    };
+    // correlate which stanza failed, after sanitizing all sensitive credential
+    // namespaces (Jingle LiveKit transport #1444 and `urn:waddle:credential:*`
+    // top-level or deeply nested elements).
+    let echoed =
+        waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(
+            &payload,
+        );
     let error = StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::ServiceUnavailable,
@@ -1810,7 +1808,7 @@ pub(crate) fn undeliverable_iq_reply(stanza: &Stanza) -> Option<Stanza> {
         to: from,
         id,
         error,
-        payload: Some(echoed),
+        payload: echoed,
     })))
 }
 

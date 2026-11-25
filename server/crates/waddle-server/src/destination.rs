@@ -20,8 +20,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use jid::{BareJid, DomainPart, DomainRef, FullJid, Jid};
 use waddle_xmpp::identity::{canonical_jid, CanonicalDomain, DomainKind};
-use waddle_xmpp::protocol::handlers::jingle::credential_free_jingle_echo;
-use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -426,7 +424,10 @@ pub fn unroutable_iq_reply(
         from: iq.to().cloned(),
         to: Some(sender.clone()),
         id: iq.id().to_owned(),
-        payload: Some(payload.clone()),
+        payload:
+            waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(
+                payload,
+            ),
         error: reason.stanza_error(home),
     })
 }
@@ -853,7 +854,9 @@ impl OfferedIq {
         // §8.3.1 permits the echo; it is never required).
         let payload = match returned {
             Some(Stanza::Iq(iq)) if iq.id() == self.id => match *iq {
-                Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload),
+                Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+                    waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(&payload)
+                }
                 Iq::Result { .. } | Iq::Error { .. } => None,
             },
             _ => None,
@@ -868,17 +871,29 @@ impl OfferedIq {
     }
 }
 
-/// `iq` with every credential this server minted for a local recipient
-/// removed: the Waddle LiveKit transport in a Jingle payload. Revoke the
-/// credential before calling this; the stripped IQ no longer names it.
+/// `iq` with every credential this server minted or that belongs to a sensitive
+/// credential namespace removed (Waddle LiveKit transport in Jingle and
+/// `urn:waddle:credential:*` top-level or nested elements).
 pub fn without_server_minted_credentials(mut iq: Iq) -> Iq {
-    let payload = match &mut iq {
-        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload),
-        Iq::Result { payload, .. } | Iq::Error { payload, .. } => payload.as_mut(),
-    };
-    if let Some(payload) = payload {
-        if payload.is("jingle", NS_JINGLE) {
-            *payload = credential_free_jingle_echo(payload);
+    match &mut iq {
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+            if waddle_xmpp::protocol::handlers::credential_sanitize::is_sensitive_credential_namespace(
+                payload.ns().as_str(),
+            ) {
+                *payload = minidom::Element::builder(payload.name(), payload.ns()).build();
+            } else if let Some(sanitized) =
+                waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(
+                    payload,
+                )
+            {
+                *payload = sanitized;
+            }
+        }
+        Iq::Result { payload, .. } | Iq::Error { payload, .. } => {
+            if let Some(el) = payload.as_ref() {
+                *payload =
+                    waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(el);
+            }
         }
     }
     iq
