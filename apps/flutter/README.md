@@ -132,7 +132,10 @@ For a two-participant call, set `WADDLE_LIVEKIT_FIXTURE` to the path of a
 local JSON file before running the same command. The viewer decodes the
 shared screen and samples the synthetic camera with replacement, blur and
 effects disabled. The test also changes live microphone processing and remote
-playback gain, then reads the RTP statistics.
+playback gain, then reads the RTP statistics. A second call injects speech and
+noise into a private microphone and measures the decoded output with RNNoise,
+DTLN and filtering disabled. It also switches the filtered microphone to a
+second isolated input.
 Supply `publisher` and `viewer` objects, each with `url` (a `wss://` address),
 `room`, `identity` and a short-lived `token`. Use distinct identities in the
 same room with permission to publish and subscribe. For a private test CA,

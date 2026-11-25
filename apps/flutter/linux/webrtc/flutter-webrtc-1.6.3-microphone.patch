@@ -1,0 +1,117 @@
+--- a/flutter_media_stream.cc
++++ b/flutter_media_stream.cc
+@@ -1,6 +1,7 @@
+ #include "flutter_media_stream.h"
+
+ #include "flutter_utf8_sanitize.h"
++#include "microphone_filter.h"
+
+ #define DEFAULT_WIDTH 1280
+ #define DEFAULT_HEIGHT 720
+@@ -51,7 +52,16 @@
+         GetUserAudio(constraints, stream, params);
+       }
+     } else if (TypeIs<EncodableMap>(audio)) {
+-      GetUserAudio(constraints, stream, params);
++      auto options = GetValue<EncodableMap>(audio);
++      if (waddle_audio::requested(options)) {
++        if (!waddle_audio::create(options, base_->GenerateUUID(), base_->factory_.get(),
++                                  stream.get(), base_->local_tracks_, params)) {
++          result->Error("AudioFilterUnavailable", "Microphone track or filter unavailable");
++          return;
++        }
++      } else {
++        GetUserAudio(constraints, stream, params);
++      }
+     } else {
+       params[EncodableValue("audioTracks")] = EncodableValue(EncodableList());
+     }
+@@ -255,6 +265,7 @@
+         base_->factory_->CreateAudioTrack(source, uuid.c_str());
+
+     std::string track_id = track->id().std_string();
++    waddle_audio::remember_microphone(track_id, base_->factory_.get());
+
+     EncodableMap track_info;
+     track_info[EncodableValue("id")] = EncodableValue(track->id().std_string());
+@@ -587,6 +598,7 @@
+   vector<scoped_refptr<RTCAudioTrack>> audio_tracks = stream->audio_tracks();
+
+   for (auto track : audio_tracks.std_vector()) {
++    waddle_audio::forget(track->id().std_string());
+     stream->RemoveTrack(track);
+     base_->local_tracks_.erase(track->id().std_string());
+   }
+--- a/flutter_webrtc.cc
++++ b/flutter_webrtc.cc
+@@ -1,4 +1,5 @@
+ #include "flutter_webrtc.h"
++#include "microphone_filter.h"
+ #include "flutter_data_channel.h"
+
+ #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
+@@ -441,6 +442,7 @@
+     const EncodableValue enable = findEncodableValue(params, "enabled");
+     RTCMediaTrack* track = MediaTrackForId(track_id);
+     if (track != nullptr) {
++      waddle_audio::set_enabled(track_id, GetValue<bool>(enable));
+       track->set_enabled(GetValue<bool>(enable));
+     }
+     result->Success();
+@@ -877,6 +879,10 @@
+     if (rtpSenderId.empty()) {
+       result->Error("rtpSenderReplaceTrack",
+                     "rtpSenderReplaceTrack() rtpSenderId is null or empty");
++      return;
++    }
++    if (!trackId.empty() && !track) {
++      result->Error("rtpSenderReplaceTrack", "The replacement track has been disposed");
+       return;
+     }
+     RtpSenderReplaceTrack(pc, track, rtpSenderId, std::move(result));
+--- a/flutter_webrtc_base.cc
++++ b/flutter_webrtc_base.cc
+@@ -1,4 +1,5 @@
+ #include "flutter_webrtc_base.h"
++#include "microphone_filter.h"
+
+ #include "flutter_data_channel.h"
+ #include "flutter_peerconnection.h"
+@@ -42,6 +43,7 @@
+ }
+
+ FlutterWebRTCBase::~FlutterWebRTCBase() {
++  waddle_audio::clear(factory_.get());
+   if (webrtc_initialized_) {
+     LibWebRTC::Terminate();
+   }
+@@ -134,6 +136,7 @@
+ }
+
+ void FlutterWebRTCBase::RemoveMediaTrackForId(const std::string& id) {
++  waddle_audio::forget(id);
+   auto it = local_tracks_.find(id);
+   if (it != local_tracks_.end())
+     local_tracks_.erase(it);
+@@ -450,6 +453,7 @@
+ }
+
+ void FlutterWebRTCBase::RemoveTracksForId(const std::string& id) {
++  waddle_audio::forget(id);
+   auto it = local_tracks_.find(id);
+   if (it != local_tracks_.end())
+     local_tracks_.erase(it);
+--- a/flutter_peerconnection.cc
++++ b/flutter_peerconnection.cc
+@@ -771,7 +771,10 @@
+     return;
+   }
+
+-  sender->set_track(track);
++  if (!sender->set_track(track)) {
++    result_ptr->Error("rtpSenderReplaceTrack", "WebRTC rejected the replacement track");
++    return;
++  }
+
+   result_ptr->Success();
+ }

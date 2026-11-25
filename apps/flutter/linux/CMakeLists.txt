@@ -103,6 +103,7 @@ set_target_properties(${BINARY_NAME}
 # allocator during CMake configuration.
 set(MIMALLOC_USE_STATIC_LIBS OFF CACHE BOOL "" FORCE)
 include(flutter/generated_plugins.cmake)
+add_subdirectory(webrtc)
 # Compile the capture callback with the SDK's desktop ABI and its linked
 # WebRTC engine. Both the model library and the plugin live in bundle/lib.
 target_sources(flutter_webrtc_plugin PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runner/camera_effects.cc")

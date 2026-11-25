@@ -20,7 +20,8 @@ if [[ -n "${WADDLE_LIVEKIT_FIXTURE:-}" ]]; then
   gst=$(nix build --no-link --print-out-paths --inputs-from . 'nixpkgs#gst_all_1.gstreamer^bin')
   gst_core=$(tool gst_all_1.gstreamer)
   gst_base=$(tool gst_all_1.gst-plugins-base)
-  export gst gst_core gst_base
+  espeak=$(tool espeak-ng)
+  export gst gst_core gst_base espeak
 fi
 
 work=$(mktemp -d)
@@ -109,8 +110,21 @@ dbus-run-session "${bus_config[@]}" -- bash -eu <<'SESSION'
       sleep 0.1
     done
     [[ "$nodes" == *waddle-camera-test* ]] || { cat "$XDG_RUNTIME_DIR/camera.log" >&2; exit 1; }
+    # The fixture injects speech/noise into a dedicated source. Separate remote
+    # playout prevents the decoded participant's audio feeding back into capture.
+    "$pulse/bin/pactl" load-module module-null-sink sink_name=waddle_receiver_output >/dev/null
+    "$pulse/bin/pactl" load-module module-remap-source master=waddle_capture_test.monitor source_name=waddle_test_mic >/dev/null
+    "$pulse/bin/pactl" load-module module-null-sink sink_name=waddle_second_input >/dev/null
+    "$pulse/bin/pactl" load-module module-remap-source master=waddle_second_input.monitor \
+      source_name=waddle_second_mic source_properties=device.description=WaddleSecondMic >/dev/null
+    export WADDLE_TEST_SECOND_MIC=WaddleSecondMic
+    "$pulse/bin/pactl" set-default-source waddle_test_mic
+    "$pulse/bin/pactl" set-default-sink waddle_receiver_output
+    export PULSE_SOURCE=waddle_test_mic PULSE_SINK=waddle_receiver_output
+    export WADDLE_TEST_SPEECH="$XDG_RUNTIME_DIR/speech.wav"
+    "$espeak/bin/espeak-ng" -w "$WADDLE_TEST_SPEECH" 'The weather is clear and sunny beside the river.'
     export WADDLE_ISOLATED_CAMERA=1
-    tests+=(integration_test/wayland_sfu_test.dart)
+    tests+=(integration_test/wayland_sfu_test.dart integration_test/wayland_microphone_filters_test.dart)
   fi
   for test in "${tests[@]}"; do
     run=()
