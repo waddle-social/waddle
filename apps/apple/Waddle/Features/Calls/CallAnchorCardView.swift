@@ -149,8 +149,8 @@ struct CallAnchorRow: View {
         )
     }
 
-    /// No later announcement in what is loaded of the room.
+    /// No announcement of a later call in what is loaded of the room.
     private var isNewest: Bool {
-        session.timelines.timeline(for: item.conversation).items.last { $0.callAnchor != nil }?.id == item.id
+        CallAnchorCard.newestAnnouncementID(in: session.timelines.timeline(for: item.conversation).items) == item.id
     }
 }

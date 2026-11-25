@@ -75,6 +75,22 @@ public struct CallAnchorCard: Equatable, Sendable {
         )
     }
 
+    /// The room's latest announcement among `items`, by when each call
+    /// began and not by where its row sits: a row that arrived live carries
+    /// no time and sorts after every row read from history, so after a
+    /// reconnect an older announcement can sit below a newer one.
+    public static func newestAnnouncementID(in items: [TimelineItem]) -> String? {
+        var newest: (id: String, began: Date)?
+        for item in items {
+            guard let anchor = item.callAnchor else { continue }
+            // The server stamps each announcement with when its call began.
+            let began = anchor.started ?? item.sentAt
+            // Later in the list wins a tie.
+            if newest.map({ began >= $0.began }) ?? true { newest = (item.id, began) }
+        }
+        return newest?.id
+    }
+
     /// "Ada, Linus, Grace +2"
     static func peopleText(_ people: [String], naming limit: Int = 3) -> String {
         guard !people.isEmpty else { return "No one connected" }

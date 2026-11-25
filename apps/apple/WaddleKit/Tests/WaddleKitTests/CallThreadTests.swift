@@ -12,17 +12,21 @@ import Testing
         return store
     }
 
-    private func anchor(origin: String = "o1", stanza: String = "s1", from: JID? = nil, thread: String = "t1") -> WireMessage {
+    private func anchor(
+        origin: String = "o1", stanza: String = "s1", from: JID? = nil, thread: String = "t1", started: Date? = nil,
+        at timestamp: Date? = nil
+    ) -> WireMessage {
         var message = WireMessage(
             type: .groupchat,
             from: from ?? jid(room.description),
             to: JID(bare: me.jid, resource: "phone"),
             identity: MessageIdentity(
                 messageID: "m-\(origin)", originID: origin, stanzaIDs: [StanzaID(id: stanza, by: room)]),
+            timestamp: timestamp,
             body: "ada started a call",
             thread: thread
         )
-        message.callThread = CallThreadAnchor(kind: .room, hasVideo: true)
+        message.callThread = CallThreadAnchor(kind: .room, hasVideo: true, started: started)
         return message
     }
 
@@ -106,6 +110,29 @@ import Testing
         message.callThreadEnded = CallThreadEnded(anchorID: "o1", duration: 5)
         #expect(store.ingest(message) != .mutation)
         #expect(items(store).map(\.body) == ["hello"])
+    }
+
+    /// A row that arrived live carries no time and sorts after every row read from history.
+    @Test func theLatestCallIsTheOneThatBeganLastWhereverItsRowSits() {
+        let store = store()
+        let morning = Date(timeIntervalSince1970: 1_800_000_000)
+        // Heard live before a disconnect, and too far back to be read again afterwards.
+        store.ingest(anchor(origin: "old", stanza: "s1", thread: "t1", started: morning))
+        // Read from history after the reconnect: a later call.
+        store.ingest(anchor(origin: "new", stanza: "s2", thread: "t2", started: morning.addingTimeInterval(3600), at: morning.addingTimeInterval(3600)))
+        let rows = items(store)
+        #expect(rows.map(\.identity.originID) == ["new", "old"], "the older row sits last")
+        #expect(CallAnchorCard.newestAnnouncementID(in: rows) == rows[0].id)
+    }
+
+    @Test func withNoTimeToGoByTheLaterRowIsTheLatest() {
+        let store = store()
+        store.ingest(anchor(origin: "o1", stanza: "s1", thread: "t1"))
+        store.ingest(anchor(origin: "o2", stanza: "s2", thread: "t2"))
+        store.ingest(roomMessage("hello", from: "bob", stanzaID: "b1"))
+        let rows = items(store)
+        #expect(CallAnchorCard.newestAnnouncementID(in: rows) == rows[1].id)
+        #expect(CallAnchorCard.newestAnnouncementID(in: [rows[2]]) == nil)
     }
 
     @Test func aPeerCannotAnnounceACallInAConversationOfTwo() {
