@@ -148,14 +148,15 @@ const TENANT_SCHEMA_STATEMENTS: &[&str] = &[
 
 struct PoolSlot {
     _db: turso::Database,
-    conn: turso::Connection,
+    conn: Arc<Mutex<turso::Connection>>,
     pin_count: usize,
 }
 
 struct PoolInner {
     accounting: FdPoolAccounting,
     lru: LruCache<TenantId, PoolSlot>,
-    in_flight_opens: HashMap<TenantId, watch::Receiver<bool>>,
+    in_flight_opens: HashMap<TenantId, (u64, watch::Receiver<bool>)>,
+    next_open_id: u64,
     evictions: usize,
 }
 
@@ -173,6 +174,7 @@ impl PoolInner {
             accounting,
             lru: LruCache::new(lru_cap),
             in_flight_opens: HashMap::new(),
+            next_open_id: 0,
             evictions: 0,
         })
     }
@@ -191,13 +193,15 @@ impl PoolInner {
 /// Decrements `pin_count` (and releases the `FdPoolAccounting` pin when hitting 0) on drop.
 pub struct PinnedTursoConn {
     tenant_id: TenantId,
-    conn: turso::Connection,
+    conn: Arc<Mutex<turso::Connection>>,
     pool: Arc<Mutex<PoolInner>>,
 }
 
 impl PinnedTursoConn {
-    pub fn connection(&self) -> &turso::Connection {
-        &self.conn
+    /// Lock the tenant's per-slot Turso connection, serializing concurrent
+    /// queries and transactions while preserving the 1-DB-handle FD budget.
+    pub async fn lock_conn(&self) -> tokio::sync::MutexGuard<'_, turso::Connection> {
+        self.conn.lock().await
     }
 }
 
@@ -206,9 +210,9 @@ impl Drop for PinnedTursoConn {
         let tenant_id = self.tenant_id.clone();
         if let Ok(mut guard) = self.pool.try_lock() {
             release_pin_locked(&mut guard, &tenant_id);
-        } else {
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let pool = Arc::clone(&self.pool);
-            tokio::spawn(async move {
+            handle.spawn(async move {
                 let mut guard = pool.lock().await;
                 release_pin_locked(&mut guard, &tenant_id);
             });
@@ -223,6 +227,79 @@ fn release_pin_locked(inner: &mut PoolInner, tenant_id: &TenantId) {
             if slot.pin_count == 0 {
                 let _ = inner.accounting.release_pin();
             }
+        }
+    }
+}
+
+/// RAII guard ensuring an in-flight cold open cleans up `in_flight_opens`,
+/// rolls back its `FdPoolAccounting` reservation, and wakes waiting callers
+/// if the leader future is cancelled or panics before re-acquiring the pool lock.
+struct InFlightOpenGuard {
+    tenant_id: TenantId,
+    open_id: u64,
+    pool: Arc<Mutex<PoolInner>>,
+    open_tx: Option<watch::Sender<bool>>,
+    armed: bool,
+}
+
+impl InFlightOpenGuard {
+    fn new(
+        tenant_id: TenantId,
+        open_id: u64,
+        pool: Arc<Mutex<PoolInner>>,
+        open_tx: watch::Sender<bool>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            open_id,
+            pool,
+            open_tx: Some(open_tx),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) -> Option<watch::Sender<bool>> {
+        self.armed = false;
+        self.open_tx.take()
+    }
+}
+
+fn rollback_in_flight_open_locked(inner: &mut PoolInner, tenant_id: &TenantId, open_id: u64) {
+    let matches = inner
+        .in_flight_opens
+        .get(tenant_id)
+        .is_some_and(|(id, _)| *id == open_id);
+    if matches {
+        inner.in_flight_opens.remove(tenant_id);
+        let _ = inner.accounting.release_pin();
+        let _ = inner.accounting.close_unpinned();
+    }
+}
+
+impl Drop for InFlightOpenGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let tenant_id = self.tenant_id.clone();
+        let open_id = self.open_id;
+        let open_tx = self.open_tx.take();
+        if let Ok(mut guard) = self.pool.try_lock() {
+            rollback_in_flight_open_locked(&mut guard, &tenant_id, open_id);
+            if let Some(tx) = open_tx {
+                let _ = tx.send(true);
+            }
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool = Arc::clone(&self.pool);
+            handle.spawn(async move {
+                let mut guard = pool.lock().await;
+                rollback_in_flight_open_locked(&mut guard, &tenant_id, open_id);
+                if let Some(tx) = open_tx {
+                    let _ = tx.send(true);
+                }
+            });
+        } else if let Some(tx) = open_tx {
+            let _ = tx.send(true);
         }
     }
 }
@@ -336,7 +413,7 @@ impl TursoTenantStore {
         }
 
         loop {
-            let (evicted_slot, open_tx) = {
+            let (evicted_slot, mut in_flight_guard) = {
                 let mut guard = self.pool.lock().await;
                 let inner = &mut *guard;
                 if let Some(slot) = inner.lru.get_mut(tenant_id) {
@@ -356,7 +433,7 @@ impl TursoTenantStore {
                             })?;
                     }
                     slot.pin_count += 1;
-                    let conn = slot.conn.clone();
+                    let conn = Arc::clone(&slot.conn);
                     return Ok(PinnedTursoConn {
                         tenant_id: tenant_id.clone(),
                         conn,
@@ -366,10 +443,19 @@ impl TursoTenantStore {
 
                 // Coalesce concurrent cold opens for the same tenant so only one
                 // caller reserves an FD pool slot and opens the WAL database.
-                if let Some(in_flight_rx) = inner.in_flight_opens.get(tenant_id) {
+                if let Some((in_flight_id, in_flight_rx)) = inner.in_flight_opens.get(tenant_id) {
+                    let in_flight_id = *in_flight_id;
                     let mut rx = in_flight_rx.clone();
+                    // Defensive: if the sender was already dropped without completing
+                    // cleanup, evict the stale entry and roll back its FD slot now.
+                    if rx.has_changed().is_err() {
+                        rollback_in_flight_open_locked(inner, tenant_id, in_flight_id);
+                        continue;
+                    }
                     drop(guard);
-                    let _ = rx.wait_for(|done| *done).await;
+                    if rx.wait_for(|done| *done).await.is_err() {
+                        tokio::task::yield_now().await;
+                    }
                     continue;
                 }
 
@@ -400,25 +486,35 @@ impl TursoTenantStore {
                     AcquireAction::OpenedFresh | AcquireAction::ReusedOpen => None,
                 };
 
+                inner.next_open_id = inner.next_open_id.wrapping_add(1);
+                let open_id = inner.next_open_id;
                 let (tx, rx) = watch::channel(false);
-                inner.in_flight_opens.insert(tenant_id.clone(), rx);
-                (evicted, tx)
+                inner
+                    .in_flight_opens
+                    .insert(tenant_id.clone(), (open_id, rx));
+                let guard_handle =
+                    InFlightOpenGuard::new(tenant_id.clone(), open_id, Arc::clone(&self.pool), tx);
+                (evicted, guard_handle)
             };
 
             // Checkpoint and close the evicted handle BEFORE opening the new DB so
             // open FDs never exceed the pool bound.
             if let Some(slot) = evicted_slot {
-                let _ = Self::checkpoint_and_flush(&slot.conn).await;
+                {
+                    let conn = slot.conn.lock().await;
+                    let _ = Self::checkpoint_and_flush(&conn).await;
+                }
                 drop(slot);
             }
 
             let opened = Self::open_raw_turso_db(&path).await;
             let mut duplicate_to_drop = None;
-            let result = {
+            let (result, open_tx) = {
                 let mut guard = self.pool.lock().await;
+                let open_tx = in_flight_guard.disarm();
                 let inner = &mut *guard;
                 inner.in_flight_opens.remove(tenant_id);
-                match opened {
+                let res = match opened {
                     Ok((db, conn)) => {
                         if let Some(existing) = inner.lru.get_mut(tenant_id) {
                             // Defensive dedup: if another caller inserted this tenant
@@ -449,25 +545,25 @@ impl TursoTenantStore {
                                     existing.pin_count += 1;
                                     Ok(PinnedTursoConn {
                                         tenant_id: tenant_id.clone(),
-                                        conn: existing.conn.clone(),
+                                        conn: Arc::clone(&existing.conn),
                                         pool: Arc::clone(&self.pool),
                                     })
                                 }
                                 Err(err) => Err(err),
                             }
                         } else {
-                            let conn_clone = conn.clone();
+                            let shared_conn = Arc::new(Mutex::new(conn));
                             inner.lru.put(
                                 tenant_id.clone(),
                                 PoolSlot {
                                     _db: db,
-                                    conn,
+                                    conn: Arc::clone(&shared_conn),
                                     pin_count: 1,
                                 },
                             );
                             Ok(PinnedTursoConn {
                                 tenant_id: tenant_id.clone(),
-                                conn: conn_clone,
+                                conn: shared_conn,
                                 pool: Arc::clone(&self.pool),
                             })
                         }
@@ -478,10 +574,13 @@ impl TursoTenantStore {
                         let _ = inner.accounting.close_unpinned();
                         Err(err)
                     }
-                }
+                };
+                (res, open_tx)
             };
 
-            let _ = open_tx.send(true);
+            if let Some(tx) = open_tx {
+                let _ = tx.send(true);
+            }
             drop(duplicate_to_drop);
             return result;
         }
@@ -663,7 +762,10 @@ impl TursoTenantStore {
     ) -> Result<PinnedTursoConn, TenantStoreError> {
         self.verify_scope_against_lease(scope).await?;
         let pinned = self.acquire_pinned_conn(&scope.tenant_id).await?;
-        Self::check_fence_on_conn(pinned.connection(), scope).await?;
+        {
+            let conn = pinned.lock_conn().await;
+            Self::check_fence_on_conn(&conn, scope).await?;
+        }
         Ok(pinned)
     }
 }
@@ -697,7 +799,10 @@ impl TenantStore for TursoTenantStore {
     ) -> Result<TenantDbHandle, TenantStoreError> {
         self.verify_scope_against_lease(scope).await?;
         let pinned = self.acquire_pinned_conn(&scope.tenant_id).await?;
-        Self::upsert_fence_row(pinned.connection(), scope).await?;
+        {
+            let conn = pinned.lock_conn().await;
+            Self::upsert_fence_row(&conn, scope).await?;
+        }
         {
             let mut fences = self.local_fences.lock().await;
             fences.insert(
@@ -738,7 +843,10 @@ impl TenantStore for TursoTenantStore {
             slot
         };
         if let Some(slot) = popped {
-            Self::checkpoint_and_flush(&slot.conn).await?;
+            {
+                let conn = slot.conn.lock().await;
+                Self::checkpoint_and_flush(&conn).await?;
+            }
             drop(slot);
         }
         Ok(())
@@ -772,25 +880,24 @@ impl TenantDataOps for TursoTenantStore {
         user: &TenantUserRecord,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "INSERT INTO users (jid, account_id, username, xmpp_localpart, display_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(jid) DO UPDATE SET
-                     username = excluded.username,
-                     xmpp_localpart = excluded.xmpp_localpart,
-                     display_name = excluded.display_name",
-                (
-                    user.jid.as_str(),
-                    user.account_id.to_string(),
-                    user.username.as_str(),
-                    user.xmpp_localpart.as_str(),
-                    user.display_name.as_deref(),
-                ),
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("upsert_user failed: {err}")))?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "INSERT INTO users (jid, account_id, username, xmpp_localpart, display_name)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(jid) DO UPDATE SET
+                 username = excluded.username,
+                 xmpp_localpart = excluded.xmpp_localpart,
+                 display_name = excluded.display_name",
+            (
+                user.jid.as_str(),
+                user.account_id.to_string(),
+                user.username.as_str(),
+                user.xmpp_localpart.as_str(),
+                user.display_name.as_deref(),
+            ),
+        )
+        .await
+        .map_err(|err| TenantStoreError::Backend(format!("upsert_user failed: {err}")))?;
         Ok(())
     }
 
@@ -800,8 +907,8 @@ impl TenantDataOps for TursoTenantStore {
         xmpp_localpart: &str,
     ) -> Result<Option<TenantUserRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        let mut rows = pinned
-            .connection()
+        let conn = pinned.lock_conn().await;
+        let mut rows = conn
             .query(
                 "SELECT jid, account_id, username, xmpp_localpart, display_name
                  FROM users WHERE xmpp_localpart = ?1",
@@ -849,14 +956,13 @@ impl TenantDataOps for TursoTenantStore {
         new_account_id: AccountId,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "UPDATE users SET account_id = ?1 WHERE jid = ?2",
-                (new_account_id.to_string(), jid),
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("update account_id failed: {err}")))?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "UPDATE users SET account_id = ?1 WHERE jid = ?2",
+            (new_account_id.to_string(), jid),
+        )
+        .await
+        .map_err(|err| TenantStoreError::Backend(format!("update account_id failed: {err}")))?;
         Ok(())
     }
 
@@ -866,26 +972,23 @@ impl TenantDataOps for TursoTenantStore {
         identity: &TenantAuthIdentityRecord,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "INSERT INTO auth_identities (id, user_jid, provider_id, issuer, subject)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(issuer, subject) DO UPDATE SET
-                     user_jid = excluded.user_jid,
-                     provider_id = excluded.provider_id",
-                (
-                    identity.id.as_str(),
-                    identity.user_jid.as_str(),
-                    identity.provider_id.as_str(),
-                    identity.issuer.as_str(),
-                    identity.subject.as_str(),
-                ),
-            )
-            .await
-            .map_err(|err| {
-                TenantStoreError::Backend(format!("upsert_auth_identity failed: {err}"))
-            })?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "INSERT INTO auth_identities (id, user_jid, provider_id, issuer, subject)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(issuer, subject) DO UPDATE SET
+                 user_jid = excluded.user_jid,
+                 provider_id = excluded.provider_id",
+            (
+                identity.id.as_str(),
+                identity.user_jid.as_str(),
+                identity.provider_id.as_str(),
+                identity.issuer.as_str(),
+                identity.subject.as_str(),
+            ),
+        )
+        .await
+        .map_err(|err| TenantStoreError::Backend(format!("upsert_auth_identity failed: {err}")))?;
         Ok(())
     }
 
@@ -896,8 +999,8 @@ impl TenantDataOps for TursoTenantStore {
         subject: &str,
     ) -> Result<Option<TenantAuthIdentityRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        let mut rows = pinned
-            .connection()
+        let conn = pinned.lock_conn().await;
+        let mut rows = conn
             .query(
                 "SELECT id, user_jid, provider_id, issuer, subject
                  FROM auth_identities WHERE issuer = ?1 AND subject = ?2",
@@ -937,22 +1040,21 @@ impl TenantDataOps for TursoTenantStore {
         space: &TenantSpaceRecord,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "INSERT INTO spaces_metadata (space_node, space_jid, name)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(space_node) DO UPDATE SET
-                     space_jid = excluded.space_jid,
-                     name = excluded.name",
-                (
-                    space.space_node.as_str(),
-                    space.space_jid.as_str(),
-                    space.name.as_str(),
-                ),
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("upsert_space failed: {err}")))?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "INSERT INTO spaces_metadata (space_node, space_jid, name)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(space_node) DO UPDATE SET
+                 space_jid = excluded.space_jid,
+                 name = excluded.name",
+            (
+                space.space_node.as_str(),
+                space.space_jid.as_str(),
+                space.name.as_str(),
+            ),
+        )
+        .await
+        .map_err(|err| TenantStoreError::Backend(format!("upsert_space failed: {err}")))?;
         Ok(())
     }
 
@@ -962,8 +1064,8 @@ impl TenantDataOps for TursoTenantStore {
         space_node: &str,
     ) -> Result<Option<TenantSpaceRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        let mut rows = pinned
-            .connection()
+        let conn = pinned.lock_conn().await;
+        let mut rows = conn
             .query(
                 "SELECT space_node, space_jid, name FROM spaces_metadata WHERE space_node = ?1",
                 [space_node],
@@ -996,23 +1098,22 @@ impl TenantDataOps for TursoTenantStore {
         participant: &RemoteParticipantRecord,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "INSERT INTO remote_participants (room_id, remote_bare_jid, affiliation)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(room_id, remote_bare_jid) DO UPDATE SET
-                     affiliation = excluded.affiliation",
-                (
-                    participant.room_id.as_str(),
-                    participant.remote_bare_jid.as_str(),
-                    participant.affiliation.as_str(),
-                ),
-            )
-            .await
-            .map_err(|err| {
-                TenantStoreError::Backend(format!("record_remote_participant failed: {err}"))
-            })?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "INSERT INTO remote_participants (room_id, remote_bare_jid, affiliation)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(room_id, remote_bare_jid) DO UPDATE SET
+                 affiliation = excluded.affiliation",
+            (
+                participant.room_id.as_str(),
+                participant.remote_bare_jid.as_str(),
+                participant.affiliation.as_str(),
+            ),
+        )
+        .await
+        .map_err(|err| {
+            TenantStoreError::Backend(format!("record_remote_participant failed: {err}"))
+        })?;
         Ok(())
     }
 
@@ -1022,8 +1123,8 @@ impl TenantDataOps for TursoTenantStore {
         room_id: &str,
     ) -> Result<Vec<RemoteParticipantRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        let mut rows = pinned
-            .connection()
+        let conn = pinned.lock_conn().await;
+        let mut rows = conn
             .query(
                 "SELECT room_id, remote_bare_jid, affiliation
                  FROM remote_participants WHERE room_id = ?1 ORDER BY remote_bare_jid",
@@ -1060,20 +1161,19 @@ impl TenantDataOps for TursoTenantStore {
         job: &TenantJobRecord,
     ) -> Result<(), TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        pinned
-            .connection()
-            .execute(
-                "INSERT INTO tenant_jobs (job_id, queue, payload_json, status)
-                 VALUES (?1, ?2, ?3, ?4)",
-                (
-                    job.job_id.as_str(),
-                    job.queue.as_str(),
-                    job.payload_json.as_str(),
-                    job.status.as_str(),
-                ),
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("enqueue_job failed: {err}")))?;
+        let conn = pinned.lock_conn().await;
+        conn.execute(
+            "INSERT INTO tenant_jobs (job_id, queue, payload_json, status)
+             VALUES (?1, ?2, ?3, ?4)",
+            (
+                job.job_id.as_str(),
+                job.queue.as_str(),
+                job.payload_json.as_str(),
+                job.status.as_str(),
+            ),
+        )
+        .await
+        .map_err(|err| TenantStoreError::Backend(format!("enqueue_job failed: {err}")))?;
         Ok(())
     }
 
@@ -1083,36 +1183,39 @@ impl TenantDataOps for TursoTenantStore {
         queue: &str,
     ) -> Result<Option<TenantJobRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
+        let conn = pinned.lock_conn().await;
         loop {
-            let mut rows = pinned
-                .connection()
-                .query(
-                    "SELECT job_id, queue, payload_json, status
-                     FROM tenant_jobs
-                     WHERE queue = ?1 AND status = 'pending'
-                     ORDER BY job_id LIMIT 1",
-                    [queue],
-                )
-                .await
-                .map_err(|err| TenantStoreError::Backend(format!("claim_next_job query: {err}")))?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|err| TenantStoreError::Backend(format!("claim_next_job row: {err}")))?
-            else {
-                return Ok(None);
+            let (job_id, queue_val, payload_json) = {
+                let mut rows = conn
+                    .query(
+                        "SELECT job_id, queue, payload_json, status
+                         FROM tenant_jobs
+                         WHERE queue = ?1 AND status = 'pending'
+                         ORDER BY job_id LIMIT 1",
+                        [queue],
+                    )
+                    .await
+                    .map_err(|err| {
+                        TenantStoreError::Backend(format!("claim_next_job query: {err}"))
+                    })?;
+                let Some(row) = rows.next().await.map_err(|err| {
+                    TenantStoreError::Backend(format!("claim_next_job row: {err}"))
+                })?
+                else {
+                    return Ok(None);
+                };
+                let job_id: String = row
+                    .get(0)
+                    .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+                let queue_val: String = row
+                    .get(1)
+                    .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+                let payload_json: String = row
+                    .get(2)
+                    .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+                (job_id, queue_val, payload_json)
             };
-            let job_id: String = row
-                .get(0)
-                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-            let queue_val: String = row
-                .get(1)
-                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-            let payload_json: String = row
-                .get(2)
-                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-            let affected = pinned
-                .connection()
+            let affected = conn
                 .execute(
                     "UPDATE tenant_jobs SET status = 'claimed' WHERE job_id = ?1 AND status = 'pending'",
                     [job_id.as_str()],

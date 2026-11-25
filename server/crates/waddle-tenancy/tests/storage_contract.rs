@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tempfile::tempdir;
 use waddle_broker_core::holder_pop::HolderKeypair;
@@ -582,4 +584,200 @@ async fn concurrent_cold_open_coalesces_without_fd_pool_leak() {
     assert_eq!(open_four, 4);
     assert_eq!(pinned_four, 3);
     drop((p2, p3, p4));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turso_concurrent_claim_next_job_claims_all_jobs_uniquely_without_errors() {
+    let dir = tempdir().expect("tempdir");
+    let store = Arc::new(
+        TursoTenantStore::new(
+            dir.path(),
+            TursoPoolConfig {
+                rlimit_nofile_override: Some(64),
+                reserved_fds: 16,
+            },
+            None,
+        )
+        .expect("turso store"),
+    );
+
+    let tenant = TenantId::parse("jobs-race.example").expect("valid");
+    let holder = make_holder(
+        "spiffe://waddle.internal/ns/cells/sa/shared-pool",
+        [0x55; 32],
+    );
+    let scope = TenantQueryScope {
+        tenant_id: tenant.clone(),
+        holder,
+        placement_generation: FenceGeneration::new(1),
+    };
+
+    store.provision_tenant(&tenant).await.expect("provision");
+    store.open_tenant(&scope).await.expect("open");
+
+    const JOB_COUNT: usize = 20;
+    const WORKER_COUNT: usize = 8;
+
+    for i in 0..JOB_COUNT {
+        store
+            .enqueue_job(
+                &scope,
+                &TenantJobRecord {
+                    job_id: format!("job-{i:02}"),
+                    queue: "q1".to_owned(),
+                    payload_json: format!(r#"{{"index":{i}}}"#),
+                    status: "pending".to_owned(),
+                },
+            )
+            .await
+            .expect("enqueue job");
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(WORKER_COUNT));
+    let mut handles = Vec::with_capacity(WORKER_COUNT);
+    for _ in 0..WORKER_COUNT {
+        let store = Arc::clone(&store);
+        let scope = scope.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let mut claimed = Vec::new();
+            loop {
+                match store.claim_next_job(&scope, "q1").await {
+                    Ok(Some(job)) => claimed.push(job.job_id),
+                    Ok(None) => break,
+                    Err(err) => panic!("concurrent claim_next_job failed: {err}"),
+                }
+            }
+            claimed
+        }));
+    }
+
+    let mut all_claimed = Vec::with_capacity(JOB_COUNT);
+    for handle in handles {
+        all_claimed.extend(handle.await.expect("worker join"));
+    }
+
+    let unique: HashSet<String> = all_claimed.iter().cloned().collect();
+    assert_eq!(
+        all_claimed.len(),
+        JOB_COUNT,
+        "all {JOB_COUNT} jobs must be claimed across {WORKER_COUNT} workers"
+    );
+    assert_eq!(
+        unique.len(),
+        JOB_COUNT,
+        "every job must be claimed uniquely (exactly once)"
+    );
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let (_, pinned, _) = store.pool_stats().await;
+    assert_eq!(pinned, 0, "no pins may remain after all workers finish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_cold_open_neither_leaks_fd_pool_nor_livelocks_waiters() {
+    let dir = tempdir().expect("tempdir");
+    // (16 - 10) / 3 = 2 open Turso DB slots.
+    let store = Arc::new(
+        TursoTenantStore::new(
+            dir.path(),
+            TursoPoolConfig {
+                rlimit_nofile_override: Some(16),
+                reserved_fds: 10,
+            },
+            None,
+        )
+        .expect("turso store"),
+    );
+    assert_eq!(store.pool_capacity(), 2);
+
+    let target = TenantId::parse("cancel-target.example").expect("valid");
+    let peer_a = TenantId::parse("cancel-peer-a.example").expect("valid");
+    let peer_b = TenantId::parse("cancel-peer-b.example").expect("valid");
+    for tenant in [&target, &peer_a, &peer_b] {
+        store.provision_tenant(tenant).await.expect("provision");
+    }
+
+    // Repeatedly abort/drop cold-open leaders while a waiter races on the same tenant.
+    for round in 0..16u64 {
+        let _ = store.checkpoint_and_release(&target).await;
+
+        let leader_store = Arc::clone(&store);
+        let leader_tenant = target.clone();
+        let leader = tokio::spawn(async move {
+            let _ = leader_store.acquire_pinned_conn(&leader_tenant).await;
+        });
+
+        let waiter_store = Arc::clone(&store);
+        let waiter_tenant = target.clone();
+        let waiter = tokio::spawn(async move {
+            if round % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            waiter_store.acquire_pinned_conn(&waiter_tenant).await
+        });
+
+        // Also exercise dropping an in-flight future directly via select!.
+        {
+            let fut = store.acquire_pinned_conn(&target);
+            tokio::select! {
+                biased;
+                _ = tokio::task::yield_now() => {}
+                res = fut => {
+                    drop(res);
+                }
+            }
+        }
+
+        // Abort the leader task mid-open.
+        leader.abort();
+        let _ = leader.await;
+
+        // Waiter MUST complete promptly without livelocking on a dead watch channel.
+        let waiter_conn = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must not livelock after leader cancellation")
+            .expect("waiter join")
+            .expect("waiter must acquire pinned conn cleanly");
+        drop(waiter_conn);
+
+        // Subsequent open for the same tenant must also succeed without hanging.
+        let followup =
+            tokio::time::timeout(Duration::from_secs(5), store.acquire_pinned_conn(&target))
+                .await
+                .expect("follow-up open must not livelock")
+                .expect("follow-up open must succeed");
+        drop(followup);
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let (_, pinned, _) = store.pool_stats().await;
+        assert_eq!(pinned, 0, "round {round}: pinned must return to 0");
+    }
+
+    // Release target and prove both slots of the capacity-2 pool remain usable
+    // simultaneously (zero leaked open/pinned FD slots).
+    store
+        .checkpoint_and_release(&target)
+        .await
+        .expect("release target");
+    let p_a = store
+        .acquire_pinned_conn(&peer_a)
+        .await
+        .expect("open peer_a");
+    let p_b = store
+        .acquire_pinned_conn(&peer_b)
+        .await
+        .expect("open peer_b");
+    let (open_both, pinned_both, _) = store.pool_stats().await;
+    assert_eq!(open_both, 2, "both FD pool slots must be available");
+    assert_eq!(pinned_both, 2, "both peer slots must be pinned");
+    drop((p_a, p_b));
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let (_, pinned_final, _) = store.pool_stats().await;
+    assert_eq!(pinned_final, 0, "zero pins must remain after cleanup");
 }
