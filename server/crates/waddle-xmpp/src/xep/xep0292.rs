@@ -203,7 +203,7 @@ pub fn parse_vcard4(elem: &Element) -> VCard4 {
         full_name: text_prop("fn"),
         nickname: text_prop("nickname"),
         email: text_prop("email"),
-        tel: text_prop("tel"),
+        tel: uri_prop("tel"),
         note: text_prop("note"),
         org: text_prop("org"),
         title: text_prop("title"),
@@ -246,7 +246,12 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
         append_text_prop(&mut elem, "email", v);
     }
     if let Some(ref v) = vcard.tel {
-        append_text_prop(&mut elem, "tel", v);
+        // RFC 6351 section 3.3.1.1: a tel: URI is carried in <uri>; other values in <text>.
+        if v.starts_with("tel:") {
+            append_uri_prop(&mut elem, "tel", v);
+        } else {
+            append_text_prop(&mut elem, "tel", v);
+        }
     }
     if let Some(ref v) = vcard.note {
         append_text_prop(&mut elem, "note", v);
