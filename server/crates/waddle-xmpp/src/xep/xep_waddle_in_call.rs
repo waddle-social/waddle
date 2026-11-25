@@ -3,7 +3,7 @@
 //! Two distinct shapes share this namespace and the `<in-call/>` root:
 //!
 //! - **Message-transient signals** (reactions): carried in a `<message/>`
-//!   marked `no-store`/`no-copy`, identified by a `sid` attribute and a
+//!   marked `no-store` (and `no-copy` for a full JID), identified by a `sid` attribute and a
 //!   `<reaction/>` child. Fire-and-forget; never stored.
 //! - **Presence-durable state** (raised hand): carried in MUC occupant
 //!   presence as a child *alongside* (never inside) the `<muji/>` element,

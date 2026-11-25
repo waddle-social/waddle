@@ -17,7 +17,10 @@ class CompactCall extends StatelessWidget {
       return Stack(
         fit: StackFit.expand,
         children: [
-          Offstage(offstage: compact, child: content),
+          ExcludeFocus(
+            excluding: compact,
+            child: Offstage(offstage: compact, child: content),
+          ),
           if (compact)
             Material(
               color: Colors.black,
@@ -28,6 +31,7 @@ class CompactCall extends StatelessWidget {
                   Align(
                     alignment: Alignment.topRight,
                     child: IconButton(
+                      autofocus: true,
                       tooltip: 'Expand call',
                       color: Colors.white,
                       icon: const Icon(Icons.open_in_full),

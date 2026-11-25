@@ -502,6 +502,7 @@ class PlatformCallService {
     String? roomJid,
   }) async {
     final room = roomJid ?? _peer, nick = _nick;
+    final muted = active && media.snapshot['microphoneEnabled'] != true;
     final previous = _presenceTail;
     final done = Completer<void>();
     _presenceTail = done.future;
@@ -510,9 +511,7 @@ class PlatformCallService {
       requireGeneration(context, generation);
       // A teardown may clear its own old marker, but never a successor's room marker.
       if (!_current(epoch, generation, sid) &&
-          _peer == room &&
-          _group &&
-          _phase != 'ended') {
+          (!leaving || (_peer == room && _group && _phase != 'ended'))) {
         return;
       }
       await _rpc('update_muji_presence', {
@@ -521,10 +520,7 @@ class PlatformCallService {
         'active': active,
         'preparing': preparing,
         'video': active && _video,
-        'flags': {
-          'hand_raised': active && _hand,
-          'muted': active && media.snapshot['microphoneEnabled'] != true,
-        },
+        'flags': {'hand_raised': active && _hand, 'muted': muted},
       });
       if (!leaving) {
         _guard(epoch, generation, sid);
@@ -795,6 +791,7 @@ class PlatformCallService {
       return Future.value();
     }
     final token = _talkHold = held ? Object() : null;
+    Future<void>? presence;
     final result = _talkTransition.then((_) async {
       if (!_current(epoch, generation, sid) || _phase != 'active') return;
       if (held) {
@@ -815,10 +812,16 @@ class PlatformCallService {
         }
       }
       await media.microphone(held);
-      if (_current(epoch, generation, sid)) _publish();
+      if (_current(epoch, generation, sid)) {
+        if (_group) {
+          presence = _sendPresence(sid, epoch, generation, active: true);
+        }
+        _publish();
+      }
     });
+    // The microphone must mute on release even when the room is slow to respond.
     _talkTransition = result.catchError((Object _) {});
-    return result;
+    return result.then((_) => presence);
   }
 
   bool _isReaction(String value) =>

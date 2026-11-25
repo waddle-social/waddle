@@ -153,6 +153,19 @@ fn in_call_reaction_message_round_trips_with_transient_hints() {
 }
 
 #[test]
+fn group_reactions_use_no_store_without_the_full_jid_only_no_copy_hint() {
+    let message = build_in_call_reaction_message(
+        "room@muc.example.test".parse().expect("room JID"),
+        "alice@example.test/laptop".parse().expect("sender JID"),
+        &InCallSessionId::try_new("call-123").expect("valid SID"),
+        &InCallReactionEmoji::try_new("👏").expect("valid emoji"),
+        MessageType::Groupchat,
+    );
+    assert!(waddle_xmpp::xep::has_hint(&message, Hint::NoStore));
+    assert!(!waddle_xmpp::xep::has_hint(&message, Hint::NoCopy));
+}
+
+#[test]
 fn lowered_hand_is_empty_state_with_no_marker_child() {
     let lowered = InCallPresenceState {
         hand_raised: false,

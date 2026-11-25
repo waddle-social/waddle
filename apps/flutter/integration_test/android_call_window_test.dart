@@ -46,6 +46,20 @@ void main() {
           expect(await window.invokeMethod<bool>('setCompact', false), false);
           expect(await window.invokeMethod<bool>('state'), false);
           expect(changes, containsAllInOrder([true, false]));
+          // Android may decline immediate re-entry while the task is expanding.
+          final expansion = Stopwatch()..start();
+          while (await window.invokeMethod<bool>('setCompact', true) != true) {
+            expect(expansion.elapsed, lessThan(const Duration(seconds: 5)));
+            await Future<void>.delayed(const Duration(milliseconds: 100));
+          }
+          await window.invokeMethod<void>('setActive', false);
+          final deadline = Stopwatch()..start();
+          while (await window.invokeMethod<bool>('state') == true &&
+              deadline.elapsed < const Duration(seconds: 5)) {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          expect(await window.invokeMethod<bool>('state'), false);
+          expect(await window.invokeMethod<bool>('setCompact', true), false);
         }
       } finally {
         await window.invokeMethod<void>('setActive', false);

@@ -17,7 +17,7 @@ class FakeMedia extends CallMedia {
   @override
   Map<String, dynamic> get snapshot => {
     'mediaState': 'idle',
-    'microphoneEnabled': false,
+    'microphoneEnabled': microphoneChanges.lastOrNull ?? false,
     'cameraEnabled': false,
     'screenShareEnabled': sharing,
   };
@@ -151,6 +151,53 @@ void main() {
       expect(media.microphoneChanges, [true, false]);
     },
   );
+  test('push-to-talk mutes locally while group presence is pending', () async {
+    const room = 'room@muc.example.test', sid = 'cached-sid';
+    final context = TestRuntimeContext(), media = FakeMedia();
+    context.persistent['callSessions'] = {
+      room: {
+        'sid': sid,
+        'self_full_jid': 'alice@example.test/flutter-1',
+        'join': fixtureGrant(room),
+      },
+    };
+    final service = PlatformCallService(
+      context,
+      media: media,
+      requestCapture: (_) async {},
+    );
+    addTearDown(service.dispose);
+    await service.invoke('call.start', {'jid': room, 'group': true});
+    final entered = Completer<void>(), unblock = Completer<void>();
+    final muted = <bool>[];
+    context.handler = (method, args) async {
+      if (method == 'update_muji_presence' && args['active'] == true) {
+        expect(args['room_jid'], room);
+        muted.add(runtimeMap(args['flags'])['muted'] == true);
+        if (!entered.isCompleted) {
+          entered.complete();
+          await unblock.future;
+        }
+      }
+      return true;
+    };
+    final press = service.invoke('call.talk', {
+      'expectedSid': sid,
+      'held': true,
+    });
+    await entered.future.timeout(const Duration(seconds: 2));
+    final release = service.invoke('call.talk', {
+      'expectedSid': sid,
+      'held': false,
+    });
+    await settle();
+    expect(media.microphoneChanges, [true, false]);
+    expect(muted, [false]);
+    unblock.complete();
+    await Future.wait([press, release]);
+    expect(muted, [false, true]);
+  });
+
   test('answer permission delay cannot accept a successor ring', () async {
     final context = TestRuntimeContext();
     final permission = Completer<void>();

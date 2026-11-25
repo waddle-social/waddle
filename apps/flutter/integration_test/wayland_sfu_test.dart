@@ -1,30 +1,41 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:integration_test/integration_test.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:waddle_flutter/runtime/platform_media.dart';
 
-Future<void> _expectRemoteCamera(
+Future<String> _expectRemoteCamera(
   lk.Room viewer,
   String mode,
-  bool Function(double magenta, double luminance, double contrast) matches,
-) async {
+  bool Function(double magenta, double luminance, double contrast) matches, {
+  String? previousSid,
+}) async {
   final deadline = DateTime.now().add(const Duration(seconds: 25));
   String latest = 'waiting for a camera publication';
   while (DateTime.now().isBefore(deadline)) {
-    final track = viewer.remoteParticipants.values
+    final publication = viewer.remoteParticipants.values
         .expand((p) => p.videoTrackPublications)
-        .where((p) => p.source == lk.TrackSource.camera)
-        .firstOrNull
-        ?.track;
+        .where((p) => p.source == lk.TrackSource.camera && p.sid != previousSid)
+        .firstOrNull;
+    final track = publication?.track;
     if (track != null &&
         ((await track.getReceiverStats())?.framesDecoded ?? 0) > 0) {
-      final png = await track.mediaStreamTrack.captureFrame();
+      late final ByteBuffer png;
+      try {
+        png = await track.mediaStreamTrack.captureFrame();
+      } on PlatformException catch (e) {
+        if (e.code != 'captureFrame') rethrow;
+        latest = e.message ?? 'waiting for a decoded frame';
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        continue;
+      }
       final codec = await ui.instantiateImageCodec(png.asUint8List());
       final image = (await codec.getNextFrame()).image;
       try {
@@ -47,7 +58,7 @@ Future<void> _expectRemoteCamera(
         final fraction = magenta / samples,
             mean = luma / samples,
             contrast = difference / samples;
-        if (matches(fraction, mean, contrast)) return;
+        if (matches(fraction, mean, contrast)) return publication!.sid;
         latest = 'magenta=$fraction, mean=$mean, contrast=$contrast';
       } finally {
         image.dispose();
@@ -136,18 +147,24 @@ void main() {
           img.fill(sample, color: img.ColorRgb8(255, 0, 255));
           await media.changeBackground('custom', img.encodePng(sample));
           await media.camera(true);
-          await _expectRemoteCamera(peer, 'replacement', (m, _, _) => m > .8);
+          final replacement = await _expectRemoteCamera(
+            peer,
+            'replacement',
+            (m, _, _) => m > .8,
+          );
           await media.changeBackground('blur', null);
-          await _expectRemoteCamera(
+          final blurred = await _expectRemoteCamera(
             peer,
             'blurred',
             (m, l, c) => m < .1 && l > 60 && c < 12,
+            previousSid: replacement,
           );
           await media.changeBackground('off', null);
           await _expectRemoteCamera(
             peer,
             'unprocessed',
             (m, l, c) => m < .1 && l > 60 && c > 18,
+            previousSid: blurred,
           );
           await media.camera(false);
         }

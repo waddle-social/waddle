@@ -117,8 +117,8 @@ class _CallShortcutsState extends State<_CallShortcuts>
   Widget build(BuildContext context) => Focus(
     autofocus: true,
     focusNode: _scope,
-    onFocusChange: (focused) {
-      if (!focused) _release();
+    onFocusChange: (_) {
+      if (!_scope.hasPrimaryFocus) _release();
     },
     onKeyEvent: _key,
     child: widget.child,
