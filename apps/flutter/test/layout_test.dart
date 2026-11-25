@@ -309,14 +309,16 @@ Map<String, int> _wallpaperRoles(Brightness brightness) {
 }
 
 Future<void> _fonts() async {
-  final manrope = FontLoader('Manrope');
-  for (final weight in [400, 500, 600, 700, 800]) {
-    manrope.addFont(rootBundle.load('assets/fonts/Manrope-$weight.ttf'));
+  for (final family in [
+    'Bricolage Grotesque',
+    'Atkinson Hyperlegible Next',
+    'Atkinson Hyperlegible Mono',
+  ]) {
+    final asset = family.replaceAll(' ', '');
+    await (FontLoader(
+      family,
+    )..addFont(rootBundle.load('assets/fonts/$asset.ttf'))).load();
   }
-  await manrope.load();
-  await (FontLoader(
-    'Fredoka',
-  )..addFont(rootBundle.load('assets/fonts/Fredoka-600.ttf'))).load();
   await (FontLoader(
     'MaterialIcons',
   )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
@@ -376,10 +378,10 @@ void main() {
       );
     }
   }
-  for (final screen in ['home', 'conversation']) {
-    testWidgets('$screen adapts to tablet width', (tester) async {
-      await _render(tester, screen, Brightness.dark, const Size(1280, 900), 1);
-    });
+  for (final screen in ['home', 'conversation', 'login', 'login-device-code']) {
+    testWidgets('$screen renders on a wide Linux window', (tester) async {
+      await _render(tester, screen, Brightness.dark, const Size(1440, 900), 1);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.linux));
   }
   for (final screen in [
     'home',
@@ -432,21 +434,27 @@ Future<void> _render(
     social: screen.contains('social'),
     wallpaper: screen.contains('wallpaper'),
   );
-  final ownedByApp = screen == 'home' || conversation || screen == 'login';
+  final ownedByApp =
+      screen == 'home' || conversation || screen.startsWith('login');
   final key = GlobalKey();
-  if (screen == 'login') {
+  if (screen.startsWith('login')) {
     bridge.acceptEvent({
       'topic': 'session',
-      'data': {'state': 'signedOut'},
+      'data': {
+        'state': 'signedOut',
+        'serverOrigin': 'https://xmpp.waddle.social',
+      },
     });
     bridge.acceptEvent({
       'topic': 'login',
-      'data': {
-        'state': 'providers',
-        'providers': [
-          {'id': 'community', 'name': 'Community'},
-        ],
-      },
+      'data': screen == 'login-device-code'
+          ? {'state': 'verifying', 'code': 'TEST-1234'}
+          : {
+              'state': 'providers',
+              'providers': [
+                {'id': 'community', 'name': 'Community'},
+              ],
+            },
     });
   }
   if (screen == 'call') {
@@ -484,16 +492,28 @@ Future<void> _render(
           builder: scalable,
           home: page,
         );
+  Future<void> settle() async {
+    if (screen == 'login-device-code') {
+      await tester.pump(const Duration(milliseconds: 350));
+    } else {
+      await tester.pumpAndSettle();
+    }
+  }
+
   try {
     await tester.pumpWidget(RepaintBoundary(key: key, child: app));
-    await tester.pumpAndSettle();
+    await settle();
     await tester.runAsync(
       () => precacheImage(
-        const AssetImage('assets/brand/waddle-mark.png'),
+        AssetImage(
+          screen.startsWith('login')
+              ? 'assets/brand/spot-conversation.png'
+              : 'assets/brand/waddle-mark.png',
+        ),
         tester.element(find.byType(Scaffold).first),
       ),
     );
-    await tester.pumpAndSettle();
+    await settle();
     if (conversation) {
       bridge.acceptEvent({
         'topic': 'navigate',

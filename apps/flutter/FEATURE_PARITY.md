@@ -2,6 +2,8 @@
 
 The Android and Wayland builds use the same Flutter screens and Rust XMPP dispatcher. The Flutter web build uses the corresponding WASM client. The comparison below uses the Waddle web chat, Apple, Kotlin Android and GTK Linux clients at revision `2f4b5240b`.
 
+The sign-in screen, home dashboard and conversation layout follow the Polar Huddle web client at `6ccec0851`. Wide windows keep the account sidebar visible while a room is open. On narrow screens, the sidebar and conversation each have their own view. Widget tests cover room drafts across resizes, keyboard navigation, Night and Daylight themes, and layouts as narrow as 320 logical pixels with double-size text.
+
 | Workflow | Flutter behavior | Verification |
 | --- | --- | --- |
 | Sign in and switch accounts | Device-flow sign-in, custom servers, secure credentials and per-account preferences, drafts, outbox and push identity. The server origin and bare JID identify an account. | Android Keystore and Linux Secret Service integration tests. Session and restoration tests exercise switching and stale notifications. |

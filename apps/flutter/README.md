@@ -23,8 +23,9 @@ never opened by this app.
 
 ## Interface
 
-Warm-paper/deep-teal light and dark themes use bundled Manrope typography,
-Waddle's Fredoka wordmark and the shared penguin mark. Android wallpaper schemes,
+The Night and Daylight themes follow the web client’s Polar Huddle design.
+Bricolage Grotesque headings, Atkinson Hyperlegible body and monospace text,
+and Waddle’s penguin artwork are bundled for offline use. Android wallpaper schemes,
 text scaling, reduced animation, adaptive navigation and restored navigation are
 supported. Room chat uses compact sender groups and a bottom composer in both
 reading orders, with formatting, attachments and safety details on demand.

@@ -53,22 +53,17 @@ flutter:
     - assets/brand/
     - assets/backgrounds/
     - assets/licenses/
-    - assets/fonts/manrope-OFL.txt
-    - assets/fonts/fredoka-OFL.txt
+    - assets/emoji/
+    - assets/fonts/OFL-bricolage-grotesque.txt
+    - assets/fonts/OFL-atkinson-hyperlegible-next.txt
+    - assets/fonts/OFL-atkinson-hyperlegible-mono.txt
   fonts:
-    - family: Manrope
+    - family: Bricolage Grotesque
       fonts:
-        - asset: assets/fonts/Manrope-400.ttf
-          weight: 400
-        - asset: assets/fonts/Manrope-500.ttf
-          weight: 500
-        - asset: assets/fonts/Manrope-600.ttf
-          weight: 600
-        - asset: assets/fonts/Manrope-700.ttf
-          weight: 700
-        - asset: assets/fonts/Manrope-800.ttf
-          weight: 800
-    - family: Fredoka
+        - asset: assets/fonts/BricolageGrotesque.ttf
+    - family: Atkinson Hyperlegible Next
       fonts:
-        - asset: assets/fonts/Fredoka-600.ttf
-          weight: 600
+        - asset: assets/fonts/AtkinsonHyperlegibleNext.ttf
+    - family: Atkinson Hyperlegible Mono
+      fonts:
+        - asset: assets/fonts/AtkinsonHyperlegibleMono.ttf

@@ -184,10 +184,9 @@ class _LoginState extends State<LoginScreen> {
     final accounts = records(widget.bridge.topic('accounts')['saved']);
     final providers = records(login['providers']);
     final label = type.labelSmall?.copyWith(
-      fontFamily: 'Atkinson Hyperlegible Mono',
-      fontSize: 11,
-      fontWeight: FontWeight.w600,
-      letterSpacing: 1.1,
+      fontSize: 13,
+      fontWeight: FontWeight.w700,
+      letterSpacing: .13,
       color: scheme.onSurfaceVariant,
     );
     final hostStyle = type.bodyMedium?.copyWith(
@@ -247,7 +246,7 @@ class _LoginState extends State<LoginScreen> {
             ..._actions(login, providers, label),
             if (accounts.isNotEmpty && !locked) ...[
               const SizedBox(height: 16),
-              Text('SAVED ACCOUNTS', style: label),
+              Text('Saved accounts', style: label),
               for (final account in accounts)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
@@ -274,7 +273,7 @@ class _LoginState extends State<LoginScreen> {
   ) => [
     Row(
       children: [
-        Expanded(child: Text('HOMESERVER', style: label)),
+        Expanded(child: Text('Homeserver', style: label)),
         Semantics(
           expanded: _editing,
           child: OutlinedButton.icon(
@@ -337,7 +336,7 @@ class _LoginState extends State<LoginScreen> {
                     HttpAuthGateway.defaultBaseUri.authority,
                     style: hostStyle,
                   ),
-                  Text('DEFAULT', style: label),
+                  Text('default', style: label),
                 ],
               ),
             ),
@@ -421,7 +420,7 @@ class _LoginState extends State<LoginScreen> {
         ),
       ] else if (state == 'providers') ...[
         if (providers.length > 1) ...[
-          Text('SIGN IN WITH', style: label),
+          Text('Sign in with', style: label),
           const SizedBox(height: 8),
         ],
         for (final (index, provider) in providers.indexed)

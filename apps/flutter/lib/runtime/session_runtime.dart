@@ -84,6 +84,7 @@ class SessionRuntime implements RuntimeContext {
     'stayConnected': null,
   };
   final _channels = <Map<String, dynamic>>[];
+  final _spaceNames = <String, String>{};
   final _inbox = <String, Map<String, dynamic>>{};
   final _presence = <String, Map<String, dynamic>>{};
   final _notify = <String, String>{};
@@ -925,6 +926,21 @@ class SessionRuntime implements RuntimeContext {
     if (topology['channels'] is! List) {
       throw StateError('The room list could not be loaded.');
     }
+    final spaces = runtimeRows(topology['spaces'])
+      ..sort(
+        (a, b) => '${a['name']}'.toLowerCase().compareTo(
+          '${b['name']}'.toLowerCase(),
+        ),
+      );
+    _spaceNames.clear();
+    for (final space in spaces) {
+      if (space case {
+        'id': String id,
+        'name': String name,
+      } when name.trim().isNotEmpty) {
+        _spaceNames[id] = name;
+      }
+    }
     _channels
       ..clear()
       ..addAll(runtimeRows(topology['channels']));
@@ -1119,6 +1135,7 @@ class SessionRuntime implements RuntimeContext {
             channel['name'] ??
             room.split('@').first,
         'description': channel['description'],
+        'communityName': ?_spaceNames[channel['space_id']],
         'groupDm': channel['is_group_dm'] == true,
         'forum': channel['channel_type'] == 'forum',
         'unread': inbox['unread'] ?? 0,
@@ -1178,6 +1195,7 @@ class SessionRuntime implements RuntimeContext {
             ),
           );
     emit('home', {
+      'communityName': ?_spaceNames.values.firstOrNull,
       'settled': _settled,
       'canCreate': _canManage,
       'isCommunityOwner': _canManage,
@@ -1514,6 +1532,7 @@ class SessionRuntime implements RuntimeContext {
     _callDemand = false;
     _disconnectNotified = true;
     _channels.clear();
+    _spaceNames.clear();
     _inbox.clear();
     _presence.clear();
     _notify.clear();

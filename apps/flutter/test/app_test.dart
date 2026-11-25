@@ -186,9 +186,9 @@ void main() {
         },
       });
       await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
-      await tester.ensureVisible(find.text('Continue with Community'));
+      await tester.ensureVisible(find.text('Sign in with Community'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Continue with Community'));
+      await tester.tap(find.text('Sign in with Community'));
       await tester.pump();
       expect(
         commands.where((command) => command.$1 == 'login.select').single.$2,
@@ -198,7 +198,7 @@ void main() {
   );
 
   testWidgets(
-    'phone and tablet navigation use Material 3 adaptive components',
+    'phone home becomes a persistent room sidebar beside the desktop dashboard',
     (tester) async {
       final bridge = WaddleBridge(
         events: const Stream<dynamic>.empty(),
@@ -230,14 +230,20 @@ void main() {
           home: WaddleShell(bridge: bridge),
         ),
       );
-      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byTooltip('Browse all rooms'), findsOneWidget);
+      expect(find.text('Jump into General'), findsNothing);
       expect(find.text('General'), findsOneWidget);
       tester.view.physicalSize = const Size(1200, 900);
       await tester.pumpAndSettle();
-      expect(find.byType(NavigationRail), findsOneWidget);
-      expect(find.byType(NavigationBar), findsNothing);
-      expect(find.text('General'), findsOneWidget);
-      expect(find.byType(SearchBar), findsOneWidget);
+      expect(find.text('Jump into General'), findsOneWidget);
+      await tester.tap(find.text('General').first);
+      await tester.pumpAndSettle();
+      expect(find.byType(ConversationScreen), findsOneWidget);
+      expect(find.byTooltip('Browse all rooms'), findsOneWidget);
+      await tester.tap(find.text('Home'));
+      await tester.pumpAndSettle();
+      expect(find.text('Jump into General'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 
@@ -294,7 +300,7 @@ void main() {
       },
     });
     await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
-    await tester.tap(find.text('Activity').last);
+    await tester.tap(find.text('Inbox').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Thread in Alex'));
     await tester.pumpAndSettle();
@@ -353,7 +359,7 @@ void main() {
         },
       });
       await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
-      await tester.tap(find.text('Activity').last);
+      await tester.tap(find.text('Inbox').last);
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Threads'));
       await tester.pumpAndSettle();

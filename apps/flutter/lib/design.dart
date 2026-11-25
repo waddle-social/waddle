@@ -2,184 +2,108 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
-/// Waddle's default palette. Wallpaper roles replace these through the host.
+/// Polar Huddle's Night and Daylight roles, as resolved by Waddle's web design preset.
 ColorScheme waddleScheme(Brightness brightness) {
-  final dark = brightness == Brightness.dark;
+  Color role(int night, int day) =>
+      Color(brightness == Brightness.dark ? night : day);
   return ColorScheme.fromSeed(
-    seedColor: const Color(0xFF0C7A6F),
+    seedColor: role(0xFFFFC139, 0xFF0F4376),
     brightness: brightness,
   ).copyWith(
-    primary: dark ? const Color(0xFF86D9C6) : const Color(0xFF0C7A6F),
-    onPrimary: dark ? const Color(0xFF063B31) : Colors.white,
-    primaryContainer: dark ? const Color(0xFF174C40) : const Color(0xFFD5EDE2),
-    onPrimaryContainer: dark
-        ? const Color(0xFFB7F2DF)
-        : const Color(0xFF123E34),
-    secondary: dark ? const Color(0xFFCEC3EA) : const Color(0xFF665780),
-    onSecondary: dark ? const Color(0xFF342B43) : Colors.white,
-    secondaryContainer: dark
-        ? const Color(0xFF393147)
-        : const Color(0xFFEDE6F6),
-    onSecondaryContainer: dark
-        ? const Color(0xFFEDE2FF)
-        : const Color(0xFF453650),
-    tertiary: dark ? const Color(0xFFF4B399) : const Color(0xFF954A30),
-    onTertiary: dark ? const Color(0xFF52210F) : Colors.white,
-    tertiaryContainer: dark ? const Color(0xFF4C3329) : const Color(0xFFFFE4D5),
-    onTertiaryContainer: dark
-        ? const Color(0xFFFFDCCC)
-        : const Color(0xFF713822),
-    surface: dark ? const Color(0xFF111B18) : const Color(0xFFF7F6F0),
-    onSurface: dark ? const Color(0xFFEBF0E9) : const Color(0xFF132723),
-    onSurfaceVariant: dark ? const Color(0xFFABBEB3) : const Color(0xFF53665C),
-    surfaceDim: dark ? const Color(0xFF0D1512) : const Color(0xFFE4E7DD),
-    surfaceBright: dark ? const Color(0xFF35413A) : const Color(0xFFFFFEF9),
-    surfaceContainerLowest: dark ? const Color(0xFF0C1511) : Colors.white,
-    surfaceContainerLow: dark
-        ? const Color(0xFF17231D)
-        : const Color(0xFFF1F2EA),
-    surfaceContainer: dark ? const Color(0xFF1C2A23) : const Color(0xFFECEFE6),
-    surfaceContainerHigh: dark
-        ? const Color(0xFF24342C)
-        : const Color(0xFFE5EAE0),
-    surfaceContainerHighest: dark
-        ? const Color(0xFF2D3E34)
-        : const Color(0xFFDFE6DA),
-    outline: dark ? const Color(0xFF81958A) : const Color(0xFF74857B),
-    outlineVariant: dark ? const Color(0xFF34473C) : const Color(0xFFDCE3D7),
+    primary: role(0xFFFFC139, 0xFF0F4376),
+    onPrimary: role(0xFF060F19, 0xFFFFFFFF),
+    primaryContainer: role(0xFF2B1C00, 0xFFFFEED0),
+    onPrimaryContainer: role(0xFFFFD27D, 0xFF6B4C00),
+    secondary: role(0xFF78B5F9, 0xFF205F9F),
+    onSecondary: role(0xFF060F19, 0xFFFFFFFF),
+    secondaryContainer: role(0xFF041A32, 0xFFF1F8FF),
+    onSecondaryContainer: role(0xFF9ECCFF, 0xFF205F9F),
+    tertiary: role(0xFF4ED7DF, 0xFF007176),
+    onTertiary: role(0xFF060F19, 0xFFFFFFFF),
+    tertiaryContainer: role(0xFF002021, 0xFFEBFAFB),
+    onTertiaryContainer: role(0xFF85E5EA, 0xFF005256),
+    error: const Color(0xFFD33944),
+    onError: const Color(0xFFFFFFFF),
+    errorContainer: role(0xFF360307, 0xFFFFF4F3),
+    onErrorContainer: role(0xFFFFAFAC, 0xFFAA1D2C),
+    surface: role(0xFF060F19, 0xFFF8FAFD),
+    onSurface: role(0xFFEDF0F4, 0xFF060F19),
+    onSurfaceVariant: role(0xFFC1C8D0, 0xFF38424E),
+    surfaceDim: role(0xFF020912, 0xFFEDF0F4),
+    surfaceBright: role(0xFF232E39, 0xFFFFFFFF),
+    surfaceContainerLowest: role(0xFF111A25, 0xFFFFFFFF),
+    surfaceContainerLow: role(0xFF0A131E, 0xFFFFFFFF),
+    surfaceContainer: role(0xFF111A25, 0xFFFFFFFF),
+    surfaceContainerHigh: role(0xFF1A242F, 0xFFEDF0F4),
+    surfaceContainerHighest: role(0xFF232E39, 0xFFFFFFFF),
+    outline: role(0xFF9AA2AD, 0xFF737D88),
+    outlineVariant: role(0xFF28333F, 0xFFDBE0E6),
+    scrim: role(0xB8020912, 0x80060F19),
   );
 }
 
 ThemeData waddleTheme(ColorScheme scheme) {
-  final base = ThemeData(useMaterial3: true, colorScheme: scheme);
-  const heading = FontWeight.w800;
-  final text = base.textTheme
-      .apply(fontFamily: 'Manrope')
-      .copyWith(
-        displayLarge: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 60,
-          height: 1.06,
-          fontWeight: heading,
-          letterSpacing: -2.5,
-          color: scheme.onSurface,
-        ),
-        displayMedium: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 46,
-          height: 1.08,
-          fontWeight: heading,
-          letterSpacing: -1.9,
-          color: scheme.onSurface,
-        ),
-        displaySmall: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 38,
-          height: 1.12,
-          fontWeight: heading,
-          letterSpacing: -1.5,
-          color: scheme.onSurface,
-        ),
-        headlineLarge: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 32,
-          height: 1.15,
-          fontWeight: heading,
-          letterSpacing: -1.1,
-          color: scheme.onSurface,
-        ),
-        headlineMedium: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 28,
-          height: 1.2,
-          fontWeight: heading,
-          letterSpacing: -.9,
-          color: scheme.onSurface,
-        ),
-        headlineSmall: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 24,
-          height: 1.25,
-          fontWeight: heading,
-          letterSpacing: -.7,
-          color: scheme.onSurface,
-        ),
-        titleLarge: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 20,
-          height: 1.3,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -.4,
-          color: scheme.onSurface,
-        ),
-        titleMedium: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 16,
-          height: 1.4,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -.2,
-          color: scheme.onSurface,
-        ),
-        titleSmall: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 14,
-          height: 1.4,
-          fontWeight: FontWeight.w700,
-          color: scheme.onSurface,
-        ),
-        bodyLarge: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 16,
-          height: 1.5,
-          fontWeight: FontWeight.w500,
-          color: scheme.onSurface,
-        ),
-        bodyMedium: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 14,
-          height: 1.5,
-          fontWeight: FontWeight.w500,
-          color: scheme.onSurface,
-        ),
-        bodySmall: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 12,
-          height: 1.5,
-          fontWeight: FontWeight.w500,
-          color: scheme.onSurfaceVariant,
-        ),
-        labelLarge: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 14,
-          height: 1.3,
-          fontWeight: FontWeight.w700,
-          color: scheme.onSurface,
-        ),
-        labelMedium: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 12,
-          height: 1.3,
-          fontWeight: FontWeight.w700,
-          color: scheme.onSurfaceVariant,
-        ),
-        labelSmall: TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 11,
-          height: 1.4,
-          fontWeight: FontWeight.w700,
-          letterSpacing: .2,
-          color: scheme.onSurfaceVariant,
-        ),
+  final base = ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    fontFamily: 'Atkinson Hyperlegible Next',
+  );
+  TextStyle display(
+    double size,
+    double lineHeight,
+    FontWeight weight,
+    double tracking,
+  ) => TextStyle(
+    fontFamily: 'Bricolage Grotesque',
+    fontSize: size,
+    height: lineHeight / size,
+    fontWeight: weight,
+    letterSpacing: tracking,
+    color: scheme.onSurface,
+  );
+  TextStyle body(double size, double lineHeight, FontWeight weight) =>
+      TextStyle(
+        fontFamily: 'Atkinson Hyperlegible Next',
+        fontSize: size,
+        height: lineHeight / size,
+        fontWeight: weight,
+        letterSpacing: 0,
+        color: scheme.onSurface,
       );
-  final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(18));
+  final text = base.textTheme.copyWith(
+    displayLarge: display(60, 60, FontWeight.w800, -1.8),
+    displayMedium: display(40, 44, FontWeight.w800, -1),
+    displaySmall: display(30, 36, FontWeight.w800, -.6),
+    headlineLarge: display(30, 36, FontWeight.w800, -.6),
+    headlineMedium: display(24, 30, FontWeight.w700, -.36),
+    headlineSmall: display(20, 26, FontWeight.w700, -.2),
+    titleLarge: display(20, 26, FontWeight.w700, -.2),
+    titleMedium: display(18, 24, FontWeight.w700, -.18),
+    titleSmall: body(15, 20, FontWeight.w700),
+    bodyLarge: body(16, 24, FontWeight.w400),
+    bodyMedium: body(15, 22, FontWeight.w400),
+    bodySmall: body(
+      13,
+      18,
+      FontWeight.w400,
+    ).copyWith(color: scheme.onSurfaceVariant),
+    labelLarge: body(14, 20, FontWeight.w600),
+    labelMedium: body(13, 18, FontWeight.w600),
+    labelSmall: body(
+      12,
+      16,
+      FontWeight.w600,
+    ).copyWith(color: scheme.onSurfaceVariant),
+  );
+  final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(12));
   return base.copyWith(
     textTheme: text,
     scaffoldBackgroundColor: scheme.surface,
     splashFactory: InkSparkle.splashFactory,
     appBarTheme: AppBarTheme(
       centerTitle: false,
-      toolbarHeight: 72,
-      titleSpacing: 20,
+      toolbarHeight: 56,
+      titleSpacing: 16,
       elevation: 0,
       scrolledUnderElevation: 0,
       backgroundColor: scheme.surface,
@@ -190,23 +114,23 @@ ThemeData waddleTheme(ColorScheme scheme) {
       color: scheme.surfaceContainerLowest,
       elevation: 0,
       margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: scheme.surfaceContainerLow,
       hintStyle: text.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(12),
         borderSide: BorderSide(color: scheme.outlineVariant),
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(12),
         borderSide: BorderSide(color: scheme.outlineVariant),
       ),
       focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(12),
         borderSide: BorderSide(color: scheme.primary, width: 2),
       ),
     ),
@@ -224,17 +148,32 @@ ThemeData waddleTheme(ColorScheme scheme) {
       ),
     ),
     filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-        minimumSize: const Size(48, 52),
-        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
-        textStyle: text.labelLarge,
-        shape: shape,
-      ),
+      style:
+          FilledButton.styleFrom(
+            minimumSize: const Size(44, 44),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            textStyle: text.labelLarge,
+            shape: shape,
+          ).copyWith(
+            backgroundBuilder: (context, states, child) =>
+                states.contains(WidgetState.disabled)
+                ? child ?? const SizedBox.shrink()
+                : DecoratedBox(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Color(0x33FFFFFF), Color(0x00FFFFFF)],
+                      ),
+                    ),
+                    child: child,
+                  ),
+          ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size(48, 50),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        minimumSize: const Size(44, 44),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         textStyle: text.labelLarge,
         shape: shape,
       ),
@@ -263,7 +202,7 @@ ThemeData waddleTheme(ColorScheme scheme) {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      height: 76,
+      height: 64,
       elevation: 0,
       backgroundColor: scheme.surfaceContainerLowest,
       indicatorColor: scheme.primaryContainer,
@@ -284,7 +223,7 @@ ThemeData waddleTheme(ColorScheme scheme) {
       unselectedLabelTextStyle: text.labelSmall,
     ),
     listTileTheme: ListTileThemeData(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       iconColor: scheme.onSurfaceVariant,
       titleTextStyle: text.titleMedium,
       subtitleTextStyle: text.bodySmall,
@@ -347,7 +286,7 @@ class WaddleBrand extends StatelessWidget {
         Text(
           'waddle',
           style: TextStyle(
-            fontFamily: 'Fredoka',
+            fontFamily: 'Bricolage Grotesque',
             fontWeight: FontWeight.w600,
             fontSize: 28,
             height: 1,
@@ -375,13 +314,28 @@ class WaddleAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final index = name.runes.fold(0, (sum, rune) => sum + rune) % 3;
-    final pairs = [
-      (scheme.primaryContainer, scheme.onPrimaryContainer),
-      (scheme.secondaryContainer, scheme.onSecondaryContainer),
-      (scheme.tertiaryContainer, scheme.onTertiaryContainer),
+    const tints = [
+      Color(0xFFFFE0A9),
+      Color(0xFFC4DFFF),
+      Color(0xFFDBE0E6),
+      Color(0xFFB4EEF1),
+      Color(0xFFFFCFCC),
+      Color(0xFFBCEAC7),
     ];
-    final (background, foreground) = pairs[index];
+    final hash = name.runes.fold(
+      5381,
+      (value, rune) => (value * 33 + rune).toUnsigned(32),
+    );
+    final background = tints[hash % tints.length];
+    const foreground = Color(0xFF060F19);
+    final initials = name
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .take(2)
+        .map((part) => part.characters.first)
+        .join()
+        .toUpperCase();
     return Semantics(
       label: '$name${online ? ', online' : ''}',
       child: SizedBox.square(
@@ -389,19 +343,16 @@ class WaddleAvatar extends StatelessWidget {
         child: Stack(
           clipBehavior: Clip.none,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(size * .36),
+            ClipOval(
               child: ColoredBox(
                 color: background,
                 child: SizedBox.expand(
                   child: bytes == null
                       ? Center(
                           child: Text(
-                            name.trim().isEmpty
-                                ? '?'
-                                : name.trim().characters.first.toUpperCase(),
+                            initials.isEmpty ? '?' : initials,
                             style: TextStyle(
-                              fontFamily: 'Manrope',
+                              fontFamily: 'Atkinson Hyperlegible Next',
                               fontSize: size * .36,
                               fontWeight: FontWeight.w800,
                               color: foreground,
@@ -423,7 +374,9 @@ class WaddleAvatar extends StatelessWidget {
                 bottom: -1,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: scheme.primary,
+                    color: scheme.brightness == Brightness.dark
+                        ? const Color(0xFF67C986)
+                        : const Color(0xFF0A924B),
                     shape: BoxShape.circle,
                     border: Border.all(color: scheme.surface, width: 2.5),
                   ),
@@ -491,7 +444,10 @@ class WaddlePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Material(
     color: color ?? Theme.of(context).colorScheme.surfaceContainerLowest,
-    borderRadius: BorderRadius.circular(26),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(20),
+      side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+    ),
     clipBehavior: Clip.antiAlias,
     child: InkWell(
       onTap: onTap,

@@ -9,13 +9,18 @@ import 'bootstrap.dart';
 import 'bridge.dart';
 import 'design.dart';
 import 'features/compact_call.dart';
+import 'features/session_landing.dart';
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
   LicenseRegistry.addLicense(() async* {
     const notices = {
-      'Manrope': 'assets/fonts/manrope-OFL.txt',
-      'Fredoka': 'assets/fonts/fredoka-OFL.txt',
+      'Bricolage Grotesque': 'assets/fonts/OFL-bricolage-grotesque.txt',
+      'Atkinson Hyperlegible Next':
+          'assets/fonts/OFL-atkinson-hyperlegible-next.txt',
+      'Atkinson Hyperlegible Mono':
+          'assets/fonts/OFL-atkinson-hyperlegible-mono.txt',
+      'emojilib': 'assets/licenses/emojilib-MIT.txt',
       'DTLN': 'assets/licenses/dtln-MIT.txt',
       'MediaPipe Selfie Segmentation': 'assets/licenses/mediapipe-Apache.txt',
       'nnnoiseless': 'assets/licenses/nnnoiseless-BSD.txt',
@@ -47,39 +52,10 @@ class _StartupFailure extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     theme: waddleTheme(waddleScheme(Brightness.light)),
     darkTheme: waddleTheme(waddleScheme(Brightness.dark)),
-    home: Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(32),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 400),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const WaddleBrand(),
-                  const SizedBox(height: 32),
-                  Text(
-                    'Waddle couldn’t start',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Try again, or close and reopen the app.',
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 24),
-                  FilledButton.icon(
-                    onPressed: onRetry,
-                    icon: const Icon(Icons.refresh_rounded),
-                    label: const Text('Try again'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+    home: SessionLanding(
+      title: 'Waddle couldn’t start',
+      message: 'Try again, or close and reopen the app.',
+      onRetry: onRetry,
     ),
   );
 }

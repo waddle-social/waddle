@@ -1,16 +1,27 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'bridge.dart';
 import 'design.dart';
 import 'features/conversation.dart';
+import 'features/login.dart';
+import 'features/session_landing.dart';
 import 'features/surfaces.dart';
 import 'features/threads.dart';
 import 'features/presence_input.dart';
 import 'features/trip_plan.dart';
 import 'features/community.dart';
 import 'features/remote_communities.dart';
+import 'features/calendar_occurrences.dart';
+
+part 'features/account_sidebar.dart';
+part 'features/account_photos.dart';
+part 'features/home_dashboard.dart';
+part 'features/home_context.dart';
+part 'features/quick_jump.dart';
+part 'features/room_directory.dart';
 
 List<Map<String, dynamic>> records(dynamic value) => value is List
     ? value
@@ -50,274 +61,18 @@ class WaddleShell extends StatelessWidget {
         bridge: bridge,
         child: _AccountNavigator(bridge: bridge),
       ),
-      'signedOut' => _Login(bridge: bridge),
-      'error' => Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.cloud_off_outlined, size: 48),
-                const SizedBox(height: 24),
-                Text(
-                  'Couldn’t restore your session',
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  '${bridge.session['message'] ?? 'Check your connection and try again.'}',
-                ),
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: () =>
-                      perform(context, () => bridge.invoke('session.retry')),
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Try again'),
-                ),
-                TextButton(
-                  onPressed: () =>
-                      perform(context, () => bridge.invoke('session.logout')),
-                  child: const Text('Sign out'),
-                ),
-              ],
-            ),
-          ),
-        ),
+      'signedOut' => LoginScreen(bridge: bridge),
+      'error' => SessionLanding(
+        title: 'Couldn’t restore your session',
+        message:
+            '${bridge.session['message'] ?? 'Check your connection and try again.'}',
+        onRetry: () => perform(context, () => bridge.invoke('session.retry')),
+        onSignOut: () =>
+            perform(context, () => bridge.invoke('session.logout')),
       ),
-      _ => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      _ => const SessionLanding(title: 'Checking session.'),
     },
   );
-}
-
-class _Login extends StatefulWidget {
-  const _Login({required this.bridge});
-  final WaddleBridge bridge;
-  @override
-  State<_Login> createState() => _LoginState();
-}
-
-class _LoginState extends State<_Login> {
-  @override
-  void initState() {
-    super.initState();
-    if (widget.bridge.session['canSwitchAccounts'] == true) {
-      unawaited(
-        widget.bridge.invoke('session.accounts').catchError((Object _) => null),
-      );
-    }
-    unawaited(
-      widget.bridge.invoke('login.providers').catchError((Object _) => null),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final login = widget.bridge.login;
-    final state = login['state'];
-    final colors = Theme.of(context).colorScheme;
-    final type = Theme.of(context).textTheme;
-    final form = WaddlePanel(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Come on in.', style: type.headlineSmall),
-          const SizedBox(height: 8),
-          Text(
-            'Your community is one sign-in away.',
-            style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
-          ),
-          for (final account in records(
-            widget.bridge.topic('accounts')['saved'],
-          ))
-            ListTile(
-              leading: const Icon(Icons.account_circle_outlined),
-              title: Text('${account['jid']}'),
-              subtitle: Text('${account['origin']}'),
-              onTap: () => perform(
-                context,
-                () => widget.bridge.invoke('session.resume', account),
-              ),
-            ),
-          if (widget.bridge.session['serverOrigin'] case final String origin)
-            TextButton.icon(
-              icon: const Icon(Icons.dns_outlined),
-              label: Text(Uri.parse(origin).authority),
-              onPressed: state == 'verifying' || state == 'completing'
-                  ? null
-                  : () async {
-                      var value = origin;
-                      final address = await showDialog<String>(
-                        context: context,
-                        builder: (context) => AlertDialog(
-                          title: const Text('Community server'),
-                          content: TextFormField(
-                            autofocus: true,
-                            initialValue: origin,
-                            keyboardType: TextInputType.url,
-                            decoration: const InputDecoration(
-                              labelText: 'Server address',
-                            ),
-                            onChanged: (text) => value = text,
-                            onFieldSubmitted: (text) =>
-                                Navigator.pop(context, text),
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(context),
-                              child: const Text('Cancel'),
-                            ),
-                            FilledButton(
-                              onPressed: () => Navigator.pop(context, value),
-                              child: const Text('Connect'),
-                            ),
-                          ],
-                        ),
-                      );
-                      if (context.mounted && address != null) {
-                        await perform(
-                          context,
-                          () => widget.bridge.invoke('login.server', {
-                            'address': address,
-                          }),
-                        );
-                      }
-                    },
-            ),
-          const SizedBox(height: 28),
-          if (state == 'verifying') ...[
-            const Text('Approve sign-in in your browser. Your code:'),
-            const SizedBox(height: 16),
-            SelectableText('${login['code'] ?? ''}', style: type.displaySmall),
-            const SizedBox(height: 24),
-            const LinearProgressIndicator(),
-            TextButton(
-              onPressed: () =>
-                  perform(context, () => widget.bridge.invoke('login.cancel')),
-              child: const Text('Cancel'),
-            ),
-          ] else if (state == 'failed') ...[
-            Text('${login['error'] ?? 'Sign-in failed. Please try again.'}'),
-            const SizedBox(height: 16),
-            FilledButton(
-              onPressed: () => perform(
-                context,
-                () => widget.bridge.invoke('login.providers'),
-              ),
-              child: const Text('Try again'),
-            ),
-          ] else if (state == 'providers') ...[
-            for (final provider in records(login['providers']))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size.fromHeight(56),
-                  ),
-                  onPressed: () => perform(
-                    context,
-                    () => widget.bridge.invoke('login.select', {
-                      'id': provider['id'],
-                    }),
-                  ),
-                  icon: const Icon(Icons.arrow_forward_rounded),
-                  label: Text(
-                    'Continue with ${provider['name'] ?? provider['id']}',
-                  ),
-                ),
-              ),
-            if (records(login['providers']).isEmpty)
-              const Text(
-                'No sign-in providers are available. Contact your community administrator.',
-              ),
-          ] else ...[
-            const Center(child: CircularProgressIndicator()),
-            const SizedBox(height: 16),
-            Text(
-              state == 'completing'
-                  ? 'Finishing sign-in…'
-                  : 'Finding your community…',
-            ),
-          ],
-        ],
-      ),
-    );
-    final introduction = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const WaddleBrand(),
-        const SizedBox(height: 56),
-        SizedBox(
-          width: 150,
-          height: 100,
-          child: WaddleMotif(color: colors.primary),
-        ),
-        const SizedBox(height: 28),
-        Text(
-          'Find your\nkind of people.',
-          style: type.displayLarge?.copyWith(
-            fontSize: 56,
-            height: 1.02,
-            letterSpacing: -2.4,
-          ),
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'A little more conversation.\nA lot more connection.',
-          style: type.titleMedium?.copyWith(
-            height: 1.5,
-            color: colors.onSurfaceVariant,
-          ),
-        ),
-      ],
-    );
-    return Scaffold(
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final wide = constraints.maxWidth >= 900;
-            return Center(
-              child: SingleChildScrollView(
-                padding: EdgeInsets.symmetric(
-                  horizontal: wide ? 64 : 28,
-                  vertical: 36,
-                ),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1060),
-                  child: wide
-                      ? Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Expanded(child: introduction),
-                            const SizedBox(width: 72),
-                            Expanded(child: form),
-                          ],
-                        )
-                      : Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            introduction,
-                            const SizedBox(height: 40),
-                            form,
-                            const SizedBox(height: 28),
-                            Text(
-                              'Good company. Shared space.',
-                              style: type.labelMedium?.copyWith(
-                                color: colors.onSurfaceVariant,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ),
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
 }
 
 class _AccountNavigator extends StatefulWidget {
@@ -329,7 +84,11 @@ class _AccountNavigator extends StatefulWidget {
 
 class _AccountNavigatorState extends State<_AccountNavigator> {
   final _navigator = GlobalKey<NavigatorState>();
-  final _observer = _AccountObserver();
+  late var _photos = _AccountPhotos(widget.bridge);
+  bool _wasOffline = false;
+  late final _observer = _AccountObserver(_routeChanged);
+  String _page = '/';
+  String? _selectedJid;
   late final StreamSubscription<Map<String, dynamic>> _navigation;
   String? _presentedCall;
   bool _scheduled = false;
@@ -349,6 +108,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
 
   @override
   void dispose() {
+    _photos.active = false;
     widget.bridge.removeListener(_checkCall);
     unawaited(_navigation.cancel());
     super.dispose();
@@ -442,26 +202,108 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
     widget.bridge.consumeNavigation();
   }
 
+  void _routeChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final route = _observer.page;
+      final name = route?.settings.name ?? '/';
+      final args = route?.settings.arguments;
+      final jid = name == 'conversation' && args is Map
+          ? args['jid'] as String?
+          : null;
+      if (name != _page || jid != _selectedJid) {
+        setState(() {
+          _page = name;
+          _selectedJid = jid;
+        });
+      }
+    });
+  }
+
+  void _select(String name, {Map<String, dynamic>? arguments}) {
+    final navigator = _navigator.currentState;
+    if (navigator == null) return;
+    if (name == '/') {
+      navigator.popUntil((route) => route.isFirst);
+      return;
+    }
+    final current = _observer.page;
+    if (current?.settings.name == name &&
+        (name != 'conversation' ||
+            (current?.settings.arguments as Map?)?['jid'] ==
+                    arguments?['jid'] &&
+                (current?.settings.arguments as Map?)?['threadId'] == null)) {
+      return;
+    }
+    navigator.restorablePushNamedAndRemoveUntil(
+      name,
+      (route) => route.isFirst,
+      arguments: arguments,
+    );
+  }
+
+  void _selectEntry(Map<String, dynamic> row, bool group) => _select(
+    'conversation',
+    arguments: {'jid': row['jid'], 'title': _entryName(row), 'group': group},
+  );
+
+  void _jump() async {
+    final overlay = _navigator.currentState?.overlay;
+    if (overlay == null) return;
+    final entry = await showDialog<_JumpEntry>(
+      context: overlay.context,
+      useRootNavigator: false,
+      builder: (_) => _QuickJump(bridge: widget.bridge),
+    );
+    if (!mounted || entry == null) return;
+    if (entry.row case final row?) {
+      _selectEntry(row, entry.group);
+    } else {
+      _select(entry.route);
+    }
+  }
+
+  Widget _sidebar() => _AccountSidebar(
+    bridge: widget.bridge,
+    page: _page,
+    jid: _selectedJid,
+    select: _select,
+    open: _selectEntry,
+    jump: _jump,
+  );
+
   Route<void> _route(RouteSettings settings) {
     final bridge = widget.bridge;
-    final arguments = settings.arguments is Map
+    final args = settings.arguments is Map
         ? Map<String, dynamic>.from(settings.arguments! as Map)
         : <String, dynamic>{};
     final Widget page = switch (settings.name) {
-      'conversation' => _ConversationPage(
+      'conversation' => ConversationScreen(
         bridge: bridge,
-        jid: arguments['jid'] as String,
-        title: arguments['title'] as String? ?? arguments['jid'] as String,
-        group: arguments['group'] == true,
-        threadId: arguments['threadId'] as String?,
-        compose: arguments['compose'] == true,
+        jid: args['jid'] as String,
+        title: args['title'] as String? ?? args['jid'] as String,
+        group: args['group'] == true,
+        threadId: args['threadId'] as String?,
+        focusComposer: args['compose'] == true,
       ),
+      'inbox' => Scaffold(
+        appBar: AppBar(
+          title: const Text('Inbox'),
+          actions: [
+            IconButton(
+              tooltip: 'Threads',
+              icon: const Icon(Icons.forum_outlined),
+              onPressed: () =>
+                  _navigator.currentState?.restorablePushNamed('threads'),
+            ),
+          ],
+        ),
+        body: ActivityScreen(bridge: bridge, onOpen: _open),
+      ),
+      'rooms' => _RoomDirectory(bridge: bridge, onOpen: _selectEntry),
       'threads' => ThreadsScreen(bridge: bridge, onOpen: _open),
       'settings' => SettingsScreen(bridge: bridge),
-      'profile' => ProfileScreen(
-        bridge: bridge,
-        jid: arguments['jid'] as String?,
-      ),
+      'profile' => ProfileScreen(bridge: bridge, jid: args['jid'] as String?),
       'admin' => CommunityAdminScreen(bridge: bridge),
       'people' => PeopleScreen(
         bridge: bridge,
@@ -469,171 +311,91 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
         onGroup: (jid, name) => _open(jid, name, true),
       ),
       'call' => ActiveCallScreen(bridge: bridge),
-      _ => _Community(bridge: bridge),
+      'events' || 'feed' || 'stories' => CommunityScreen(
+        bridge: bridge,
+        section: CommunitySection.values.byName(settings.name!),
+      ),
+      'trips' => TripPlansScreen(bridge: bridge),
+      'remote' => RemoteCommunitiesScreen(bridge: bridge),
+      _ => Builder(
+        builder: (context) =>
+            MediaQuery.sizeOf(context).width < _sidebarBreakpoint
+            ? _sidebar()
+            : _HomeDashboard(
+                bridge: bridge,
+                select: _select,
+                open: _selectEntry,
+              ),
+      ),
     };
     return MaterialPageRoute<void>(settings: settings, builder: (_) => page);
   }
 
   @override
-  Widget build(BuildContext context) => NavigatorPopHandler<void>(
-    onPopWithResult: (_) => _navigator.currentState?.pop(),
-    child: Navigator(
-      key: _navigator,
-      restorationScopeId: _accountScope(widget.bridge),
-      observers: [waddleRoutes, _observer],
-      onGenerateRoute: _route,
-    ),
-  );
-}
-
-/// One conversation state moves between compact and list/detail layouts.
-class _ConversationPage extends StatefulWidget {
-  const _ConversationPage({
-    required this.bridge,
-    required this.jid,
-    required this.title,
-    required this.group,
-    this.threadId,
-    this.compose = false,
-  });
-  final WaddleBridge bridge;
-  final String jid;
-  final String title;
-  final bool group;
-  final String? threadId;
-  final bool compose;
-  @override
-  State<_ConversationPage> createState() => _ConversationPageState();
-}
-
-class _ConversationPageState extends State<_ConversationPage> {
-  final _conversationKey = GlobalKey();
-  late bool _direct = !widget.group;
-  String _query = '';
-
-  @override
   Widget build(BuildContext context) {
-    final conversation = ConversationScreen(
-      key: _conversationKey,
-      bridge: widget.bridge,
-      jid: widget.jid,
-      title: widget.title,
-      group: widget.group,
-      threadId: widget.threadId,
-      focusComposer: widget.compose,
-    );
-    if (MediaQuery.sizeOf(context).width < 840) {
-      return conversation;
+    final wide = MediaQuery.sizeOf(context).width >= _sidebarBreakpoint;
+    final connection = widget.bridge.topic('connection')['state'];
+    if (!_photos._current || (connection == 'ready' && _wasOffline)) {
+      _photos.active = false;
+      _photos = _AccountPhotos(widget.bridge);
     }
-    return Scaffold(
-      body: SafeArea(
-        child: Row(
-          children: [
-            SizedBox(
-              width: 308,
-              child: AnimatedBuilder(
-                animation: widget.bridge,
-                builder: (context, _) {
-                  final home = widget.bridge.home;
-                  final rooms = records(home['rooms']);
-                  final rows =
-                      (_direct
-                              ? [
-                                  ...records(home['dmPeers']),
-                                  ...rooms.where(
-                                    (room) => room['groupDm'] == true,
-                                  ),
-                                ]
-                              : rooms
-                                    .where((room) => room['groupDm'] != true)
-                                    .toList())
-                          .where(
-                            (row) => '${row['name'] ?? row['jid']}'
-                                .toLowerCase()
-                                .contains(_query.toLowerCase()),
-                          )
-                          .toList();
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+    _wasOffline = connection != null && connection != 'ready';
+    return _PhotoScope(
+      photos: _photos,
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.keyK, control: true): _jump,
+          const SingleActivator(LogicalKeyboardKey.keyK, meta: true): _jump,
+        },
+        child: Scaffold(
+          body: SafeArea(
+            child: Column(
+              children: [
+                if (connection != null &&
+                    connection != 'ready' &&
+                    connection != 'paused')
+                  MaterialBanner(
+                    content: Text(
+                      connection == 'offline'
+                          ? 'You’re offline. Messages will send when you reconnect.'
+                          : 'Connecting to your community…',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => perform(
+                          context,
+                          () => widget.bridge.invoke('session.retry'),
+                        ),
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                Expanded(
+                  child: Row(
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 20, 16, 24),
-                        child: Row(
-                          children: [
-                            const Expanded(child: WaddleBrand(compact: true)),
-                            IconButton(
-                              tooltip: 'Back to community',
-                              icon: const Icon(Icons.cottage_outlined),
-                              onPressed: () => Navigator.maybePop(context),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: SegmentedButton<bool>(
-                          segments: const [
-                            ButtonSegment(value: false, label: Text('Rooms')),
-                            ButtonSegment(value: true, label: Text('Messages')),
-                          ],
-                          selected: {_direct},
-                          showSelectedIcon: false,
-                          onSelectionChanged: (value) =>
-                              setState(() => _direct = value.single),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: _QuietSearch(
-                          hint: 'Find a conversation',
-                          onChanged: (value) => setState(() => _query = value),
-                        ),
-                      ),
+                      if (wide && _page != 'call') ...[
+                        SizedBox(width: 280, child: _sidebar()),
+                        const VerticalDivider(width: 1, thickness: 1),
+                      ],
                       Expanded(
-                        child: ListView.builder(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          itemCount: rows.length,
-                          itemBuilder: (context, index) {
-                            final row = rows[index];
-                            final jid = row['jid'] as String;
-                            final group = !_direct || row['groupDm'] == true;
-                            final name = '${row['name'] ?? jid}';
-                            return _CommunityRow(
-                              row: row,
-                              group: group,
-                              compact: true,
-                              selected: jid == widget.jid,
-                              onTap: () {
-                                if (jid == widget.jid &&
-                                    widget.threadId == null) {
-                                  return;
-                                }
-                                Navigator.of(
-                                  context,
-                                ).restorablePushReplacementNamed(
-                                  'conversation',
-                                  arguments: {
-                                    'jid': jid,
-                                    'title': name,
-                                    'group': group,
-                                  },
-                                );
-                              },
-                            );
-                          },
+                        key: const ValueKey('account-pages'),
+                        child: NavigatorPopHandler<void>(
+                          onPopWithResult: (_) =>
+                              _navigator.currentState?.pop(),
+                          child: Navigator(
+                            key: _navigator,
+                            restorationScopeId: _accountScope(widget.bridge),
+                            observers: [waddleRoutes, _observer],
+                            onGenerateRoute: _route,
+                          ),
                         ),
                       ),
                     ],
-                  );
-                },
-              ),
+                  ),
+                ),
+              ],
             ),
-            VerticalDivider(
-              width: 1,
-              color: Theme.of(context).colorScheme.outlineVariant,
-            ),
-            Expanded(child: conversation),
-          ],
+          ),
         ),
       ),
     );
@@ -641,6 +403,15 @@ class _ConversationPageState extends State<_ConversationPage> {
 }
 
 class _AccountObserver extends NavigatorObserver {
+  _AccountObserver(this.changed);
+  final VoidCallback changed;
+  Route<dynamic>? get page =>
+      _routes.whereType<PageRoute<dynamic>>().lastOrNull;
+  @override
+  void didChangeTop(
+    Route<dynamic> topRoute,
+    Route<dynamic>? previousTopRoute,
+  ) => changed();
   final _routes = <Route<dynamic>>[];
   Route<dynamic>? get top => _routes.isEmpty ? null : _routes.last;
   bool get showingCall =>
@@ -668,957 +439,6 @@ class _AccountObserver extends NavigatorObserver {
     if (newRoute != null) {
       _routes.add(newRoute);
     }
-  }
-}
-
-class _Community extends StatefulWidget {
-  const _Community({required this.bridge});
-  final WaddleBridge bridge;
-  @override
-  State<_Community> createState() => _CommunityState();
-}
-
-class _CommunityState extends State<_Community> with RestorationMixin {
-  final _tabIndex = RestorableInt(0);
-  int get _tab => _tabIndex.value;
-  set _tab(int value) => _tabIndex.value = value;
-  String _query = '';
-  WaddleBridge get bridge => widget.bridge;
-
-  @override
-  String get restorationId => 'community';
-
-  @override
-  void restoreState(RestorationBucket? oldBucket, bool initialRestore) {
-    registerForRestoration(_tabIndex, 'tab');
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    bridge.addListener(_updated);
-  }
-
-  @override
-  void dispose() {
-    bridge.removeListener(_updated);
-    _tabIndex.dispose();
-    super.dispose();
-  }
-
-  void _updated() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  void _push(Widget screen) {
-    final (name, arguments) = switch (screen) {
-      ConversationScreen page => (
-        'conversation',
-        <String, dynamic>{
-          'jid': page.jid,
-          'title': page.title,
-          'group': page.group,
-          if (page.threadId != null) 'threadId': page.threadId,
-        },
-      ),
-      ProfileScreen page => (
-        'profile',
-        <String, dynamic>{if (page.jid != null) 'jid': page.jid},
-      ),
-      SettingsScreen() => ('settings', <String, dynamic>{}),
-      PeopleScreen() => ('people', <String, dynamic>{}),
-      CommunityAdminScreen() => ('admin', <String, dynamic>{}),
-      ActiveCallScreen() => (
-        'call',
-        <String, dynamic>{'sid': bridge.call['sid']},
-      ),
-      _ => throw ArgumentError('Unknown destination'),
-    };
-    Navigator.of(context).restorablePushNamed(name, arguments: arguments);
-  }
-
-  void _open(String jid, String title, bool group, {String? threadId}) {
-    _push(
-      ConversationScreen(
-        bridge: bridge,
-        jid: jid,
-        title: title,
-        group: group,
-        threadId: threadId,
-      ),
-    );
-  }
-
-  Future<void> _createRoom() async {
-    final result = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (_) => const _CreateRoomDialog(),
-    );
-    if (result == null || !mounted) {
-      return;
-    }
-    await perform(context, () async {
-      final created = await bridge.invoke('room.create', result);
-      if (mounted && created is Map && created['jid'] is String) {
-        _open(created['jid'] as String, result['name'] as String, true);
-      }
-    });
-  }
-
-  void _people() => _push(
-    PeopleScreen(
-      bridge: bridge,
-      onGroup: (jid, name) => _open(jid, name, true),
-      onMessage: (jid, name) => _open(jid, name, false),
-    ),
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 840;
-    final home = bridge.home;
-    final rooms = records(
-      home['rooms'],
-    ).where((room) => room['groupDm'] != true).toList();
-    final peers = [
-      ...records(home['dmPeers']),
-      ...records(home['rooms']).where((room) => room['groupDm'] == true),
-    ];
-    final unread = peers.fold<int>(
-      0,
-      (sum, row) => sum + ((row['unread'] as num?)?.toInt() ?? 0),
-    );
-    final titles = ['Home', 'Messages', 'Activity', 'You'];
-    final icons = [
-      Icons.cottage_outlined,
-      Icons.chat_bubble_outline_rounded,
-      Icons.notifications_none_rounded,
-      Icons.person_outline_rounded,
-    ];
-    final selectedIcons = [
-      Icons.cottage_rounded,
-      Icons.chat_bubble_rounded,
-      Icons.notifications_rounded,
-      Icons.person_rounded,
-    ];
-    final connection = bridge.topic('connection')['state'];
-    final call = bridge.call['state'];
-    final hasCall = call != null && call != 'idle' && call != 'ended';
-    final colors = Theme.of(context).colorScheme;
-    final shell = Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 80,
-        titleSpacing: 24,
-        title: _tab == 0
-            ? LayoutBuilder(
-                builder: (context, constraints) => WaddleBrand(
-                  compact:
-                      constraints.maxWidth < 180 ||
-                      MediaQuery.textScalerOf(context).scale(1) > 1.4,
-                ),
-              )
-            : Text(titles[_tab], maxLines: 1, overflow: TextOverflow.ellipsis),
-        actions: [
-          if (_tab == 2)
-            IconButton(
-              tooltip: 'Threads',
-              icon: const Icon(Icons.forum_outlined),
-              onPressed: () =>
-                  Navigator.of(context).restorablePushNamed('threads'),
-            ),
-          IconButton(
-            tooltip: 'People',
-            icon: const Icon(Icons.people_outline_rounded),
-            onPressed: _people,
-          ),
-          Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: IconButton(
-              tooltip: 'Settings',
-              icon: const Icon(Icons.tune_rounded),
-              onPressed: () => _push(SettingsScreen(bridge: bridge)),
-            ),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          if (connection != null &&
-              connection != 'ready' &&
-              connection != 'paused')
-            MaterialBanner(
-              content: Text(
-                connection == 'offline'
-                    ? 'You’re offline. Messages will send when you reconnect.'
-                    : 'Connecting to your community…',
-              ),
-              leading: const Icon(Icons.cloud_off_outlined),
-              actions: [
-                TextButton(
-                  onPressed: () =>
-                      perform(context, () => bridge.invoke('session.retry')),
-                  child: const Text('Retry'),
-                ),
-              ],
-            ),
-          if (hasCall)
-            ListTile(
-              tileColor: colors.secondaryContainer,
-              leading: Icon(
-                call == 'incoming' ? Icons.phone_in_talk : Icons.graphic_eq,
-              ),
-              title: Text(
-                call == 'incoming' ? 'Incoming call' : 'Return to call',
-              ),
-              subtitle: Text(
-                '${bridge.call['name'] ?? bridge.call['peer'] ?? bridge.call['peerJid'] ?? ''}',
-              ),
-              onTap: () => _push(ActiveCallScreen(bridge: bridge)),
-            ),
-          Expanded(
-            child: switch (_tab) {
-              2 => ActivityScreen(bridge: bridge, onOpen: _open),
-              3 => _you(context),
-              _ => _conversations(
-                context,
-                _tab == 0 ? rooms : peers,
-                rooms,
-                peers,
-              ),
-            },
-          ),
-        ],
-      ),
-      bottomNavigationBar: wide
-          ? null
-          : NavigationBar(
-              selectedIndex: _tab,
-              destinations: List.generate(
-                4,
-                (index) => NavigationDestination(
-                  icon: index == 1 && unread > 0
-                      ? Badge(label: Text('$unread'), child: Icon(icons[index]))
-                      : Icon(icons[index]),
-                  selectedIcon: Icon(selectedIcons[index]),
-                  label: titles[index],
-                ),
-              ),
-              onDestinationSelected: (value) => setState(() {
-                _tab = value;
-                _query = '';
-              }),
-            ),
-    );
-    if (!wide) return shell;
-    return Scaffold(
-      body: SafeArea(
-        child: Row(
-          children: [
-            NavigationRail(
-              selectedIndex: _tab,
-              labelType: NavigationRailLabelType.all,
-              leading: const Padding(
-                padding: EdgeInsets.fromLTRB(0, 16, 0, 32),
-                child: WaddleMark(size: 40),
-              ),
-              onDestinationSelected: (value) => setState(() {
-                _tab = value;
-                _query = '';
-              }),
-              destinations: List.generate(
-                4,
-                (index) => NavigationRailDestination(
-                  icon: Icon(icons[index]),
-                  selectedIcon: Icon(selectedIcons[index]),
-                  label: Text(titles[index]),
-                ),
-              ),
-            ),
-            VerticalDivider(width: 1, color: colors.outlineVariant),
-            Expanded(child: shell),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _conversations(
-    BuildContext context,
-    List<Map<String, dynamic>> allRows,
-    List<Map<String, dynamic>> rooms,
-    List<Map<String, dynamic>> peers,
-  ) {
-    final home = bridge.home;
-    final colors = Theme.of(context).colorScheme;
-    final type = Theme.of(context).textTheme;
-    final rows = allRows
-        .where(
-          (row) => '${row['name'] ?? row['jid']}'.toLowerCase().contains(
-            _query.toLowerCase(),
-          ),
-        )
-        .toList();
-    final compactHeading =
-        MediaQuery.sizeOf(context).width <= 360 ||
-        MediaQuery.textScalerOf(context).scale(1) >= 1.5;
-    final people = records(home['people']);
-    final totalUnread = [
-      ...rooms,
-      ...peers,
-    ].fold<int>(0, (sum, row) => sum + ((row['unread'] as num?)?.toInt() ?? 0));
-    final name = '${bridge.session['username'] ?? ''}'.trim();
-    final firstName = name.isEmpty ? '' : name.split(RegExp(r'\s+')).first;
-    final greeting = firstName.isEmpty
-        ? 'Make yourself\nat home.'
-        : 'Hey, $firstName.\nSettle in.';
-    final heading = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (_tab == 0) ...[
-          const SizedBox(height: 8),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Text(
-                  greeting,
-                  style: type.headlineLarge?.copyWith(
-                    fontSize: compactHeading ? 26 : 36,
-                    height: 1.14,
-                    letterSpacing: -1.5,
-                  ),
-                ),
-              ),
-              if (MediaQuery.textScalerOf(context).scale(1) <= 1.3)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6, left: 8),
-                  child: SizedBox(
-                    width: 60,
-                    height: 60,
-                    child: WaddleMotif(color: colors.tertiary),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'A place for your people.',
-            style: type.bodyMedium?.copyWith(
-              color: colors.onSurfaceVariant,
-              height: 1.5,
-            ),
-          ),
-          const SizedBox(height: 24),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              _CommunityPill(
-                icon: Icons.door_front_door_outlined,
-                label:
-                    '${rooms.length} ${rooms.length == 1 ? 'room' : 'rooms'}',
-              ),
-              for (final section in CommunitySection.values)
-                _CommunityPill(
-                  icon: section.icon,
-                  label: section.title,
-                  onTap: () =>
-                      _push(CommunityScreen(bridge: bridge, section: section)),
-                ),
-              _CommunityPill(
-                icon: Icons.map_outlined,
-                label: 'Trips',
-                onTap: () => _push(TripPlansScreen(bridge: bridge)),
-              ),
-              _CommunityPill(
-                icon: Icons.public,
-                label: 'Remote communities',
-                onTap: () => _push(RemoteCommunitiesScreen(bridge: bridge)),
-              ),
-              if (totalUnread > 0)
-                _CommunityPill(
-                  icon: Icons.mark_chat_unread_outlined,
-                  label: '$totalUnread unread',
-                  emphasized: true,
-                ),
-              if (people.isNotEmpty)
-                _CommunityPill(
-                  icon: Icons.people_outline_rounded,
-                  label: '${people.length} people',
-                  onTap: _people,
-                ),
-            ],
-          ),
-        ] else ...[
-          Text(
-            'Pick up the\nconversation.',
-            style: type.headlineLarge?.copyWith(
-              fontSize: compactHeading ? 26 : 36,
-              height: 1.14,
-              letterSpacing: -1.5,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'A good place to say a little more.',
-            style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
-          ),
-        ],
-        const SizedBox(height: 28),
-        _QuietSearch(
-          key: ValueKey('search:$_tab'),
-          hint: _tab == 0 ? 'Find a room' : 'Find a conversation',
-          onChanged: (value) => setState(() => _query = value),
-        ),
-        const SizedBox(height: 28),
-      ],
-    );
-    final roomList = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final canCreate = _tab == 1 || home['canCreate'] == true;
-            final stackAction =
-                constraints.maxWidth < 340 ||
-                MediaQuery.textScalerOf(context).scale(1) > 1.3;
-            final action = canCreate
-                ? TextButton.icon(
-                    style: TextButton.styleFrom(
-                      minimumSize: const Size(48, 48),
-                    ),
-                    onPressed: _tab == 0 ? _createRoom : _people,
-                    icon: Icon(
-                      _tab == 0 ? Icons.add_rounded : Icons.edit_outlined,
-                      size: 20,
-                    ),
-                    label: Text(_tab == 0 ? 'New room' : 'New message'),
-                  )
-                : null;
-            final heading = WaddleSectionHeading(
-              title: _tab == 0 ? 'Your rooms' : 'Your conversations',
-              eyebrow: _tab == 0 ? 'THE COMMON ROOM' : 'JUST BETWEEN US',
-              trailing: action != null && !stackAction
-                  ? action
-                  : Text(
-                      '${rows.length}',
-                      style: type.labelLarge?.copyWith(
-                        color: colors.onSurfaceVariant,
-                      ),
-                    ),
-            );
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                heading,
-                if (action != null && stackAction) ...[
-                  const SizedBox(height: 8),
-                  Align(alignment: Alignment.centerLeft, child: action),
-                ],
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 16),
-        if (rows.isEmpty && home['settled'] != true)
-          const Padding(
-            padding: EdgeInsets.all(40),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else if (rows.isEmpty)
-          WaddlePanel(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  _tab == 0
-                      ? Icons.door_front_door_outlined
-                      : Icons.waving_hand_outlined,
-                  size: 36,
-                  color: colors.primary,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  _query.isNotEmpty
-                      ? 'No matches'
-                      : _tab == 0
-                      ? 'Room for something good.'
-                      : 'Start with hello.',
-                  style: type.titleLarge,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  _query.isNotEmpty
-                      ? 'Try another name.'
-                      : _tab == 0
-                      ? 'Your rooms will appear here when your community is ready.'
-                      : 'Find someone in your community and make their day.',
-                  style: type.bodyMedium,
-                ),
-                if (_tab == 1)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 20),
-                    child: FilledButton.tonalIcon(
-                      onPressed: _people,
-                      icon: const Icon(Icons.add_rounded),
-                      label: const Text('Find your people'),
-                    ),
-                  ),
-              ],
-            ),
-          )
-        else
-          WaddlePanel(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var index = 0; index < rows.length; index++) ...[
-                  if (index > 0)
-                    Divider(
-                      height: 1,
-                      indent: 80,
-                      endIndent: 20,
-                      color: colors.outlineVariant.withValues(alpha: .5),
-                    ),
-                  _CommunityRow(
-                    row: rows[index],
-                    group: _tab == 0 || rows[index]['groupDm'] == true,
-                    onTap: () => _open(
-                      '${rows[index]['jid']}',
-                      '${rows[index]['name'] ?? rows[index]['jid']}',
-                      _tab == 0 || rows[index]['groupDm'] == true,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-      ],
-    );
-    final community = _communityPanel(context, people);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final roomy = constraints.maxWidth >= 920;
-        return ListView(
-          padding: EdgeInsets.fromLTRB(
-            roomy ? 48 : 24,
-            8,
-            roomy ? 48 : 24,
-            112,
-          ),
-          children: [
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1120),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  heading,
-                  if (roomy && _tab == 0)
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(flex: 7, child: roomList),
-                        const SizedBox(width: 28),
-                        Expanded(flex: 4, child: community),
-                      ],
-                    )
-                  else ...[
-                    roomList,
-                    if (_tab == 0 && people.isNotEmpty) ...[
-                      const SizedBox(height: 32),
-                      community,
-                    ],
-                  ],
-                ],
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _communityPanel(
-    BuildContext context,
-    List<Map<String, dynamic>> people,
-  ) {
-    final colors = Theme.of(context).colorScheme;
-    final type = Theme.of(context).textTheme;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        WaddleSectionHeading(
-          title: 'Good company',
-          eyebrow: 'THE PEOPLE MAKE THE PLACE',
-          trailing: IconButton(
-            tooltip: 'Browse people',
-            onPressed: _people,
-            icon: const Icon(Icons.arrow_outward_rounded),
-          ),
-        ),
-        const SizedBox(height: 16),
-        WaddlePanel(
-          color: colors.secondaryContainer.withValues(alpha: .55),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (people.isEmpty) ...[
-                const WaddleMark(size: 40),
-                const SizedBox(height: 24),
-                Text('Better together.', style: type.headlineSmall),
-                const SizedBox(height: 8),
-                Text(
-                  'Find someone in your community to start a conversation.',
-                  style: type.bodyMedium,
-                ),
-              ] else ...[
-                for (final person in people.take(4))
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(16),
-                      onTap: () => _open(
-                        '${person['jid']}',
-                        '${person['name'] ?? person['jid']}',
-                        false,
-                      ),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 48),
-                        child: Row(
-                          children: [
-                            WaddleAvatar(
-                              name: '${person['name'] ?? '?'}',
-                              size: 40,
-                              online:
-                                  person['show'] == 'available' ||
-                                  person['show'] == 'chat',
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${person['name'] ?? person['jid']}',
-                                    style: type.titleSmall,
-                                  ),
-                                  if (person['inHuddle'] == true)
-                                    Text(
-                                      'In a call',
-                                      style: type.bodySmall?.copyWith(
-                                        color: colors.primary,
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            const Icon(Icons.arrow_outward_rounded, size: 18),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-              const SizedBox(height: 4),
-              TextButton.icon(
-                onPressed: _people,
-                icon: const Icon(Icons.people_outline_rounded),
-                label: const Text('Find your people'),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _you(BuildContext context) {
-    final type = Theme.of(context).textTheme;
-    final colors = Theme.of(context).colorScheme;
-    final session = bridge.session;
-    final name = '${session['username'] ?? session['jid'] ?? 'You'}';
-    final profile = bridge.topic('profile');
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 40),
-      children: [
-        WaddlePanel(
-          color: colors.primaryContainer,
-          padding: const EdgeInsets.all(28),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              WaddleAvatar(name: name, size: 72),
-              const SizedBox(height: 24),
-              Text(
-                name,
-                style: type.headlineLarge?.copyWith(letterSpacing: -1),
-              ),
-              const SizedBox(height: 8),
-              SelectableText(
-                '${session['jid'] ?? ''}',
-                style: type.bodyMedium?.copyWith(
-                  color: colors.onPrimaryContainer.withValues(alpha: .7),
-                ),
-              ),
-              if (profile['mood'] is Map &&
-                  profile['mood']['text'] != null) ...[
-                const SizedBox(height: 20),
-                Text('${profile['mood']['text']}', style: type.titleMedium),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 32),
-        const WaddleSectionHeading(
-          title: 'Make yourself at home',
-          eyebrow: 'YOUR LITTLE CORNER',
-        ),
-        const SizedBox(height: 16),
-        WaddlePanel(
-          padding: EdgeInsets.zero,
-          child: Column(
-            children: [
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 10,
-                ),
-                leading: const Icon(Icons.person_outline_rounded),
-                title: const Text('Your profile'),
-                subtitle: const Text('How you show up in your community'),
-                trailing: const Icon(Icons.arrow_outward_rounded),
-                onTap: () => _push(ProfileScreen(bridge: bridge)),
-              ),
-              Divider(
-                height: 1,
-                indent: 64,
-                color: colors.outlineVariant.withValues(alpha: .5),
-              ),
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 10,
-                ),
-                leading: const Icon(Icons.tune_rounded),
-                title: const Text('Settings'),
-                subtitle: const Text('Appearance, notifications, and delivery'),
-                trailing: const Icon(Icons.arrow_outward_rounded),
-                onTap: () => _push(SettingsScreen(bridge: bridge)),
-              ),
-            ],
-          ),
-        ),
-        if (bridge.home['isCommunityOwner'] == true)
-          Padding(
-            padding: const EdgeInsets.only(top: 24),
-            child: ListTile(
-              leading: const Icon(Icons.admin_panel_settings_outlined),
-              title: const Text('Community administration'),
-              trailing: const Icon(Icons.arrow_outward_rounded),
-              onTap: () => _push(CommunityAdminScreen(bridge: bridge)),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _QuietSearch extends StatelessWidget {
-  const _QuietSearch({super.key, required this.hint, required this.onChanged});
-  final String hint;
-  final ValueChanged<String> onChanged;
-  @override
-  Widget build(BuildContext context) => SearchBar(
-    elevation: const WidgetStatePropertyAll(0),
-    backgroundColor: WidgetStatePropertyAll(
-      Theme.of(context).colorScheme.surfaceContainer,
-    ),
-    padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 16)),
-    leading: Icon(
-      Icons.search_rounded,
-      color: Theme.of(context).colorScheme.onSurfaceVariant,
-      size: 22,
-    ),
-    hintText: hint,
-    onChanged: onChanged,
-  );
-}
-
-class _CommunityPill extends StatelessWidget {
-  const _CommunityPill({
-    required this.icon,
-    required this.label,
-    this.emphasized = false,
-    this.onTap,
-  });
-  final IconData icon;
-  final String label;
-  final bool emphasized;
-  final VoidCallback? onTap;
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Material(
-      color: emphasized ? colors.primaryContainer : colors.surfaceContainer,
-      borderRadius: BorderRadius.circular(24),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(24),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 48),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 16, color: colors.primary),
-                const SizedBox(width: 7),
-                Flexible(
-                  child: Text(
-                    label,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CommunityRow extends StatelessWidget {
-  const _CommunityRow({
-    required this.row,
-    required this.group,
-    required this.onTap,
-    this.compact = false,
-    this.selected = false,
-  });
-  final Map<String, dynamic> row;
-  final bool group, compact, selected;
-  final VoidCallback onTap;
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final type = Theme.of(context).textTheme;
-    final jid = '${row['jid'] ?? ''}';
-    final name = '${row['name'] ?? jid.split('@').first}';
-    final unread = (row['unread'] as num?)?.toInt() ?? 0;
-    final variants = [
-      colors.primaryContainer,
-      colors.secondaryContainer,
-      colors.tertiaryContainer,
-    ];
-    final tone =
-        name.codeUnits.fold<int>(0, (sum, code) => sum + code) %
-        variants.length;
-    final icon = row['forum'] == true
-        ? Icons.forum_outlined
-        : name.toLowerCase().contains('design')
-        ? Icons.palette_outlined
-        : name.toLowerCase().contains('music')
-        ? Icons.music_note_outlined
-        : name.toLowerCase().contains('weekend')
-        ? Icons.wb_sunny_outlined
-        : Icons.tag_rounded;
-    return Material(
-      color: selected
-          ? colors.primaryContainer.withValues(alpha: .5)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 12 : 20,
-            vertical: compact ? 14 : 20,
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              group
-                  ? Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        color: variants[tone],
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      child: Icon(icon, size: 22, color: colors.onSurface),
-                    )
-                  : WaddleAvatar(name: name, size: 44),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name,
-                      style: type.titleMedium?.copyWith(
-                        fontWeight: unread > 0
-                            ? FontWeight.w800
-                            : FontWeight.w600,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 5),
-                    Text(
-                      '${row['preview'] ?? row['description'] ?? jid}',
-                      style: type.bodySmall?.copyWith(
-                        color: colors.onSurfaceVariant,
-                        height: 1.45,
-                      ),
-                      maxLines: compact ? 1 : 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              if (unread > 0)
-                Container(
-                  constraints: const BoxConstraints(
-                    minWidth: 24,
-                    minHeight: 24,
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colors.primary,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '$unread',
-                    textAlign: TextAlign.center,
-                    style: type.labelSmall?.copyWith(
-                      color: colors.onPrimary,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                )
-              else if (row['live'] == true)
-                Icon(Icons.graphic_eq_rounded, size: 20, color: colors.tertiary)
-              else
-                Icon(
-                  Icons.chevron_right_rounded,
-                  size: 20,
-                  color: colors.outline,
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }
 

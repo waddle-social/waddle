@@ -6,15 +6,23 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/app.dart';
 import 'package:waddle_flutter/bridge.dart';
+import 'package:waddle_flutter/features/conversation.dart';
 import 'package:waddle_flutter/features/surfaces.dart';
 
 void main() {
   testWidgets('room dialog retains its controllers through closing animation', (
     tester,
   ) async {
+    final created = <Map<String, dynamic>>[];
     final bridge = WaddleBridge(
       events: const Stream<dynamic>.empty(),
-      commandInvoker: (method, arguments) async => null,
+      commandInvoker: (method, arguments) async {
+        if (method == 'room.create') {
+          created.add(arguments);
+          return {'jid': 'new@rooms.example.org'};
+        }
+        return null;
+      },
     );
     addTearDown(bridge.dispose);
     bridge.acceptEvent({
@@ -26,7 +34,9 @@ void main() {
       'data': {'canCreate': true, 'settled': true},
     });
     await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
-    await tester.tap(find.text('New room'));
+    await tester.tap(find.byTooltip('Browse all rooms'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('New room'));
     await tester.pumpAndSettle();
     final dialog = find.byType(AlertDialog);
     await tester.enterText(
@@ -39,6 +49,24 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpAndSettle();
     expect(find.byType(AlertDialog), findsNothing);
+    expect(created, isEmpty);
+    await tester.tap(find.byTooltip('New room'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Room name'),
+      'A new room',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await tester.pumpAndSettle();
+    expect(created.single, {
+      'name': 'A new room',
+      'description': '',
+      'forum': false,
+    });
+    expect(
+      tester.widget<ConversationScreen>(find.byType(ConversationScreen)).jid,
+      'new@rooms.example.org',
+    );
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

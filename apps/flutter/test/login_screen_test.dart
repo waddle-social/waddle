@@ -65,8 +65,12 @@ void main() {
       await tester.enterText(find.byType(TextField), 'two.example.org');
       await tester.pump(const Duration(milliseconds: 550));
       expect(requests, ['https://two.example.org']);
-      await tester.ensureVisible(find.text('DEFAULT'));
-      await tester.tap(find.text('DEFAULT'));
+      final defaultOption = find.widgetWithText(
+        RadioListTile<bool>,
+        Uri.parse(defaultOrigin).authority,
+      );
+      await tester.ensureVisible(defaultOption);
+      await tester.tap(defaultOption);
       await tester.pumpAndSettle();
       pending.complete();
       await tester.pumpAndSettle();
@@ -123,7 +127,7 @@ void main() {
       });
       await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
       expect(find.text('Sign in to Waddle'), findsOneWidget);
-      expect(find.text('SIGN IN WITH'), findsOneWidget);
+      expect(find.text('Sign in with'), findsOneWidget);
       await tester.ensureVisible(find.text(account['jid']!));
       await tester.tap(find.text(account['jid']!));
       expect(
