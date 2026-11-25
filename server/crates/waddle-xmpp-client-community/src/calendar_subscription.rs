@@ -6,7 +6,7 @@ use url::Url;
 use waddle_xmpp_client::xep::xep0050::{
     build_xep0050_command_request_with_id, AdHocAction, AdHocStatus, NS_COMMANDS, NS_DATA_FORMS,
 };
-use waddle_xmpp_core::calendar_subscription::{ISSUE, REVOKE, URL_FIELD, is_loopback_url};
+use waddle_xmpp_core::calendar_subscription::{is_loopback_url, ISSUE, REVOKE, URL_FIELD};
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]

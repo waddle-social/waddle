@@ -10,6 +10,7 @@ pub const REVOKE: &str = "urn:waddle:calendar:subscription:1:revoke";
 pub const URL_FIELD: &str = "url";
 
 /// Cleartext calendar links are only suitable for loopback development endpoints.
+#[must_use]
 pub fn is_loopback_url(url: &Url) -> bool {
     match url.host() {
         Some(Host::Domain(host)) => host == "localhost",
