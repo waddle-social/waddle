@@ -26,7 +26,8 @@ extension FFIInbound {
             BridgeLog.debug("dropped call event: invalid sender JID")
             return nil
         }
-        return CallEvent(from: from, sid: event.sid, kind: callKind(event.kind))
+        // An address that does not parse is as good as none: the event is still its sender's.
+        return CallEvent(from: from, to: event.to.flatMap(jid), sid: event.sid, kind: callKind(event.kind))
     }
 
     private static func callKind(_ kind: WaddleCallEventKind) -> CallEvent.Kind {

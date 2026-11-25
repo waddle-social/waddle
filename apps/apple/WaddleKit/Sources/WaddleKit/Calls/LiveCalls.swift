@@ -1,7 +1,8 @@
 import Foundation
 
-/// A call going on in a room we are in and are not part of, for the
-/// sidebar's "Live now" list (web `CallActivityDock`).
+/// A call going on that this device is not part of, for the sidebar's
+/// "Live now" list (web `CallActivityDock`): a room's call we have not
+/// joined, or a 1:1 call that another of our devices is in.
 public struct LiveCall: Identifiable, Equatable, Sendable {
     /// What choosing the call does.
     public enum Action: Equatable, Sendable {
@@ -18,32 +19,70 @@ public struct LiveCall: Identifiable, Equatable, Sendable {
         }
     }
 
-    public let room: BareJID
-    /// The room's name.
+    public enum Kind: Equatable, Sendable {
+        case room
+        /// A 1:1 call another of our devices is in. Two with one person are told apart by `sid`.
+        case elsewhere(sid: String)
+    }
+
+    /// Where the call is: its room, or the conversation with the other person.
+    public let conversation: ConversationID
+    public let kind: Kind
+    /// The room's name, or the other person's.
     public let title: String
-    /// Who is in it, one row a person.
+    /// Who is in it, one row a person; the other person, for a call of two.
     public let people: [GroupCallRosterRow]
-    public let hasVideo: Bool
+    /// `nil` when it is not known, as for a call answered elsewhere before we came online.
+    public let hasVideo: Bool?
     public let action: Action
 
-    public var id: BareJID { room }
+    public var id: String {
+        switch kind {
+        case .room: conversation.description
+        case .elsewhere(let sid): "elsewhere:\(sid)"
+        }
+    }
 
     public init(room: BareJID, title: String, people: [GroupCallRosterRow], hasVideo: Bool, action: Action) {
-        self.room = room
+        conversation = .room(room)
+        kind = .room
         self.title = title
         self.people = people
         self.hasVideo = hasVideo
         self.action = action
     }
 
-    /// "Group call · 3 people"
-    public var meta: String {
-        "\(hasVideo ? "Group video call" : "Group call") · \(headcount)"
+    /// A call of two that another of our devices is in. This device can open
+    /// the conversation; the call itself is the other device's.
+    public init(elsewhere call: CallElsewhere, name: String) {
+        conversation = .direct(call.peer)
+        kind = .elsewhere(sid: call.sid)
+        title = name
+        people = [GroupCallRosterRow(nick: name, jid: call.peer)]
+        hasVideo = call.media?.video
+        action = .open
     }
 
-    /// "3 people": what is left of `meta` where the whole of it does not fit.
+    /// "Group call · 3 people", "Voice call · On another device"
+    public var meta: String { "\(kindLabel(capitalized: true)) · \(headcount)" }
+
+    /// "3 people", "On another device": what is left of `meta` where the whole of it does not fit.
     public var headcount: String {
-        people.count == 1 ? "1 person" : "\(people.count) people"
+        switch kind {
+        case .room: people.count == 1 ? "1 person" : "\(people.count) people"
+        case .elsewhere: "On another device"
+        }
+    }
+
+    private func kindLabel(capitalized: Bool) -> String {
+        let label = switch (kind, hasVideo) {
+        case (.room, true): "group video call"
+        case (.room, _): "group call"
+        case (.elsewhere, true): "video call"
+        case (.elsewhere, false): "voice call"
+        case (.elsewhere, nil): "call"
+        }
+        return capitalized ? label.prefix(1).uppercased() + label.dropFirst() : label
     }
 
     /// "You, Ada and 2 more": who is there, in words, for whoever cannot see
@@ -56,7 +95,10 @@ public struct LiveCall: Identifiable, Equatable, Sendable {
 
     /// The whole card in a sentence, with nothing in it that is read out as a symbol.
     public var spoken: String {
-        "\(action.title) \(title), \(hasVideo ? "group video call" : "group call"), \(headcount): \(preview())"
+        switch kind {
+        case .room: "\(action.title) \(title), \(kindLabel(capitalized: false)), \(headcount): \(preview())"
+        case .elsewhere: "\(action.title) \(title), \(kindLabel(capitalized: false)), live on another of your devices"
+        }
     }
 }
 
@@ -82,8 +124,12 @@ public enum LiveCalls {
     /// The calls to list while the call slot is in `state`: every room's
     /// call but our own, which has its own card, with those we can walk
     /// into first and then by name.
-    public static func list(_ rooms: [Room], state: CallState) -> [LiveCall] {
-        rooms
+    ///
+    /// - Parameter elsewhere: The calls of two our other devices are in, each with the other person's name.
+    public static func list(
+        _ rooms: [Room], elsewhere: [(call: CallElsewhere, name: String)] = [], state: CallState, now: Date = Date()
+    ) -> [LiveCall] {
+        let inRooms = rooms
             .filter { !$0.people.isEmpty && !state.isInGroupCall(in: $0.room) }
             .map {
                 LiveCall(
@@ -91,12 +137,24 @@ public enum LiveCalls {
                     action: $0.canJoin ? .join : .open
                 )
             }
-            .sorted { left, right in
-                if left.action != right.action { return left.action == .join }
-                let order = left.title.localizedStandardCompare(right.title)
-                if order != .orderedSame { return order == .orderedAscending }
-                return left.room.description < right.room.description
-            }
+        // A call this device has since taken up itself is its own, with its own
+        // card. One whose ring merely ended here is still live where it was answered.
+        let onOtherDevices = elsewhere
+            .filter { $0.call.isShown(at: now) && !(state.isLive && state.sid == $0.call.sid) }
+            .map { LiveCall(elsewhere: $0.call, name: $0.name) }
+        return (inRooms + onOtherDevices).sorted { left, right in
+            if left.action != right.action { return left.action == .join }
+            let order = left.title.localizedStandardCompare(right.title)
+            if order != .orderedSame { return order == .orderedAscending }
+            return left.id < right.id
+        }
+    }
+
+    /// When the list next changes by the clock alone: the first of `calls`
+    /// still shown at `now` to reach the end of its day. Nothing else tells
+    /// a list that sits untouched that one of its cards has run out.
+    public static func nextExpiry(of calls: [CallElsewhere], after now: Date) -> Date? {
+        calls.filter { $0.isShown(at: now) }.map(\.shownUntil).min()
     }
 
     /// "Live now · 2"

@@ -72,6 +72,64 @@ struct LiveCallsTests {
         #expect(call.spoken == "Join Design, group call, 2 people: You and Ada")
     }
 
+    @Test func aCallOnAnotherOfOurDevicesCanOnlyBeOpened() {
+        let ada = bare("ada@waddle.test")
+        let call = CallElsewhere(sid: "s1", peer: ada, media: CallMedia(audio: true, video: false), since: Date())
+        let calls = LiveCalls.list([], elsewhere: [(call, "Ada")], state: .idle)
+        #expect(calls.count == 1)
+        #expect(calls[0].conversation == .direct(ada))
+        #expect(calls[0].action == .open)
+        #expect(calls[0].meta == "Voice call · On another device")
+        #expect(calls[0].headcount == "On another device")
+        #expect(calls[0].spoken == "Open Ada, voice call, live on another of your devices")
+        #expect(calls[0].people.map(\.jid) == [ada])
+    }
+
+    @Test func aCallWhoseRingMerelyEndedHereIsStillLiveElsewhere() {
+        let call = CallElsewhere(sid: "s1", peer: bare("ada@waddle.test"), media: nil, since: Date())
+        #expect(LiveCalls.list([], elsewhere: [(call, "Ada")], state: .ended(sid: "s1", reason: .missed)).count == 1)
+    }
+
+    @Test func aCallTooOldToBelieveIsNotListed() {
+        let now = Date()
+        let call = CallElsewhere(sid: "s1", peer: bare("ada@waddle.test"), media: nil, since: now.addingTimeInterval(-CallElsewhere.longestShown))
+        #expect(LiveCalls.list([], elsewhere: [(call, "Ada")], state: .idle, now: now).isEmpty)
+    }
+
+    @Test func theListNextChangesWhenItsOldestCallRunsOut() {
+        let now = Date()
+        let ada = bare("ada@waddle.test")
+        let older = CallElsewhere(sid: "a", peer: ada, media: nil, since: now.addingTimeInterval(-3600))
+        let newer = CallElsewhere(sid: "b", peer: ada, media: nil, since: now)
+        let gone = CallElsewhere(sid: "c", peer: ada, media: nil, since: now.addingTimeInterval(-CallElsewhere.longestShown - 1))
+        #expect(LiveCalls.nextExpiry(of: [newer, older, gone], after: now) == older.shownUntil)
+        #expect(LiveCalls.nextExpiry(of: [gone], after: now) == nil)
+        #expect(LiveCalls.nextExpiry(of: [], after: now) == nil)
+        // And at that moment the call is no longer listed.
+        #expect(LiveCalls.list([], elsewhere: [(older, "Ada")], state: .idle, now: older.shownUntil).isEmpty)
+    }
+
+    @Test func aCallWhoseInvitationWeMissedIsJustACall() {
+        let call = CallElsewhere(sid: "s1", peer: bare("ada@waddle.test"), media: nil, since: Date())
+        let live = LiveCalls.list([], elsewhere: [(call, "Ada")], state: .idle)[0]
+        #expect(live.meta == "Call · On another device")
+        #expect(LiveCall(elsewhere: CallElsewhere(sid: "s2", peer: call.peer, media: CallMedia(audio: true, video: true)), name: "Ada").meta
+            == "Video call · On another device")
+    }
+
+    @Test func roomsWeCanJoinComeBeforeCallsWeCanOnlyOpen() {
+        let call = CallElsewhere(sid: "s1", peer: bare("ada@waddle.test"), media: nil, since: Date())
+        let calls = LiveCalls.list([room("Zebra", people("Linus"))], elsewhere: [(call, "Ada")], state: .idle)
+        #expect(calls.map(\.title) == ["Zebra", "Ada"])
+        #expect(Set(calls.map(\.id)).count == 2)
+    }
+
+    @Test func aRoomAndAPersonWithOneAddressAreTwoCalls() {
+        let call = CallElsewhere(sid: "s1", peer: bare("design@rooms.waddle.test"), media: nil, since: Date())
+        let calls = LiveCalls.list([room("Design", people("Linus"))], elsewhere: [(call, "Design")], state: .idle)
+        #expect(Set(calls.map(\.id)).count == 2)
+    }
+
     @Test func theHeadingCountsAndACallStartingIsSaid() {
         #expect(LiveCalls.heading(count: 2) == "Live now · 2")
         #expect(LiveCalls.announcement(count: 1, besidesOurs: false) == "1 active call.")

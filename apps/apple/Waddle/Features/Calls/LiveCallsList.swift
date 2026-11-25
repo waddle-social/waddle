@@ -108,12 +108,18 @@ struct LiveCallsHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The time the list was last worked out for. A card for a call on
+    /// another device runs out by the clock, which changes nothing a view
+    /// watches: this is moved on when the next one is due.
+    @State private var asOf = Date()
 
     /// Taller than this and the cards scroll: the rooms' own list must keep its place.
     private static let maxHeight: CGFloat = 232
 
     var body: some View {
-        let calls = LiveCalls.list(rooms, state: session.calls.state)
+        // Never earlier than now: anything else that redraws the list also brings it up to date.
+        let now = max(asOf, Date())
+        let calls = LiveCalls.list(rooms, elsewhere: elsewhere, state: session.calls.state, now: now)
         ZStack {
             if !calls.isEmpty {
                 let list = LiveCallsList(calls: calls, choose: choose)
@@ -128,6 +134,12 @@ struct LiveCallsHost: View {
             }
         }
         .huddleAnimation(.settle, value: calls.map(\.id))
+        .task(id: LiveCalls.nextExpiry(of: session.calls.elsewhere.calls, after: now)) {
+            guard let due = LiveCalls.nextExpiry(of: session.calls.elsewhere.calls, after: Date()) else { return }
+            try? await Task.sleep(for: .seconds(max(0, due.timeIntervalSinceNow)))
+            // Cancelled when the calls changed: the next task has the new time.
+            if !Task.isCancelled { asOf = Date() }
+        }
         .onChange(
             of: LiveCalls.Change(count: calls.count, ownCall: session.calls.state.sid, isOnline: session.connection == .online)
         ) { before, after in
@@ -152,10 +164,17 @@ struct LiveCallsHost: View {
         }
     }
 
+    /// The calls of two our other devices are in, each with the other person's name.
+    private var elsewhere: [(call: CallElsewhere, name: String)] {
+        session.calls.elsewhere.calls.map { call in
+            (call, ConversationHeaderText.make(for: .direct(call.peer), session: session).name)
+        }
+    }
+
     private func choose(_ call: LiveCall) {
-        navigation.open(.room(call.room))
-        guard call.action == .join else { return }
+        navigation.open(call.conversation)
+        guard call.action == .join, call.kind == .room else { return }
         // As the room's own banner joins: with the microphone, and the camera for the person to turn on.
-        Task { await session.joinGroupCall(in: call.room, video: false) }
+        Task { await session.joinGroupCall(in: call.conversation.jid, video: false) }
     }
 }

@@ -4,6 +4,8 @@ import Observation
 /// A MainActor call slot; inbound reductions run before ordered remote effects.
 @MainActor @Observable public final class CallStore {
     public let groupPresence = GroupCallPresence()
+    /// The 1:1 calls our other devices are in.
+    public let elsewhere = CallsElsewhere()
     /// Our optimistic choice; room echoes never overwrite local intent.
     public private(set) var isHandRaised = false
     /// Capture owns mute state; a failed presence write leaves this choice intact.
@@ -113,6 +115,7 @@ import Observation
 
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
+        elsewhere.apply(event, own: ownBareJID, device: ownJID(), at: Date())
         if case .propose = event.kind, isFinished(sid: event.sid) {
             if let index = declinedBeforeProposalSids.firstIndex(of: event.sid) {
                 declinedBeforeProposalSids.remove(at: index)
@@ -267,6 +270,7 @@ import Observation
         generation += 1
         groupControl.clear()
         groupPresence.clear()
+        elsewhere.clear()
         setGroupMarkers(hand: false, muted: false, confirmedMute: false)
         effectTask?.cancel()
         effectTask = nil

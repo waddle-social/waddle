@@ -452,6 +452,7 @@ public final class SessionCoordinator {
         directory.clear()
         presence.clear()
         calls.groupPresence.clear()
+        calls.elsewhere.clear()
         roomBots.clear()
         typing.clear()
         unread.clearAll()
@@ -554,6 +555,7 @@ public final class SessionCoordinator {
             sentPresence = nil
             presence.clear()
             calls.groupPresence.clear()
+            calls.elsewhere.clear()
             mdsPublishSupported = nil
             if !isStopped, status.connection != .authenticationFailed {
                 scheduleReconnect()
