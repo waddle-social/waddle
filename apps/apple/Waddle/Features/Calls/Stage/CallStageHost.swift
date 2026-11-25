@@ -194,6 +194,8 @@ struct CallStageHost: View {
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
             showsChat: chat?.isOpen ?? false,
+            reactions: session.calls.reactions,
+            ownNick: ownNick,
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
@@ -232,6 +234,11 @@ struct CallStageHost: View {
     /// A stage narrower than this gives the panel the tiles' place.
     private static let widthForTilesAndPanel: CGFloat = 720
 
+    /// Our nick in the room whose call the slot holds.
+    private var ownNick: String? {
+        if case .inGroup(let call) = session.calls.state { call.nick } else { nil }
+    }
+
     /// The chat of a room's call: the thread its announcement heads, with
     /// the messages of it that are loaded. A call of two has none here yet.
     private struct Chat {
@@ -267,6 +274,11 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
+            sendReaction: { [session] emoji in
+                // For the call the stage was drawn for, while it is still that call.
+                guard session.calls.state.sid == sid else { return }
+                Task { await session.calls.sendReaction(emoji) }
+            },
             toggleChat: { [model, navigation] in
                 guard let chat else { return }
                 if chat.isOpen {

@@ -7,6 +7,7 @@ enum CallSend: Hashable {
     case groupTerminate(BareJID, String)
     case propose(BareJID, String, CallMedia)
     case ringing(JID, String)
+    case reaction(String, CallReactionLedger.Destination)
     case proceed(JID, String)
     case reject(JID, String, Bool)
     case retract(BareJID, String)
@@ -24,6 +25,7 @@ enum CallSend: Hashable {
         case .groupTerminate: "groupTerminate"
         case .propose: "propose"
         case .ringing: "ringing"
+        case .reaction: "reaction"
         case .proceed: "proceed"
         case .reject: "reject"
         case .retract: "retract"
@@ -94,6 +96,9 @@ extension FakePort {
         for continuation in held { continuation.resume() }
     }
 
+    func sendInCallReaction(_ emoji: String, to destination: CallReactionLedger.Destination) async -> Bool {
+        await recordCall(.reaction(emoji, destination))
+    }
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool {
         await recordCall(.propose(peer, sid, media))
     }

@@ -303,12 +303,26 @@ final class CallStageSnapshotTests: XCTestCase {
     }
     #endif
 
+    /// Three reactions as they appear, before they rise: each in its own place across the stage.
+    func testRoomWithReactionsRising() {
+        var ledger = CallReactionLedger()
+        let now = Date()
+        for emoji in ["👍", "🎉", "❤️"] { ledger.received(emoji, from: nil, at: now) }
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: CallReactionsField(bursts: ledger.bursts, animates: false)
+                .frame(width: Self.panel.width, height: 240)
+                .background(Theme.Colors.seaDeep),
+            width: Self.panel.width + 2 * Theme.Spacing.l
+        )
+    }
+
     // MARK: - Control bar
 
     private func assertBar(
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, hasMedia: Bool = true, isHandRaised: Bool? = nil,
         viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split,
-        isSharingScreen: Bool? = nil, chatUnread: Int? = nil, showsChat: Bool = false,
+        isSharingScreen: Bool? = nil, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false,
         testName: String = #function, line: UInt = #line
     ) {
         assertHuddleSnapshot(
@@ -316,7 +330,7 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
                 viewMode: viewMode, size: size, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
-                showsChat: showsChat, actions: Self.actions
+                showsChat: showsChat, canReact: canReact, actions: Self.actions
             )
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
@@ -339,6 +353,16 @@ final class CallStageSnapshotTests: XCTestCase {
 
     func testControlBarWithTheCallChatOpen() {
         assertBar(isHandRaised: false, size: .expanded, chatUnread: 0, showsChat: true)
+    }
+
+    /// Room for every button: reactions have one of their own.
+    func testControlBarWithReactionsInAnExpandedStage() {
+        assertBar(isHandRaised: false, size: .expanded, canReact: true)
+    }
+
+    /// The 400 pt column of a room's call: reacting goes into More, and sharing and the list of people keep their buttons.
+    func testControlBarWithReactionsInASplitRoomStage() {
+        assertBar(isHandRaised: false, size: .split, isSharingScreen: false, canReact: true)
     }
 
     func testControlBarDirect() {

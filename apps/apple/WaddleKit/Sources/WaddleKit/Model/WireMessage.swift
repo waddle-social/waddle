@@ -96,6 +96,9 @@ public struct WireMessage: Hashable, Sendable {
     public var callThread: CallThreadAnchor?
     /// The call an anchor began is over (a XEP-0422 fastening, unverified here).
     public var callThreadEnded: CallThreadEnded?
+    /// `urn:waddle:in-call:0`: an emoji for everyone in a call to see for a
+    /// moment. Live only, and no part of any timeline.
+    public var inCallReaction: InCallReaction?
 
     public init(
         source: Source = .live,

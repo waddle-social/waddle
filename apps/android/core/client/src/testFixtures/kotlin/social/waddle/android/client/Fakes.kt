@@ -194,7 +194,7 @@ data class UploadSlotCall(
 )
 
 /**
- * One recorded `sendCall*` wire verb, in send order, so call-engine
+ * One recorded call wire verb, in send order, so call-engine
  * tests can assert exact sequences (e.g. the tie-break branch's
  * finish-migrated → proceed → session-terminate ordering).
  */
@@ -207,6 +207,13 @@ sealed interface RecordedCallVerb {
     ) : RecordedCallVerb
 
     data class Ringing(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class InCallReaction(
+        val to: String,
+        val audience: WaddleMessageAudience,
+        val sid: String,
+        val emoji: String,
+    ) : RecordedCallVerb
 
     data class Proceed(val peerFullJid: String, val sid: String) : RecordedCallVerb
 
@@ -1093,6 +1100,16 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun sendCallRinging(peerFullJid: String, sid: String): Boolean {
         callVerbs += RecordedCallVerb.Ringing(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendInCallReaction(
+        to: String,
+        audience: WaddleMessageAudience,
+        sid: String,
+        emoji: String,
+    ): Boolean {
+        callVerbs += RecordedCallVerb.InCallReaction(to, audience, sid, emoji)
         return callVerbResult
     }
 

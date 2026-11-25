@@ -1349,6 +1349,7 @@ pub(crate) mod tests {
             call_thread: None,
             shared_files: Vec::new(),
             mds_displayed: None,
+            in_call_reaction: None,
         }
     }
 

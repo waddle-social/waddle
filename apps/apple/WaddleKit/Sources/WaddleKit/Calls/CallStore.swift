@@ -6,6 +6,8 @@ import Observation
     public let groupPresence = GroupCallPresence()
     /// The 1:1 calls our other devices are in.
     public let elsewhere = CallsElsewhere()
+    /// The emoji rising on the stage of the call in the slot.
+    public let reactions = CallReactions()
     /// Our optimistic choice; room echoes never overwrite local intent.
     public private(set) var isHandRaised = false
     /// Capture owns mute state; a failed presence write leaves this choice intact.
@@ -271,6 +273,7 @@ import Observation
         groupControl.clear()
         groupPresence.clear()
         elsewhere.clear()
+        reactions.clear()
         setGroupMarkers(hand: false, muted: false, confirmedMute: false)
         effectTask?.cancel()
         effectTask = nil
@@ -305,6 +308,8 @@ import Observation
             lastError = nil
             let previous = state
             state = next
+            // A reaction was to the call it was sent in: it does not rise over the next one.
+            if previous.sid != next.sid { reactions.clear() }
             // Every way a call starts ringing here bounds the ring: a
             // proposal, a tie-break won, a slot taken over.
             if case .incoming(let call) = next, !call.isAccepting, !(previous.isIncoming && previous.sid == call.sid) {

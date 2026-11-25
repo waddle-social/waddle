@@ -48,6 +48,11 @@ struct CallStageView: View {
     var chatUnread: Int?
     /// The call's chat is open beside the conversation.
     var showsChat = false
+    /// The emoji rising over the stage; `nil` draws none. Handed on whole:
+    /// only the overlay reads what is in it, so only the overlay redraws.
+    var reactions: CallReactions?
+    /// Our nick in the room of a room's call; `nil` in a call of two.
+    var ownNick: String?
     /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
     var ownScreen: CallStageTile?
     /// Where the tiles get their pictures and send a pin.
@@ -96,6 +101,9 @@ struct CallStageView: View {
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
                         toggleParticipants: actions.toggleParticipants
                     )
+                    .overlay {
+                        if let reactions { CallReactionsOverlay(reactions: reactions, ownNick: ownNick) }
+                    }
                 }
                 if let participants {
                     CallParticipantsPanel(
@@ -115,7 +123,7 @@ struct CallStageView: View {
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
                 isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
                 showsParticipants: participants != nil, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
-                showsChat: showsChat, actions: actions
+                showsChat: showsChat, canReact: status != .connecting, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)

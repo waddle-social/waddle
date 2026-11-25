@@ -56,6 +56,15 @@ extension FFIXmppPort {
         await client.sendCallPropose(peerBareJid: peer.description, sid: sid, audio: media.audio, video: media.video)
     }
 
+    func sendInCallReaction(_ emoji: String, to destination: CallReactionLedger.Destination) async -> Bool {
+        switch destination {
+        case .device(let device, let sid):
+            await client.sendInCallReaction(to: device.description, audience: .direct, sid: sid, emoji: emoji)
+        case .room(let room, let sid):
+            await client.sendInCallReaction(to: room.description, audience: .muc, sid: sid, emoji: emoji)
+        }
+    }
+
     func sendCallRinging(to peer: JID, sid: String) async -> Bool {
         await client.sendCallRinging(peerFullJid: peer.description, sid: sid)
     }

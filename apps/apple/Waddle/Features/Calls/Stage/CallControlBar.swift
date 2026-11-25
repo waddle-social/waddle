@@ -13,6 +13,8 @@ struct CallStageActions {
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
+    /// Sends an emoji for everyone in the call to see for a moment.
+    var sendReaction: @MainActor (String) -> Void = { _ in /* a call with nobody to show it to */ }
     /// Opens the call's chat beside the conversation, or puts it away.
     var toggleChat: @MainActor () -> Void = { /* a call with no chat */ }
     /// Tries a device the call could not use again, or puts its notice away for this call.
@@ -47,6 +49,8 @@ struct CallControlBar: View {
     /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
     var chatUnread: Int?
     var showsChat = false
+    /// Media has connected: there is a call to react in.
+    var canReact = false
     let actions: CallStageActions
 
     var body: some View {
@@ -64,6 +68,11 @@ struct CallControlBar: View {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
                 endButton
             }
+            // One button too many for that column: reacting goes into More before sharing and the list of people do.
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, reactInMenu: true) }
+                endButton
+            }
             // Narrower still, or with every button there is: sharing and the list of people go there too.
             VStack(spacing: Theme.Spacing.s) {
                 HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
@@ -78,7 +87,7 @@ struct CallControlBar: View {
     private var toggles: some View { toggles(viewChoiceInMenu: false) }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool, extrasInMenu: Bool = false) -> some View {
+    private func toggles(viewChoiceInMenu: Bool, reactInMenu: Bool = false, extrasInMenu: Bool = false) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -119,6 +128,7 @@ struct CallControlBar: View {
             }
             .accessibilityAddTraits(showsChat ? .isSelected : [])
         }
+        if canReact, !extrasInMenu, !reactInMenu { reactMenu }
         if !extrasInMenu {
             CallControlButton(
                 title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
@@ -127,7 +137,7 @@ struct CallControlBar: View {
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
         }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu)
+        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu, withReact: reactInMenu || extrasInMenu)
     }
 
     // MARK: - Split, expanded, full screen
@@ -192,7 +202,30 @@ struct CallControlBar: View {
 
     // MARK: - More
 
-    private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
+    // MARK: - Reactions
+
+    /// The six emoji the web's picker offers, one click each.
+    private var reactMenu: some View {
+        Menu {
+            reactionChoices
+        } label: {
+            CallControlButton.face(symbol: "face.smiling", tone: .plain)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(Text("React"))
+        .help("React")
+    }
+
+    private var reactionChoices: some View {
+        ForEach(CallReactionLedger.offered, id: \.self) { emoji in
+            Button(emoji) { actions.sendReaction(emoji) }
+        }
+    }
+
+    private func more(withViewChoice: Bool, withExtras: Bool = false, withReact: Bool = false) -> some View {
         Menu {
             if withExtras {
                 if isSharingScreen == false {
@@ -202,6 +235,9 @@ struct CallControlBar: View {
                 if let chatUnread, chatUnread == 0, !showsChat {
                     Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
                 }
+            }
+            if withReact, canReact {
+                Menu("React") { reactionChoices }
             }
             if withViewChoice {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
