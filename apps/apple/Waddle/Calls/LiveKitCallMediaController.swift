@@ -76,14 +76,14 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             return AnyView(SwiftUIVideoView(track, layoutMode: identity == dockCameraIdentities.local ? .fill : .fit))
         case .screen:
             // All of a screen, never cropped.
-            let own = room?.localParticipant.identity?.stringValue ?? joinedIdentity
+            let own = roomAccess.room?.localParticipant.identity?.stringValue ?? joinedIdentity
             let track = identity == own ? ownScreenTrack : screenTracks[identity]?.track
             return track.map { AnyView(SwiftUIVideoView($0, layoutMode: .fit)) }
         }
     }
 
     func setVolume(_ gain: Double, of identity: String) {
-        guard let room, !identity.isEmpty, identity != joinedIdentity,
+        guard let room = roomAccess.room, !identity.isEmpty, identity != joinedIdentity,
               identity != room.localParticipant.identity?.stringValue else { return }
         let gain = CallVolume.clamp(gain)
         volumeGains[identity] = gain
@@ -106,8 +106,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         volumeUpdates.enqueue(for: track) { track.volume = gain }
     }
 
-    /// The room of the call in progress, from the moment its connect starts.
-    @ObservationIgnored private var room: Room?
+    @ObservationIgnored private let roomAccess = CallRoomAccess()
     /// The room holds its delegates weakly.
     @ObservationIgnored private var observer: RoomObserver?
 
@@ -146,6 +145,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
         background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
+        roomAccess.tracksChanged = { [weak self] in self?.refreshTracks() }
+        roomAccess.recordRefusal = { [weak self] kind in self?.mediaRefusals[kind, default: 0] += 1 }
         #if os(macOS)
         // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
         AudioManager.shared.onDeviceUpdate = { [weak self] _ in
@@ -230,7 +231,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     /// Every video stream of the call now: ours first, then the others'.
     private var videoStreams: [VideoStream] {
-        guard let room else { return [] }
+        guard let room = roomAccess.room else { return [] }
         let own: String = room.localParticipant.identity?.stringValue ?? joinedIdentity ?? ""
         var streams: [VideoStream] = []
         for publication in room.localParticipant.localVideoTracks where !publication.isMuted {
@@ -260,13 +261,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     private func measureNewVideoTracks() async {
-        let measuring = room
+        let measuring = roomAccess.room
         for stream in videoStreams where measuredTracks[ObjectIdentifier(stream.track)] == nil {
             measuredTracks[ObjectIdentifier(stream.track)] = stream.track
             await stream.track.set(reportStatistics: true)
             // The settings closed, or the call ended, while that one was being
             // switched on: it goes off again and nothing more is switched on.
-            guard measuresVideo, room === measuring else {
+            guard measuresVideo, let measuring, roomAccess.holds(measuring) else {
                 measuredTracks[ObjectIdentifier(stream.track)] = nil
                 await stream.track.set(reportStatistics: false)
                 return
@@ -380,7 +381,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // A blur that gave no picture while the camera was starting leaves no
         // camera at all: the SDK gives up on a track it gets no frames from.
         // Checking again then means starting the camera again, if it is still wanted.
-        guard let room, publications(of: .video, in: room).isEmpty, captureChoices[.video] == true else { return }
+        guard let room = roomAccess.room, publications(of: .video, in: room).isEmpty, captureChoices[.video] == true else { return }
         await setSource(.video, enabled: true, in: room)
     }
 
@@ -430,11 +431,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     /// The one thing the stage is told: the blur is on and no picture is getting out.
     private func refreshBackgroundFailing() {
-        let isFailing = room != nil && background == .blur && (!failingBackgrounds.isEmpty || cameraFailedToStartBlurred)
+        let isFailing = roomAccess.room != nil && background == .blur && (!failingBackgrounds.isEmpty || cameraFailedToStartBlurred)
         guard isBackgroundFailing != isFailing else { return }
         isBackgroundFailing = isFailing
         // Said again each time it happens, as a refused device is.
-        if isFailing { mediaRefusals[.background, default: 0] += 1 }
+        if isFailing { roomAccess.recordRefusal(.background) }
     }
 
     /// The safety net under `publishCamera`: a camera of ours that somehow
@@ -465,7 +466,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         // None to unmute, or it went away while we were at it, as a muted
         // track does in a full reconnect: a new one, made our way.
-        if self.room === room, !publications(of: .video, in: room).contains(where: { !$0.isMuted }) {
+        if roomAccess.holds(room), !publications(of: .video, in: room).contains(where: { !$0.isMuted }) {
             await publishCamera(in: room)
         }
     }
@@ -477,7 +478,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         let processor = makeBackgroundProcessor()
         let track = await capture.makeCamera(options: cameraCaptureOptions(), processor: processor)
         let id = ObjectIdentifier(track.capturer)
-        guard self.room === room else {
+        guard roomAccess.holds(room) else {
             // The call ended while the camera was being made. `setSource`
             // takes the room down next; the processor is held until then
             // and never counted among those of a later call.
@@ -495,7 +496,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             // another. Its processor goes, so the failure is kept here.
             discardBackgroundProcessor(of: id)
             _ = try? await track.stop()
-            if self.room === room, background == .blur {
+            if roomAccess.holds(room), background == .blur {
                 cameraFailedToStartBlurred = true
                 refreshBackgroundFailing()
             }
@@ -529,7 +530,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// in what others hear. A track keeps the options it was made with for
     /// its own restarts, so this runs again after a reconnect.
     private func applyAudioProcessing() async {
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         let wanted = audioProcessing
         let options = AudioProcessingOptions(
             echoCancellation: wanted.echoCancellation, autoGainControl: wanted.autoGainControl,
@@ -572,7 +573,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private(set) var appliedAudioProcessing: CallAudioProcessing?
     /// The microphone's publication, for tests: a change of processing must not replace it.
     var microphonePublicationID: String? {
-        room.flatMap { publications(of: .audio, in: $0).first?.sid.stringValue }
+        roomAccess.room.flatMap { publications(of: .audio, in: $0).first?.sid.stringValue }
     }
 
     /// Moves a camera that is on to the one that should be in use. A camera
@@ -600,7 +601,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private var cameraChoiceWork: Task<Void, Never>?
 
     private func moveCameraToChoice(droppingIdleTracks: Bool) async {
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         let wanted = cameraCaptureOptions()
         for publication in publications(of: .video, in: room) {
             if publication.isMuted {
@@ -616,13 +617,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 // The change stops the capture and starts it again. A camera
                 // turned off, or a call left, between the two finds nothing
                 // to stop, and the restart would then run on behind it.
-                if self.room !== room || publication.isMuted || captureChoices[.video] == false {
+                if !roomAccess.holds(room) || publication.isMuted || captureChoices[.video] == false {
                     _ = try? await capturer.stopCapture()
-                    if self.room === room, !publication.isMuted { try? await publication.mute() }
+                    if roomAccess.holds(room), !publication.isMuted { try? await publication.mute() }
                 }
             }
         }
-        if self.room === room { refreshTracks() }
+        if roomAccess.holds(room) { refreshTracks() }
     }
 
     /// On iPhone and iPad the system lists every lens, and the combinations
@@ -641,7 +642,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func connect(join: CallJoin, media: CallMedia, iceServers: [WaddleKit.IceServer]) async throws {
-        guard room == nil else { throw CallMediaError.alreadyConnected }
+        guard roomAccess.room == nil else { throw CallMediaError.alreadyConnected }
         wasEndedByServer = false
         let (changes, observer) = RoomObserver.make()
         let room = Room(delegate: observer, roomOptions: RoomOptions(adaptiveStream: true, dynacast: true))
@@ -652,7 +653,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         // Owned before connecting, so a drop the SFU reports while the
         // connect is still returning is not lost.
-        self.room = room
+        roomAccess.room = room
         self.observer = observer
         joinedIdentity = join.identity
         phase = .connecting
@@ -666,9 +667,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             try await room.connect(url: join.url, token: join.token, connectOptions: options)
             // A hang-up or a drop that raced the connect owns the slot now.
             try Task.checkCancellation()
-            guard self.room === room else { throw CancellationError() }
+            guard roomAccess.holds(room) else { throw CancellationError() }
         } catch {
-            if self.room === room { forgetRoom() }
+            if roomAccess.holds(room) { forgetRoom() }
             await room.disconnect()
             releaseBackgroundProcessors(of: room)
             throw error
@@ -685,7 +686,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func disconnect() async {
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         forgetRoom()
         await room.disconnect()
         releaseBackgroundProcessors(of: room)
@@ -701,7 +702,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     func setMicrophone(_ on: Bool) async {
         captureChoices[.audio] = on
         if isMicrophoneMutedByChoice == on { isMicrophoneMutedByChoice = !on }
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         await setSource(.audio, enabled: on, in: room)
     }
 
@@ -712,7 +713,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             cameraFailedToStartBlurred = false
             refreshBackgroundFailing()
         }
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         await setSource(.video, enabled: on, in: room)
     }
 
@@ -729,7 +730,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         guard let found = await capture.screenContent() else {
             // Refused, or not yet answered: either way there is nothing to pick from.
             isScreenShareBlocked = !capture.isScreenCaptureAllowed
-            if isScreenShareBlocked { mediaRefusals[.screen, default: 0] += 1 }
+            if isScreenShareBlocked { roomAccess.recordRefusal(.screen) }
             return isScreenShareBlocked ? nil : CallScreenSources(CallScreenCandidates(), ownBundleID: nil)
         }
         if isScreenShareBlocked { isScreenShareBlocked = false }
@@ -764,7 +765,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     private func startScreenShare(_ source: CallScreenSource, generation: Int) async {
-        guard generation == screenShareGeneration, let room else { return }
+        guard generation == screenShareGeneration, let room = roomAccess.room else { return }
         await unpublishScreens()
         guard generation == screenShareGeneration else { return }
         if didScreenShareFail { didScreenShareFail = false }
@@ -774,10 +775,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // Listed again now: the picker's list may be minutes old, and a
         // screen is captured with the applications that exist when it is listed.
         guard room.connectionState == .connected, let makeTrack = await capture.screenContent()?.makeTrack[source.id] else {
-            if self.room === room, generation == screenShareGeneration {
+            if roomAccess.holds(room), generation == screenShareGeneration {
                 wantsScreenShare = false
                 didScreenShareFail = true
-                mediaRefusals[.screen, default: 0] += 1
+                roomAccess.recordRefusal(.screen)
             }
             return
         }
@@ -803,7 +804,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         track.capturer.delegates.add(delegate: watcher)
         screenCaptureWatcher = watcher
         let publication = try? await room.localParticipant.publish(videoTrack: track, options: options)
-        guard self.room === room, generation == screenShareGeneration else {
+        guard roomAccess.holds(room), generation == screenShareGeneration else {
             // The call ended, or the person or the system stopped, while it
             // was starting: the screen must not go on being captured for nobody.
             track.capturer.delegates.remove(delegate: watcher)
@@ -820,7 +821,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenCaptureWatcher = nil
             wantsScreenShare = false
             didScreenShareFail = true
-            mediaRefusals[.screen, default: 0] += 1
+            roomAccess.recordRefusal(.screen)
             refreshTracks()
             return
         }
@@ -829,11 +830,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     private func unpublishScreens() async {
         screenCaptureWatcher = nil
-        guard let room else { return }
+        guard let room = roomAccess.room else { return }
         for publication in room.localParticipant.localVideoTracks where publication.source == .screenShareVideo {
             try? await room.localParticipant.unpublish(publication: publication)
         }
-        if self.room === room { refreshTracks() }
+        if roomAccess.holds(room) { refreshTracks() }
     }
 
     private static let screenShareFPS = 30
@@ -853,7 +854,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // Here and not before the room exists: a hang-up must find a room to
         // disconnect from the moment its connect starts.
         await refreshDevices()
-        guard self.room === room else { return }
+        guard roomAccess.holds(room) else { return }
         if captureChoices[.audio] ?? media.audio { await setSource(.audio, enabled: true, in: room) }
         if captureChoices[.video] ?? media.video { await setSource(.video, enabled: true, in: room) }
     }
@@ -886,7 +887,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
         // The call ended while a track was starting: `disconnect()` ran
         // before the track was published, so release it here.
-        guard self.room === room else {
+        guard roomAccess.holds(room) else {
             await room.localParticipant.unpublishAll()
             await room.disconnect()
             releaseBackgroundProcessors(of: room)
@@ -904,17 +905,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// and checks again once the user has answered: a prompt can stay open
     /// long after a hang-up. An ended call neither prompts nor captures.
     private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
-        guard self.room === room else { return false }
+        guard roomAccess.holds(room) else { return false }
         let isAllowed = await capture.requestAccess(for: kind)
         // Kept for the dock, which says why the control does nothing.
         if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
-        if !isAllowed { mediaRefusals[kind == .audio ? .microphone : .camera, default: 0] += 1 }
-        return isAllowed && self.room === room
+        if !isAllowed { roomAccess.recordRefusal(kind == .audio ? .microphone : .camera) }
+        return isAllowed && roomAccess.holds(room)
     }
 
     private func forgetRoom() {
-        let departing = room
-        room = nil
+        let departing = roomAccess.room
+        roomAccess.room = nil
         observer = nil
         joinedIdentity = nil
         volumeUpdates.removeAll()
@@ -956,7 +957,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// the room first, so only a drop the SDK reports on the room still in
     /// use ends the call.
     private func handle(_ change: RoomChange, in changed: Room) {
-        guard changed === room else { return }
+        guard roomAccess.holds(changed) else { return }
         switch change {
         case .dropped(let endedByServer):
             wasEndedByServer = endedByServer
@@ -977,7 +978,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             connectionSettling?.cancel()
             connectionSettling = Task { [weak self] in
                 try? await Task.sleep(for: CallConnectionRatingGate.settleTime)
-                guard !Task.isCancelled, let self, self.room === changed else { return }
+                guard !Task.isCancelled, let self, self.roomAccess.holds(changed) else { return }
                 self.connectionRating.settled()
                 self.refreshParticipants()
             }
@@ -1051,19 +1052,19 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func refreshTracks(restoringVolumes: Bool = false) {
         // On if any publication of the device is live, so a second one can
         // never send while the dock shows the device off.
-        let preview = room.flatMap { publications(of: .video, in: $0).first(where: \.isLive)?.track as? VideoTrack }
-        let microphone = room.map { publications(of: .audio, in: $0).contains(where: \.isLive) } ?? false
+        let preview = roomAccess.room.flatMap { publications(of: .video, in: $0).first(where: \.isLive)?.track as? VideoTrack }
+        let microphone = roomAccess.room.map { publications(of: .audio, in: $0).contains(where: \.isLive) } ?? false
         let camera = preview != nil
-        let ownScreen = room?.localParticipant.localVideoTracks
+        let ownScreen = roomAccess.room?.localParticipant.localVideoTracks
             .first { $0.source == .screenShareVideo && !$0.isMuted }?.track as? VideoTrack
         var tracks: [String: VideoTrack] = [:]
         var screens: [String: SharedScreen] = [:]
         var dockCameras = CallDockCameraIdentities()
-        if let preview, let local = room?.localParticipant.identity?.stringValue ?? joinedIdentity {
+        if let preview, let local = roomAccess.room?.localParticipant.identity?.stringValue ?? joinedIdentity {
             tracks[local] = preview
             dockCameras.local = local
         }
-        let remotes = room.map { Array($0.remoteParticipants.values) } ?? []
+        let remotes = roomAccess.room.map { Array($0.remoteParticipants.values) } ?? []
         for remote in remotes {
             guard let identity = remote.identity?.stringValue else { continue }
             if let publication = remote.videoTracks.first(where: { $0.source == .screenShareVideo && $0.isLive }),
@@ -1117,7 +1118,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// now; like `refreshTracks`, never applied as deltas. Only a connected
     /// room has a roster: a reconnect may replace every participant.
     private func refreshParticipants() {
-        guard let room, phase == .connected else {
+        guard let room = roomAccess.room, phase == .connected else {
             if !participants.isEmpty { participants = [] }
             if !activeSpeakersLoudestFirst.isEmpty { activeSpeakersLoudestFirst = [] }
             // What was measured belonged to a connection that is gone or being remade.
@@ -1235,102 +1236,4 @@ final class CallVolumeUpdates {
 
 enum CallMediaError: Error {
     case alreadyConnected
-}
-
-/// What the call needs to hear from a room.
-private enum RoomChange {
-    /// The media session died after it was established. True when the
-    /// SFU ended it on purpose: this participant was removed, the room was
-    /// closed, or the same identity joined from elsewhere.
-    case dropped(endedByServer: Bool)
-    case reconnecting
-    case reconnected
-    /// A track was published, subscribed, muted or removed, on either side.
-    case tracks
-    /// Someone joined, or the SDK reported who is speaking and how loudly.
-    case participants
-    /// The server rated our own connection.
-    case ownConnectionRated
-}
-
-/// Hands room events to the controller as an ordered stream. The
-/// reconnect-mode callbacks are used because a quick reconnect changes
-/// neither `connectionState` nor `roomIsReconnecting`.
-private final class RoomObserver: NSObject, RoomDelegate, Sendable {
-    private let changes: AsyncStream<RoomChange>.Continuation
-
-    static func make() -> (AsyncStream<RoomChange>, RoomObserver) {
-        let (stream, continuation) = AsyncStream<RoomChange>.makeStream()
-        return (stream, RoomObserver(changes: continuation))
-    }
-
-    private init(changes: AsyncStream<RoomChange>.Continuation) {
-        self.changes = changes
-    }
-
-    deinit {
-        changes.finish()
-    }
-
-    private func forward(_ change: RoomChange, from _: Room) {
-        changes.yield(change)
-    }
-
-    func room(_ room: Room, didDisconnectWithError error: LiveKitError?) {
-        let endedByServer: Bool
-        switch error?.type {
-        case .participantRemoved?, .roomDeleted?, .duplicateIdentity?: endedByServer = true
-        default: endedByServer = false
-        }
-        forward(.dropped(endedByServer: endedByServer), from: room)
-    }
-
-    func room(_ room: Room, didStartReconnectWithMode _: ReconnectMode) {
-        forward(.reconnecting, from: room)
-    }
-
-    func room(_ room: Room, didCompleteReconnectWithMode _: ReconnectMode) {
-        forward(.reconnected, from: room)
-    }
-
-    func room(_ room: Room, participant _: LocalParticipant, didPublishTrack _: LocalTrackPublication) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participant _: LocalParticipant, didUnpublishTrack _: LocalTrackPublication) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participant _: RemoteParticipant, didSubscribeTrack _: RemoteTrackPublication) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participant _: RemoteParticipant, didUnsubscribeTrack _: RemoteTrackPublication) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participant _: RemoteParticipant, trackPublication _: RemoteTrackPublication, didUpdateIsSubscriptionAllowed _: Bool) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participant _: Participant, trackPublication _: TrackPublication, didUpdateIsMuted _: Bool) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participantDidDisconnect _: RemoteParticipant) {
-        forward(.tracks, from: room)
-    }
-
-    func room(_ room: Room, participantDidConnect _: RemoteParticipant) {
-        forward(.participants, from: room)
-    }
-
-    func room(_ room: Room, didUpdateSpeakingParticipants _: [Participant]) {
-        forward(.participants, from: room)
-    }
-
-    func room(_ room: Room, participant: Participant, didUpdateConnectionQuality _: ConnectionQuality) {
-        // Only ours is shown.
-        if participant is LocalParticipant { forward(.ownConnectionRated, from: room) }
-    }
 }
