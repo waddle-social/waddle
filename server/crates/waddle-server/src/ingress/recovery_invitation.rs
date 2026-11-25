@@ -88,6 +88,7 @@ pub(super) fn restore(
                 input.envelope,
                 input.recorded,
                 &receipt,
+                input.occupant_id_secret,
             )?
             else {
                 continue;

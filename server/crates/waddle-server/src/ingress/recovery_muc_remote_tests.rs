@@ -150,6 +150,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
+        occupant_id_secret: None,
     })
     .expect("rebuild remote occupant");
     let mut detached_index = None;

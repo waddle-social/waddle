@@ -51,6 +51,9 @@ pub(in crate::ingress) struct RecoveryInput<'a> {
     /// another copy for them.
     pub departed_occupants: Vec<jid::FullJid>,
     pub blocked_recipients: &'a [jid::BareJid],
+    /// The secret generated invitations derive their XEP-0421 occupant-id
+    /// from; `None` only where no recorded invitation can be rebuilt.
+    pub occupant_id_secret: Option<&'a waddle_xmpp::xep::xep0421::OccupantIdSecret>,
 }
 pub(in crate::ingress) struct RebuiltRecovery {
     pub decision: IngressDecision,
@@ -96,6 +99,7 @@ pub(in crate::ingress) fn rebuild(
             input.unreceipted,
             input.envelope,
             input.created_at,
+            input.occupant_id_secret,
         )?;
     }
     if input

@@ -191,6 +191,11 @@ pub struct IngressUnitOfWork {
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
     fencing: IngressFencing,
+    /// The deployment secret room-authored stanzas derive their XEP-0421
+    /// occupant-id from. Bound once at boot; invitation reconstruction
+    /// refuses to run until it is, so a stanza is never rebuilt without the
+    /// `<occupant-id/>` the live relay stamped. Shared by every clone.
+    occupant_id_secret: Arc<std::sync::OnceLock<waddle_xmpp::xep::xep0421::OccupantIdSecret>>,
 }
 
 /// A private witness that the repository owns the complete transaction.
@@ -246,7 +251,25 @@ impl IngressUnitOfWork {
             host_grant_relations: Default::default(),
             host_grant_gate: Default::default(),
             fencing: IngressFencing::SingleNode,
+            occupant_id_secret: Default::default(),
         })
+    }
+
+    /// Bind the secret that reconstructed room-authored stanzas derive their
+    /// XEP-0421 occupant-id from. The first binding stays; the answer is
+    /// whether this call set it.
+    pub fn bind_occupant_id_secret(
+        &self,
+        secret: waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    ) -> bool {
+        self.occupant_id_secret.set(secret).is_ok()
+    }
+
+    /// The bound occupant-id secret; `None` before boot binds it.
+    pub(crate) fn occupant_id_secret(
+        &self,
+    ) -> Option<&waddle_xmpp::xep::xep0421::OccupantIdSecret> {
+        self.occupant_id_secret.get()
     }
 
     /// Record that this replica verified its runtime role's privileges on

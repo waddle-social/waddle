@@ -146,6 +146,7 @@ fn original_reflection_recovers_after_occupant_receipt_without_new_audience() {
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
+        occupant_id_secret: None,
     })
     .expect("rebuild");
     assert!(rebuilt.unsupported_receipts.is_empty());

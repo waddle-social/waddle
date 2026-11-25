@@ -114,7 +114,7 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             reference.receipt.kind.to_storage(),
         )
         .expect("typed binding");
-        check_canonical_obligation(&fixture.db, &carbon, &reference)
+        check_canonical_obligation(&fixture.db, &carbon, &reference, None)
             .await
             .expect("frozen carbon accepted");
         let wrong_direction = match kind {
@@ -148,7 +148,7 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             wrapper(&changed_parent, &owner, &target, kind),
         ] {
             assert!(matches!(
-                check_canonical_obligation(&fixture.db, &invalid, &reference).await,
+                check_canonical_obligation(&fixture.db, &invalid, &reference, None).await,
                 Err(AppendAuthorityRejection::CarbonObligationMismatch)
             ));
         }
@@ -157,7 +157,8 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             assert!(check_canonical_obligation(
                 &fixture.db,
                 &wrapper(original, &owner, &late, kind),
-                &reference
+                &reference,
+                None
             )
             .await
             .is_err());
@@ -168,9 +169,11 @@ async fn carbon_append_authority(fixture: IngressFixture) {
         );
         let mut forged = reference.clone();
         forged.receipt.semantic_identity_hash = [0; 32];
-        assert!(check_canonical_obligation(&fixture.db, &carbon, &forged)
-            .await
-            .is_err());
+        assert!(
+            check_canonical_obligation(&fixture.db, &carbon, &forged, None)
+                .await
+                .is_err()
+        );
     }
     fixture.close().await;
 }
