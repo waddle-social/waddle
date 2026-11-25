@@ -110,6 +110,16 @@ fn tombstone_value(target: &TombstoneTarget) -> Value {
         } => {
             json!(["direct", wire_id, author.to_string(), archive.to_string()])
         }
+        TombstoneTarget::GroupchatCorrection {
+            replaced_id,
+            occupant,
+            room,
+        } => json!([
+            "groupchat-correction",
+            replaced_id,
+            occupant.to_string(),
+            room.to_string()
+        ]),
     }
 }
 

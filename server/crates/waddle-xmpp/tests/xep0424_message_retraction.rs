@@ -739,3 +739,91 @@ async fn tombstone_scrub_removes_same_author_corrections_only() {
         .collect();
     assert_eq!(remaining, vec![rows[2].clone(), rows[3].clone()]);
 }
+
+/// XEP-0424 §Tombstones applied to a MUC: queued reflections of the
+/// retracted occupant's XEP-0308 corrections are scrubbed, while another
+/// occupant's `<replace>` of the same id survives (XEP-0308 §Business Rules:
+/// a MUC correction must come from the original's full JID).
+#[tokio::test]
+async fn groupchat_tombstone_scrub_removes_same_occupant_corrections_only() {
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+    use waddle_xmpp::tombstone::TombstoneTarget;
+    let storage =
+        InMemoryPendingDeliveryStorage::new(waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited);
+    let recipient: jid::BareJid = "reader@example.com".parse().expect("reader");
+    let target = TombstoneTarget::GroupchatCorrection {
+        replaced_id: "original".into(),
+        occupant: "room@conference.example.com/alice"
+            .parse()
+            .expect("occupant"),
+        room: "room@conference.example.com".parse().expect("room"),
+    };
+    // (occupant, wire id, replaces)
+    let cases = [
+        ("room@conference.example.com/alice", "original", None),
+        (
+            "room@conference.example.com/alice",
+            "fix-1",
+            Some("original"),
+        ),
+        (
+            "room@conference.example.com/mallory",
+            "fix-2",
+            Some("original"),
+        ),
+        (
+            "room@conference.example.com/alice",
+            "fix-3",
+            Some("unrelated"),
+        ),
+    ];
+    let mut rows = Vec::new();
+    for (occupant, id, replaces) in cases {
+        let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.from = Some(occupant.parse().expect("occupant"));
+        message.id = Some(xmpp_parsers::message::Id(id.into()));
+        if let Some(replaces) = replaces {
+            message.payloads.push(
+                format!("<replace xmlns='urn:xmpp:message-correct:0' id='{replaces}'/>")
+                    .parse::<minidom::Element>()
+                    .expect("replace element"),
+            );
+        }
+        let row = PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        rows.push(row.id.clone());
+        storage.insert(row).await.expect("queued");
+    }
+    // The room scope matches on `from` (the reflection is addressed from
+    // the occupant), so the correction copies are removed; the original is
+    // removed by the room stanza-id target, not this one.
+    let scrub = storage
+        .scrub_for_tombstone_with_row_ids(&target)
+        .await
+        .expect("scrub");
+    assert_eq!(scrub.row_ids, vec![rows[1].clone()]);
+    let mut remaining: Vec<_> = storage
+        .list(&recipient)
+        .await
+        .expect("remaining")
+        .into_iter()
+        .map(|row| format!("{:?}", row.id))
+        .collect();
+    remaining.sort();
+    let mut expected: Vec<_> = [&rows[0], &rows[2], &rows[3]]
+        .iter()
+        .map(|id| format!("{id:?}"))
+        .collect();
+    expected.sort();
+    assert_eq!(remaining, expected);
+}
