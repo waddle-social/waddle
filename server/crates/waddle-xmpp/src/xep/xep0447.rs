@@ -104,6 +104,9 @@ pub struct FileSharing {
     pub sources: Vec<Source>,
     /// Content disposition; `None` when the sender did not assert one.
     pub disposition: Option<Disposition>,
+    /// Optional `id` attribute. XEP-0447 §multi-file: when a message carries
+    /// several `<file-sharing/>` elements each MUST carry a differing `id`.
+    pub id: Option<String>,
 }
 
 impl FileSharing {
@@ -113,7 +116,14 @@ impl FileSharing {
             metadata,
             sources: Vec::new(),
             disposition: None,
+            id: None,
         }
+    }
+
+    /// Set the `id` attribute.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// Add a URL source.
@@ -206,10 +216,16 @@ pub fn parse_file_sharing_element(elem: &Element) -> Option<FileSharing> {
         }
     }
 
+    let id = elem
+        .attr("id")
+        .filter(|id| !id.is_empty())
+        .map(String::from);
+
     Some(FileSharing {
         metadata,
         sources,
         disposition,
+        id,
     })
 }
 
@@ -223,6 +239,9 @@ pub fn build_file_sharing_element(sharing: &FileSharing) -> Element {
             minidom::rxml::xml_ncname!("disposition").to_owned(),
             disposition.as_str(),
         );
+    }
+    if let Some(id) = sharing.id.as_deref() {
+        builder = builder.attr(minidom::rxml::xml_ncname!("id").to_owned(), id);
     }
     let mut fs = builder.build();
 
@@ -255,6 +274,52 @@ pub fn build_file_sharing_element(sharing: &FileSharing) -> Element {
 pub fn set_file_sharing(msg: &mut Message, sharing: &FileSharing) {
     msg.payloads.retain(|e| e.ns() != NS_SFS);
     msg.payloads.push(build_file_sharing_element(sharing));
+}
+
+/// Give every `<file-sharing/>` payload a distinct non-empty `id`.
+///
+/// XEP-0447 (multiple files): "It MUST add an id attribute with differing
+/// values to each of these <file-sharing/> elements." Does nothing unless
+/// the slice holds more than one `<file-sharing/>`. Existing unique ids are
+/// kept; missing, empty or duplicate ids are replaced with `sfs-N` values
+/// that collide with no other id in the set.
+pub fn assign_distinct_file_sharing_ids(payloads: &mut [Element]) {
+    use std::collections::HashSet;
+
+    if payloads
+        .iter()
+        .filter(|e| is_file_sharing_element(e))
+        .count()
+        < 2
+    {
+        return;
+    }
+    let mut used: HashSet<String> = HashSet::new();
+    let mut needs_id: Vec<usize> = Vec::new();
+    for (index, payload) in payloads.iter().enumerate() {
+        if !is_file_sharing_element(payload) {
+            continue;
+        }
+        match payload.attr("id").filter(|id| !id.is_empty()) {
+            Some(id) if used.insert(id.to_owned()) => {}
+            _ => needs_id.push(index),
+        }
+    }
+    let mut counter = 0usize;
+    for index in needs_id {
+        let id = loop {
+            let candidate = format!("sfs-{counter}");
+            counter += 1;
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        payloads[index].set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("id").to_owned(),
+            id,
+        );
+    }
 }
 
 /// Remove file sharing from a message.

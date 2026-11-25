@@ -72,4 +72,45 @@ describe("encrypted attachment runtime", () => {
       }),
     ).rejects.toThrow("integrity check failed");
   });
+
+  test("cuts decrypted bytes beyond the declared size", async () => {
+    const original = new File(["hello encrypted world"], "note.txt", { type: "text/plain" });
+    const prepared = await prepareEncryptedAttachmentUpload(original);
+    const encryptedUrl = "https://files.example.com/note.txt.enc";
+    const ciphertext = await prepared.uploadFile.arrayBuffer();
+    globalThis.fetch = mock(async () => new Response(ciphertext, { status: 200 })) as typeof fetch;
+
+    const decrypted = await decryptEncryptedAttachment({
+      url: encryptedUrl,
+      mediaType: prepared.originalMediaType,
+      size: 5,
+      encrypted: { ...prepared.encrypted, sources: [encryptedUrl] },
+    });
+    expect(await decrypted.text()).toBe("hello");
+  });
+
+  test("verifies the plaintext hash before presenting the file", async () => {
+    const original = new File(["hello encrypted world"], "note.txt", { type: "text/plain" });
+    const prepared = await prepareEncryptedAttachmentUpload(original);
+    const encryptedUrl = "https://files.example.com/note.txt.enc";
+    const ciphertext = await prepared.uploadFile.arrayBuffer();
+    globalThis.fetch = mock(async () => new Response(ciphertext, { status: 200 })) as typeof fetch;
+    const descriptor = {
+      url: encryptedUrl,
+      mediaType: prepared.originalMediaType,
+      encrypted: { ...prepared.encrypted, sources: [encryptedUrl] },
+    };
+
+    const ok = await decryptEncryptedAttachment({ ...descriptor, hashes: prepared.plaintextHashes });
+    expect(await ok.text()).toBe("hello encrypted world");
+
+    // Distinct key so the in-flight cache does not reuse the first result.
+    await expect(
+      decryptEncryptedAttachment({
+        ...descriptor,
+        url: `${encryptedUrl}?bad`,
+        hashes: [{ algo: "sha-256", valueB64: "ZmFrZQ==" }],
+      }),
+    ).rejects.toThrow("integrity check failed");
+  });
 });

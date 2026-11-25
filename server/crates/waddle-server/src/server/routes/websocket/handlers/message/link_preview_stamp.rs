@@ -145,6 +145,9 @@ pub(super) fn consume_link_preview_request(
             message
                 .payloads
                 .push(build_file_sharing_element(&video_sharing));
+            // XEP-0447: several <file-sharing/> in one message MUST carry
+            // differing id attributes, so id the client's shares too.
+            waddle_xmpp::xep::xep0447::assign_distinct_file_sharing_ids(&mut message.payloads);
         }
     }
 }
