@@ -392,11 +392,6 @@ fn build_verification_string_with_extensions(
 
             let mut values = field.values;
             values.sort();
-            if values.is_empty() {
-                s.push('<');
-                continue;
-            }
-
             for value in values {
                 s.push_str(&value);
                 s.push('<');

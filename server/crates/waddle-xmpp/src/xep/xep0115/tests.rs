@@ -557,7 +557,7 @@ fn test_compute_caps_hash_ignores_foreign_namespaced_form_children() {
 }
 
 #[test]
-fn test_build_verification_string_treats_missing_field_values_as_empty() {
+fn test_build_verification_string_valueless_field_contributes_only_var() {
     let verification_string = build_verification_string_with_extensions(
         &[Identity::server(Some("Waddle"))],
         &[Feature::disco_info()],
@@ -566,7 +566,7 @@ fn test_build_verification_string_treats_missing_field_values_as_empty() {
 
     assert_eq!(
             verification_string,
-            "server/im//Waddle<http://jabber.org/protocol/disco#info<urn:xmpp:dataforms:softwareinfo<software<<"
+            "server/im//Waddle<http://jabber.org/protocol/disco#info<urn:xmpp:dataforms:softwareinfo<software<"
         );
 }
 

@@ -69,8 +69,7 @@ pub(super) async fn handle_caps_disco_info_result(
     };
 
     let previous_features: std::collections::HashSet<String> = resolver
-        .key_for_resource(sender)
-        .and_then(|key| resolver.cached(&key))
+        .info_for_resource(sender)
         .map(|cached| cached.features.into_iter().map(|f| f.0).collect())
         .unwrap_or_default();
 
@@ -81,8 +80,8 @@ pub(super) async fn handle_caps_disco_info_result(
         parsed.extensions,
         parsed.ill_formed,
     ) {
-        CapsVerification::Match => {
-            debug!(id = %iq.id(), jid = %sender, "Cached XEP-0115 caps after hash verification");
+        outcome @ (CapsVerification::Match | CapsVerification::ResourceOnly) => {
+            debug!(id = %iq.id(), jid = %sender, ?outcome, "Recorded XEP-0115 caps for resource");
             // XEP-0163: interest became known after the initial presence;
             // replay last items for nodes not already covered by the
             // previously known caps, to a resource that is still available.
