@@ -151,7 +151,7 @@ pub fn is_archivable(message: &Message) -> bool {
 
 /// True when the message carries content that justifies a MAM archive
 /// row even without an explicit `<store/>` hint (a non-empty body or a
-/// substantive XEP-0308 / XEP-0424 / XEP-0444 payload).
+/// substantive XEP-0308 / XEP-0424 / XEP-0444 / XEP-0447 payload).
 ///
 /// Public so the DM-intake classifier shares the exact same matrix as
 /// [`is_archivable`] — the two must never disagree, or the classifier
@@ -174,8 +174,11 @@ fn has_substantive_body(message: &Message) -> bool {
 }
 
 fn has_archivable_payload(message: &Message) -> bool {
-    use crate::xep::{xep0308, xep0424, xep0444};
+    use crate::xep::{xep0308, xep0424, xep0444, xep0447};
     xep0308::is_correction_message(message)
+        // Attachment-only shares send an empty body; XEP-0449 stickers
+        // ride the same `<file-sharing/>` payload.
+        || xep0447::has_file_sharing(message)
         || matches!(
             xep0424::extract_retraction_from_message(message),
             Some(xep0424::RetractionKind::Request(_))
@@ -480,6 +483,22 @@ mod tests {
                 "stanza-X",
                 &["🔥"],
             ));
+        let outcome = run(&local, &mut msg);
+        assert_eq!(extract_archive_events(&outcome).len(), 1);
+    }
+
+    #[test]
+    fn xep_0447_file_share_with_empty_body_is_archived() {
+        // Attachment-only DMs carry `<body></body>` plus `<file-sharing/>`;
+        // they must reach MAM or they vanish on history reload.
+        let local = full("alice@example.com/web");
+        let mut msg = chat_with_body("alice@example.com/web", "bob@example.com", "");
+        crate::xep::xep0447::set_file_sharing(
+            &mut msg,
+            &crate::xep::xep0447::FileSharing::new(crate::xep::xep0446::FileMetadata::new())
+                .with_url("https://upload.example.com/photo.png"),
+        );
+        assert!(has_archivable_content(&msg));
         let outcome = run(&local, &mut msg);
         assert_eq!(extract_archive_events(&outcome).len(), 1);
     }
