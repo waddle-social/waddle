@@ -43,8 +43,8 @@ val LocalPeerAvatars = staticCompositionLocalOf<PeerAvatarSource?> { null }
 
 /**
  * A person's avatar, everywhere the app shows another user: their
- * XEP-0084 image when one is published, else initials on their XEP-0392
- * consistent color (web `AppAvatar` parity). [jid] is the REAL bare JID
+ * XEP-0084 image when one is published, else initials on a static tint.
+ * [jid] is the REAL bare JID
  * — never a nick or a guess; `null` when unknown renders initials.
  * Composition watches the JID (lazy fetch + revalidation while on
  * screen); policy lives in the core `PeerAvatarRepository`.
