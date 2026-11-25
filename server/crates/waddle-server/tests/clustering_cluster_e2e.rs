@@ -235,6 +235,24 @@ fn frame_has_attr(frame: &str, name: &str, value: &str) -> bool {
     frame.contains(&format!("{name}='{value}'")) || frame.contains(&format!("{name}=\"{value}\""))
 }
 
+/// Whether `frame` is the room's presence for `occupant` carrying `role` in
+/// its `muc#user` item, read from the parsed stanza so either attribute
+/// quote style matches.
+fn frame_is_occupant_role(frame: &str, occupant: &str, role: &str) -> bool {
+    frame.parse::<minidom::Element>().is_ok_and(|element| {
+        element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+            && element.attr("from") == Some(occupant)
+            && element
+                .get_child("x", "http://jabber.org/protocol/muc#user")
+                .is_some_and(|x| {
+                    x.children().any(|child| {
+                        child.is("item", "http://jabber.org/protocol/muc#user")
+                            && child.attr("role") == Some(role)
+                    })
+                })
+    })
+}
+
 fn frame_attr_starts_with(frame: &str, name: &str, prefix: &str) -> bool {
     frame.contains(&format!("{name}='{prefix}")) || frame.contains(&format!("{name}=\"{prefix}"))
 }
@@ -2488,6 +2506,9 @@ async fn muc_join_routes_to_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B, a SEPARATE bare JID on node B (a different process),
     // attempts to join the SAME room while A is still live. Node B must not
@@ -3384,6 +3405,9 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B joins the same room THROUGH NODE B (relayed join), so B
     // is an occupant whose occupancy lives on node A.
@@ -3640,16 +3664,20 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
             .send(&set_role(id, nick, role))
             .await
             .expect("the owner changes a role");
-        owner
-            .recv_matching(|frame| frame.contains(id))
+        let answer = owner
+            .recv_matching(|frame| frame.contains(id) && frame.contains("<iq"))
             .await
             .expect("the role change is answered");
+        assert!(
+            frame_has_attr(&answer, "type", "result"),
+            "the owner's role change succeeds: {answer}"
+        );
     }
     // The visitor has been told of its role before it asks.
+    let visitor_occupant = format!("{room}/visitor-b");
     visitor
-        .recv_until(|frame| {
-            frame.contains(&format!("{room}/visitor-b"))
-                && (frame.contains("role=\"visitor\"") || frame.contains("role='visitor'"))
+        .recv_matching_within(Duration::from_secs(15), |frame| {
+            frame_is_occupant_role(frame, &visitor_occupant, "visitor")
         })
         .await
         .expect("the visitor learns of its role");
@@ -3719,11 +3747,7 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         .await
         .expect("the moderator approves");
     let granted = visitor
-        .recv_until(|frame| {
-            frame.contains(&format!("{room}/visitor-b")) && frame.contains("role=\"participant\"")
-                || frame.contains(&format!("{room}/visitor-b"))
-                    && frame.contains("role='participant'")
-        })
+        .recv_until(|frame| frame_is_occupant_role(frame, &visitor_occupant, "participant"))
         .await
         .expect("the visitor is granted voice");
     assert!(
@@ -3733,10 +3757,7 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         "{granted:?}"
     );
     owner
-        .recv_matching(|frame| {
-            frame.contains(&format!("{room}/visitor-b"))
-                && (frame.contains("role=\"participant\"") || frame.contains("role='participant'"))
-        })
+        .recv_matching(|frame| frame_is_occupant_role(frame, &visitor_occupant, "participant"))
         .await
         .expect("the owner sees the role change");
 
@@ -3871,6 +3892,9 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B joins the same room THROUGH NODE B (relayed join), so
     // B's occupancy — and therefore B's voice — lives on node A while
