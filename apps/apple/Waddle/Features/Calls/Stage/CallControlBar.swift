@@ -32,26 +32,22 @@ struct CallStageActions {
 /// that ends our part of the call, "Hang up" in a room too, as on the web. When they do not fit one row the pill
 /// takes a row of its own.
 struct CallControlBar: View {
-    var isMicrophoneOn = false
-    var isCameraOn = false
-    /// The devices can be switched: media has connected.
-    var hasMedia = true
-    /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
-    var isHandRaised: Bool?
-    var viewMode = CallStagePresentation.ViewMode.gallery
-    var isSelfViewHidden = false
-    var size = CallSurface.Size.split
-    /// Off while something else on screen has a use for Escape.
-    var escapeStepsDown = true
-    var showsParticipants = false
-    /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
-    var isSharingScreen: Bool?
-    /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
-    var chatUnread: Int?
-    var showsChat = false
-    /// Media has connected: there is a call to react in.
-    var canReact = false
+    var controls = CallControls()
     let actions: CallStageActions
+
+    private var isMicrophoneOn: Bool { controls.devices.isMicrophoneOn }
+    private var isCameraOn: Bool { controls.devices.isCameraOn }
+    private var hasMedia: Bool { controls.devices.hasMedia }
+    private var isHandRaised: Bool? { controls.isHandRaised }
+    private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
+    private var isSelfViewHidden: Bool { controls.isSelfViewHidden }
+    private var size: CallSurface.Size { controls.size }
+    private var escapeStepsDown: Bool { controls.escapeStepsDown }
+    private var showsParticipants: Bool { controls.showsParticipants }
+    private var isSharingScreen: Bool? { controls.devices.isSharingScreen }
+    private var chatUnread: Int? { controls.chatUnread }
+    private var showsChat: Bool { controls.showsChat }
+    private var canReact: Bool { controls.canReact }
 
     var body: some View {
         ViewThatFits(in: .horizontal) {

@@ -17,31 +17,19 @@ struct CallStageView: View {
     var presentation = CallStagePresentation()
     /// Who the speaker view shows large.
     var promotedSpeaker: String?
-    /// How much of the window the stage has, for the buttons that change it.
-    var size = CallSurface.Size.split
-    var escapeStepsDown = true
+    var controls = CallControls()
     /// The participants panel's rows while it is open.
     var participants: [CallParticipantRow]?
     /// Someone's volume has been moved, whether or not they are listed now.
     var canResetVolumes = false
     /// The stage is too narrow for tiles and the panel side by side: the panel takes the tiles' place.
     var participantsCoverTiles = false
-    var isMicrophoneOn = false
-    var isCameraOn = false
-    /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
-    var isHandRaised: Bool?
     /// What the call could not use of our own devices, each with a way to try again or put it away.
     var issues: [CallMediaIssue] = []
     /// The kinds being tried again now.
     var checkingIssues: Set<CallMediaIssue.Kind> = []
     /// How good our own connection is, once the call is live; `nil` shows no indicator.
     var connection: CallConnectionQuality?
-    /// Whether we are sharing our screen; `nil` where this device cannot.
-    var isSharingScreen: Bool?
-    /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
-    var chatUnread: Int?
-    /// The call's chat is open beside the conversation.
-    var showsChat = false
     /// The emoji rising over the stage; `nil` draws none. Handed on whole:
     /// only the overlay reads what is in it, so only the overlay redraws.
     var reactions: CallReactions?
@@ -57,10 +45,7 @@ struct CallStageView: View {
 
     /// The letter keys that do something on this stage as it is.
     private var shortcuts: [CallShortcut] {
-        CallShortcut.available(
-            hasMedia: status.hasMedia, canShareScreen: isSharingScreen != nil, hasHands: isHandRaised != nil,
-            size: size
-        )
+        CallShortcut.available(for: controls)
     }
 
     private func perform(_ shortcut: CallShortcut) {
@@ -69,7 +54,7 @@ struct CallStageView: View {
         case .camera: actions.toggleCamera()
         case .screenShare: actions.toggleScreenShare()
         case .hand: actions.toggleHand()
-        case .stepUp: actions.setSize(size.steppedUp)
+        case .stepUp: actions.setSize(controls.size.steppedUp)
         }
     }
 
@@ -114,13 +99,7 @@ struct CallStageView: View {
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, WaddleTokens.Spacing.s1Half)
             .padding(.bottom, Theme.Spacing.m)
-            CallControlBar(
-                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status.hasMedia,
-                isHandRaised: isHandRaised, viewMode: presentation.viewMode,
-                isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
-                showsParticipants: participants != nil, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
-                showsChat: showsChat, canReact: status.hasMedia, actions: actions
-            )
+            CallControlBar(controls: controls, actions: actions)
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)
             .padding(.bottom, Theme.Spacing.l)

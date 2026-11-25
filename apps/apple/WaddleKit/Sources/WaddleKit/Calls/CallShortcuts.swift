@@ -27,21 +27,14 @@ public enum CallShortcut: CaseIterable, Equatable, Sendable {
 
     /// The keys that do something on a stage as it is now; the others are
     /// left alone, for whatever else may want them.
-    ///
-    /// - Parameters:
-    ///   - hasMedia: Media has connected: the devices can be switched.
-    ///   - canShareScreen: This device can share its screen.
-    ///   - hasHands: The call is a room's, where hands are raised.
-    public static func available(
-        hasMedia: Bool, canShareScreen: Bool, hasHands: Bool, size: CallSurface.Size
-    ) -> [CallShortcut] {
+    public static func available(for controls: CallControls) -> [CallShortcut] {
         allCases.filter { shortcut in
             switch shortcut {
-            case .microphone, .camera: hasMedia
-            case .screenShare: hasMedia && canShareScreen
-            case .hand: hasHands
+            case .microphone, .camera: controls.devices.hasMedia
+            case .screenShare: controls.devices.hasMedia && controls.devices.isSharingScreen != nil
+            case .hand: controls.isHandRaised != nil
             // Full screen is as big as a call gets.
-            case .stepUp: size != .immersive
+            case .stepUp: controls.size != .immersive
             }
         }
     }

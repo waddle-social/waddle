@@ -42,9 +42,16 @@ final class CallStageRedrawTests: XCTestCase {
         let source: CallTileSource
 
         var body: some View {
+            let status: CallSessionStatus = .connected
+            let presentation = CallStagePresentation(viewMode: .speaker)
+            let controls = CallControls(
+                devices: .init(hasMedia: status.hasMedia),
+                viewMode: presentation.viewMode, isSelfViewHidden: presentation.isSelfViewHidden,
+                showsParticipants: false, canReact: status.hasMedia
+            )
             CallStageView(
-                title: "#design", subtitle: "2 others in call", status: .connected, tiles: roster.tiles,
-                presentation: CallStagePresentation(viewMode: .speaker), tileSource: source, announcesChanges: false,
+                title: "#design", subtitle: "2 others in call", status: status, tiles: roster.tiles,
+                presentation: presentation, controls: controls, tileSource: source, announcesChanges: false,
                 actions: CallStageActions(
                     toggleMicrophone: {}, toggleCamera: {}, toggleHand: {}, setViewMode: { _ in }, toggleSelfView: {},
                     hangUp: {}

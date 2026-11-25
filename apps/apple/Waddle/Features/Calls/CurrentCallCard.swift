@@ -25,14 +25,9 @@ struct CurrentCallCard: View {
     let summary: String
     /// Media is up: the dot is live.
     var isConnected = true
-    /// The devices can be switched: media has connected, even if it is reconnecting now.
-    var hasMedia = true
-    var isMicrophoneOn = false
-    var isCameraOn = false
+    var devices = CallControls.Devices()
     /// Something the person should know about their own devices, as when Waddle may not use one.
     var notice: String?
-    /// We are sharing our screen into this call, which goes on while we are elsewhere.
-    var isSharingScreen = false
     let actions: Actions
 
     var body: some View {
@@ -65,7 +60,7 @@ struct CurrentCallCard: View {
                     .foregroundStyle(Theme.Colors.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if isSharingScreen {
+            if devices.isSharingScreen == true {
                 HStack(spacing: Theme.Spacing.s) {
                     Circle()
                         .fill(Theme.Colors.danger)
@@ -86,13 +81,13 @@ struct CurrentCallCard: View {
             // with a finger's controls on an iPad, the way back and out take a row of their own.
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: WaddleTokens.Spacing.s1Half) {
-                    devices
+                    deviceButtons
                     Spacer(minLength: 0)
                     returnButton
                     hangUpButton
                 }
                 VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-                    HStack(spacing: WaddleTokens.Spacing.s1Half) { devices }
+                    HStack(spacing: WaddleTokens.Spacing.s1Half) { deviceButtons }
                     HStack(spacing: WaddleTokens.Spacing.s1Half) {
                         returnButton
                         Spacer(minLength: 0)
@@ -112,7 +107,10 @@ struct CurrentCallCard: View {
     }
 
     @ViewBuilder
-    private var devices: some View {
+    private var deviceButtons: some View {
+        let isMicrophoneOn = devices.isMicrophoneOn
+        let isCameraOn = devices.isCameraOn
+        let hasMedia = devices.hasMedia
         control(
             isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             isOff: !isMicrophoneOn && hasMedia, action: actions.toggleMicrophone
@@ -230,15 +228,18 @@ struct CurrentCallCardHost: View {
                 .map { session.callRoster(of: $0, media: media, speaking: []).count } ?? 0)
         }
         let commands = CallCommands(calls: session.calls, media: media)
+        let devices = CallControls.Devices(
+            isMicrophoneOn: media?.isMicrophoneOn ?? false,
+            isCameraOn: media?.isCameraOn ?? false,
+            hasMedia: status.hasMedia,
+            isSharingScreen: media?.isSharingOrStartingScreen == true
+        )
         return CurrentCallCard(
             title: conversation.isRoom ? header.title : header.name,
             summary: CallCardSummary.line(status: status, kind: kind),
             isConnected: status == .connected,
-            hasMedia: status.hasMedia,
-            isMicrophoneOn: media?.isMicrophoneOn ?? false,
-            isCameraOn: media?.isCameraOn ?? false,
+            devices: devices,
             notice: media?.deviceNotice,
-            isSharingScreen: media?.isScreenShareOn == true || media?.isScreenShareStarting == true,
             actions: .init(
                 returnToCall: { [model, navigation] in
                     // As the web does: back to the call as a split beside its conversation.

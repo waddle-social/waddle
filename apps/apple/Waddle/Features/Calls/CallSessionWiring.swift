@@ -65,6 +65,9 @@ struct CallCommands {
 }
 
 extension CallMediaControls {
+    /// A share is on, or on its way: either way it is ours to stop.
+    var isSharingOrStartingScreen: Bool { isScreenShareOn || isScreenShareStarting }
+
     /// What to tell the person when Waddle may not use a device their call needs.
     /// What this call's media says about our own devices.
     var mediaReport: CallMediaIssues.Report {
@@ -82,6 +85,18 @@ extension CallMediaControls {
     /// while the call is away from its stage, and the person must not forget it.
     var dockNotice: String? {
         deviceNotice ?? (isScreenShareOn ? "You’re sharing your screen. Open the call’s conversation to stop sharing." : nil)
+    }
+}
+
+extension CallControls.Devices {
+    @MainActor
+    init(of media: (any CallMediaControls)?, status: CallSessionStatus) {
+        self.init(
+            isMicrophoneOn: media?.isMicrophoneOn ?? false,
+            isCameraOn: media?.isCameraOn ?? false,
+            hasMedia: status.hasMedia,
+            isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isSharingOrStartingScreen : nil }
+        )
     }
 }
 

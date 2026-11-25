@@ -172,6 +172,19 @@ struct CallStageHost: View {
                 CallParticipantAudio(identity: $0.identity, hasMicrophone: $0.hasMicrophoneTrack, volume: $0.volume)
             }
         ) : nil
+        let controls = CallControls(
+            devices: .init(of: media, status: call.status),
+            isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
+            viewMode: memory.presentation.viewMode,
+            isSelfViewHidden: memory.presentation.isSelfViewHidden,
+            size: memory.size,
+            // An open inspector has a composer whose Escape cancels a reply or an edit.
+            escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
+            showsParticipants: rows != nil,
+            chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
+            showsChat: chat?.isOpen ?? false,
+            canReact: call.status.hasMedia
+        )
         return CallStageView(
             title: call.title,
             subtitle: subtitle,
@@ -181,21 +194,13 @@ struct CallStageHost: View {
             tiles: tiles,
             presentation: memory.presentation,
             promotedSpeaker: memory.promotedSpeaker,
-            size: memory.size,
-            // An open inspector has a composer whose Escape cancels a reply or an edit.
-            escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
+            controls: controls,
             participants: rows,
             canResetVolumes: media?.hasChangedVolumes ?? false,
             participantsCoverTiles: (layout?.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
-            isMicrophoneOn: media?.isMicrophoneOn ?? false,
-            isCameraOn: media?.isCameraOn ?? false,
-            isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             issues: media.map { CallMediaIssues.shown(for: $0.mediaReport, dismissed: memory.dismissedMediaIssues) } ?? [],
             checkingIssues: checkingIssues,
             connection: media?.connectionQuality,
-            isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
-            chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
-            showsChat: chat?.isOpen ?? false,
             reactions: session.calls.reactions,
             ownNick: ownNick,
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
@@ -320,7 +325,7 @@ struct CallStageHost: View {
             toggleScreenShare: { [media, session] in
                 guard let media else { return }
                 Task {
-                    if media.isScreenShareOn || media.isScreenShareStarting {
+                    if media.isSharingOrStartingScreen {
                         await media.stopScreenShare()
                     } else {
                         // Refused: the stage's notice says so and there is nothing to pick.
