@@ -144,4 +144,6 @@ pub enum BrokerError {
     TenantStore(#[from] TenantStoreError),
     #[error("permission backend error: {0}")]
     PermissionBackend(#[from] PermissionBackendError),
+    #[error("admission error: {0}")]
+    Admission(#[from] waddle_broker_core::admission::AdmissionError),
 }

@@ -566,6 +566,26 @@ impl DeviceKeyRegistry {
         }
     }
 
+    /// Looks up an active registered device key bound to `(tenant_id, device_key_id, account_id)`.
+    pub fn get_active_key(
+        &self,
+        tenant_id: &TenantId,
+        device_key_id: Uuid,
+        account_id: AccountId,
+    ) -> Result<RegisteredDeviceKey, AuthError> {
+        let guard = self
+            .keys
+            .read()
+            .map_err(|_| AuthError::InvalidDeviceSignature)?;
+        let rec = guard
+            .get(&(tenant_id.clone(), device_key_id))
+            .ok_or(AuthError::UnknownOrInactiveDeviceKey(device_key_id))?;
+        if !rec.active || rec.tenant_id != *tenant_id || rec.account_id != account_id {
+            return Err(AuthError::UnknownOrInactiveDeviceKey(device_key_id));
+        }
+        Ok(rec.clone())
+    }
+
     /// Verifies a single-use device-signed command against an active enrolled key.
     pub fn verify_signed_command(
         &self,

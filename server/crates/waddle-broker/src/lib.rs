@@ -2,6 +2,7 @@
 //! providers, durable destruction ledger, IdP intent verification, and
 //! client-sealed enrollment.
 
+pub mod admission;
 pub mod authz;
 pub mod custody;
 pub mod envelope;
@@ -13,6 +14,24 @@ pub mod ledger;
 pub mod sealed_enrollment;
 pub mod secret;
 
+pub use admission::invocation::{
+    validate_principal_and_payer, validate_signed_invocation, InvocationError, InvocationPrincipal,
+    PayerSelection, SignedInferenceInvocation, MAX_INVOCATION_TTL_MS,
+};
+pub use admission::postgres::{PostgresAdmissionLedgerStore, SqliteCompatAdmissionLedgerStore};
+pub use admission::replica_fence::{
+    BrokerReplicaFence, FenceTicket, BROKER_FENCE_ACK_DEADLINE, BROKER_FENCE_EXPIRY_GRACE,
+    BROKER_FENCE_LEASE_MARGIN, BROKER_FENCE_LEASE_TTL, BROKER_FENCE_TICK,
+};
+pub use admission::service::{
+    AdmissionBarrierHooks, AdmissionServiceError, AdmitInvocationInput, AdmittedDispatch,
+    BrokerAdmissionService, TraceRecorder,
+};
+pub use admission::turso::TursoAdmissionLedgerStore;
+pub use admission::{
+    AdmissionQueryStore, AttemptRecord, AttemptStatus, FenceAcknowledgement, ReplicaFenceStore,
+    RunBudgetSnapshot,
+};
 pub use authz::local::LocalPermissionBackend;
 pub use authz::openfga::{
     parse_openfga_consistency, InProcessOpenFgaServer, OpenFgaCheckWireRequest, OpenFgaConfig,
