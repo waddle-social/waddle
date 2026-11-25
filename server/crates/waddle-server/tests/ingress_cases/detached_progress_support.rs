@@ -329,9 +329,8 @@ pub async fn cross_archive_retry(fixture: IngressFixture) {
     let delivered = xmpp_parsers::message::Message::try_from(element).expect("delivered message");
     let stamps = extract_stanza_ids(&delivered);
     assert_eq!(stamps.len(), 1);
-    assert!(stamps
-        .iter()
-        .all(|stamp| stamp.by != fixture.principal.bare_jid().clone().into()));
+    let sender_archive = jid::Jid::from(fixture.principal.bare_jid().clone());
+    assert!(stamps.iter().all(|stamp| stamp.by != sender_archive));
     assert!(stamps.contains(&StanzaId::new(
         "recorded-stamp-juliet@example.com",
         b.to_bare().into()
