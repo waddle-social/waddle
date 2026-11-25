@@ -195,8 +195,9 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
         'name': offer?['name'] ?? existing?['name'],
         'revision': null,
       };
-      if (_unfollowIntents.containsKey(address))
+      if (_unfollowIntents.containsKey(address)) {
         await _setUnfollowIntent(address, null);
+      }
       _remoteRenewalStatus.remove(address);
       _remoteUnsaved[address] = {...pref, 'unsaved': true};
       final message = switch (state) {

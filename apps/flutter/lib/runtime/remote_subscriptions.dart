@@ -63,8 +63,9 @@ extension RemoteSubscriptions on SurfaceRuntime {
             late final Future<void> job;
             job = _renewRemoteSpace(address, byAddress[address], epoch)
                 .whenComplete(() {
-                  if (identical(_remoteRenewals[address], job))
+                  if (identical(_remoteRenewals[address], job)) {
                     _remoteRenewals.remove(address);
+                  }
                 });
             _remoteRenewals[address] = job;
             await job;
@@ -99,8 +100,9 @@ extension RemoteSubscriptions on SurfaceRuntime {
       _requireRemoteSession(epoch);
       if (entry?['follow'] != true ||
           _remoteUnsaved[address]?['follow'] == false ||
-          _remoteBusy.containsKey(address))
+          _remoteBusy.containsKey(address)) {
         return;
+      }
       final response = runtimeMap(
         await _rpc('change_remote_subscription', {
           'address': address,
@@ -113,8 +115,9 @@ extension RemoteSubscriptions on SurfaceRuntime {
       if (!{'subscribed', 'unconfigured', 'pending'}.contains(state)) {
         throw StateError('The host did not renew this subscription.');
       }
-      if (response['subid'] case final String id)
+      if (response['subid'] case final String id) {
         _remoteSubscriptionIds[address] = id;
+      }
       _remoteRenewalStatus[address] = switch (state) {
         'pending' => 'Awaiting host approval',
         'unconfigured' => 'The host requires subscription configuration',

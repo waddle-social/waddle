@@ -120,6 +120,11 @@ class SurfaceRuntime {
     if (method.startsWith('remote.')) return _remote(method, args);
     if (method.startsWith('admin.')) return _admin(method, args);
     switch (method) {
+      case 'calendar.issueSubscription':
+      case 'calendar.revokeSubscription':
+        return _rpc('calendar_subscription', {
+          'revoke': method == 'calendar.revokeSubscription',
+        });
       case 'community.feed':
       case 'community.stories':
       case 'community.events':

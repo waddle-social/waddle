@@ -74,6 +74,12 @@ defaults to FCM and offers UnifiedPush in Settings. With the four values unset,
 the APK contains no Firebase SDK. Incoming FCM data messages carry the RFC 8291
 ciphertext of the notification envelope.
 
+## Live calendar subscriptions
+
+In Calendar, copy the private subscription URL and add it to a calendar app that supports iCalendar subscriptions. Revoke the link in Waddle to stop all readers using it. Copying the link again after revocation creates a new one.
+
+The home server lists two single-stage XEP-0050 commands under its bare domain. Both take an IQ set with no input form. `urn:waddle:calendar:subscription:1:issue` returns a completed XEP-0004 result with a hidden `FORM_TYPE` equal to the command node and a text-single `url` field. `urn:waddle:calendar:subscription:1:revoke` completes without a form and invalidates the authenticated account’s current link. The external HTTP reader returns only the deployment’s open community calendar. The existing web client can obtain the same account-scoped URL through its authenticated HTTP endpoint.
+
 ## Development
 
 Enter `nix develop .#flutter` from the repository root for this app's independent

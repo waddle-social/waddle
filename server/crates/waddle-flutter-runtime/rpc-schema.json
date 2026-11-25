@@ -114,6 +114,12 @@
     },
     "result": "Result<WaddleAdminUsersPage, WaddleError>"
   },
+  "calendar_subscription": {
+    "args": {
+      "revoke": "bool"
+    },
+    "result": "Result<WaddleCalendarSubscription, WaddleError>"
+  },
   "change_remote_subscription": {
     "args": {
       "address": "String",

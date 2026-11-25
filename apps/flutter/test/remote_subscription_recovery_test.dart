@@ -27,11 +27,12 @@ void main() {
       ];
       ctx.handler = (method, args) async {
         if (method == 'fetch_saved_remote_spaces') return prefs;
-        if (method == 'change_remote_subscription')
+        if (method == 'change_remote_subscription') {
           return {
             'state': args['follow'] == true ? 'subscribed' : 'none',
             'subid': 'new-host-id',
           };
+        }
         return null;
       };
       await Future.wait([
@@ -68,8 +69,9 @@ void main() {
             'subid': 'new',
           };
         }
-        if (method == 'update_saved_remote_space')
+        if (method == 'update_saved_remote_space') {
           throw StateError('private PEP offline');
+        }
         return null;
       };
       var surface = SurfaceRuntime(ctx);

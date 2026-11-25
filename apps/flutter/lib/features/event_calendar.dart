@@ -7,6 +7,7 @@ import '../bridge.dart';
 import '../runtime/platform_file_access.dart';
 import 'calendar_editor.dart';
 import 'calendar_occurrences.dart';
+import 'calendar_subscription.dart';
 import 'trip_plan.dart';
 
 class EventCalendar extends StatefulWidget {
@@ -262,12 +263,17 @@ class _EventCalendarState extends State<EventCalendar> {
                 setState(() => _dayOnly = values.single),
           ),
         ),
-        Center(
-          child: FilterChip(
-            label: const Text('Going or maybe'),
-            selected: _attendingOnly,
-            onSelected: (value) => setState(() => _attendingOnly = value),
-          ),
+        Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            FilterChip(
+              label: const Text('Going or maybe'),
+              selected: _attendingOnly,
+              onSelected: (value) => setState(() => _attendingOnly = value),
+            ),
+            CalendarSubscriptionMenu(bridge: widget.bridge),
+          ],
         ),
         if (rows.isEmpty)
           const Padding(

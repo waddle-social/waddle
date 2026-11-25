@@ -53,6 +53,7 @@
   "cancel_raw_iq": [
     "id"
   ],
+  "calendar_subscription": ["revoke"],
   "change_remote_subscription": [
     "address",
     "follow",

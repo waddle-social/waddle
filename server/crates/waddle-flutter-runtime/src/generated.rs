@@ -12,7 +12,7 @@ use waddle_xmpp_client_ffi::{
     WaddleAdminSpacesCreateArgs, WaddleAdminSpacesListArgs, WaddleAdminSpacesListPage,
     WaddleAdminSpacesMembersArgs, WaddleAdminSpacesMembersPage, WaddleAdminSpacesSetRoleResult,
     WaddleAdminSpacesUpdateArgs, WaddleAdminUsersPage, WaddleAttendee, WaddleAvatarResult,
-    WaddleBookmarkItem, WaddleCalendarEdit, WaddleCalendarItemInput,
+    WaddleBookmarkItem, WaddleCalendarEdit, WaddleCalendarItemInput, WaddleCalendarSubscription,
     WaddleCallSessionTerminateOutcome, WaddleChatState, WaddleClient, WaddleDmBookmarkItem,
     WaddleExtensionCommand, WaddleExtensionCommandResult, WaddleExtensionFormField,
     WaddleExtensionRoute, WaddleExtensionRouteItem, WaddleExternalService, WaddleFeedEntry,
@@ -90,6 +90,9 @@ pub(crate) enum Operation {
         prefix: Option<String>,
         page_size: Option<u32>,
         after_cursor: Option<String>,
+    },
+    CalendarSubscription {
+        revoke: bool,
     },
     ChangeRemoteSubscription {
         address: String,
@@ -608,6 +611,7 @@ pub(crate) enum Output {
     AdminSpacesSetRole(WaddleAdminSpacesSetRoleResult),
     AdminSpacesUpdate(WaddleAdminSpaceRef),
     AdminUsersList(WaddleAdminUsersPage),
+    CalendarSubscription(WaddleCalendarSubscription),
     ChangeRemoteSubscription(WaddleRemoteSubscription),
     ConsistentColorHue(f64),
     CreateGroupDm(String),
@@ -831,6 +835,12 @@ impl Operation {
             } => Ok(Output::AdminUsersList(
                 client
                     .admin_users_list(prefix, page_size, after_cursor)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::CalendarSubscription { revoke } => Ok(Output::CalendarSubscription(
+                client
+                    .calendar_subscription(revoke)
                     .await
                     .map_err(RuntimeError::from)?,
             )),

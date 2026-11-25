@@ -45,6 +45,10 @@ mod convert;
 mod error;
 mod extension_commands;
 #[cfg(feature = "serde")]
+mod flutter_calendar_subscription;
+#[cfg(feature = "serde")]
+pub use flutter_calendar_subscription::WaddleCalendarSubscription;
+#[cfg(feature = "serde")]
 mod flutter_extension_routes;
 #[cfg(feature = "serde")]
 mod flutter_remote_communities;
