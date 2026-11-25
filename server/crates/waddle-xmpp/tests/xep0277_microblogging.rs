@@ -1,6 +1,6 @@
 //! XEP-0277: Microblogging over PEP dedicated suite.
 
-use waddle_xmpp::pubsub::{AccessModel, PepHandler};
+use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PepHandler, SendLastPublishedItem};
 
 const MICROBLOG_NODE: &str = "urn:xmpp:microblog:0";
 
@@ -19,5 +19,19 @@ fn xep0277_access_model_consistency() {
     assert_eq!(
         PepHandler::default_access_model_for_node(MICROBLOG_NODE),
         AccessModel::Presence
+    );
+}
+
+#[test]
+fn xep0277_node_config_follows_recommendations() {
+    // XEP-0277 §"Microblog node configuration": notify_retract MUST be true;
+    // max_items SHOULD be increased from the default; send_last_published_item
+    // SHOULD be "never".
+    let config = NodeConfig::pep_for_node(MICROBLOG_NODE);
+    assert!(config.notify_retract);
+    assert!(config.max_items > NodeConfig::pep_default().max_items);
+    assert_eq!(
+        config.send_last_published_item,
+        SendLastPublishedItem::Never
     );
 }

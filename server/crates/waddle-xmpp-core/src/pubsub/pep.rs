@@ -31,6 +31,9 @@ pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 /// layer; the two constants are pinned equal by a `waddle-xmpp` test.
 pub const PEP_NODE_STICKERS: &str = "urn:xmpp:stickers:0";
 
+/// XEP-0277 microblog PEP node.
+pub const PEP_NODE_MICROBLOG: &str = "urn:xmpp:microblog:0";
+
 /// XEP-0292 §3 vCard4 PEP node.
 ///
 /// Mirrored as `waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4` for use at
@@ -150,7 +153,7 @@ impl PepHandler {
             || node == "http://jabber.org/protocol/activity"
             || node == "http://jabber.org/protocol/tune"
             || node == "http://jabber.org/protocol/geoloc"
-            || node == "urn:xmpp:microblog:0"
+            || node == PEP_NODE_MICROBLOG
     }
 
     /// Get the default access model for a well-known PEP node.

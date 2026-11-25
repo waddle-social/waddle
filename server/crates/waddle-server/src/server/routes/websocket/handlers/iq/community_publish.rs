@@ -165,17 +165,31 @@ async fn handle_community_non_bookmark_publish(
                     PubSubError::PayloadRequired,
                 ))];
             };
-            let item_id = item.id.as_deref().unwrap_or_default();
-            if waddle_xmpp_core::xep0472::parse_feed_entry(item_id, payload).is_none() {
+            // The service assigns the item id when the publisher omits it
+            // (XEP-0060 §7.1.2.1) so the alternate link below can name it.
+            let item_id = item
+                .id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            if waddle_xmpp_core::xep0472::parse_feed_entry(&item_id, payload).is_none() {
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
                     PubSubError::InvalidPayload,
                 ))];
             }
-            item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
-                payload,
-                &entity.to_string(),
+            let stamped =
+                waddle_xmpp_core::xep0472::stamp_feed_entry_author(payload, &entity.to_string());
+            // XEP-0472 §"Publishing a Post": the `xmpp:` alternate link
+            // "SHOULD be inserted at server side".
+            let href = format!(
+                "xmpp:{community_domain}?;node={};item={}",
+                urlencoding::encode(node),
+                urlencoding::encode(&item_id)
+            );
+            item.payload = Some(waddle_xmpp_core::xep0472::ensure_feed_entry_xmpp_link(
+                &stamped, &href,
             ));
+            item.id = Some(item_id);
         }
     }
 
