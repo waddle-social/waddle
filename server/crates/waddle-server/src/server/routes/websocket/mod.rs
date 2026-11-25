@@ -64,6 +64,7 @@ mod connection;
 mod drain_append;
 mod frame;
 mod frame_backstop;
+pub use frame_backstop::{spawn_decoupled_streaming_inference, StreamingInferenceSession};
 pub(crate) mod interpret_loop;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;

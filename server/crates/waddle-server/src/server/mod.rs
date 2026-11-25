@@ -57,6 +57,7 @@ pub(crate) mod routes;
 pub use routes::interpret::effects;
 /// Interpreter-only ingress planning seam, consumed by the authority cutover.
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
+pub use routes::websocket::{spawn_decoupled_streaming_inference, StreamingInferenceSession};
 pub mod xmpp_state;
 
 pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};

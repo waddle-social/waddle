@@ -355,5 +355,65 @@ where
     }
 }
 
+/// Handle returned immediately to the WebSocket connection loop when an
+/// inference invocation is admitted as an asynchronous background stream,
+/// decoupling progressive delivery from [`STANZA_HANDLER_WEDGE_TIMEOUT`] (15s).
+pub struct StreamingInferenceSession {
+    pub stream_id: String,
+    pub chunk_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl StreamingInferenceSession {
+    /// Synchronously cancels the background streaming inference task without blocking.
+    pub fn cancel_sync(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
+}
+
+impl Drop for StreamingInferenceSession {
+    fn drop(&mut self) {
+        self.cancel_sync();
+    }
+}
+
+/// Launches a streaming inference execution detached from the 15s synchronous
+/// [`STANZA_HANDLER_WEDGE_TIMEOUT`], wired to `shutdown` (`WADDLE_DRAIN_TIMEOUT_SECS`)
+/// and progressive chunk delivery over a bounded channel.
+pub fn spawn_decoupled_streaming_inference<F, Fut>(
+    stream_id: impl Into<String>,
+    buffer_capacity: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+    worker: F,
+) -> (StreamingInferenceSession, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<Vec<u8>>, tokio::sync::watch::Receiver<bool>) -> Fut
+        + Send
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let stream_id = stream_id.into();
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(buffer_capacity.max(1));
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let session = StreamingInferenceSession {
+        stream_id,
+        chunk_rx,
+        cancel_tx: cancel_tx.clone(),
+    };
+    let worker_cancel_rx = cancel_rx.clone();
+    let handle = tokio::spawn(async move {
+        let fut = worker(chunk_tx, worker_cancel_rx);
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                let _ = cancel_tx.send(true);
+            }
+            _ = cancel_rx.changed() => {}
+            () = fut => {}
+        }
+    });
+    (session, handle)
+}
+
 #[cfg(test)]
 mod tests;
