@@ -159,7 +159,7 @@ XEP-0503 = ["crates/waddle-server/tests/xep0503_spaces_ws.rs"]
 id = "community-feed-stories"
 server_maturity = "experimental"
 protocols = ["XEP-0060", "XEP-0472", "XEP-0501"]
-advertised_features = ["http://jabber.org/protocol/pubsub", "urn:xmpp:pubsub-social-feed:1", "urn:xmpp:pubsub-social-feed:stories:0"]
+advertised_features = ["http://jabber.org/protocol/pubsub", "urn:xmpp:pubsub-social-feed:1"]
 server_evidence = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs", "crates/waddle-server/tests/xep0501_stories_ws.rs"]
 topologies = { local = "experimental", federated = "unsupported" }
 [capability.protocol_evidence]
