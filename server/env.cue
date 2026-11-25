@@ -420,6 +420,17 @@ schema.#Project & {
 			}
 			tasks: [_t.rootSyncChecks]
 		}
+		streamManagementVerification: {
+			mode:        "expanded"
+			derivePaths: true
+			when: {
+				pullRequest: true
+				manual:      true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: contents: "read"
+			tasks: [_t.verifyStreamManagementRust]
+		}
 		xmppCompliance: {
 			mode: "expanded"
 			when: {
@@ -654,6 +665,7 @@ schema.#Project & {
 					".github/workflows/waddle-server-rootsync.yml",
 					".github/workflows/waddle-server-rusttests.yml",
 					".github/workflows/waddle-server-spacefanoutcontract.yml",
+					".github/workflows/waddle-server-streammanagementverification.yml",
 					".github/workflows/waddle-server-xmppcompliance.yml",
 					".github/workflows/waddle-server-xmppservercompliance.yml",
 					"cue.mod/module.cue",
@@ -1810,6 +1822,30 @@ schema.#Project & {
 					flux reconcile kustomization infra-waddle-server -n flux-system --with-source
 					flux reconcile helmrelease waddle-server -n waddle --with-source
 				"""#]
+		}
+
+		verifyStreamManagementRust: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-euo", "pipefail", "-c", """
+				install_dir=$(mktemp -d)
+				export KANI_HOME="$install_dir/bundle"
+				export PATH="$install_dir/bin:$PATH"
+				rustup run stable cargo install --locked --root "$install_dir" --version 0.68.0 kani-verifier
+				cd specs/stream-management/proof
+				rustup run stable cargo fetch --locked
+				CARGO_NET_OFFLINE=true rustup run stable cargo kani
+				git diff --exit-code -- Cargo.lock
+				"""]
+			inputs: [
+				"env.cue",
+				"specs/stream-management/proof/Cargo.toml",
+				"specs/stream-management/proof/Cargo.lock",
+				"specs/stream-management/proof/src/**",
+				"crates/waddle-xmpp/src/stream_management/durable/counter.rs",
+				"crates/waddle-xmpp/src/stream_management/durable/lifecycle.rs",
+				schema.#ModuleFiles & {paths: [".github/workflows/waddle-server-streammanagementverification.yml"]},
+			]
 		}
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
