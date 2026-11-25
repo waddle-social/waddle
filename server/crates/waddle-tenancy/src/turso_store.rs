@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lru::LruCache;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_broker_core::kernels::lru_fd_pool::{AcquireAction, FdPoolAccounting, FdPoolError};
@@ -155,6 +155,7 @@ struct PoolSlot {
 struct PoolInner {
     accounting: FdPoolAccounting,
     lru: LruCache<TenantId, PoolSlot>,
+    in_flight_opens: HashMap<TenantId, watch::Receiver<bool>>,
     evictions: usize,
 }
 
@@ -171,6 +172,7 @@ impl PoolInner {
         Ok(Self {
             accounting,
             lru: LruCache::new(lru_cap),
+            in_flight_opens: HashMap::new(),
             evictions: 0,
         })
     }
@@ -333,91 +335,155 @@ impl TursoTenantStore {
             return Err(TenantStoreError::TenantNotFound(tenant_id.clone()));
         }
 
-        let evicted_slot = {
-            let mut guard = self.pool.lock().await;
-            let inner = &mut *guard;
-            if let Some(slot) = inner.lru.get_mut(tenant_id) {
-                if slot.pin_count == 0 {
-                    inner
-                        .accounting
-                        .acquire_open(true)
-                        .map_err(|err| match err {
-                            FdPoolError::AllHandlesPinned => TenantStoreError::FdPoolExhausted {
-                                limit: self.capacity,
-                            },
-                            other => {
-                                TenantStoreError::Backend(format!("FD accounting error: {other:?}"))
-                            }
-                        })?;
-                }
-                slot.pin_count += 1;
-                let conn = slot.conn.clone();
-                return Ok(PinnedTursoConn {
-                    tenant_id: tenant_id.clone(),
-                    conn,
-                    pool: Arc::clone(&self.pool),
-                });
-            }
-
-            let action = guard
-                .accounting
-                .acquire_open(false)
-                .map_err(|err| match err {
-                    FdPoolError::AllHandlesPinned => TenantStoreError::FdPoolExhausted {
-                        limit: self.capacity,
-                    },
-                    other => TenantStoreError::Backend(format!("FD accounting error: {other:?}")),
-                })?;
-
-            match action {
-                AcquireAction::EvictedUnpinnedAndOpened => {
-                    let victim =
-                        guard
-                            .find_lru_unpinned()
-                            .ok_or(TenantStoreError::FdPoolExhausted {
-                                limit: self.capacity,
+        loop {
+            let (evicted_slot, open_tx) = {
+                let mut guard = self.pool.lock().await;
+                let inner = &mut *guard;
+                if let Some(slot) = inner.lru.get_mut(tenant_id) {
+                    if slot.pin_count == 0 {
+                        inner
+                            .accounting
+                            .acquire_open(true)
+                            .map_err(|err| match err {
+                                FdPoolError::AllHandlesPinned => {
+                                    TenantStoreError::FdPoolExhausted {
+                                        limit: self.capacity,
+                                    }
+                                }
+                                other => TenantStoreError::Backend(format!(
+                                    "FD accounting error: {other:?}"
+                                )),
                             })?;
-                    let popped = guard.lru.pop(&victim);
-                    guard.evictions += 1;
-                    popped
-                }
-                AcquireAction::OpenedFresh | AcquireAction::ReusedOpen => None,
-            }
-        };
-
-        // Checkpoint and close the evicted handle BEFORE opening the new DB so
-        // open FDs never exceed the pool bound.
-        if let Some(slot) = evicted_slot {
-            let _ = Self::checkpoint_and_flush(&slot.conn).await;
-            drop(slot);
-        }
-
-        let opened = Self::open_raw_turso_db(&path).await;
-        match opened {
-            Ok((db, conn)) => {
-                let mut guard = self.pool.lock().await;
-                let conn_clone = conn.clone();
-                guard.lru.put(
-                    tenant_id.clone(),
-                    PoolSlot {
-                        _db: db,
+                    }
+                    slot.pin_count += 1;
+                    let conn = slot.conn.clone();
+                    return Ok(PinnedTursoConn {
+                        tenant_id: tenant_id.clone(),
                         conn,
-                        pin_count: 1,
-                    },
-                );
-                Ok(PinnedTursoConn {
-                    tenant_id: tenant_id.clone(),
-                    conn: conn_clone,
-                    pool: Arc::clone(&self.pool),
-                })
+                        pool: Arc::clone(&self.pool),
+                    });
+                }
+
+                // Coalesce concurrent cold opens for the same tenant so only one
+                // caller reserves an FD pool slot and opens the WAL database.
+                if let Some(in_flight_rx) = inner.in_flight_opens.get(tenant_id) {
+                    let mut rx = in_flight_rx.clone();
+                    drop(guard);
+                    let _ = rx.wait_for(|done| *done).await;
+                    continue;
+                }
+
+                let action = inner
+                    .accounting
+                    .acquire_open(false)
+                    .map_err(|err| match err {
+                        FdPoolError::AllHandlesPinned => TenantStoreError::FdPoolExhausted {
+                            limit: self.capacity,
+                        },
+                        other => {
+                            TenantStoreError::Backend(format!("FD accounting error: {other:?}"))
+                        }
+                    })?;
+
+                let evicted = match action {
+                    AcquireAction::EvictedUnpinnedAndOpened => {
+                        let victim =
+                            inner
+                                .find_lru_unpinned()
+                                .ok_or(TenantStoreError::FdPoolExhausted {
+                                    limit: self.capacity,
+                                })?;
+                        let popped = inner.lru.pop(&victim);
+                        inner.evictions += 1;
+                        popped
+                    }
+                    AcquireAction::OpenedFresh | AcquireAction::ReusedOpen => None,
+                };
+
+                let (tx, rx) = watch::channel(false);
+                inner.in_flight_opens.insert(tenant_id.clone(), rx);
+                (evicted, tx)
+            };
+
+            // Checkpoint and close the evicted handle BEFORE opening the new DB so
+            // open FDs never exceed the pool bound.
+            if let Some(slot) = evicted_slot {
+                let _ = Self::checkpoint_and_flush(&slot.conn).await;
+                drop(slot);
             }
-            Err(err) => {
-                // Roll back the open+pinned reservation in FdPoolAccounting.
+
+            let opened = Self::open_raw_turso_db(&path).await;
+            let mut duplicate_to_drop = None;
+            let result = {
                 let mut guard = self.pool.lock().await;
-                let _ = guard.accounting.release_pin();
-                let _ = guard.accounting.close_unpinned();
-                Err(err)
-            }
+                let inner = &mut *guard;
+                inner.in_flight_opens.remove(tenant_id);
+                match opened {
+                    Ok((db, conn)) => {
+                        if let Some(existing) = inner.lru.get_mut(tenant_id) {
+                            // Defensive dedup: if another caller inserted this tenant
+                            // while we were opening outside the lock, roll back our
+                            // duplicate reservation and pin the existing slot instead.
+                            let _ = inner.accounting.release_pin();
+                            let _ = inner.accounting.close_unpinned();
+                            let pin_res = if existing.pin_count == 0 {
+                                inner
+                                    .accounting
+                                    .acquire_open(true)
+                                    .map_err(|err| match err {
+                                        FdPoolError::AllHandlesPinned => {
+                                            TenantStoreError::FdPoolExhausted {
+                                                limit: self.capacity,
+                                            }
+                                        }
+                                        other => TenantStoreError::Backend(format!(
+                                            "FD accounting error: {other:?}"
+                                        )),
+                                    })
+                            } else {
+                                Ok(AcquireAction::ReusedOpen)
+                            };
+                            duplicate_to_drop = Some((db, conn));
+                            match pin_res {
+                                Ok(_) => {
+                                    existing.pin_count += 1;
+                                    Ok(PinnedTursoConn {
+                                        tenant_id: tenant_id.clone(),
+                                        conn: existing.conn.clone(),
+                                        pool: Arc::clone(&self.pool),
+                                    })
+                                }
+                                Err(err) => Err(err),
+                            }
+                        } else {
+                            let conn_clone = conn.clone();
+                            inner.lru.put(
+                                tenant_id.clone(),
+                                PoolSlot {
+                                    _db: db,
+                                    conn,
+                                    pin_count: 1,
+                                },
+                            );
+                            Ok(PinnedTursoConn {
+                                tenant_id: tenant_id.clone(),
+                                conn: conn_clone,
+                                pool: Arc::clone(&self.pool),
+                            })
+                        }
+                    }
+                    Err(err) => {
+                        // Roll back the open+pinned reservation in FdPoolAccounting.
+                        let _ = inner.accounting.release_pin();
+                        let _ = inner.accounting.close_unpinned();
+                        Err(err)
+                    }
+                }
+            };
+
+            let _ = open_tx.send(true);
+            drop(duplicate_to_drop);
+            return result;
         }
     }
 
@@ -1017,46 +1083,52 @@ impl TenantDataOps for TursoTenantStore {
         queue: &str,
     ) -> Result<Option<TenantJobRecord>, TenantStoreError> {
         let pinned = self.ensure_fenced_conn(scope).await?;
-        let mut rows = pinned
-            .connection()
-            .query(
-                "SELECT job_id, queue, payload_json, status
-                 FROM tenant_jobs
-                 WHERE queue = ?1 AND status = 'pending'
-                 ORDER BY job_id LIMIT 1",
-                [queue],
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("claim_next_job query: {err}")))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("claim_next_job row: {err}")))?
-        else {
-            return Ok(None);
-        };
-        let job_id: String = row
-            .get(0)
-            .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-        let queue_val: String = row
-            .get(1)
-            .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-        let payload_json: String = row
-            .get(2)
-            .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
-        pinned
-            .connection()
-            .execute(
-                "UPDATE tenant_jobs SET status = 'claimed' WHERE job_id = ?1 AND status = 'pending'",
-                [job_id.as_str()],
-            )
-            .await
-            .map_err(|err| TenantStoreError::Backend(format!("claim_next_job update: {err}")))?;
-        Ok(Some(TenantJobRecord {
-            job_id,
-            queue: queue_val,
-            payload_json,
-            status: "claimed".to_owned(),
-        }))
+        loop {
+            let mut rows = pinned
+                .connection()
+                .query(
+                    "SELECT job_id, queue, payload_json, status
+                     FROM tenant_jobs
+                     WHERE queue = ?1 AND status = 'pending'
+                     ORDER BY job_id LIMIT 1",
+                    [queue],
+                )
+                .await
+                .map_err(|err| TenantStoreError::Backend(format!("claim_next_job query: {err}")))?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|err| TenantStoreError::Backend(format!("claim_next_job row: {err}")))?
+            else {
+                return Ok(None);
+            };
+            let job_id: String = row
+                .get(0)
+                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+            let queue_val: String = row
+                .get(1)
+                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+            let payload_json: String = row
+                .get(2)
+                .map_err(|e| TenantStoreError::Backend(e.to_string()))?;
+            let affected = pinned
+                .connection()
+                .execute(
+                    "UPDATE tenant_jobs SET status = 'claimed' WHERE job_id = ?1 AND status = 'pending'",
+                    [job_id.as_str()],
+                )
+                .await
+                .map_err(|err| {
+                    TenantStoreError::Backend(format!("claim_next_job update: {err}"))
+                })?;
+            if affected == 1 {
+                return Ok(Some(TenantJobRecord {
+                    job_id,
+                    queue: queue_val,
+                    payload_json,
+                    status: "claimed".to_owned(),
+                }));
+            }
+        }
     }
 }

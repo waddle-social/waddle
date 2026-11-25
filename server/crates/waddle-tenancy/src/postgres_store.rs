@@ -1151,37 +1151,41 @@ impl TenantDataOps for SqliteCompatPostgresStore {
         queue: &str,
     ) -> Result<Option<TenantJobRecord>, TenantStoreError> {
         self.verify_scope(scope).await?;
-        let row = sqlx::query(
-            "SELECT job_id, queue, payload_json, status
-             FROM tenant_jobs
-             WHERE tenant_id = ?1 AND queue = ?2 AND status = 'pending'
-             ORDER BY job_id LIMIT 1",
-        )
-        .bind(scope.tenant_id.as_str())
-        .bind(queue)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| TenantStoreError::Backend(format!("claim_next_job query: {err}")))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let job_id: String = row.get(0);
-        let queue_val: String = row.get(1);
-        let payload_json: String = row.get(2);
-        sqlx::query(
-            "UPDATE tenant_jobs SET status = 'claimed'
-             WHERE tenant_id = ?1 AND job_id = ?2 AND status = 'pending'",
-        )
-        .bind(scope.tenant_id.as_str())
-        .bind(&job_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| TenantStoreError::Backend(format!("claim_next_job update: {err}")))?;
-        Ok(Some(TenantJobRecord {
-            job_id,
-            queue: queue_val,
-            payload_json,
-            status: "claimed".to_owned(),
-        }))
+        loop {
+            let row = sqlx::query(
+                "SELECT job_id, queue, payload_json, status
+                 FROM tenant_jobs
+                 WHERE tenant_id = ?1 AND queue = ?2 AND status = 'pending'
+                 ORDER BY job_id LIMIT 1",
+            )
+            .bind(scope.tenant_id.as_str())
+            .bind(queue)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|err| TenantStoreError::Backend(format!("claim_next_job query: {err}")))?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let job_id: String = row.get(0);
+            let queue_val: String = row.get(1);
+            let payload_json: String = row.get(2);
+            let result = sqlx::query(
+                "UPDATE tenant_jobs SET status = 'claimed'
+                 WHERE tenant_id = ?1 AND job_id = ?2 AND status = 'pending'",
+            )
+            .bind(scope.tenant_id.as_str())
+            .bind(&job_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|err| TenantStoreError::Backend(format!("claim_next_job update: {err}")))?;
+            if result.rows_affected() == 1 {
+                return Ok(Some(TenantJobRecord {
+                    job_id,
+                    queue: queue_val,
+                    payload_json,
+                    status: "claimed".to_owned(),
+                }));
+            }
+        }
     }
 }

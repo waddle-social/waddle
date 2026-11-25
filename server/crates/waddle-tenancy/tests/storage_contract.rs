@@ -507,3 +507,79 @@ async fn tenant_registry_is_sole_handle_constructor_with_scoped_cache() {
         Some("v2")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cold_open_coalesces_without_fd_pool_leak() {
+    let dir = tempdir().expect("tempdir");
+    // (22 - 10) / 3 = 4 open Turso DB slots.
+    let store = Arc::new(
+        TursoTenantStore::new(
+            dir.path(),
+            TursoPoolConfig {
+                rlimit_nofile_override: Some(22),
+                reserved_fds: 10,
+            },
+            None,
+        )
+        .expect("turso store"),
+    );
+    assert_eq!(store.pool_capacity(), 4);
+
+    let cold = TenantId::parse("cold-race.example").expect("valid");
+    let t2 = TenantId::parse("peer-2.example").expect("valid");
+    let t3 = TenantId::parse("peer-3.example").expect("valid");
+    let t4 = TenantId::parse("peer-4.example").expect("valid");
+    for tenant in [&cold, &t2, &t3, &t4] {
+        store.provision_tenant(tenant).await.expect("provision");
+    }
+
+    // Spawn 8 concurrent tasks opening the exact same uncached tenant on a capacity-4 pool.
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut join_handles = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let store = Arc::clone(&store);
+        let tenant = cold.clone();
+        let barrier = Arc::clone(&barrier);
+        join_handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.acquire_pinned_conn(&tenant).await
+        }));
+    }
+
+    let mut pinned_conns = Vec::with_capacity(8);
+    for handle in join_handles {
+        let conn = handle
+            .await
+            .expect("task join")
+            .expect("all 8 concurrent cold opens must succeed without FdPoolExhausted");
+        pinned_conns.push(conn);
+    }
+
+    let (open_held, pinned_held, _) = store.pool_stats().await;
+    assert_eq!(
+        open_held, 1,
+        "coalesced cold open must occupy only 1 open slot"
+    );
+    assert_eq!(pinned_held, 1, "all 8 guards share 1 pinned pool slot");
+
+    drop(pinned_conns);
+    // Allow any async fallback drop task to release pins if mutex was contended during drop.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let (open_after, pinned_after, _) = store.pool_stats().await;
+    assert_eq!(open_after, 1, "cold tenant remains cached as 1 open slot");
+    assert_eq!(
+        pinned_after, 0,
+        "zero FD pool pins must remain after all guards drop"
+    );
+
+    // 3 more distinct tenants can still be opened and held simultaneously without FdPoolExhausted.
+    let p2 = store.acquire_pinned_conn(&t2).await.expect("open t2");
+    let p3 = store.acquire_pinned_conn(&t3).await.expect("open t3");
+    let p4 = store.acquire_pinned_conn(&t4).await.expect("open t4");
+    let (open_four, pinned_four, _) = store.pool_stats().await;
+    assert_eq!(open_four, 4);
+    assert_eq!(pinned_four, 3);
+    drop((p2, p3, p4));
+}
