@@ -309,6 +309,7 @@
 		62979DAA0D631BF62E7F66AC /* NavigationSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AAAA9D431C32EA59D349047 /* NavigationSections.swift */; };
 		62E5A7287B1A5271E6643A5A /* ProfileStatusSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A699C3988283081BA15B97DD /* ProfileStatusSection.swift */; };
 		633AC5E6CFF14426B0E62B58 /* MessageActionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */; };
+		63D27F23BBA61C05DDF0A4AE /* CallVideoMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C4F59C54B68D0A220A28E7 /* CallVideoMeter.swift */; };
 		63D308DA73DBE137966A82F5 /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */; };
 		641F7B16A2615FEBFE18C715 /* PeerDetailsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E570A12B625BCB30023E6AB0 /* PeerDetailsSection.swift */; };
 		64571B910A1B5EDCAF96F1DB /* NavigationRowChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E389D8FF37A6F61A5761275 /* NavigationRowChrome.swift */; };
@@ -462,6 +463,7 @@
 		8E21B8BF6A5F09855BFC02C8 /* ConversationToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424F4321DD2A384763B772FD /* ConversationToolbar.swift */; };
 		8E48B1656CF58F68F1AF0047 /* MeActionLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5173026BA4C32541F02B90EA /* MeActionLine.swift */; };
 		8EC1ABA94053BAFEBBEBE55E /* FFIInbound+SafetyScores.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE36378C327949710DA48E9 /* FFIInbound+SafetyScores.swift */; };
+		8FC4E6A1A96486E49AA6E57F /* CallVideoMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C4F59C54B68D0A220A28E7 /* CallVideoMeter.swift */; };
 		8FED731BC1592BD5301690C8 /* ExtensionCommandStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC04CCBB25DF7EFFCEE73622 /* ExtensionCommandStage.swift */; };
 		908D61E5D7DB47674BDBB209 /* waddle_xmpp_client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908AA7A66AF0FE4F0F8A2956 /* waddle_xmpp_client.swift */; };
 		909058747F0DFEB5AF64753A /* PushControlsSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98ED22994875718F88ABC97A /* PushControlsSnapshotTests.swift */; };
@@ -987,6 +989,7 @@
 		73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		745E4D7A386971E4AA451053 /* BridgeLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLog.swift; sourceTree = "<group>"; };
 		749944689EAAD79B60977AEA /* EventsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsView.swift; sourceTree = "<group>"; };
+		74C4F59C54B68D0A220A28E7 /* CallVideoMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallVideoMeter.swift; sourceTree = "<group>"; };
 		74D8F9F8580CF2FA58D4DC9A /* PushTokenRegistrarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushTokenRegistrarTests.swift; sourceTree = "<group>"; };
 		74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Notify.swift"; sourceTree = "<group>"; };
 		756566268D527B8B54F42E36 /* SampleSession+Rooms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SampleSession+Rooms.swift"; sourceTree = "<group>"; };
@@ -1942,6 +1945,7 @@
 			children = (
 				B47B72A706E6370BF383A219 /* CallRoomAccess.swift */,
 				A362141EF8A6EF4C8EDD5A06 /* CallRoomEvents.swift */,
+				74C4F59C54B68D0A220A28E7 /* CallVideoMeter.swift */,
 			);
 			path = Media;
 			sourceTree = "<group>";
@@ -2488,6 +2492,7 @@
 				7C0B1C9E142CC4D77C8DB6C2 /* CallTileArea.swift in Sources */,
 				432C72C15F92CABB01174EA9 /* CallTileView.swift in Sources */,
 				AF3A278E2FF667065EE7E6EA /* CallTonePlayer.swift in Sources */,
+				8FC4E6A1A96486E49AA6E57F /* CallVideoMeter.swift in Sources */,
 				0291757DA94700C6192ADF57 /* CallWindowLayout.swift in Sources */,
 				8C9500416C6FB08A34147C29 /* ChannelListSection.swift in Sources */,
 				08C2C76EAE49D394F1159D6F /* ChannelNavigationRow.swift in Sources */,
@@ -2889,6 +2894,7 @@
 				D806357526E692A83D0EC5B8 /* CallTileArea.swift in Sources */,
 				806DB2B5A7584C082B829E4A /* CallTileView.swift in Sources */,
 				13CE69FB5B3430AADAEA0595 /* CallTonePlayer.swift in Sources */,
+				63D27F23BBA61C05DDF0A4AE /* CallVideoMeter.swift in Sources */,
 				FE1839AFDC8C0916EFFD6102 /* CallWindowLayout.swift in Sources */,
 				EA4D755EA947404147B1AABA /* ChannelListSection.swift in Sources */,
 				AF7B332D1BA246B047307930 /* ChannelNavigationRow.swift in Sources */,
