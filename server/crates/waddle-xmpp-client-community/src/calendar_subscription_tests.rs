@@ -36,6 +36,13 @@ fn xep0050_subscription_uses_only_the_bare_server_and_correlated_single_stage_re
             (WaddleCalendarSubscription::Revoked, true)
                 | (WaddleCalendarSubscription::Available { .. }, false)
         ));
+        let refused = result(
+            &action,
+            &format!("{payload}<note type='error'>Denied</note>"),
+        );
+        assert!(action.result(&refused, ENDPOINT).is_none());
+        let message = result(&action, &format!("<note type='info'>Done</note>{payload}"));
+        assert!(action.result(&message, ENDPOINT).is_some());
         let original = String::from(&reply);
         for (needle, replacement) in [
             ("from='example.test'", "from='another.test'"),

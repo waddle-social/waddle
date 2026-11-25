@@ -58,6 +58,9 @@ impl SubscriptionCommand {
         if commands.next().is_some()
             || command.attr("node") != Some(self.node())
             || AdHocStatus::parse(command.attr("status")?) != Some(AdHocStatus::Completed)
+            || command
+                .children()
+                .any(|note| note.is("note", NS_COMMANDS) && note.attr("type") == Some("error"))
         {
             return None;
         }
