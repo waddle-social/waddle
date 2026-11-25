@@ -9,8 +9,9 @@
     <name>Waddle Contributors</name>
   </developer>
   <description>
-    <p>Waddle is a self-hostable place for communities to talk: rooms, direct messages and voice huddles, built on XMPP.</p>
-    <p>This is an early build. It signs in and remembers your accounts; rooms, messages and calls are on the way.</p>
+    <p>Waddle is a self-hostable place for communities to talk: rooms, direct messages and voice calls, built on XMPP.</p>
+    <p>Chat in rooms, direct messages and group chats with replies, threads, reactions, formatting, files, GIFs and stickers. Keep up with an unread overview, the community feed and stories, and events. Place one-to-one voice calls.</p>
+    <p>This is an early build and has not yet been run against a live server by its authors; expect rough edges.</p>
   </description>
   <launchable type="desktop-id">social.waddle.Waddle.desktop</launchable>
   <url type="homepage">https://waddle.social</url>
@@ -20,6 +21,10 @@
     <content_attribute id="social-chat">intense</content_attribute>
     <content_attribute id="social-audio">intense</content_attribute>
   </content_rating>
+  <branding>
+    <color type="primary" scheme_preference="light">#c4dfff</color>
+    <color type="primary" scheme_preference="dark">#062c50</color>
+  </branding>
   <supports>
     <control>pointing</control>
     <control>keyboard</control>
@@ -28,6 +33,9 @@
   <requires>
     <display_length compare="ge">360</display_length>
   </requires>
+  <recommends>
+    <internet>always</internet>
+  </recommends>
   <releases>
     <release version="0.1.0" date="2026-10-18">
       <description>

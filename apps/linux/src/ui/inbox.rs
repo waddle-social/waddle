@@ -146,6 +146,7 @@ impl WaddleWindow {
         if let Some(badge) = state.badge.as_ref() {
             badge.set_visible(total > 0);
             badge.set_label(&badge_text(total));
+            super::a11y::label(badge, &super::a11y::unread_phrase(total));
         }
         if let Some(row) = state.row.as_ref() {
             row.set_tooltip_text(Some(&match total {
@@ -538,6 +539,7 @@ fn count_badge(count: u32) -> gtk::Label {
     badge.add_css_class("unread-badge");
     badge.add_css_class("numeric");
     badge.set_tooltip_text(Some("Unread"));
+    super::a11y::label(&badge, &super::a11y::unread_phrase(count));
     badge
 }
 
@@ -548,6 +550,7 @@ fn mention_badge() -> gtk::Label {
         .build();
     badge.add_css_class("mention-badge");
     badge.set_tooltip_text(Some("You were mentioned"));
+    super::a11y::label(&badge, "You were mentioned");
     badge
 }
 

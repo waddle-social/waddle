@@ -522,6 +522,7 @@ impl WaddleWindow {
             .tooltip_text("Refresh the Feed")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&refresh, "Refresh the feed");
         refresh.add_css_class("flat");
         refresh.add_css_class("circular");
 
@@ -559,6 +560,7 @@ impl WaddleWindow {
             .tooltip_text("Add a Picture")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&attach, "Add a picture");
         attach.add_css_class("flat");
         let attached_name = gtk::Label::builder()
             .xalign(0.0)
@@ -571,6 +573,7 @@ impl WaddleWindow {
             .tooltip_text("Remove the Picture")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&remove, "Remove the picture");
         remove.add_css_class("flat");
         remove.add_css_class("circular");
         let attached = gtk::Box::new(gtk::Orientation::Horizontal, 6);

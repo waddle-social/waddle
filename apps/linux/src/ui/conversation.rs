@@ -171,6 +171,7 @@ impl WaddleWindow {
         self.setup_presence_input();
         self.setup_message_tools();
         self.setup_room_tools();
+        self.setup_shortcuts();
         self.setup_link();
     }
 
@@ -1058,14 +1059,17 @@ fn conversation_row(
             .build();
         badge.add_css_class("unread-badge");
         badge.add_css_class("numeric");
+        super::a11y::label(&badge, &super::a11y::unread_phrase(unread));
         row.add_suffix(&badge);
         row.add_css_class("unread");
+        super::a11y::describe(&row, &super::a11y::unread_phrase(unread));
     }
     if muted {
         let icon = gtk::Image::from_icon_name("notifications-disabled-symbolic");
         icon.set_valign(gtk::Align::Center);
         icon.add_css_class("dim-label");
         icon.set_tooltip_text(Some("Notifications are off"));
+        super::a11y::label(&icon, "Notifications are off");
         row.add_suffix(&icon);
     }
     row
@@ -1159,7 +1163,10 @@ fn row_widget() -> gtk::Box {
         day.append(&widget);
     }
 
-    let row = gtk::Box::builder().spacing(12).build();
+    let row = gtk::Box::builder()
+        .spacing(12)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
     row.add_css_class("waddle-message");
     let gutter = gtk::Stack::builder()
         .width_request(GUTTER)
@@ -1461,6 +1468,23 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         }
         None => parts.attachments.set_visible(false),
     }
+    let name_row = |delivery: Option<&str>| {
+        super::a11y::label(
+            &parts.row,
+            &super::a11y::message_phrase(
+                &item.sender,
+                &if social {
+                    stamp(item.timestamp_ms)
+                } else {
+                    time.clone()
+                },
+                item.edited,
+                pinned && !item.retracted,
+                delivery,
+            ),
+        );
+    };
+    name_row(None);
     if item.retracted {
         body.set_markup("<i>Message deleted</i>");
         body.add_css_class("dim-label");
@@ -1503,6 +1527,7 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         }
         if let Some(text) = shown.note(latest) {
             note(text);
+            name_row(Some(text.trim_start_matches("· ")));
         }
     }
     body.set_visible(!markup.is_empty());

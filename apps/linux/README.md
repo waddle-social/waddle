@@ -31,6 +31,8 @@ The native client currently supports:
 
 - **Voice calls:** the phone button in a one-to-one conversation's header places an audio call (XEP-0353 invitations, then a XEP-0166 session with LiveKit credentials from the server, as on the Apple and web apps). An incoming call opens the call window with Answer and Decline, and posts a notification with the same actions when the app is not in front. The window shows the state, the elapsed time, a mute toggle, microphone and speaker choice, and Hang Up. Audio only for now: no video, screen share or group calls, and no ring tone. Not yet run against a live server or audio hardware.
 
+- **Keyboard and accessibility:** Ctrl+? (or Keyboard Shortcuts in the main menu) lists every shortcut; Ctrl+K switches conversation by name, Alt+Down and Alt+Up step through the sidebar, Ctrl+L focuses the composer. Icon-only controls, unread counts, message rows and story rings have accessible names; see `FEATURE_PARITY.md` for what was and was not checked. Colours are the Polar Huddle tokens (`data/style.css`), Night or Daylight following the Preferences appearance setting.
+
 The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
 ## Build
@@ -47,6 +49,21 @@ The baseline is GNOME 48 (GTK 4.18, libadwaita 1.7).
 
 Call media links libwebrtc through the `livekit` crate. Its build script downloads a prebuilt libwebrtc archive from the `livekit/rust-sdks` GitHub releases on the first build (about 150 MB, 700 MB unpacked, kept under `target/`; set `LK_CUSTOM_WEBRTC` to use a local build), and compiles its C++ bridges against Chromium's libc++, which needs clang 21 or later as the C++ compiler. The `linux` dev shell provides it and sets `CXX`; outside it, install clang 21+ and export `CXX=clang++`. At run time libwebrtc opens PulseAudio (or PipeWire's pulse server) and ALSA.
 
+## Flatpak
+
+`flatpak/social.waddle.Waddle.yaml` builds against the GNOME 50 runtime with the Rust and LLVM SDK extensions. It was written without being run (no `flatpak-builder`, no network where it was authored), so treat it as a starting point:
+
+```sh
+cd apps/linux/flatpak
+# crate sources for the offline build, from Cargo.lock (flatpak-builder-tools)
+python3 flatpak-cargo-generator.py ../Cargo.lock -o cargo-sources.json
+flatpak-builder --user --install --force-clean build-dir social.waddle.Waddle.yaml
+```
+
+Permissions: Wayland and X11 fallback, IPC, DRI, PulseAudio (the microphone and speakers for calls; PipeWire answers the protocol), and the network. There is no filesystem access (the file chooser and drop targets use the document portal), no notification talk-name (GNotification uses the portal) and no Secret Service talk-name (oo7 uses the secret portal).
+
+libwebrtc: the `livekit` crate's build script downloads a prebuilt libwebrtc archive from GitHub, which the build sandbox forbids. The manifest therefore lists that archive (tag `webrtc-a545de4`, the `WEBRTC_TAG` of the locked `webrtc-sys-build`, one zip per architecture, with sha256) as a source and points `LK_CUSTOM_WEBRTC` at the unpacked copy. The checksums come from downloading the release assets; the archive was never unpacked into a Flatpak build. Update the tag and hashes whenever `cargo update` moves `webrtc-sys`. Also unconfirmed: that an `llvm21` SDK extension exists for the runtime's freedesktop branch (clang 21 or later is required), that the SDK needs the `blueprint-compiler` module, and the build time and memory of the LTO release profile. A Flathub submission would also need screenshots and a git source with a commit instead of the local directory.
+
 ## Checks
 
 CI runs these through `apps/linux/env.cue`:
@@ -59,7 +76,7 @@ desktop-file-validate data/social.waddle.Waddle.desktop
 appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml
 ```
 
-The GTK window tests require a display and are excluded from ordinary headless runs. GTK can start once per process, so run each separately: `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`, then the same with `profile_surfaces_open_and_resolve_authors` (the profile, People and profile-sheet dialogs, built against a session that cannot connect) and `the_call_window_follows_the_slot` (the call window opening for a ringing call and closing when it is declined).
+The GTK window tests require a display and are excluded from ordinary headless runs. GTK can start once per process, so run each separately: `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`, then the same with `profile_surfaces_open_and_resolve_authors` (the profile, People and profile-sheet dialogs, built against a session that cannot connect) and `the_call_window_follows_the_slot` (the call window opening for a ringing call and closing when it is declined), `the_window_names_its_controls_and_wires_its_shortcuts` (shortcut actions exist, the shortcuts window opens, icon buttons have tooltips and at least 24 px), `the_style_sheet_parses_without_errors_in_both_schemes` and `every_accelerator_parses`.
 
 ## Layout
 
@@ -87,4 +104,6 @@ The GTK window tests require a display and are excluded from ordinary headless r
 | `src/ui/suggestions.rs` | The composer's suggestion popover |
 | `src/ui/composer_view.rs` | The composer's text view and formatting bar |
 | `src/ui/commands.rs` | Extension command discovery, running and the form dialog |
-| `data/` | Desktop entry, AppStream metadata, icon |
+| `src/shortcuts.rs`, `src/ui/shortcuts.rs`, `src/ui/a11y.rs` | The shortcut table, the Keyboard Shortcuts window, quick switch and conversation stepping; accessible names and the phrases screen readers get |
+| `data/` | Desktop entry, AppStream metadata, icon, style sheet (Polar Huddle tokens) |
+| `flatpak/` | Flatpak manifest (unbuilt, see Flatpak) |
