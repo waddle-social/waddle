@@ -379,15 +379,20 @@ async fn explicit_subscribers_honour_xep0191_blocking_on_open_nodes() {
     ] {
         let r = subscribe(client, id, bare).await;
         assert!(r.contains("type='result'"), "open node subscribe: {r}");
+        // XEP-0163 §4: a new subscriber is first sent the last published
+        // item (the world's `item-1`) with a XEP-0203 delay.
+        let replay = wait_for_event(client, Duration::from_secs(3))
+            .await
+            .expect("new subscriber receives the last published item");
+        assert!(replay.contains("item-1"), "last item is item-1: {replay}");
+        assert!(replay.contains("urn:xmpp:delay"), "delay stamped: {replay}");
     }
     publish(&mut w.alice, "pub-2", "item-2").await;
     for client in [&mut w.bob, &mut w.carol] {
-        assert!(
-            wait_for_event(client, Duration::from_secs(3))
-                .await
-                .is_some(),
-            "explicit subscribers are notified before any block"
-        );
+        let live = wait_for_event(client, Duration::from_secs(3))
+            .await
+            .expect("explicit subscribers are notified before any block");
+        assert!(live.contains("item-2"), "live publish: {live}");
     }
 
     // The owner blocks bob; carol blocks the owner (both directions).

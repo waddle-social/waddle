@@ -296,6 +296,10 @@ const CUE_ONLY_XEP_TAGS: &[XepCoverageExemption] = &[
         reason: "URL address payload is exercised through the FileShare CUE DSL; no standalone module exists.",
     },
     XepCoverageExemption {
+        xep: "XEP-0163",
+        reason: "PEP is signalled by the pubsub/pep identity plus XEP-0060 features and defines no feature var of its own; exercised by CUE.",
+    },
+    XepCoverageExemption {
         xep: "XEP-0511",
         reason: "Link metadata enrichment is server behavior exercised by CUE; no standalone module exists.",
     },
@@ -1347,6 +1351,8 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("urn:xmpp:avatar:data", "XEP-0084"),
         ("http://jabber.org/protocol/chatstates", "XEP-0085"),
         ("jabber:iq:version", "XEP-0092"),
+        // XEP-0163 §6: PEP support is the pubsub/pep identity, named here.
+        ("Personal Eventing Protocol", "XEP-0163"),
         ("http://jabber.org/protocol/mood", "XEP-0107"),
         ("http://jabber.org/protocol/activity", "XEP-0108"),
         ("http://jabber.org/protocol/caps", "XEP-0115"),
