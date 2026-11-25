@@ -1,5 +1,6 @@
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import serverQueuePaths from "../ci/rust-tests/queue-paths.json";
 
 const workflowDirectory = ".github/workflows";
 export const outputFile = `${workflowDirectory}/waddle-integration.yml`;
@@ -25,26 +26,78 @@ function pinActionReferences(value: any): any {
 }
 
 type Workflow = Record<string, any>;
-export type Lane = { id: string; file: string; workflow: Workflow };
+export type Lane = { id: string; file: string; workflow: Workflow; paths?: string[] };
+
+// These verification workflows run on demand or after merge. The queue reuses
+// their jobs and the path filters of the matching project workflows. Only
+// trigger paths are read from default workflows; publishing jobs stay on main.
+const queueScopes: Record<string, string[]> = {
+  "operational-qualification": ["operational-qualification"],
+  "waddle-server-xmppcompliance": ["waddle-server-xmppcompliance"],
+  "waddle-apple-default": ["waddle-apple-default"],
+  "waddle-server-federationgrantfence": ["waddle-server-federationgrantfence"],
+  ...Object.fromEntries(["android", "chat", "linux", "operator"].map(project => [
+    `waddle-${project}-queuechecks`, [`waddle-${project}-pullrequest`, `waddle-${project}-default`],
+  ])),
+};
+
+function triggerPaths(trigger: any, file: string): string[] | undefined {
+  if (trigger?.["paths-ignore"]) throw new Error(`Unsupported paths-ignore in ${file}`);
+  const paths = trigger?.paths;
+  if (paths !== undefined && (!Array.isArray(paths) || paths.some(path => typeof path !== "string"))) {
+    throw new Error(`Invalid paths in ${file}`);
+  }
+  return paths;
+}
 
 export function readLanes(directory = workflowDirectory): Lane[] {
-  return readdirSync(directory).filter(file => /\.ya?ml$/.test(file)).sort().flatMap(file => {
-    if (file === "waddle-integration.yml") return [];
+  const workflows = new Map<string, Workflow>();
+  for (const file of readdirSync(directory).filter(file => /\.ya?ml$/.test(file)).sort()) {
+    if (file === "waddle-integration.yml") continue;
     const workflow = Bun.YAML.parse(readFileSync(join(directory, file), "utf8")) as Workflow;
     if (typeof workflow.on === "string") workflow.on = { [workflow.on]: {} };
     if (Array.isArray(workflow.on)) workflow.on = Object.fromEntries(workflow.on.map((event: string) => [event, {}]));
-    if (!workflow.on || !Object.hasOwn(workflow.on, "pull_request")) return [];
-    if (workflow.on.pull_request?.["paths-ignore"]) throw new Error(`Unsupported paths-ignore in ${file}`);
-    const id = file.replace(/\.ya?ml$/, "").replaceAll("-", "_");
-    return [{ id, file, workflow }];
+    workflows.set(file, workflow);
+  }
+
+  const deferred = new Map<string, string[] | undefined>(Object.entries(serverQueuePaths));
+  for (const [name, scopes] of Object.entries(queueScopes)) {
+    const filters = scopes.map(scope => {
+      const source = workflows.get(scope + ".yml");
+      if (!source?.on || !["pull_request", "push"].some(event => Object.hasOwn(source.on, event))) {
+        throw new Error(`Missing path source ${scope} for ${name}`);
+      }
+      return triggerPaths(source.on.pull_request ?? source.on.push, scope);
+    });
+    deferred.set(name, filters.every(filter => filter !== undefined) ? [...new Set(filters.flat())] : undefined);
+  }
+  for (const name of deferred.keys()) {
+    if (!workflows.has(name + ".yml")) throw new Error(`Missing deferred workflow ${name}`);
+  }
+
+  return [...workflows].flatMap(([file, workflow]) => {
+    const name = file.replace(/\.ya?ml$/, "");
+    let paths: string[] | undefined;
+    if (deferred.has(name)) {
+      if (!workflow.on || !Object.hasOwn(workflow.on, "workflow_dispatch") || Object.hasOwn(workflow.on, "pull_request") || Object.hasOwn(workflow.on, "merge_group")) {
+        throw new Error(`Expected separately dispatched queue verification in ${file}`);
+      }
+      const scope = deferred.get(name);
+      if (scope) paths = [`.github/workflows/${file}`, ...scope];
+    } else if (workflow.on && Object.hasOwn(workflow.on, "pull_request")) {
+      paths = triggerPaths(workflow.on.pull_request, file);
+    } else {
+      return [];
+    }
+    return [{ id: name.replaceAll("-", "_"), file, workflow, paths }];
   });
 }
 
 export function applicable(lane: Lane, files: string[]): boolean {
   // A graph or planner change exercises every lane. Source PR branch filters
   // are deliberately ignored: queue validation can conservatively add coverage.
-  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py"].includes(file))) return true;
-  const patterns = lane.workflow.on.pull_request?.paths;
+  if (files.some(file => [outputFile, "ci/rust-tests/queue-paths.json", "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py"].includes(file))) return true;
+  const patterns = lane.paths ?? lane.workflow.on.pull_request?.paths;
   if (!patterns) return true;
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== "string")) throw new Error(`Invalid paths in ${lane.file}`);
   // GitHub accepts more glob syntax than Bun. Unknown syntax selects the lane
@@ -126,7 +179,7 @@ export function generate(lanes: Lane[]): string {
         }
         if (step.uses?.startsWith("actions/checkout@")) {
           checkouts++;
-          if (step.with?.repository || step.with?.ref) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
+          if (step.with?.repository || (step.with?.ref && step.with.ref !== "${{ github.sha }}")) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
           step.with = { ...step.with, ref: "${{ github.sha }}", "persist-credentials": false, "fetch-depth": 0 };
         }
         if (/^actions\/(upload|download)-artifact@/.test(step.uses ?? "")) {
@@ -155,10 +208,8 @@ export function generate(lanes: Lane[]): string {
       env: { JOB_RESULTS: "${{ toJSON(needs) }}", EXPECTED_JOBS: "${{ needs.plan.outputs.expected }}" },
     }],
   };
-  // Every lane here is copied from a workflow that already runs on the pull
-  // request. Running the copies there as well doubled the demand for each
-  // runner, including the 32-core builder, so this graph verifies merge-queue
-  // candidates and explicit dispatches only.
+  // Ordinary PR workflows provide fast feedback; the complete graph runs once
+  // on the combined merge candidate, with an explicit dispatch for qualification.
   const workflow = {
     name: "waddle-integration",
     on: { merge_group: { types: ["checks_requested"] }, workflow_dispatch: {
@@ -168,7 +219,7 @@ export function generate(lanes: Lane[]): string {
     concurrency: { group: "integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}", "cancel-in-progress": true },
     jobs,
   };
-  return "# Generated from existing PR workflow graphs; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(pinActionReferences(workflow), null, 2).replace(/[ \t]+$/gm, "") + "\n";
+  return "# Generated from PR and deferred verification workflows; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(pinActionReferences(workflow), null, 2).replace(/[ \t]+$/gm, "") + "\n";
 }
 
 export function verifyGate(results: Record<string, { result: string }>, expected: string[], allJobs: string[]): void {

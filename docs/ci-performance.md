@@ -11,6 +11,16 @@ outstanding. See the final trial record below.
 
 The primary obstacle is the all-features Rust test build. The latest server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL independently took 19m42s. Both must improve to deliver the requested result.
 
+## Current PR and merge-queue routing
+
+On ordinary PR updates, the server runs its short checks. Android, Linux, chat
+and Apple run fast tooling or contract checks. Full client builds, server
+compilation and default-feature tests run on affected merge candidates. The
+server's all-features PostgreSQL shards still gate publication on main. Its
+concurrency group lets the active revision finish while newer pending pushes
+coalesce. The [integration workflow](integration-ci.md) describes the path
+filters, read-only permissions and the remaining repository ruleset requirement.
+
 ## What the measurements show
 
 Inspected the latest 50 workflow records, detailed jobs for six selected runs, logs for the main bottlenecks, current CUE/Nix/workflow configuration, and relevant existing PRs. Four recent successful source-changing server PR runs took 54m36s, 54m36s, 54m52s and 55m51s. This is a small diagnostic sample, not an established p95.

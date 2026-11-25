@@ -10,10 +10,12 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 workflow="$repo_root/.github/workflows/waddle-server-rusttests.yml"
+queue_paths="$repo_root/ci/rust-tests/queue-paths.json"
 generated="$(mktemp)"
-trap 'rm -f "$generated"' EXIT
+generated_paths="$(mktemp)"
+trap 'rm -f "$generated" "$generated_paths"' EXIT
 
-# The workflow is evaluated through server/env.cue, which imports cuenv 0.77.1's
+# The workflow is evaluated through server/env.cue, which imports cuenv 0.81.1's
 # v0.18.0 schema (see the cue pin in flake.nix). Refuse any other language
 # version rather than failing with an unrelated-looking evaluation error.
 required_cue=v0.18.0
@@ -34,11 +36,29 @@ cd "$repo_root"
   cue export ./ci/rust-tests -e workflow --out yaml
 } > "$generated"
 
+cue export ./ci/rust-tests -e queueTasks | jq '
+  def inputs($prefix):
+    if (.inputs | length) == 0 then "**"
+    else .inputs[] |
+      if type == "string" then $prefix + .
+      elif .cuenvFiles == "module" then .paths[]
+      else error("unsupported queue task input: " + tostring) end
+    end;
+  with_entries(.key as $name | .value = ([
+    "*.cue", "server/*.cue", "ci/*.cue", "ci/contributors/*.cue", "cue.mod/**",
+    "cuenv.lock", (".github/workflows/" + $name + ".yml"),
+    (.value[] | .prefix as $prefix |
+      (.extraInputs[]? | $prefix + .),
+      (.tasks[] | recurse(.dependsOn[]?) | inputs($prefix)))
+  ] | unique))
+' > "$generated_paths"
+
 if [[ "$mode" = --check ]]; then
-  if ! diff -u "$workflow" "$generated"; then
+  if ! diff -u "$workflow" "$generated" || ! diff -u "$queue_paths" "$generated_paths"; then
     echo "Rust workflow drift detected. Run: bash scripts/sync-rust-tests.sh" >&2
     exit 1
   fi
 else
   install -m 0644 "$generated" "$workflow"
+  install -m 0644 "$generated_paths" "$queue_paths"
 fi

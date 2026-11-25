@@ -28,29 +28,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apple-xmpp-client:
-    name: apple-xmpp-client
-    runs-on: namespace-profile-darwin-arm64
+  telemetry:
+    name: Apple telemetry contract
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain
-        working-directory: server
-        run: rustup toolchain install
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - name: Check native telemetry contract
         run: bash scripts/check-native-remote-telemetry.sh --apple
-      - name: Test WaddleKit
-        working-directory: apps/apple/WaddleKit
-        run: swift test
-      - name: Build XMPP client XCFramework
-        run: bash scripts/build-xcframework.sh --debug
-      - name: Build and test macOS app
-        run: xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
-      - name: Build and test iOS app
-        run: |
-          device="$(python3 apps/apple/scripts/newest-iphone-simulator.py)"
-          xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination "platform=iOS Simulator,id=${device}" CODE_SIGNING_ALLOWED=NO test

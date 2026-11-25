@@ -1006,7 +1006,7 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
-          # cuenv 0.77.1's CUE schema declares language version v0.18.0.
+          # cuenv 0.81.1's CUE schema declares language version v0.18.0.
           # Verified cue v0.18.0-rc.4 evaluates `cue vet .` in server/ (~4s),
           # resolving the 0.17.1 hang (#1763). Covers the CLI only; the cuengine
           # crate is pinned separately in server/Cargo.lock.

@@ -13,6 +13,17 @@ in a shared derivation. Changing a source file can therefore invalidate several
 checks while the third-party dependency artifact remains reusable. Moving that
 artifact to another provider does not change the derivation's source inputs.
 
+## Default-feature Cargo volume trial
+
+Dispatch `waddle-ci-cache-benchmark.yml` on `main` with `scope=cargo`.
+A trusted runner builds and tests the server workspace on a dedicated 50 GB
+Namespace volume. A fresh runner restores the snapshot and runs the same tests
+twice, first unchanged and then with a new test in the server crate. The job
+checks the test inventory, verifies that Cargo rebuilt the changed crate, and
+reports the time spent on each phase and available volume space. The restore
+runner discards its writes. Normal main and queue jobs retain the existing
+test command until the trial establishes changed-code performance.
+
 ## First measured qualification: 2026-09-20
 
 [Run 35510413179](https://github.com/waddle-social/waddle/actions/runs/35510413179)
