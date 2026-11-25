@@ -98,11 +98,16 @@ pub struct AdmitInvocationInput {
     pub attempt_id: AttemptId,
     pub run_id: RunId,
     pub step_id: StepId,
+    pub trust_domain: String,
     pub tenant_id: TenantId,
     pub principal: InvocationPrincipal,
+    pub extension_id: String,
+    pub extension_digest_sha256: [u8; 32],
+    pub provider: String,
     pub payer: PayerSelection,
     pub room_or_space: RoomScopeKey,
     pub holder: HolderInstance,
+    pub command_digest_sha256: [u8; 32],
     pub invocation_nonce: [u8; 32],
     pub expires_at_ms: i64,
     pub reserved_spend_microcents: u64,
@@ -111,10 +116,28 @@ pub struct AdmitInvocationInput {
     pub now_ms: i64,
 }
 
-/// Successful admission outcome containing the durable receipt and the local
-/// stream cancellation receiver from [`BrokerReplicaFence`].
+/// Bound dispatch metadata carried from admission into provider egress so
+/// downstream execution cannot switch trust domain, tenant, provider, extension,
+/// digest, command digest, payer, or budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundDispatchContext {
+    pub trust_domain: String,
+    pub tenant_id: TenantId,
+    pub extension_id: String,
+    pub extension_digest_sha256: [u8; 32],
+    pub provider: String,
+    pub payer: PayerSelection,
+    pub room_or_space: RoomScopeKey,
+    pub command_digest_sha256: [u8; 32],
+    pub reserved_spend_microcents: u64,
+    pub budget: BudgetLimits,
+}
+
+/// Successful admission outcome containing the durable receipt, bound dispatch
+/// context, and the local stream cancellation receiver from [`BrokerReplicaFence`].
 pub struct AdmittedDispatch {
     pub receipt: AdmitReceipt,
+    pub dispatch_context: BoundDispatchContext,
     pub cancel_rx: watch::Receiver<bool>,
 }
 
@@ -163,7 +186,10 @@ where
 
     /// Executes the full Step 5 admission sequence:
     /// 1. Validate principal & payer (strict payer separation; never switches payer).
-    /// 2. For member-funded use, verify device-signed invocation against `DeviceKeyRegistry`.
+    /// 2. For member-funded use, verify device-signed invocation against `DeviceKeyRegistry`
+    ///    and verify all bound fields (`trust_domain`, `tenant_id`, `account_id`,
+    ///    `extension_id`, `extension_digest_sha256`, `provider`, `payer`, `room_scope`,
+    ///    `command_digest_sha256`, `nonce`, `expires_at_ms`, `budget`).
     /// 3. Snapshot all 3 fences (`Credential`, `RoomOrSpace`, `Placement`).
     /// 4. Run fresh `PermissionBackend::check` with `AuthzConsistency::Strong`.
     /// 5. Atomically commit `admit_attempt` verifying all 3 fences remain `Open` at
@@ -184,10 +210,15 @@ where
                 .signed_invocation
                 .as_ref()
                 .ok_or(InvocationError::SignedInvocationRequired)?;
-            if signed.tenant_id != input.tenant_id
+            if signed.trust_domain != input.trust_domain
+                || signed.tenant_id != input.tenant_id
                 || signed.account_id != cred_owner
+                || signed.extension_id != input.extension_id
+                || signed.extension_digest_sha256 != input.extension_digest_sha256
+                || signed.provider != input.provider
                 || signed.payer != input.payer
                 || signed.room_scope != input.room_or_space
+                || signed.command_digest_sha256 != input.command_digest_sha256
                 || signed.nonce != input.invocation_nonce
                 || signed.expires_at_ms != input.expires_at_ms
                 || signed.budget != input.budget
@@ -196,6 +227,19 @@ where
             }
             validate_signed_invocation(&self.device_keys, signed, input.now_ms)?;
         }
+
+        let dispatch_context = BoundDispatchContext {
+            trust_domain: input.trust_domain.clone(),
+            tenant_id: input.tenant_id.clone(),
+            extension_id: input.extension_id.clone(),
+            extension_digest_sha256: input.extension_digest_sha256,
+            provider: input.provider.clone(),
+            payer: input.payer,
+            room_or_space: input.room_or_space.clone(),
+            command_digest_sha256: input.command_digest_sha256,
+            reserved_spend_microcents: input.reserved_spend_microcents,
+            budget: input.budget,
+        };
 
         let cred_key = input.payer.credential_key();
         let snapshot = self
@@ -305,7 +349,11 @@ where
             },
         );
 
-        Ok(AdmittedDispatch { receipt, cancel_rx })
+        Ok(AdmittedDispatch {
+            receipt,
+            dispatch_context,
+            cancel_rx,
+        })
     }
 
     /// Executes the restriction/revocation protocol:

@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 turso = { version = "0.8.4", default-features = false, features = ["fts"] }
+url = { workspace = true }
 uuid = { workspace = true }
 waddle-broker-core = { path = "../waddle-broker-core" }
 waddle-tenancy = { path = "../waddle-tenancy" }

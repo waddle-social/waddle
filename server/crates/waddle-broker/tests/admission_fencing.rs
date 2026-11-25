@@ -380,14 +380,19 @@ async fn replica_fence_closes_before_mutation_and_aborts_peer_streams() {
             attempt_id: AttemptId::new_v4(),
             run_id: RunId::new_v4(),
             step_id: StepId::new(0),
+            trust_domain: "trust.example".to_owned(),
             tenant_id: tenant.clone(),
             principal: InvocationPrincipal::LocalMember {
                 account_id: account,
                 provenance: AuthProvenance::ExternalIdp,
             },
+            extension_id: "ai-chatbot".to_owned(),
+            extension_digest_sha256: [0xAB; 32],
+            provider: "openai".to_owned(),
             payer,
             room_or_space: room.clone(),
             holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-b"),
+            command_digest_sha256: [0xCD; 32],
             invocation_nonce: nonce,
             expires_at_ms: exp,
             reserved_spend_microcents: 50_000,
@@ -613,14 +618,19 @@ async fn payer_separation_never_silently_switches_member_to_tenant() {
             attempt_id: AttemptId::new_v4(),
             run_id: RunId::new_v4(),
             step_id: StepId::new(0),
+            trust_domain: "trust.example".to_owned(),
             tenant_id: tenant.clone(),
             principal: InvocationPrincipal::LocalMember {
                 account_id: account,
                 provenance: AuthProvenance::ExternalIdp,
             },
+            extension_id: "ai-chatbot".to_owned(),
+            extension_digest_sha256: [0xAB; 32],
+            provider: "openai".to_owned(),
             payer: member_payer,
             room_or_space: room,
             holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-a"),
+            command_digest_sha256: [0xCD; 32],
             invocation_nonce: nonce,
             expires_at_ms: exp,
             reserved_spend_microcents: 100,
@@ -1170,14 +1180,19 @@ async fn pairwise_revoke_inflight_authz_barrier_and_pobserve_trace() {
                 attempt_id: AttemptId::new_v4(),
                 run_id: RunId::new_v4(),
                 step_id: StepId::new(0),
+                trust_domain: "trust.example".to_owned(),
                 tenant_id: tenant_c,
                 principal: InvocationPrincipal::LocalMember {
                     account_id: account,
                     provenance: AuthProvenance::ExternalIdp,
                 },
+                extension_id: "ai-chatbot".to_owned(),
+                extension_digest_sha256: [0xAB; 32],
+                provider: "openai".to_owned(),
                 payer,
                 room_or_space: room_c,
                 holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-a"),
+                command_digest_sha256: [0xCD; 32],
                 invocation_nonce: nonce,
                 expires_at_ms: exp,
                 reserved_spend_microcents: 100,
@@ -1474,14 +1489,19 @@ async fn e2e_gate2_dual_broker_race_single_provider_dispatch_and_pobserve() {
         attempt_id: AttemptId::new_v4(),
         run_id: shared_run,
         step_id: StepId::new(0),
+        trust_domain: "trust.example".to_owned(),
         tenant_id: tenant.clone(),
         principal: InvocationPrincipal::LocalMember {
             account_id: account,
             provenance: AuthProvenance::ExternalIdp,
         },
+        extension_id: "ai-chatbot".to_owned(),
+        extension_digest_sha256: [0xAB; 32],
+        provider: "openai".to_owned(),
         payer,
         room_or_space: room.clone(),
         holder: test_holder(holder_sa),
+        command_digest_sha256: [0xCD; 32],
         invocation_nonce: shared_nonce,
         expires_at_ms: exp,
         reserved_spend_microcents: 200_000,
@@ -1626,14 +1646,19 @@ async fn signed_invocation_binding_rejects_cross_account_signer_and_tampered_fie
             attempt_id: AttemptId::new_v4(),
             run_id: RunId::new_v4(),
             step_id: StepId::new(0),
+            trust_domain: "trust.example".to_owned(),
             tenant_id: tenant.clone(),
             principal: InvocationPrincipal::LocalMember {
                 account_id: alice,
                 provenance: AuthProvenance::ExternalIdp,
             },
+            extension_id: "ai-chatbot".to_owned(),
+            extension_digest_sha256: [0xAB; 32],
+            provider: "openai".to_owned(),
             payer: alice_payer,
             room_or_space: room,
             holder: test_holder("spiffe://trust.example/ns/waddle/sa/cell-a"),
+            command_digest_sha256: [0xCD; 32],
             invocation_nonce: nonce,
             expires_at_ms,
             reserved_spend_microcents: 100,
@@ -1716,15 +1741,38 @@ async fn signed_invocation_binding_rejects_cross_account_signer_and_tampered_fie
         ))
     ));
 
+    // 3d. Tampered trust_domain, extension_id, extension_digest_sha256, provider, command_digest_sha256
+    for mutate in [
+        Box::new(|inp: &mut AdmitInvocationInput| inp.trust_domain = "evil.example".to_owned())
+            as Box<dyn FnOnce(&mut AdmitInvocationInput)>,
+        Box::new(|inp: &mut AdmitInvocationInput| inp.extension_id = "other-ext".to_owned()),
+        Box::new(|inp: &mut AdmitInvocationInput| inp.extension_digest_sha256 = [0x11; 32]),
+        Box::new(|inp: &mut AdmitInvocationInput| inp.provider = "anthropic".to_owned()),
+        Box::new(|inp: &mut AdmitInvocationInput| inp.command_digest_sha256 = [0x22; 32]),
+    ] {
+        let mut tampered = make_input([2u8; 32], room_a.clone(), exp, budget, alice_signed.clone());
+        mutate(&mut tampered);
+        assert!(matches!(
+            svc.admit_invocation(tampered).await,
+            Err(AdmissionServiceError::Invocation(
+                InvocationError::SignedInvocationBindingMismatch
+            ))
+        ));
+    }
+
     assert!(
         trace.records().is_empty(),
         "rejected tampered invocations must not emit dispatch trace"
     );
 
-    // 4. Exact matching fields admit cleanly.
-    svc.admit_invocation(make_input([2u8; 32], room_a, exp, budget, alice_signed))
+    // 4. Exact matching fields admit cleanly and expose bound dispatch context.
+    let admitted = svc
+        .admit_invocation(make_input([2u8; 32], room_a, exp, budget, alice_signed))
         .await
         .expect("untampered signed invocation succeeds");
+    assert_eq!(admitted.dispatch_context.provider, "openai");
+    assert_eq!(admitted.dispatch_context.extension_id, "ai-chatbot");
+    assert_eq!(admitted.dispatch_context.trust_domain, "trust.example");
 }
 
 async fn exercise_cross_tenant_run_id_hijack_denied<S>(store: &S)

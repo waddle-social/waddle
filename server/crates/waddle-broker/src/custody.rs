@@ -564,11 +564,33 @@ impl BrokerCustodyService {
     }
 
     /// Unseals a credential solely inside broker memory for constrained
+    /// provider egress, verifying that the credential's enrolled provider
+    /// matches `expected_provider`.
+    pub async fn unseal_for_provider_egress(
+        &self,
+        tenant_id: &TenantId,
+        credential_id: Uuid,
+        expected_provider: &str,
+    ) -> Result<SecretBytes, BrokerError> {
+        self.unseal_inner(tenant_id, credential_id, Some(expected_provider))
+            .await
+    }
+
+    /// Unseals a credential solely inside broker memory for constrained
     /// provider egress. Enforces all 6 Quint/Plan safety checks.
     pub async fn unseal_for_egress(
         &self,
         tenant_id: &TenantId,
         credential_id: Uuid,
+    ) -> Result<SecretBytes, BrokerError> {
+        self.unseal_inner(tenant_id, credential_id, None).await
+    }
+
+    async fn unseal_inner(
+        &self,
+        tenant_id: &TenantId,
+        credential_id: Uuid,
+        expected_provider: Option<&str>,
     ) -> Result<SecretBytes, BrokerError> {
         if !self.egress_open() {
             return Err(BrokerError::EgressClosedPendingRestore);
@@ -586,6 +608,16 @@ impl BrokerCustodyService {
             .get_envelope(tenant_id, credential_id)
             .await?
             .ok_or(BrokerError::CredentialNotFound(credential_id))?;
+
+        if let Some(expected) = expected_provider {
+            if record.provider != expected {
+                return Err(BrokerError::ProviderMismatch {
+                    credential_id,
+                    expected: expected.to_owned(),
+                    actual: record.provider,
+                });
+            }
+        }
 
         if self
             .ledger

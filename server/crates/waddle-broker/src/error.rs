@@ -128,6 +128,12 @@ pub enum BrokerError {
     AccountRetired(AccountId),
     #[error("tenant {0} has been destroyed")]
     TenantDestroyed(TenantId),
+    #[error("credential {credential_id} belongs to provider '{actual}', expected '{expected}'")]
+    ProviderMismatch {
+        credential_id: Uuid,
+        expected: String,
+        actual: String,
+    },
     #[error("enrollment nonce reused with conflicting payload digest")]
     NoncePayloadConflict,
     #[error("crypto error: {0}")]

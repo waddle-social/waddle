@@ -5,6 +5,7 @@
 pub mod admission;
 pub mod authz;
 pub mod custody;
+pub mod egress;
 pub mod envelope;
 pub mod error;
 pub mod idp_proof;
@@ -25,7 +26,7 @@ pub use admission::replica_fence::{
 };
 pub use admission::service::{
     AdmissionBarrierHooks, AdmissionServiceError, AdmitInvocationInput, AdmittedDispatch,
-    BrokerAdmissionService, TraceRecorder,
+    BoundDispatchContext, BrokerAdmissionService, TraceRecorder,
 };
 pub use admission::turso::TursoAdmissionLedgerStore;
 pub use admission::{
@@ -48,6 +49,12 @@ pub use authz::{
 pub use custody::{
     BrokerCustodyService, CredentialLifecycleStatus, CredentialReceipt, EnrollCredentialInput,
     RestoreReopenReport,
+};
+pub use egress::{
+    is_blocked_admin_path, resolve_and_validate_addrs, validate_operation_path, BrokerEgressClient,
+    DnsResolver, EgressCaps, EgressChunk, EgressError, EgressInferenceRequest,
+    EgressProfileRegistry, EgressResponse, EgressStream, ProfileError, ProviderOperation,
+    ProviderOperationWire, ProviderProfile, SsrfError, TokioDnsResolver,
 };
 pub use envelope::{
     decrypt_secret, encrypt_secret, EnvelopeCipher, EnvelopeContext, SealedEnvelope,
