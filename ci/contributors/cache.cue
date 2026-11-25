@@ -15,9 +15,7 @@ import "github.com/cuenv/cuenv/schema"
 // Shared Namespace Bazel remote cache settings. Default-safe read-only in
 // CUE (`upload: false`); #NamespaceBazelCache enables remote uploads via
 // $GITHUB_ENV only on trusted `push` events to `refs/heads/main` and isolates
-// local cache directories between trusted and untrusted runs. (Omitting `ci`
-// avoids cuenv 0.77.0's static trigger check forcing `CUENV_REMOTE_CACHE_UPLOAD`
-// to 'false' on workflows that also declare `manual: true`.)
+// local cache directories between trusted and untrusted runs.
 #NamespaceRemoteCache: schema.#RemoteCache & {
 	endpoint: "https://bazel.namespace.invalid"
 	protocol: "grpc"

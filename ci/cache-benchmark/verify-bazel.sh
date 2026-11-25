@@ -20,17 +20,17 @@ export CUENV_CACHE_DIR
 events="$(mktemp "$RUNNER_TEMP/crd-events.XXXXXX")"
 trap 'rm -f "$events"' EXIT
 if ! cuenv --json ci --all --pipeline cacheVerification --path operator > "$events"; then
-  jq -Rr 'fromjson? | .category | select(.type == "Task" or .type == "Output") | .data' "$events" | tail -c 8000 >&2
+  jq -Rc 'fromjson? | objects | .category | select(.type == "Task" or .type == "Output") | .data' "$events" | tail -c 8000 >&2
   exit 1
 fi
 
 # CLI output can also contain unstructured command output. Inspect only the
 # task executor's typed events, including the reason for a skipped upload.
-jq -Rrc 'fromjson? | .category | select(.type == "Cache" or .type == "Task")
+jq -Rrc 'fromjson? | objects | .category | select(.type == "Cache" or .type == "Task")
   | .data | select(.data.task == "ciCheckCrdDrift" or .data.name == "ciCheckCrdDrift")
   | select(.event | test("Cache|RemoteUpload"))' "$events"
 digest="$(jq -Rr --arg phase "$phase" '
-  fromjson? | .category |
+  fromjson? | objects | .category |
   if $phase == "seed" then
     select(.type == "Cache") | .data | select(.event == "RemoteUploaded" and .data.task == "ciCheckCrdDrift") | .data.digest
   else

@@ -6,6 +6,7 @@ runner="$(mktemp -d)"
 trap 'rm -rf "$runner"' EXIT
 
 environment_for_job() (
+  set -e
   local bootstrap="$1"
   mkdir -p "$bootstrap"
   printf '#!/bin/sh\nexit 0\n' > "$bootstrap/cuenv"
