@@ -16,7 +16,7 @@ use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 use url::{Host, Url};
-use waddle_client_session::Attachment;
+use waddle_client_session::{timeline::Sha256Digest, Attachment};
 
 /// The web client's cap; the upload service may set a lower one.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
@@ -160,6 +160,32 @@ pub fn upload_name(name: &str) -> String {
     } else {
         format!("{name}.enc")
     }
+}
+
+pub fn plaintext_digest(encoded: &str) -> Sha256Digest {
+    match BASE64
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+    {
+        Some(bytes) => Sha256Digest::Valid(bytes),
+        None => Sha256Digest::Invalid,
+    }
+}
+
+pub fn verified_plaintext(
+    bytes: Vec<u8>,
+    hashes: &[Sha256Digest],
+) -> Result<Vec<u8>, AttachmentError> {
+    if !hashes.is_empty() {
+        let actual = digest(&SHA256, &bytes);
+        if !hashes.iter().all(
+            |hash| matches!(hash, Sha256Digest::Valid(expected) if expected == actual.as_ref()),
+        ) {
+            return Err(AttachmentError::Integrity);
+        }
+    }
+    Ok(bytes)
 }
 
 fn sha256_b64(bytes: &[u8]) -> String {
@@ -354,8 +380,8 @@ impl TransferError {
 }
 
 /// What identifies a shared file's content: its address and everything
-/// needed to decrypt it. Two messages naming one URL with different keys
-/// are different files.
+/// needed to decrypt and verify it. A change to either the key or the
+/// advertised content hashes requires checking the bytes again.
 pub fn cache_key(attachment: &Attachment) -> String {
     let mut parts: Vec<&str> = vec![attachment.url.as_str()];
     if let Some(encryption) = &attachment.encryption {
@@ -367,7 +393,19 @@ pub fn cache_key(attachment: &Attachment) -> String {
         parts.extend(encryption.sha256_b64.iter().map(String::as_str));
         parts.extend(encryption.sources.iter().map(String::as_str));
     }
-    sha256_b64(parts.join("\u{0}").as_bytes())
+    let identity = digest(&SHA256, parts.join("\u{0}").as_bytes());
+    let mut key = ring::digest::Context::new(&SHA256);
+    key.update(identity.as_ref());
+    for hash in &attachment.hashes {
+        match hash {
+            Sha256Digest::Valid(bytes) => {
+                key.update(&[1]);
+                key.update(bytes);
+            }
+            Sha256Digest::Invalid => key.update(&[0]),
+        }
+    }
+    BASE64.encode(key.finish().as_ref())
 }
 
 /// A sender-chosen file name made safe to propose for saving: its last
@@ -588,6 +626,7 @@ mod tests {
             media_type: None,
             size: None,
             inline: true,
+            hashes: Vec::new(),
             encryption: Some(waddle_client_session::Encryption {
                 cipher: AES_256_GCM.into(),
                 key_b64: key.into(),
@@ -598,6 +637,9 @@ mod tests {
         };
         assert_eq!(cache_key(&attachment("k1")), cache_key(&attachment("k1")));
         assert_ne!(cache_key(&attachment("k1")), cache_key(&attachment("k2")));
+        let mut changed = attachment("k1");
+        changed.hashes.push(Sha256Digest::Invalid);
+        assert_ne!(cache_key(&attachment("k1")), cache_key(&changed));
     }
 
     #[test]

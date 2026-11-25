@@ -426,16 +426,20 @@ impl Session {
             for source in sources {
                 match transfers.fetch(&source).await {
                     Ok(bytes) => {
-                        return match &attachment.encryption {
-                            Some(encryption) => Ok(attachments::open(
+                        let plaintext = match &attachment.encryption {
+                            Some(encryption) => attachments::open(
                                 &bytes,
                                 &encryption.cipher,
                                 &encryption.key_b64,
                                 &encryption.iv_b64,
                                 &encryption.sha256_b64,
-                            )?),
-                            None => Ok(bytes),
+                            )?,
+                            None => bytes,
                         };
+                        return Ok(attachments::verified_plaintext(
+                            plaintext,
+                            &attachment.hashes,
+                        )?);
                     }
                     Err(error) => last = error,
                 }
@@ -584,6 +588,12 @@ pub fn attachment_from(file: &WaddleSharedFile) -> Attachment {
         media_type: file.media_type.clone(),
         size: file.size,
         inline: file.disposition == "inline",
+        hashes: file
+            .hashes
+            .iter()
+            .filter(|hash| hash.algo.eq_ignore_ascii_case(attachments::SHA_256))
+            .map(|hash| attachments::plaintext_digest(&hash.value_b64))
+            .collect(),
         encryption: file.encrypted.as_ref().map(|encrypted| Encryption {
             cipher: encrypted.cipher.clone(),
             key_b64: encrypted.key_b64.clone(),
@@ -1016,6 +1026,46 @@ mod tests {
             bookmark_name: None,
             is_group_dm: group_dm,
         }
+    }
+
+    #[test]
+    fn shared_files_verify_advertised_plaintext_hashes_after_decryption() {
+        let plaintext = b"the shared file";
+        let sealed = attachments::seal(plaintext).unwrap();
+        let file = Outgoing {
+            name: "example.txt".into(),
+            media_type: "text/plain".into(),
+            bytes: plaintext.to_vec(),
+        };
+        let mut wire = shared_file(&file, &sealed, "https://up.example/file".into()).wire;
+        let projected = attachment_from(&wire);
+        let encryption = projected.encryption.unwrap();
+        let opened = attachments::open(
+            &sealed.ciphertext,
+            &encryption.cipher,
+            &encryption.key_b64,
+            &encryption.iv_b64,
+            &encryption.sha256_b64,
+        )
+        .unwrap();
+        assert_eq!(
+            attachments::verified_plaintext(opened, &projected.hashes).unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            attachments::verified_plaintext(b"changed".to_vec(), &projected.hashes),
+            Err(attachments::AttachmentError::Integrity)
+        );
+
+        wire.hashes[0].value_b64 = "malformed".into();
+        assert_eq!(
+            attachments::verified_plaintext(plaintext.to_vec(), &attachment_from(&wire).hashes),
+            Err(attachments::AttachmentError::Integrity)
+        );
+        wire.hashes[0].algo = "sha-512".into();
+        assert!(attachment_from(&wire).hashes.is_empty());
+        wire.hashes.clear();
+        assert!(attachment_from(&wire).hashes.is_empty());
     }
 
     fn stanza_id(id: &str, by: &str) -> WaddleStanzaId {
