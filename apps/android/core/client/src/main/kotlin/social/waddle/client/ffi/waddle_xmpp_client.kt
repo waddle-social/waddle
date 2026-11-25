@@ -669,7 +669,7 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event(
 ): Int
-external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue(
+external fun uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hex(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid(
 ): Int
@@ -1246,8 +1246,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventli
 ): Unit
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_expand_community_event(`event`: RustBuffer.ByValue,`fromMs`: Long,`toMs`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): Double
+external fun uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hex(`input`: RustBuffer.ByValue,`saturation`: Double,`lightness`: Double,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_waddle_xmpp_client_ffi_fn_func_parse_jid(`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun ffi_waddle_xmpp_client_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1372,7 +1372,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event() != 53397) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hex() != 60148) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid() != 54118) {
@@ -21318,14 +21318,16 @@ public typealias FfiConverterTypeStanzaId = FfiConverterString
 
 
         /**
-         * XEP-0392 §"Angle generation": hue in degrees (`0.0..360.0`) for
-         * `input` (nickname or bare JID, used verbatim — no normalization).
-         */ fun `consistentColorHue`(`input`: kotlin.String): kotlin.Double {
-            return FfiConverterDouble.lift(
+         * XEP-0392: the `#rrggbb` color for `input` (nickname or bare JID, used
+         * verbatim, no normalization): SHA-1 hue (section "Angle generation")
+         * converted with HSLuv `hsluvToRgb` (section "RGB generation") at
+         * `saturation` and `lightness` (0.0-100.0).
+         */ fun `consistentColorHex`(`input`: kotlin.String, `saturation`: kotlin.Double, `lightness`: kotlin.Double): kotlin.String {
+            return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(
+    UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hex(
 
-        FfiConverterString.lower(`input`),_status)
+        FfiConverterString.lower(`input`),FfiConverterDouble.lower(`saturation`),FfiConverterDouble.lower(`lightness`),_status)
 }
     )
     }

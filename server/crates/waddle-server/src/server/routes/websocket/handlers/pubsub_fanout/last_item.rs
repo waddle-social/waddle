@@ -39,17 +39,13 @@ pub(crate) async fn replay_last_published_items(
     already_notified: &HashSet<String>,
 ) {
     let resolver = &state.deps.protocol.caps_resolver;
-    let Some(features) = resolver
-        .key_for_resource(recipient)
-        .and_then(|key| resolver.cached(&key))
-        .map(|cached| {
-            cached
-                .features
-                .into_iter()
-                .map(|feature| feature.0)
-                .collect::<HashSet<String>>()
-        })
-    else {
+    let Some(features) = resolver.info_for_resource(recipient).map(|cached| {
+        cached
+            .features
+            .into_iter()
+            .map(|feature| feature.0)
+            .collect::<HashSet<String>>()
+    }) else {
         return;
     };
     if !features.iter().any(|feature| feature.ends_with("+notify")) {

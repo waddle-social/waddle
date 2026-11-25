@@ -18,6 +18,11 @@
 //!   cached, even when the advertised hash matches the malformed set.
 //! - A reply arriving from a different resource than the one queried
 //!   is dropped and never cached.
+//! - An unsupported `hash` still triggers disco#info; the result is
+//!   associated with that JID only and never globally cached (§5.4
+//!   step 2).
+//! - A value-less data-form field contributes only `var<` and a
+//!   repeated identical FORM_TYPE value is not ill-formed.
 //! - Re-advertising the same `(hash, ver)` while a resolution is
 //!   already in flight MUST NOT queue a second disco#info query.
 
@@ -202,6 +207,30 @@ fn caps_disco_result_xml(
     features: &[&str],
     forms: &[(&str, &str)],
 ) -> String {
+    let extensions: Vec<Element> = forms
+        .iter()
+        .map(|(form_type, software)| caps_data_form(form_type, software))
+        .collect();
+    caps_disco_result_xml_with_extensions(
+        iq_id,
+        from,
+        node,
+        ver,
+        identity_name,
+        features,
+        &extensions,
+    )
+}
+
+fn caps_disco_result_xml_with_extensions(
+    iq_id: &str,
+    from: &FullJid,
+    node: &str,
+    ver: &str,
+    identity_name: &str,
+    features: &[&str],
+    extensions: &[Element],
+) -> String {
     use waddle_xmpp::xep::xep0115::Caps;
 
     let caps = Caps::new(node, ver);
@@ -224,8 +253,8 @@ fn caps_disco_result_xml(
                 .build(),
         );
     }
-    for (form_type, software) in forms {
-        query = query.append(caps_data_form(form_type, software));
+    for extension in extensions {
+        query = query.append(extension.clone());
     }
 
     element_to_xml(
@@ -795,44 +824,182 @@ async fn caps_reply_with_identity_xml_lang_verifies_and_caches() {
 }
 
 // ============================================================================
-// Test 6 — caps_unsupported_hash_algorithm_skips_resolution
+// Test 6 — caps_unsupported_hash_algorithm_is_resolved_for_the_jid_only
 // ============================================================================
 //
-// XEP-0115 §5.4 step 2 + §8.1: the recipient MUST NOT cache a
-// result it cannot verify. SHA-1 is the only mandatory-to-implement
-// algorithm; for any other `hash` attribute the server skips the
-// disco#info round-trip rather than produce an unverifiable cache
-// entry.
+// XEP-0115 §5.4 step 2: when the `hash` is not supported the recipient
+// sends the disco#info request but MUST NOT validate or globally cache
+// the verification string; it SHOULD associate the discovered
+// identity+features only with the JabberID of the generating entity.
 #[tokio::test]
-async fn caps_unsupported_hash_algorithm_skips_resolution() {
+async fn caps_unsupported_hash_algorithm_is_resolved_for_the_jid_only() {
     let _serial = TEST_SERIAL.lock().await;
-    let server = TestServer::start();
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &bob_password)]);
     let mut admin = admin_client(&server, "caps-unsupp-1").await;
+    let admin_full_jid: FullJid = admin
+        .full_jid
+        .as_deref()
+        .expect("full jid")
+        .parse()
+        .expect("typed full jid");
 
-    admin
-        .send(&format!(
-            r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-256" node="https://example.test/caps#sha256" ver="some-base64-string"/></presence>"#
-        ))
-        .await
-        .expect("send presence with sha-256 caps");
-    ping_anchor(&mut admin, "caps-unsupp-anchor-1").await;
-
-    let timed = tokio::time::timeout(
-        Duration::from_millis(50),
-        admin.recv_matching(|frame| {
+    let node = "https://example.test/caps";
+    let ver = "unsupported-hash-ver";
+    let advert = format!(
+        r#"<presence xmlns="jabber:client"><c xmlns="{NS_CAPS}" hash="sha-256" node="{node}" ver="{ver}"/></presence>"#
+    );
+    admin.send(&advert).await.expect("send sha-256 caps");
+    let disco_query = admin
+        .recv_matching(|frame| {
             frame.contains("<iq")
                 && frame.contains(r#"type='get'"#)
                 && frame.contains(NS_DISCO_INFO)
-        }),
+        })
+        .await
+        .expect("unsupported hash MUST still trigger a disco#info request");
+    assert!(disco_query.contains(&format!("{node}#{ver}")));
+    admin
+        .send(&caps_disco_result_xml(
+            &extract_iq_id(&disco_query),
+            &admin_full_jid,
+            node,
+            ver,
+            "Unverifiable Client",
+            &["urn:xmpp:ping"],
+            &[],
+        ))
+        .await
+        .expect("send disco#info result");
+    ping_anchor(&mut admin, "caps-unsupp-anchor-1").await;
+
+    // Same JID re-advertising: its association already exists.
+    admin.send(&advert).await.expect("re-advertise");
+    let repeat = tokio::time::timeout(
+        Duration::from_millis(300),
+        admin.recv_matching(|frame| frame.contains("<iq") && frame.contains(NS_DISCO_INFO)),
     )
     .await;
     assert!(
-        timed.is_err(),
-        "advertised sha-256 hash MUST NOT trigger a disco#info round-trip; \
-         the server has no way to verify the reply per §5.4 step 2. Got: {timed:?}"
+        repeat.is_err(),
+        "result is associated with the JID; no second query. Got: {repeat:?}"
+    );
+
+    // Another JID advertising the same unverified (hash, ver) is NOT
+    // served from a global cache and must be queried itself.
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-unsupp-2").await;
+    bob.send(&advert).await.expect("bob advertises");
+    bob.recv_matching(|frame| {
+        frame.contains("<iq") && frame.contains(r#"type='get'"#) && frame.contains(NS_DISCO_INFO)
+    })
+    .await
+    .expect("unsupported-hash result MUST NOT be globally cached");
+
+    let _ = admin.close().await;
+    let _ = bob.close().await;
+}
+
+// ============================================================================
+// Test 6b — caps_verification_string_for_value_less_field
+// ============================================================================
+//
+// XEP-0115 §5.1 step 3.2: "Append the value of the 'var' attribute,
+// followed by the '<' character" and then one `value<` per <value/>;
+// a field with no <value/> contributes only `var<`. A repeated FORM_TYPE
+// <value/> with identical text is not ill-formed (§5.4 step 3.5).
+#[tokio::test]
+async fn caps_verification_string_for_value_less_field_and_repeated_form_type_value() {
+    let _serial = TEST_SERIAL.lock().await;
+    let bob_password = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &bob_password)]);
+    let mut admin = admin_client(&server, "caps-valueless-1").await;
+    let admin_full_jid: FullJid = admin
+        .full_jid
+        .as_deref()
+        .expect("full jid")
+        .parse()
+        .expect("typed full jid");
+
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let field = |var: &str, ty: Option<&str>, values: &[&str]| {
+        let mut builder = Element::builder("field", "jabber:x:data")
+            .attr(minidom::rxml::xml_ncname!("var").to_owned(), var);
+        if let Some(ty) = ty {
+            builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), ty);
+        }
+        for value in values {
+            builder = builder.append(
+                Element::builder("value", "jabber:x:data")
+                    .append(*value)
+                    .build(),
+            );
+        }
+        builder.build()
+    };
+    let form = Element::builder("x", "jabber:x:data")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .append(field("FORM_TYPE", Some("hidden"), &[form_type, form_type]))
+        .append(field("os", None, &[]))
+        .build();
+
+    let node = "https://example.test/caps#valueless";
+    let features = ["urn:xmpp:ping"];
+    let ver = {
+        use waddle_xmpp::disco::info::{Feature, Identity};
+        let identities = vec![Identity::new("client", "pc", Some("Valueless Client"))];
+        let features: Vec<Feature> = features.iter().map(|f| Feature::new(f)).collect();
+        waddle_xmpp::xep::xep0115::compute_caps_hash_with_extensions(
+            &identities,
+            &features,
+            std::slice::from_ref(&form),
+        )
+    };
+    // Independent oracle: SHA-1 over
+    // `client/pc//Valueless Client<urn:xmpp:ping<{form_type}<os<`.
+    assert_eq!(ver, "4kgg3qBuKoUI+QGAzyobHLdo224=");
+
+    admin
+        .send(&caps_presence_xml(node, &ver))
+        .await
+        .expect("send caps presence");
+    let disco_query = admin
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries admin");
+    admin
+        .send(&caps_disco_result_xml_with_extensions(
+            &extract_iq_id(&disco_query),
+            &admin_full_jid,
+            node,
+            &ver,
+            "Valueless Client",
+            &features,
+            &[form],
+        ))
+        .await
+        .expect("send disco#info result");
+    ping_anchor(&mut admin, "caps-valueless-anchor-1").await;
+
+    let mut bob = extra_client(&server, "bob", &bob_password, "caps-valueless-2").await;
+    bob.send(&caps_presence_xml(node, &ver))
+        .await
+        .expect("bob sends caps");
+    let requery = tokio::time::timeout(
+        Duration::from_millis(500),
+        bob.recv_matching(|frame| frame.contains("<iq") && frame.contains(NS_DISCO_INFO)),
+    )
+    .await;
+    assert!(
+        requery.is_err(),
+        "valid reply MUST verify and be cached. Got: {requery:?}"
     );
 
     let _ = admin.close().await;
+    let _ = bob.close().await;
 }
 
 // ============================================================================

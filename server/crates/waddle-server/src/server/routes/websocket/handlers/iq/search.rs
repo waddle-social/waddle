@@ -1,8 +1,9 @@
 use super::{
     bad_request_iq_error, build_iq_error_xml_typed, build_iq_result_xml,
-    build_search_form_response, build_search_response_with_rsm, internal_server_error_iq_error,
-    iq_to_xml, is_search_form_request, item_not_found_iq_error, parse_search_request, warn,
-    ChannelResult, Element, RsmRequest, RsmResponse, Searchable, WebSocketState,
+    build_search_form_response, build_search_response_with_rsm, channel_search_iq_error,
+    internal_server_error_iq_error, iq_to_xml, is_search_form_request, item_not_found_iq_error,
+    parse_search_request, warn, ChannelResult, Element, RsmRequest, RsmResponse,
+    SearchRequestError, Searchable, SortKey, WebSocketState, SERVICE_TYPE_MUC,
 };
 use crate::server::xmpp_channels::list_public_xmpp_channels;
 
@@ -30,14 +31,37 @@ pub(super) async fn handle_channel_search_iq(
     if is_search_form_request(iq) {
         return vec![iq_to_xml(build_search_form_response(iq))];
     }
-    let Some(request) = parse_search_request(iq) else {
+    let request = match parse_search_request(iq) {
+        Ok(request) => request,
+        Err(error) => {
+            return vec![build_iq_error_xml_typed(
+                iq.id(),
+                response_from,
+                response_to,
+                channel_search_iq_error(error),
+            )];
+        }
+    };
+    // Occupant counts are not tracked for the search, so the user-count
+    // order is an unsupported sort key (XEP-0433 "Unsupported Sort Key").
+    if request.key != SortKey::Address {
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,
             response_to,
-            bad_request_iq_error("Malformed IQ payload."),
+            channel_search_iq_error(SearchRequestError::InvalidSortKey),
         )];
-    };
+    }
+    // XEP-0433: a service must not return service types the searcher has not
+    // asked for, and this one holds only XEP-0045 group chats.
+    if request
+        .types
+        .as_ref()
+        .is_some_and(|types| !types.iter().any(|t| t == SERVICE_TYPE_MUC))
+    {
+        let empty = RsmResponse::new().with_count(0);
+        return vec![iq_to_xml(build_search_response_with_rsm(iq, &[], &empty))];
+    }
     let default_limit = request.max.unwrap_or(50).clamp(1, 200);
     let channels = match list_public_xmpp_channels(
         state.deps.app_state.db_pool.global_actor().clone(),
@@ -84,7 +108,7 @@ pub(super) async fn handle_channel_search_iq(
         let result = ChannelResult::new(room_jid.to_string())
             .with_name(channel.name)
             .with_description(channel.description.unwrap_or_default());
-        if !result.matches_query(&request.query) {
+        if !result.matches_query(&request.query, request.scope) {
             continue;
         }
         if managed && !managed_room_viewable(state, &channel.id, requester).await {
@@ -92,6 +116,9 @@ pub(super) async fn handle_channel_search_iq(
         }
         results.push(result);
     }
+    // The only sort key offered is the address, which also keeps RSM paging
+    // free of duplicates and omissions.
+    results.sort_by(|a, b| a.address.cmp(&b.address));
     let (page, rsm) = search_result_page(&results, request.rsm.as_ref(), default_limit);
     vec![iq_to_xml(build_search_response_with_rsm(iq, &page, &rsm))]
 }

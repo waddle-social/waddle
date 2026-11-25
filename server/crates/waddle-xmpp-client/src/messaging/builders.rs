@@ -19,7 +19,8 @@ use super::namespaces::{
 };
 use super::parsing::payloads::validate_chat_state;
 use super::types::{
-    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, SendMessageOptions, SharedFile,
+    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, MarkupSpanData,
+    SendMessageOptions, SharedFile,
 };
 
 /// Build an XEP-0085 chat-state message with a generated stanza identifier and optional thread.
@@ -429,113 +430,7 @@ pub fn build_outbound_message(
         builder = builder.append(xep_thread::build_thread_element(thread));
     }
     if !options.markup_spans.is_empty() {
-        let mut markups = Element::builder("markup", NS_MARKUP).build();
-        for span in &options.markup_spans {
-            // XEP-0394: inline spans use <span start="..." end="..."><child/></span>;
-            // block-level elements (bcode, bquote) are siblings of span, not wrapped in it;
-            // links use <span start="..." end="..." uri="..."/> with no child element.
-            let el = match span.span_type.as_str() {
-                "bold" => {
-                    let mut el = Element::builder("span", NS_MARKUP)
-                        .attr(
-                            minidom::rxml::xml_ncname!("start").to_owned(),
-                            span.start.to_string(),
-                        )
-                        .attr(
-                            minidom::rxml::xml_ncname!("end").to_owned(),
-                            span.end.to_string(),
-                        )
-                        .build();
-                    el.append_child(Element::builder("strong", NS_MARKUP).build());
-                    el
-                }
-                "italic" => {
-                    let mut el = Element::builder("span", NS_MARKUP)
-                        .attr(
-                            minidom::rxml::xml_ncname!("start").to_owned(),
-                            span.start.to_string(),
-                        )
-                        .attr(
-                            minidom::rxml::xml_ncname!("end").to_owned(),
-                            span.end.to_string(),
-                        )
-                        .build();
-                    el.append_child(Element::builder("emphasis", NS_MARKUP).build());
-                    el
-                }
-                "strikethrough" => {
-                    let mut el = Element::builder("span", NS_MARKUP)
-                        .attr(
-                            minidom::rxml::xml_ncname!("start").to_owned(),
-                            span.start.to_string(),
-                        )
-                        .attr(
-                            minidom::rxml::xml_ncname!("end").to_owned(),
-                            span.end.to_string(),
-                        )
-                        .build();
-                    el.append_child(Element::builder("deleted", NS_MARKUP).build());
-                    el
-                }
-                "code" => {
-                    let mut el = Element::builder("span", NS_MARKUP)
-                        .attr(
-                            minidom::rxml::xml_ncname!("start").to_owned(),
-                            span.start.to_string(),
-                        )
-                        .attr(
-                            minidom::rxml::xml_ncname!("end").to_owned(),
-                            span.end.to_string(),
-                        )
-                        .build();
-                    el.append_child(Element::builder("code", NS_MARKUP).build());
-                    el
-                }
-                // Block-level: <bcode start="..." end="..."/> — sibling of <span>, never wrapped
-                "code_block" => Element::builder("bcode", NS_MARKUP)
-                    .attr(
-                        minidom::rxml::xml_ncname!("start").to_owned(),
-                        span.start.to_string(),
-                    )
-                    .attr(
-                        minidom::rxml::xml_ncname!("end").to_owned(),
-                        span.end.to_string(),
-                    )
-                    .build(),
-                // Block-level: <bquote start="..." end="..."/> — sibling of <span>, never wrapped
-                "blockquote" => Element::builder("bquote", NS_MARKUP)
-                    .attr(
-                        minidom::rxml::xml_ncname!("start").to_owned(),
-                        span.start.to_string(),
-                    )
-                    .attr(
-                        minidom::rxml::xml_ncname!("end").to_owned(),
-                        span.end.to_string(),
-                    )
-                    .build(),
-                // Link: <span start="..." end="..." uri="..."/> in urn:waddle:markup:0 —
-                // XEP-0394 does not define a link span; use custom namespace to avoid
-                // polluting the official markup namespace.
-                "link" => {
-                    let mut b = Element::builder("span", NS_WADDLE_MARKUP)
-                        .attr(
-                            minidom::rxml::xml_ncname!("start").to_owned(),
-                            span.start.to_string(),
-                        )
-                        .attr(
-                            minidom::rxml::xml_ncname!("end").to_owned(),
-                            span.end.to_string(),
-                        );
-                    if let Some(uri) = &span.uri {
-                        b = b.attr(minidom::rxml::xml_ncname!("uri").to_owned(), uri);
-                    }
-                    b.build()
-                }
-                _ => continue,
-            };
-            markups.append_child(el);
-        }
-        builder = builder.append(markups);
+        builder = builder.append(build_markup_element(&options.markup_spans));
     }
     let typed_mentions = options
         .mention_directory
@@ -736,4 +631,89 @@ pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
     }
     file_sharing.append_child(sources);
     Ok(file_sharing)
+}
+
+/// Inline style child element name for a span type, per XEP-0394 §3.
+fn inline_style_child(span_type: &str) -> Option<&'static str> {
+    match span_type {
+        "bold" => Some("strong"),
+        "italic" => Some("emphasis"),
+        "strikethrough" => Some("deleted"),
+        "code" => Some("code"),
+        _ => None,
+    }
+}
+
+fn markup_range_element(name: &str, ns: &str, start: u32, end: u32) -> minidom::ElementBuilder {
+    Element::builder(name, ns)
+        .attr(
+            minidom::rxml::xml_ncname!("start").to_owned(),
+            start.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("end").to_owned(),
+            end.to_string(),
+        )
+}
+
+/// Build `<markup xmlns='urn:xmpp:markup:0'/>` from flat span data.
+///
+/// XEP-0394: "Spans MUST NOT overlap with each other." Inline styles that share
+/// a range are therefore emitted as ONE `<span/>` carrying one child element per
+/// style, never as several spans over the same range. Block-level `<bcode/>` and
+/// `<bquote/>` are siblings of `<span/>`. Links are not defined by XEP-0394 and
+/// use `<span/>` in `urn:waddle:markup:0`.
+fn build_markup_element(spans: &[MarkupSpanData]) -> Element {
+    enum Entry {
+        Inline((u32, u32), Vec<&'static str>),
+        Other(Element),
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    for span in spans {
+        if let Some(child) = inline_style_child(span.span_type.as_str()) {
+            let key = (span.start, span.end);
+            let existing = entries.iter_mut().find_map(|entry| match entry {
+                Entry::Inline(range, styles) if *range == key => Some(styles),
+                _ => None,
+            });
+            match existing {
+                Some(styles) => {
+                    if !styles.contains(&child) {
+                        styles.push(child);
+                    }
+                }
+                None => entries.push(Entry::Inline(key, vec![child])),
+            }
+            continue;
+        }
+        let el = match span.span_type.as_str() {
+            "code_block" => markup_range_element("bcode", NS_MARKUP, span.start, span.end).build(),
+            "blockquote" => markup_range_element("bquote", NS_MARKUP, span.start, span.end).build(),
+            "link" => {
+                let mut b = markup_range_element("span", NS_WADDLE_MARKUP, span.start, span.end);
+                if let Some(uri) = &span.uri {
+                    b = b.attr(minidom::rxml::xml_ncname!("uri").to_owned(), uri);
+                }
+                b.build()
+            }
+            _ => continue,
+        };
+        entries.push(Entry::Other(el));
+    }
+    let mut markups = Element::builder("markup", NS_MARKUP).build();
+    for entry in entries {
+        match entry {
+            Entry::Inline((start, end), styles) => {
+                let mut el = markup_range_element("span", NS_MARKUP, start, end).build();
+                for style in styles {
+                    el.append_child(Element::builder(style, NS_MARKUP).build());
+                }
+                markups.append_child(el);
+            }
+            Entry::Other(el) => {
+                markups.append_child(el);
+            }
+        }
+    }
+    markups
 }

@@ -296,12 +296,14 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
                 features.push(Feature::new(var));
             }
             ("x", NS_DATA_FORMS) => {
-                if has_multiple_form_types(child) {
-                    ill_formed = true;
-                } else if let Some(form_type) = caps_form_type(child) {
-                    if !seen_form_types.insert(form_type) {
-                        ill_formed = true;
+                match caps_form_type(child) {
+                    CapsForm::IllFormed => ill_formed = true,
+                    CapsForm::Valid(form_type) => {
+                        if !seen_form_types.insert(form_type) {
+                            ill_formed = true;
+                        }
                     }
+                    CapsForm::Ignored => {}
                 }
                 extensions.push(child.clone());
             }
@@ -318,50 +320,58 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
     })
 }
 
-/// XEP-0115 §5.4 step 2.4: a `<x type="result"/>` form with more than
-/// one FORM_TYPE field — or one FORM_TYPE field carrying more than
-/// one `<value/>` — is malformed. Either case invalidates the whole
-/// disco#info response.
-pub(in crate::disco::info) fn has_multiple_form_types(form: &Element) -> bool {
-    let mut form_type_fields = 0;
-    let mut form_type_values = 0;
-    for field in form.children().filter(|c| {
-        c.name() == "field" && c.ns() == NS_DATA_FORMS && c.attr("var") == Some("FORM_TYPE")
-    }) {
-        form_type_fields += 1;
-        for value in field
-            .children()
-            .filter(|c| c.name() == "value" && c.ns() == NS_DATA_FORMS)
-        {
-            form_type_values += 1;
-            let _ = value;
-        }
-    }
-    form_type_fields > 1 || form_type_values > 1
+/// How a `<x/>` form in a disco#info response participates in XEP-0115 §5.4.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::disco::info) enum CapsForm {
+    /// Not a result form, no hidden FORM_TYPE, or a valueless FORM_TYPE:
+    /// ignore the form and continue processing (§5.4 step 2.5).
+    Ignored,
+    /// More than one FORM_TYPE field, or a FORM_TYPE field carrying
+    /// `<value/>` elements with different text: the entire response is
+    /// ill-formed (§5.4 step 2.3).
+    IllFormed,
+    /// A well-formed form with this FORM_TYPE.
+    Valid(String),
 }
 
-/// Return the FORM_TYPE used by a well-formed XEP-0128 result form.
-/// Forms with an absent, non-hidden, or valueless FORM_TYPE do not
-/// participate in XEP-0115 verification and are ignored per §5.4.
-pub(in crate::disco::info) fn caps_form_type(form: &Element) -> Option<String> {
+/// Classify an XEP-0128 form for XEP-0115 §5.4. Only result forms whose
+/// FORM_TYPE is `hidden` are evaluated; repeating the same FORM_TYPE
+/// `<value/>` text inside one field is not ill-formed.
+pub(in crate::disco::info) fn caps_form_type(form: &Element) -> CapsForm {
     if form.attr("type") != Some("result") {
-        return None;
+        return CapsForm::Ignored;
     }
 
-    let field = form.children().find(|child| {
-        child.name() == "field"
-            && child.ns() == NS_DATA_FORMS
-            && child.attr("var") == Some("FORM_TYPE")
-    })?;
-    if field.attr("type") != Some("hidden") {
-        return None;
-    }
-
-    field
+    let fields: Vec<&Element> = form
         .children()
-        .find(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
+        .filter(|child| {
+            child.name() == "field"
+                && child.ns() == NS_DATA_FORMS
+                && child.attr("var") == Some("FORM_TYPE")
+        })
+        .collect();
+    if !fields
+        .iter()
+        .any(|field| field.attr("type") == Some("hidden"))
+    {
+        return CapsForm::Ignored;
+    }
+    if fields.len() > 1 {
+        return CapsForm::IllFormed;
+    }
+
+    let values: Vec<String> = fields[0]
+        .children()
+        .filter(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
         .map(Element::text)
-        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if values.iter().any(|value| *value != values[0]) {
+        return CapsForm::IllFormed;
+    }
+    match values.into_iter().next() {
+        Some(value) if !value.trim().is_empty() => CapsForm::Valid(value),
+        _ => CapsForm::Ignored,
+    }
 }
 
 /// Build a disco#info response IQ.

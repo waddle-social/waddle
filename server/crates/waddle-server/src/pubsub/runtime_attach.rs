@@ -171,6 +171,10 @@ const NODE_COLUMNS: &[Column] = &[
     text("roster_groups_allowed", false),
     bigint("item_expire", false),
 ];
+/// The version 8 columns of `pubsub_nodes`, which the PostgreSQL baseline
+/// creates: every current column except the trailing
+/// `roster_groups_allowed`, which migration 2027 adds with version 9.
+const NODE_COLUMNS_V8: &[Column] = NODE_COLUMNS.split_at(NODE_COLUMNS.len() - 1).0;
 const ITEM_COLUMNS: &[Column] = &[
     Column {
         name: "seq",
@@ -766,10 +770,20 @@ pub(crate) async fn verify_space_binding_baseline(
         })?;
         row.get::<String>(0)?
     };
-    for table in TABLES
+    for current in TABLES
         .iter()
         .filter(|table| table.name != PUBSUB_SCHEMA_MARKER_TABLE)
     {
+        // The baseline is version 8, before `roster_groups_allowed`.
+        let baseline = Table {
+            columns: if current.name == "pubsub_nodes" {
+                NODE_COLUMNS_V8
+            } else {
+                current.columns
+            },
+            ..*current
+        };
+        let table = &baseline;
         async {
             verify_table(tx, &schema, table).await?;
             verify_columns(tx, &schema, table).await?;
@@ -1995,4 +2009,47 @@ async fn verify_counter(
         return Err(PubSubRuntimeAttachError::InvalidCounter { component: counter });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod baseline_shape_tests {
+    use super::{NODE_COLUMNS, NODE_COLUMNS_V8};
+
+    /// Column names of `pubsub_nodes` in the PostgreSQL baseline, in order.
+    fn baseline_node_columns() -> Vec<String> {
+        let baseline = include_str!("../../sql/baseline/postgres.sql");
+        let start = baseline
+            .find("CREATE TABLE pubsub_nodes (")
+            .expect("baseline creates pubsub_nodes");
+        let body = &baseline[start..];
+        let end = body.find("\n);").expect("table definition ends");
+        body["CREATE TABLE pubsub_nodes (".len()..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("CONSTRAINT"))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The Space bindings migration verifies the baseline against
+    /// `NODE_COLUMNS_V8`; the version 9 column is added by migration 2027.
+    #[test]
+    fn the_version_8_node_columns_are_the_baseline_columns() {
+        let v8: Vec<&str> = NODE_COLUMNS_V8.iter().map(|column| column.name).collect();
+        assert_eq!(v8, baseline_node_columns());
+    }
+
+    #[test]
+    fn migration_2027_adds_exactly_the_remaining_node_column() {
+        let added: Vec<&str> = NODE_COLUMNS
+            .iter()
+            .skip(NODE_COLUMNS_V8.len())
+            .map(|column| column.name)
+            .collect();
+        assert_eq!(added, ["roster_groups_allowed"]);
+        let migration = include_str!("../../sql/migrations/2027_pubsub_roster_groups.postgres.sql");
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS roster_groups_allowed text"));
+        assert!(migration.contains("SET version = 9"));
+    }
 }

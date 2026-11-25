@@ -22318,13 +22318,17 @@ public func expandCommunityEvent(event: WaddleEvent, fromMs: Int64, toMs: Int64)
 })
 }
 /**
- * XEP-0392 §"Angle generation": hue in degrees (`0.0..360.0`) for
- * `input` (nickname or bare JID, used verbatim — no normalization).
+ * XEP-0392: the `#rrggbb` color for `input` (nickname or bare JID, used
+ * verbatim, no normalization): SHA-1 hue (section "Angle generation")
+ * converted with HSLuv `hsluvToRgb` (section "RGB generation") at
+ * `saturation` and `lightness` (0.0-100.0).
  */
-public func consistentColorHue(input: String) -> Double  {
-    return try!  FfiConverterDouble.lift(try! rustCall() {
-    uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hue(
-        FfiConverterString.lower(input),$0
+public func consistentColorHex(input: String, saturation: Double, lightness: Double) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_waddle_xmpp_client_ffi_fn_func_consistent_color_hex(
+        FfiConverterString.lower(input),
+        FfiConverterDouble.lower(saturation),
+        FfiConverterDouble.lower(lightness),$0
     )
 })
 }
@@ -22357,7 +22361,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_func_expand_community_event() != 53397) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hue() != 30766) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_func_consistent_color_hex() != 60148) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_func_parse_jid() != 54118) {

@@ -10,6 +10,8 @@
 //! ready to be passed to [`super::super::super::build_iq_error_xml_typed`]
 //! together with the `<iq>` `id` and addressing metadata.
 
+use minidom::Element;
+use waddle_xmpp::xep::{SearchRequestError, NS_CHANNEL_SEARCH_ERROR};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Default human-readable language tag attached to every typed
@@ -26,6 +28,41 @@ pub(crate) fn bad_request_iq_error(text: &str) -> StanzaError {
         DEFAULT_LANG,
         text,
     )
+}
+
+/// XEP-0433 search request failures, each with the stanza condition, error
+/// type and application-defined condition the spec fixes: no-search-conditions
+/// is `bad-request`/`cancel`, invalid-search-terms `bad-request`/`modify`,
+/// invalid-sort-key `feature-not-implemented`/`modify`; a malformed request
+/// is a plain `bad-request`/`modify`.
+pub(crate) fn channel_search_iq_error(error: SearchRequestError) -> StanzaError {
+    let (type_, condition, text) = match error {
+        SearchRequestError::Malformed => (
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "Malformed IQ payload.",
+        ),
+        SearchRequestError::NoSearchConditions => (
+            ErrorType::Cancel,
+            DefinedCondition::BadRequest,
+            "A search request needs search terms in the q field.",
+        ),
+        SearchRequestError::InvalidSearchTerms => (
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "The q field contains no term suitable for search.",
+        ),
+        SearchRequestError::InvalidSortKey => (
+            ErrorType::Modify,
+            DefinedCondition::FeatureNotImplemented,
+            "The requested sort key is not supported.",
+        ),
+    };
+    let mut stanza_error = StanzaError::new(type_, condition, DEFAULT_LANG, text);
+    stanza_error.other = error
+        .application_condition()
+        .map(|name| Element::builder(name, NS_CHANNEL_SEARCH_ERROR).build());
+    stanza_error
 }
 
 /// `<bad-request/>` (modify) for legacy specs that describe the same

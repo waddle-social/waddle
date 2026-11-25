@@ -214,6 +214,76 @@ fn test_parse_disco_info_response_retains_within_form_rejection() {
     }
 }
 
+fn form_with_field(attr_type: &str, field: Element) -> Element {
+    Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), attr_type)
+        .append(field)
+        .build()
+}
+
+#[test]
+fn test_parse_disco_info_response_accepts_identical_repeated_form_type_values() {
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field(
+            "result",
+            form_type_field(&[form_type, form_type]),
+        ))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        !parsed.ill_formed,
+        "XEP-0115 §5.4 only rejects FORM_TYPE values with different character data"
+    );
+}
+
+#[test]
+fn test_parse_disco_info_response_ignores_forms_without_hidden_form_type() {
+    let non_hidden = Element::builder("field", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append("urn:xmpp:dataforms:softwareinfo")
+                .build(),
+        )
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append("urn:xmpp:dataforms:other")
+                .build(),
+        )
+        .build();
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field("result", non_hidden.clone()))
+        .append(form_with_field("result", non_hidden))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        !parsed.ill_formed,
+        "forms whose FORM_TYPE is not hidden are ignored, not evaluated (§5.4 step 2.5)"
+    );
+}
+
+#[test]
+fn test_parse_disco_info_response_ignores_non_result_forms() {
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field(
+            "form",
+            form_type_field(&[form_type, "urn:xmpp:dataforms:other"]),
+        ))
+        .append(form_with_field("form", form_type_field(&[form_type])))
+        .append(form_with_field("form", form_type_field(&[form_type])))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(!parsed.ill_formed);
+}
+
 #[test]
 fn test_server_features_include_core_features() {
     let features = server_features();

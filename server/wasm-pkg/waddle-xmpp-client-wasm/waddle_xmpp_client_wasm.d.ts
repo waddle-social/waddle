@@ -1114,20 +1114,11 @@ export class WaddleResumeState {
 }
 
 /**
- * Compute a CSS `hsl(...)` string for `input` using XEP-0392 with
- * custom saturation/lightness (percentages, 0.0–100.0). The CVD
- * correction is "none" — pass the hue back through `xep0392_consistent_hue`
- * and `apply_cvd_correction` in a future iteration if CVD modes
- * become a user preference.
+ * XEP-0392 consistent color for `input` as a `#rrggbb` string, using
+ * HSLuv `saturation` and `lightness` (0.0-100.0).
+ *
+ * Stateless free function: does not require a WaddleClient instance.
  */
 export function xep0392_consistent_color(input: string, saturation: number, lightness: number): string;
-
-/**
- * Compute the XEP-0392 consistent-color hue (0.0–360.0) for `input`.
- *
- * Stateless free function — does not require a WaddleClient instance.
- * JS callers receive a Number.
- */
-export function xep0392_consistent_hue(input: string): number;
 
 export default function init(): Promise<void>;
