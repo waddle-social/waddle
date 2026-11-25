@@ -181,3 +181,19 @@ fn xep0393_unclosed_directive_stays_plain() {
     let spans = parse_spans("*unterminated bold");
     assert_eq!(spans, vec![Span::Plain("*unterminated bold".to_owned())]);
 }
+
+#[test]
+fn xep0393_preformatted_block_keeps_leading_and_inner_blank_lines() {
+    assert_eq!(
+        parse_blocks("```\n\nfoo\n\nbar\n```"),
+        vec![Block::CodeBlock("\nfoo\n\nbar".to_owned())]
+    );
+    assert_eq!(
+        parse_blocks("```\n\n```"),
+        vec![Block::CodeBlock(String::new())]
+    );
+    assert_eq!(
+        parse_blocks("```\nfoo\n```"),
+        vec![Block::CodeBlock("foo".to_owned())]
+    );
+}
