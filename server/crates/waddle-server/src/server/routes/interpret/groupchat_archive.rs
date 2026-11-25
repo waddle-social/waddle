@@ -483,16 +483,10 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
             },
         );
     }
-    if !plan_tombstone_replay(
-        deps,
-        waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-            stanza_id: target.to_owned(),
-            room: room.clone(),
-        },
-    )
-    .await
-    {
-        return GroupchatRetractionTombstoneOutcome::Failed;
+    for scrub_target in groupchat_scrub_targets(room, &original) {
+        if !plan_tombstone_replay(deps, scrub_target).await {
+            return GroupchatRetractionTombstoneOutcome::Failed;
+        }
     }
     if existing {
         GroupchatRetractionTombstoneOutcome::AlreadyTombstoned
@@ -662,10 +656,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             }
         };
     let target_message_id = original.id.as_str();
-    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-        stanza_id: target_message_id.to_string(),
-        room: room.clone(),
-    };
+    let scrub_targets = groupchat_scrub_targets(room, &original);
     // Tombstones are terminal. A heal-retry of an XEP-0424 author
     // retraction must never downgrade the attribution or reason on an
     // existing XEP-0425 moderation tombstone.
@@ -683,10 +674,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         // pre-tombstone reflections replayable from SM queues /
         // pending_delivery. The scrub is idempotent, so re-running it
         // on the heal path closes that window (Qodo review on PR #1412).
-        scrub_unacked_for_tombstone(
+        scrub_unacked_for_tombstones(
             sm_session_registry,
             pending_storage,
-            &scrub_target,
+            &scrub_targets,
             "ApplyGroupchatRetractionTombstone",
         )
         .await;
@@ -744,10 +735,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             // Same crash-window heal as the pre-check exit: the winner
             // may not have completed its scrub yet (Qodo review on
             // PR #1412).
-            scrub_unacked_for_tombstone(
+            scrub_unacked_for_tombstones(
                 sm_session_registry,
                 pending_storage,
-                &scrub_target,
+                &scrub_targets,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -759,10 +750,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 original_id = %original.id,
                 "ApplyGroupchatRetractionTombstone: target row not found at replace time"
             );
-            scrub_unacked_for_tombstone(
+            scrub_unacked_for_tombstones(
                 sm_session_registry,
                 pending_storage,
-                &scrub_target,
+                &scrub_targets,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -775,10 +766,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
                 %error,
                 "ApplyGroupchatRetractionTombstone: terminal tombstone replacement failed"
             );
-            scrub_unacked_for_tombstone(
+            scrub_unacked_for_tombstones(
                 sm_session_registry,
                 pending_storage,
-                &scrub_target,
+                &scrub_targets,
                 "ApplyGroupchatRetractionTombstone",
             )
             .await;
@@ -793,10 +784,10 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     // that key by the room's XEP-0359 stamp, and so a colliding wire
     // id in another conversation is not accidentally scrubbed
     // (Codex P1, Copilot review on PR #305).
-    scrub_unacked_for_tombstone(
+    scrub_unacked_for_tombstones(
         sm_session_registry,
         pending_storage,
-        &scrub_target,
+        &scrub_targets,
         "ApplyGroupchatRetractionTombstone",
     )
     .await;
@@ -821,6 +812,15 @@ fn replay_target(
             wire_id: wire_id.clone(),
             author: author.clone(),
             archive: archive.clone(),
+        },
+        TombstoneTarget::GroupchatCorrection {
+            replaced_id,
+            occupant,
+            room,
+        } => TombstoneReplayTarget::GroupchatCorrection {
+            replaced_id: replaced_id.clone(),
+            occupant: occupant.clone(),
+            room: room.clone(),
         },
     }
 }
@@ -871,6 +871,60 @@ pub(super) async fn plan_tombstone_replay(
         super::effects::direct::ExternalDirectEffect::ScrubReplayForTombstone { target },
     );
     true
+}
+
+/// Replay-scrub targets of a retracted groupchat message: the original's
+/// reflection (keyed by the room stanza-id) plus, per XEP-0424 §Tombstones,
+/// each cached XEP-0308 correction of it. XEP-0308 §Business Rules limits a
+/// MUC correction to the original's full JID, so corrections are keyed by
+/// the original's occupant JID and by every id a client may name in
+/// `<replace id/>` (room stanza-id, wire id, origin-id).
+pub(super) fn groupchat_scrub_targets(
+    room: &BareJid,
+    original: &MamArchivedMessage,
+) -> Vec<waddle_xmpp::tombstone::TombstoneTarget> {
+    use waddle_xmpp::tombstone::TombstoneTarget;
+    let mut targets = vec![TombstoneTarget::Groupchat {
+        stanza_id: original.id.clone(),
+        room: room.clone(),
+    }];
+    let Ok(occupant) = original.from.clone().try_into_full() else {
+        return targets;
+    };
+    let mut ids = vec![original.id.as_str()];
+    ids.extend(original.stanza_id.as_ref().map(|id| id.id.as_str()));
+    ids.extend(original.origin_id.as_ref().map(|id| id.as_str()));
+    let mut seen = Vec::new();
+    for id in ids {
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        targets.push(TombstoneTarget::GroupchatCorrection {
+            replaced_id: id.to_owned(),
+            occupant: occupant.clone(),
+            room: room.clone(),
+        });
+    }
+    targets
+}
+
+/// [`scrub_unacked_for_tombstone`] over several targets; confirms only when
+/// every scrub succeeded.
+pub(super) async fn scrub_unacked_for_tombstones(
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    pending_storage: Option<
+        &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+    >,
+    targets: &[waddle_xmpp::tombstone::TombstoneTarget],
+    site: &'static str,
+) -> bool {
+    let mut completed = true;
+    for target in targets {
+        completed &=
+            scrub_unacked_for_tombstone(sm_session_registry, pending_storage, target, site).await;
+    }
+    completed
 }
 
 /// Scrub both replay stores, returning confirmation only when both succeed.

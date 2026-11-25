@@ -71,6 +71,22 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                         && author == recorded_author
                         && archive == recorded_archive
                 }
+                (
+                    TombstoneTarget::GroupchatCorrection {
+                        replaced_id,
+                        occupant,
+                        room,
+                    },
+                    TombstoneReplayTarget::GroupchatCorrection {
+                        replaced_id: recorded_id,
+                        occupant: recorded_occupant,
+                        room: recorded_room,
+                    },
+                ) => {
+                    replaced_id == recorded_id
+                        && occupant == recorded_occupant
+                        && room == recorded_room
+                }
                 _ => false,
             }
         }

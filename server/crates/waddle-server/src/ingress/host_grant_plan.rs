@@ -308,7 +308,8 @@ fn reduce_intent(
             of_room(intent, &mutation.archive, reduction)
         }
         IngressEffectIntent::TombstoneReplayDeletion { target, .. } => match target {
-            TombstoneReplayTarget::Groupchat { room: scrubbed, .. } => {
+            TombstoneReplayTarget::Groupchat { room: scrubbed, .. }
+            | TombstoneReplayTarget::GroupchatCorrection { room: scrubbed, .. } => {
                 of_room(intent, scrubbed, reduction)
             }
             TombstoneReplayTarget::Direct { .. } => Err(Unclassified),
@@ -482,7 +483,10 @@ fn reduce_external(
                 }
             }
             ExternalDirectEffect::ScrubReplayForTombstone { target } => match target {
-                TombstoneTarget::Groupchat { room, .. } => of_room(effect, room, reduction),
+                TombstoneTarget::Groupchat { room, .. }
+                | TombstoneTarget::GroupchatCorrection { room, .. } => {
+                    of_room(effect, room, reduction)
+                }
                 TombstoneTarget::Direct { .. } => Err(Unclassified),
             },
             ExternalDirectEffect::DmCallThreadState { .. } => Err(Unclassified),

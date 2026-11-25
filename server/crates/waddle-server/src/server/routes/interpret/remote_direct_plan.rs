@@ -192,7 +192,8 @@ fn recipient_intent(intent: &IngressEffectIntent, recipient: &BareJid, sender: &
             TombstoneReplayTarget::Direct {
                 author, archive, ..
             } => archive == recipient && author == sender,
-            TombstoneReplayTarget::Groupchat { .. } => false,
+            TombstoneReplayTarget::Groupchat { .. }
+            | TombstoneReplayTarget::GroupchatCorrection { .. } => false,
         },
         IngressEffectIntent::DmCallThreadState { state, .. } => {
             conversation_call_state(state, recipient, sender)
@@ -240,7 +241,7 @@ fn sender_tombstone(target: &TombstoneTarget, recipient: &BareJid, sender: &Bare
         TombstoneTarget::Direct {
             author, archive, ..
         } => archive == recipient && author == sender,
-        TombstoneTarget::Groupchat { .. } => false,
+        TombstoneTarget::Groupchat { .. } | TombstoneTarget::GroupchatCorrection { .. } => false,
     }
 }
 
