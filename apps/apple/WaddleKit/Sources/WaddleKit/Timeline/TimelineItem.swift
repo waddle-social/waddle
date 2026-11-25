@@ -216,11 +216,11 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     }
 
     /// Every id a pin of this message may be named by. In 1:1 the server
-    /// names it by `@id`, and falls back to an archive id for a row that
-    /// has none.
+    /// names it by `@id`; for a message that has none it falls back to an
+    /// archive id and then to the origin-id.
     public var pinnedIDs: [String] {
         if conversation.isRoom { return roomStanzaID.map { [$0] } ?? [] }
-        return [identity.messageID].compactMap(\.self) + identity.stanzaIDs.map(\.id)
+        return [identity.messageID, identity.originID].compactMap(\.self) + identity.stanzaIDs.map(\.id)
     }
 
     /// The id for reactions (XEP-0444) and replies (XEP-0461): in a

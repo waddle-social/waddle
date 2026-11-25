@@ -35,7 +35,9 @@ extension SessionCoordinator {
         }
         await markDisplayedIfVisible(conversation)
         // A room's pins, or those of a conversation of two: one query, to the room or to the other person.
-        await refreshPins(in: conversation.jid)
+        if keepsPins(conversation) {
+            await refreshPins(in: conversation.jid)
+        }
         if conversation.isRoom {
             await refreshRoomBots(in: conversation.jid)
         }

@@ -67,7 +67,7 @@ extension SessionCoordinator {
     /// pin; unknown while the room's disco#info has not said. In a
     /// conversation of two either person may, as on web.
     public func pinAccess(in conversation: ConversationID) -> PinAccess {
-        guard conversation.isRoom else { return .allowed }
+        guard conversation.isRoom else { return keepsPins(conversation) ? .allowed : .denied }
         guard presence.joinedRooms.contains(conversation.jid),
               let occupant = selfOccupant(in: conversation.jid) else { return .denied }
         if occupant.affiliation == .owner || occupant.affiliation == .admin { return .allowed }
@@ -76,6 +76,14 @@ extension SessionCoordinator {
         case .adminsOnly: return .denied
         case nil: return .unknown
         }
+    }
+
+    /// Whether `conversation` has pins this server keeps: a room, or a
+    /// conversation of two with someone on our own server. The server
+    /// keeps none with a person elsewhere, and a query for them would go
+    /// to their server and tell it when the conversation was opened.
+    func keepsPins(_ conversation: ConversationID) -> Bool {
+        conversation.isRoom || conversation.jid.domain == account.jid.domain
     }
 
     /// Reads who may pin in `room` again after the room said its

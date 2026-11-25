@@ -98,10 +98,11 @@ public final class TimelineStore {
     @discardableResult
     public func ingest(_ message: WireMessage, route: MessageRoute, receivedAt: Date = Date()) -> TimelineIngestResult {
         let conversation = route.conversation
-        // A notice that something was pinned changes the pins, where it is
-        // live; from the archive it is history of a list we read whole. It
-        // has a body in a conversation of two and is never a row.
-        if message.pinEvent != nil { return .ignored }
+        // In a conversation of two a notice that something was pinned is
+        // never a row, though it has a body: live it changes the pins, and
+        // the list is read whole when the conversation opens. A room's
+        // notice in its history stays a row, as on web.
+        if message.pinEvent != nil, !conversation.isRoom { return .ignored }
         if let mutation = MessageMutation.of(message, isMine: route.isMine) {
             apply(mutation, in: conversation, timestamp: message.timestamp)
             return .mutation

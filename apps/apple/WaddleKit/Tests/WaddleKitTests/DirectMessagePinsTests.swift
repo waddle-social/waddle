@@ -37,6 +37,63 @@ struct DirectMessagePinsTests {
         #expect(coordinator.pinAccess(in: bobConversation) == .allowed)
     }
 
+    @Test func aMessageInTheConversationOffersPinAndAPinnedOneUnpin() throws {
+        let (coordinator, _) = online()
+        coordinator.route(directMessage("lunch at noon", from: bobFull, to: meBare, id: "wire-1"))
+        let item = try row("wire-1", in: coordinator)
+        func offered() -> [MessageAction] {
+            MessageActions.available(for: item, in: MessageActionContext(
+                thread: nil, replyCount: 0, isPinned: coordinator.isPinned(item), pinning: coordinator.pinAccess(in: bobConversation)
+            ))
+        }
+        #expect(offered().contains(.pin))
+        coordinator.route(pinEvent(.pinned, target: "wire-1", by: meBare, to: bobBare))
+        #expect(offered().contains(.unpin))
+        #expect(!offered().contains(.pin))
+    }
+
+    /// The server keeps no pins with a person on another server, and asking for them would go to that server.
+    @Test func aConversationWithSomeoneElsewhereHasNoPins() async {
+        let (coordinator, port) = online()
+        let away = ConversationID.direct(jid("dana@elsewhere.example").bare)
+        port.pinsByConversation[away.jid] = [PinEntry(
+            targetStanzaID: "x", pinner: nil, pinnedAt: nil,
+            preview: PinPreview(author: nil, authorNick: nil, text: "", messageTimestamp: nil)
+        )]
+        #expect(coordinator.pinAccess(in: away) == .denied)
+
+        await coordinator.open(away, screen: ConversationScreenID())
+        #expect(coordinator.pins.pins(in: away.jid).isEmpty, "never asked for")
+
+        coordinator.route(pinEvent(.pinned, target: "x", by: jid("dana@elsewhere.example"), to: meBare))
+        #expect(coordinator.pins.pins(in: away.jid).isEmpty)
+    }
+
+    /// The author took a pinned message back: the server unpins it and says so.
+    @Test func aRetractedMessagesPinGoesWithIt() throws {
+        let (coordinator, _) = online()
+        coordinator.route(directMessage("lunch at noon", from: bobFull, to: meBare, id: "wire-1"))
+        coordinator.route(pinEvent(.pinned, target: "wire-1", by: meBare, to: bobBare))
+        coordinator.route(pinEvent(.unpinned, target: "wire-1", by: bobBare, to: meBare))
+        #expect(coordinator.pins.pins(in: bob).isEmpty)
+        #expect(!coordinator.isPinned(try row("wire-1", in: coordinator)))
+    }
+
+    @Test func aPinOfAMessageNotLoadedIsListedWithItsPreview() {
+        let (coordinator, _) = online()
+        coordinator.route(pinEvent(.pinned, target: "older", by: bobBare, to: meBare))
+        #expect(coordinator.pins.pins(in: bob).first?.preview.text == "lunch at noon")
+    }
+
+    @Test func aRoomsPinNoticeInItsHistoryStaysARow() {
+        let (coordinator, _) = online()
+        var notice = roomMessage("bob pinned a message", from: "general", stanzaID: "n1")
+        notice.pinEvent = PinEvent(action: .pinned, targetStanzaID: "s1", by: bobBare, preview: nil)
+        notice.source = .archive(mamID: "mam-1")
+        coordinator.ingestArchive(ArchivePage(messages: [notice], first: nil, isComplete: true))
+        #expect(coordinator.timelines.timeline(for: roomConversation).items.count == 1)
+    }
+
     @Test func aPinIsAskedForByTheMessagesOwnIDNotItsOriginID() async throws {
         let (coordinator, port) = online()
         var message = directMessage("lunch at noon", from: bobFull, to: meBare, id: "wire-1", archiveID: "mine-1")

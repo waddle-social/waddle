@@ -714,8 +714,12 @@ public final class SessionCoordinator {
             // In a conversation of two the server tells both people, the
             // pinner too, with a chat message from the pinner to the
             // other: the route files it under the other person either way.
-            // It has words in it and is still no message.
-            pins.apply(pin, in: route.conversation.jid)
+            // It has words in it and is still no message. A private
+            // message from a room's occupant is addressed like a
+            // conversation of two with the room: not one that has pins.
+            if keepsPins(route.conversation), route.conversation.isRoom || directory.channel(for: route.conversation.jid) == nil {
+                pins.apply(pin, in: route.conversation.jid)
+            }
             return
         }
         trackChatState(message, route: route)

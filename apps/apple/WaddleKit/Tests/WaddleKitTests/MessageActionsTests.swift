@@ -98,9 +98,10 @@ struct MessageActionsTests {
         coordinator.status.connection = .offline(retryAt: nil)
         let id = try #require(await coordinator.send(Draft(text: "queued"), in: bobConversation))
         let echo = try #require(coordinator.timelines.timeline(for: bobConversation).item(withID: id))
-        // 1:1 has no pins; an echo carries its own origin id, so others
-        // could target it, but it cannot be corrected before it is sent.
-        #expect(MessageActions.available(for: echo, in: context(pinning: .denied))
+        // An echo carries its own origin id, so others could target it, but
+        // it cannot be corrected before it is sent, nor pinned: the server
+        // has not seen it.
+        #expect(MessageActions.available(for: echo, in: context())
             == reactions + [.addReaction, .reply, .startThread, .selectText, .delete])
     }
 
@@ -129,8 +130,8 @@ struct MessageActionsTests {
     @Test func labelsAreTheSameEverywhere() {
         #expect(MessageAction.startThread.title == "Reply in thread")
         #expect(MessageAction.openThread.title == "Open thread")
-        #expect(MessageAction.pin.title == "Pin to room")
-        #expect(MessageAction.unpin.title == "Unpin from room")
+        #expect(MessageAction.pin.title == "Pin message")
+        #expect(MessageAction.unpin.title == "Unpin message")
         #expect(MessageAction.react("👍").title == "React with 👍")
         #expect(MessageAction.react("👍").accessibilityLabel == "React to message with 👍")
         #expect(MessageAction.reply.accessibilityLabel == "Reply")
