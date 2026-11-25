@@ -8888,6 +8888,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "waddle-broker"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "elliptic-curve",
+ "hex",
+ "hkdf 0.13.0",
+ "jsonwebtoken",
+ "p256",
+ "proptest",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "turso",
+ "uuid",
+ "waddle-broker-core",
+ "waddle-tenancy",
+ "zeroize",
+]
+
+[[package]]
 name = "waddle-broker-core"
 version = "0.1.0"
 dependencies = [
@@ -9044,6 +9076,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "waddle-broker",
  "waddle-broker-core",
  "waddle-ecdysis",
  "waddle-extensions",
