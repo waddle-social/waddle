@@ -507,6 +507,7 @@
 		983DA929CB7287464454FBF3 /* ConversationInspectorPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05CDE3002C84AACE6E61513C /* ConversationInspectorPlacement.swift */; };
 		985578F2C1EDA16F80D1107A /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16D87BBE11A6EE95142654E /* AuthModels.swift */; };
 		993D6DB8E4D4854D6729F56D /* EncryptedAttachmentStatusCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79EA3909819BAAAA3BAC4042 /* EncryptedAttachmentStatusCards.swift */; };
+		99B1E91F15F962B8686AC896 /* CallCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = 703EA5C6E92D95EA6C529FE8 /* CallCamera.swift */; };
 		9A3AA2A1BAE5BFA94DFDCA9E /* CallBackgroundProcessorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 467769E03D180224C2EB64BD /* CallBackgroundProcessorTests.swift */; };
 		9A82862AAAA8B383D29523FB /* DirectDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CAA209A6DBE12965CCB98D6 /* DirectDetailsForm.swift */; };
 		9AA1924C80BB3D3F5650C194 /* ProfileSave.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CD60D4DBA74E88E6838393F /* ProfileSave.swift */; };
@@ -647,6 +648,7 @@
 		C89ADE60D19E22523838019E /* ComposerIconButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC7A59F57E3733FDBC2338D9 /* ComposerIconButton.swift */; };
 		C91693FEC0077C850DAADF61 /* FeedPostCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3C54D5AD6E8BCD5E9D0FE01 /* FeedPostCard.swift */; };
 		C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68718ABC269E7FE0832170C /* EncryptedFileDownloader.swift */; };
+		C9EBAE164CB7D3CD21970A10 /* CallCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = 703EA5C6E92D95EA6C529FE8 /* CallCamera.swift */; };
 		CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745E4D7A386971E4AA451053 /* BridgeLog.swift */; };
 		CA6475DE01C10D51D4C11731 /* MessageAttachmentKind.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */; };
 		CB7DD7B71113C29CA61E8671 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB28E8396182DE8CD3D32A87 /* Components.swift */; };
@@ -995,6 +997,7 @@
 		6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Messaging.swift"; sourceTree = "<group>"; };
 		6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventDetailSheet.swift; sourceTree = "<group>"; };
 		7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerActions.swift; sourceTree = "<group>"; };
+		703EA5C6E92D95EA6C529FE8 /* CallCamera.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCamera.swift; sourceTree = "<group>"; };
 		71B981349099DC164D28D158 /* TimelineDayLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineDayLabel.swift; sourceTree = "<group>"; };
 		73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		745E4D7A386971E4AA451053 /* BridgeLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLog.swift; sourceTree = "<group>"; };
@@ -1955,6 +1958,7 @@
 		A1878D8BDB843DC9CF1A90BB /* Media */ = {
 			isa = PBXGroup;
 			children = (
+				703EA5C6E92D95EA6C529FE8 /* CallCamera.swift */,
 				CAAED2CF4299C7207E9A02F1 /* CallDeviceCatalog.swift */,
 				3E65DBE7EC80564A03D00EF4 /* CallMicrophoneProcessing.swift */,
 				AC4495B288A97476E32F59EB /* CallRemoteVolumes.swift */,
@@ -2481,6 +2485,7 @@
 				9D90003806BC9B327D9027EB /* BridgeLog.swift in Sources */,
 				3D9F07444016E6B9D479F18B /* CallAnchorCardView.swift in Sources */,
 				5E9324CFA5AB9954D2988F71 /* CallBackgroundProcessor.swift in Sources */,
+				C9EBAE164CB7D3CD21970A10 /* CallCamera.swift in Sources */,
 				4870BBF3B2C03366C4E65D0C /* CallCaptureSources.swift in Sources */,
 				9318BA8E9F9BE0AD8FA8EAF6 /* CallControlBar.swift in Sources */,
 				6D2C8FE6E22C4CD0086394AB /* CallDeviceCatalog.swift in Sources */,
@@ -2887,6 +2892,7 @@
 				CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */,
 				FED198AE05DC2E647EB73BB9 /* CallAnchorCardView.swift in Sources */,
 				8C4C9EEFC89E448A36BCBFA8 /* CallBackgroundProcessor.swift in Sources */,
+				99B1E91F15F962B8686AC896 /* CallCamera.swift in Sources */,
 				E7B3EDD4368522FCBBF408C6 /* CallCaptureSources.swift in Sources */,
 				D6B197EAAECDB9DCA6D90E70 /* CallControlBar.swift in Sources */,
 				90EE1ACC01A0CEEA3760BC11 /* CallDeviceCatalog.swift in Sources */,
