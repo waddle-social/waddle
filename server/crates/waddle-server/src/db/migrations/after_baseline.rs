@@ -92,6 +92,9 @@ pub const XMPP_OAUTH_GRANTS_VERSION: i64 = 2026;
 /// Version of the migration that brings the PostgreSQL baseline's PubSub
 /// store to schema version 9 (`pubsub_nodes.roster_groups_allowed`).
 pub const PUBSUB_ROSTER_GROUPS_VERSION: i64 = 2027;
+/// Version of the migration that brings the PostgreSQL PubSub store to
+/// schema version 10 (`pubsub_nodes.item_expire`).
+pub const PUBSUB_ITEM_EXPIRE_VERSION: i64 = 2028;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -338,6 +341,14 @@ pub fn all() -> Vec<Migration> {
             ),
             sql_postgres: include_str!(
                 "../../../sql/migrations/2027_pubsub_roster_groups.postgres.sql"
+            ),
+        },
+        Migration {
+            version: PUBSUB_ITEM_EXPIRE_VERSION,
+            description: "pubsub item expiry".to_owned(),
+            sql_sqlite: include_str!("../../../sql/migrations/2028_pubsub_item_expire.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2028_pubsub_item_expire.postgres.sql"
             ),
         },
     ]
