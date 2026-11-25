@@ -10,6 +10,7 @@ use super::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
 use super::{info, warn};
 use super::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
 use super::{BareJid, FullJid, Jid};
+use waddle_xmpp_core::pubsub::build_pubsub_configuration_event;
 
 /// Typed bundle of `fan_out_publish` inputs — keeps the public
 /// signature compact (one `state` + one struct) while still letting
@@ -71,6 +72,8 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) enum Notificat
     },
     /// XEP-0060 §8.4: sent while the node and its subscriptions still exist.
     Delete,
+    /// XEP-0060 §8.2.4: the node's configuration changed.
+    Configure,
     /// XEP-0060 §8.5: a single `<purge/>` per subscriber.
     Purge,
 }
@@ -221,6 +224,14 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                 return;
             }
             build_pubsub_delete_event(&from, &from, node)
+        }
+        Notification::Configure => {
+            // XEP-0503: a Space always notifies its subscribers of a
+            // configuration change (`pubsub#notify_config` is true).
+            if !space_node {
+                return;
+            }
+            build_pubsub_configuration_event(&from, &from, node, &node_cfg, true)
         }
         Notification::Purge => {
             // §8.5.2: purge notifications follow the node's item-deletion
@@ -719,6 +730,86 @@ pub async fn fan_out_delete(state: &WebSocketState, owner: &BareJid, node: &str,
         },
     )
     .await;
+}
+
+/// XEP-0060 §8.2.4 configuration change notification to every deliverable
+/// subscriber of a Space node, sent after the new configuration is stored.
+pub async fn fan_out_configuration(state: &WebSocketState, owner: &BareJid, node: &str) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner,
+            node,
+            is_pep: false,
+            notification: Notification::Configure,
+        },
+    )
+    .await;
+}
+
+/// XEP-0060 §8.9.2 / §12.20 notification to the owners of a Space node that
+/// `subscriber`'s subscription changed (`pubsub#notify_sub`).
+pub async fn fan_out_subscription_change(
+    state: &WebSocketState,
+    service: &BareJid,
+    node: &str,
+    subscriber: &Jid,
+    subscription: waddle_xmpp::pubsub::SubscriptionState,
+    subid: Option<&waddle_xmpp::pubsub::SubId>,
+) {
+    let storage = &state.deps.protocol.pubsub_storage;
+    let rows = match storage.list_node_affiliations(service, node).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(node, error = %error, "Subscription notice skipped: owners unreadable");
+            return;
+        }
+    };
+    let from = Jid::from(service.clone());
+    for (owner, affiliation) in rows {
+        if affiliation != waddle_xmpp::pubsub::Affiliation::Owner || !state.serves(&owner) {
+            continue;
+        }
+        let mut resources =
+            crate::server::routes::websocket::handlers::account_reads::resources(state, &owner)
+                .await;
+        if let Ok(detached) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .detached_resources_for_user(&owner)
+            .await
+        {
+            resources.extend(detached);
+        }
+        for resource in resources {
+            let message = waddle_xmpp_core::pubsub::build_pubsub_subscription_event(
+                &from,
+                &Jid::from(resource.clone()),
+                node,
+                subscriber,
+                subscription,
+                subid,
+            );
+            let stanza = Stanza::Message(message);
+            let registry = &state.deps.protocol.connection_registry;
+            if !matches!(
+                registry.try_send_to(&resource, stanza.clone()),
+                BroadcastOutcome::Delivered
+            ) {
+                let _ = state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(
+                        &resource,
+                        &stanza,
+                        chrono::Utc::now(),
+                    )
+                    .await;
+            }
+        }
+    }
 }
 
 /// XEP-0060 §8.5 node-purge notification to every deliverable subscriber.

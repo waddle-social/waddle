@@ -54,7 +54,10 @@ pub use implementation::fan_out_service_retract;
 use implementation::FanOutMetrics;
 pub use implementation::FanOutRequest;
 pub use implementation::FanOutRetractRequest;
-pub use implementation::{fan_out_delete, fan_out_pep_retract, fan_out_purge};
+pub use implementation::{
+    fan_out_configuration, fan_out_delete, fan_out_pep_retract, fan_out_purge,
+    fan_out_subscription_change,
+};
 
 /// Cancel `contact`'s subscriptions to `owner`'s PEP nodes that its current
 /// roster standing no longer allows (XEP-0163, XEP-0060 §4.5.1). Failures are

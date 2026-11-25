@@ -1,7 +1,7 @@
 use super::{
-    build_pubsub_configure_form_result, build_pubsub_error, build_pubsub_event,
-    build_pubsub_success, is_pubsub_event, is_pubsub_iq, parse_pubsub_event, parse_pubsub_iq,
-    BareJid, Iq, Jid, PubSubError, PubSubEvent, PubSubItem, PubSubRequest,
+    build_pubsub_configuration_event, build_pubsub_configure_form_result, build_pubsub_error,
+    build_pubsub_event, build_pubsub_success, is_pubsub_event, is_pubsub_iq, parse_pubsub_event,
+    parse_pubsub_iq, BareJid, Iq, Jid, PubSubError, PubSubEvent, PubSubItem, PubSubRequest,
     PubSubUnsupportedFeature, SubscriptionState, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT,
     NS_PUBSUB_OWNER,
 };
@@ -962,4 +962,35 @@ fn request_without_a_node_or_item_maps_to_the_pubsub_condition() {
         );
         assert_eq!(parse_pubsub_iq(&iq).expect_err("rejected"), expected);
     }
+}
+
+#[test]
+fn configuration_event_is_empty_for_notification_only_nodes() {
+    let service: jid::Jid = "spaces.example.test".parse().expect("service");
+    let to: jid::Jid = "alice@example.test/phone".parse().expect("recipient");
+    let mut config = crate::pubsub::NodeConfig::spaces_public();
+    config.deliver_payloads = false;
+    let message = build_pubsub_configuration_event(&service, &to, "general", &config, true);
+    let event = message.payloads.first().expect("event");
+    let configuration = event
+        .get_child("configuration", crate::pubsub::NS_PUBSUB_EVENT)
+        .expect("configuration");
+    assert_eq!(configuration.attr("node"), Some("general"));
+    assert!(configuration.children().next().is_none());
+
+    config.deliver_payloads = true;
+    let message = build_pubsub_configuration_event(&service, &to, "general", &config, true);
+    let form = message.payloads[0]
+        .get_child("configuration", crate::pubsub::NS_PUBSUB_EVENT)
+        .and_then(|c| c.get_child("x", "jabber:x:data"))
+        .expect("form");
+    assert_eq!(form.attr("type"), Some("result"));
+    assert_eq!(
+        xdata_field_value(form, "pubsub#notify_config").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        xdata_field_value(form, "pubsub#notify_sub").as_deref(),
+        Some("1")
+    );
 }
