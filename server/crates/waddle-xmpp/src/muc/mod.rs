@@ -23,6 +23,7 @@ mod room_broadcast;
 pub mod room_registry_actor;
 pub mod room_registry_handle;
 pub mod roominfo;
+pub mod voice;
 mod subject;
 
 pub use admin::{

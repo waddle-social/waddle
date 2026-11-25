@@ -1411,7 +1411,7 @@ fn honoured_admin_context(
 /// the room with `evidence`: none for a session of this deployment, and
 /// for a remote principal the inbound S2S stream that carried the request.
 /// Every decision about the sender names that evidence.
-pub(super) async fn handle_muc_admin_iq(
+pub(in crate::server::routes::websocket::handlers) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
     state: &WebSocketState,
