@@ -11,7 +11,7 @@ class CallScreenShare {
   lk.Room? _serviceOwner;
   String? _serviceTrackId;
   lk.Room? _waitingOwner;
-  Completer<bool>? _waitingForFrame;
+  Completer<bool>? _waitingForGrant;
   Future<void> _stopping = Future<void>.value();
   bool busy = false;
 
@@ -26,8 +26,8 @@ class CallScreenShare {
       return;
     }
     if (identical(_waitingOwner, room) &&
-        _waitingForFrame?.isCompleted == false) {
-      _waitingForFrame!.complete(false);
+        _waitingForGrant?.isCompleted == false) {
+      _waitingForGrant!.complete(false);
     }
     _serviceTrackId = null;
     _serviceOwner = null;
@@ -79,19 +79,22 @@ class CallScreenShare {
     }
 
     // WebRTC returns a track before the Wayland picker grants capture.
-    // Publish only after the chosen source actually delivers video.
+    // The portal confirms the selected streams even when a static screen
+    // has no new frame for an offscreen Flutter texture.
     await _stopping;
     if (!current()) return null;
-    final firstFrame = Completer<bool>();
-    final renderer = rtc.RTCVideoRenderer();
+    final grant = Completer<bool>();
     final token = ++_nextToken;
-    _waitingForFrame = firstFrame;
+    _waitingForGrant = grant;
     _waitingOwner = room;
     _serviceOwner = room;
     _serviceTrackId = null;
     _service.setMethodCallHandler((call) async {
-      if (call.method == 'revoked' && call.arguments == token) {
-        if (!firstFrame.isCompleted) firstFrame.complete(false);
+      if (call.arguments != token) return;
+      if (call.method == 'granted') {
+        if (!grant.isCompleted) grant.complete(true);
+      } else if (call.method == 'revoked') {
+        if (!grant.isCompleted) grant.complete(false);
         await onRevoked?.call();
       }
     });
@@ -108,34 +111,27 @@ class CallScreenShare {
           throw StateError('The desktop capture portal is unavailable.');
         }
       }
-      if (!current() || firstFrame.isCompleted) return null;
+      if (!current() || grant.isCompleted) return null;
       track = await lk.LocalVideoTrack.createScreenShareTrack();
       _serviceTrackId = track.mediaStreamTrack.id;
-      if (!current() || firstFrame.isCompleted) return null;
-      await renderer.initialize();
-      renderer.onFirstFrameRendered = () {
-        if (!firstFrame.isCompleted) firstFrame.complete(true);
-      };
-      renderer.srcObject = track.mediaStream;
-      ready = await firstFrame.future.timeout(
-        const Duration(minutes: 1),
-        onTimeout: () =>
-            throw StateError('The desktop did not grant screen capture.'),
-      );
+      if (!current()) return null;
+      ready =
+          enumerate == null ||
+          await grant.future.timeout(
+            const Duration(minutes: 1),
+            onTimeout: () =>
+                throw StateError('The desktop did not grant screen capture.'),
+          );
       return ready ? track : null;
     } finally {
-      _waitingForFrame = null;
+      _waitingForGrant = null;
       _waitingOwner = null;
-      try {
-        await renderer.dispose();
-      } finally {
-        if (!ready) {
-          try {
-            await track?.stop();
-          } finally {
-            await track?.dispose();
-            await release(room);
-          }
+      if (!ready) {
+        try {
+          await track?.stop();
+        } finally {
+          await track?.dispose();
+          await release(room);
         }
       }
     }

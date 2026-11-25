@@ -115,6 +115,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
     final counts = Map<String, dynamic>.from(data['counts'] ?? const {});
     final next = await showDialog<Set<String>>(
       context: context,
+      useRootNavigator: false,
       builder: (dialog) => StatefulBuilder(
         builder: (context, update) {
           final choices = {

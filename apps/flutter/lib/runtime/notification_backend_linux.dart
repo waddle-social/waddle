@@ -10,9 +10,13 @@ import 'notification_backend_stub.dart';
 /// that posted the notification. Keep each token with its original notice.
 class LinuxNotifications extends UnsupportedNotifications
     implements DesktopNotificationPresentation {
+  LinuxNotifications({DBusClient Function()? connect})
+    : _connect = connect ?? DBusClient.session;
+
   static const _name = 'org.freedesktop.Notifications';
   static final _path = DBusObjectPath('/org/freedesktop/Notifications');
   static const _window = MethodChannel('social.waddle.flutter/window');
+  final DBusClient Function() _connect;
   DBusClient? _bus;
   DBusRemoteObject? _daemon;
   StreamSubscription<DBusSignal>? _signals;
@@ -27,7 +31,7 @@ class LinuxNotifications extends UnsupportedNotifications
   @override
   Future<void> initialize(void Function(NotificationPlatformEvent) emit) async {
     try {
-      final bus = _bus = DBusClient.session();
+      final bus = _bus = _connect();
       await bus.getId();
       _daemon = DBusRemoteObject(bus, name: _name, path: _path);
       _ownerChanges = bus.nameOwnerChanged.listen((event) {
@@ -43,7 +47,8 @@ class LinuxNotifications extends UnsupportedNotifications
             interface: _name,
             path: _path,
           ).listen((signal) {
-            if (signal.values.length != 2 || signal.values.first is! DBusUint32) {
+            if (signal.values.length != 2 ||
+                signal.values.first is! DBusUint32) {
               return;
             }
             final id = signal.values.first.asUint32();

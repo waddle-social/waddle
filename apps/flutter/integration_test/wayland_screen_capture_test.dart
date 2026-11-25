@@ -11,13 +11,19 @@ import 'package:waddle_flutter/runtime/call_screen_share.dart';
 import 'package:waddle_flutter/runtime/story_capture_io.dart' as story;
 
 void main() {
-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized().framePolicy =
+      LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
   testWidgets(
     'captures a video frame from the isolated Wayland portal',
     (tester) async {
       expect(Platform.environment['DISPLAY'], isNull);
       await tester.pumpWidget(
-        const MaterialApp(home: ColoredBox(color: Colors.green)),
+        const MaterialApp(
+          home: ColoredBox(
+            color: Colors.green,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
       );
       final sharing = CallScreenShare();
       final room = lk.Room();

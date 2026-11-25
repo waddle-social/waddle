@@ -3343,6 +3343,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         .toList();
     final action = await showDialog<String>(
       context: context,
+      useRootNavigator: false,
       builder: (context) => _DialogControllers(
         controllers: controllers.values.toList(),
         builder: (context) => StatefulBuilder(

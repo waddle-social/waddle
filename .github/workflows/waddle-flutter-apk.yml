@@ -52,8 +52,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Configure independent Android SDK paths
+      - name: Configure independent Android SDK and Gradle repositories
         run: |
+          install -Dm644 scripts/flutter-ci.init.gradle "$RUNNER_TEMP/waddle-flutter-gradle/init.d/maven-central.gradle"
+          printf 'GRADLE_USER_HOME=%s/waddle-flutter-gradle\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'ANDROID_HOME=%s/waddle-flutter-sdk\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'ANDROID_SDK_ROOT=%s/waddle-flutter-sdk\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install Bun

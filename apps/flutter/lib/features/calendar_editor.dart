@@ -52,6 +52,7 @@ class _CalendarEditorState extends State<CalendarEditor> {
     final last = initial.year > 9999 ? initial : DateTime(9999, 12, 31);
     final day = await showDatePicker(
       context: context,
+      useRootNavigator: false,
       initialDate: initial,
       firstDate: first,
       lastDate: last,
@@ -59,6 +60,7 @@ class _CalendarEditorState extends State<CalendarEditor> {
     if (!mounted || day == null || dateOnly) return day;
     final time = await showTimePicker(
       context: context,
+      useRootNavigator: false,
       initialTime: TimeOfDay.fromDateTime(initial),
     );
     return time == null

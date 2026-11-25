@@ -175,7 +175,7 @@ CAPTURE_PID=''
 # Exercise the configured Firebase SDK and real Keystore using a synthetic
 # Firebase project. The instrumentation test never requests a Google token.
 cd "$REPO_ROOT/apps/flutter/android"
-ANDROID_SERIAL="$SERIAL" ./gradlew :app:connectedDebugAndroidTest --console=plain \
+ANDROID_SERIAL="$SERIAL" ./gradlew --project-cache-dir ../build/gradle-cache :app:connectedDebugAndroidTest --console=plain \
   -PWADDLE_FIREBASE_PROJECT_ID=waddle-instrumentation \
   -PWADDLE_FIREBASE_APP_ID=1:0:android:0 \
   -PWADDLE_FIREBASE_API_KEY=instrumentation-only \

@@ -22,6 +22,7 @@ class _TripPlansState extends State<TripPlansScreen> {
     var private = true;
     final values = await showDialog<(String, bool)>(
       context: context,
+      useRootNavigator: false,
       builder: (context) => StatefulBuilder(
         builder: (context, update) => AlertDialog(
           title: const Text('New trip'),

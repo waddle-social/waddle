@@ -1,0 +1,24 @@
+// The hosted runner shares Maven Central's public egress quota. Flutter's
+// included Gradle build resolves Kotlin through its own plugin repositories.
+def centralMirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven { url = centralMirror }
+        google()
+        gradlePluginPortal()
+    }
+    settings.dependencyResolutionManagement.repositories {
+        maven { url = centralMirror }
+    }
+}
+
+beforeProject { project ->
+    // Some plugins declare project-local repositories that take priority over
+    // settings. Leave Google's Android repository and Flutter engine storage intact.
+    [project.repositories, project.buildscript.repositories].each { repositories ->
+        repositories.withType(MavenArtifactRepository).configureEach { repository ->
+            if (repository.name == 'MavenRepo') repository.url = centralMirror
+        }
+    }
+}

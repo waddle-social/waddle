@@ -2,6 +2,7 @@
 
 #include <gtk/gtk.h>
 
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <string>
@@ -22,6 +23,7 @@ struct Sessions {
   bool active = false;
   gint64 token = 0;
   FlMethodCall* waiting = nullptr;
+  std::string start_request;
 
   explicit Sessions(GDBusConnection* connection)
       : bus(G_DBUS_CONNECTION(g_object_ref(connection))) {
@@ -69,6 +71,7 @@ struct Sessions {
 
   void stop() {
     active = false;
+    start_request.clear();
     finish_wait(false);
     for (const auto& path : paths) close(path.c_str());
     paths.clear();
@@ -80,6 +83,7 @@ using Shared = std::shared_ptr<Sessions>;
 struct Selection {
   Shared sessions;
   std::string path;
+  std::string request;
 };
 
 GDBusMessage* filter(GDBusConnection*, GDBusMessage* message, gboolean incoming,
@@ -87,24 +91,66 @@ GDBusMessage* filter(GDBusConnection*, GDBusMessage* message, gboolean incoming,
   if (!incoming &&
       g_dbus_message_get_message_type(message) ==
           G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
-      g_strcmp0(g_dbus_message_get_interface(message), kScreenCast) == 0 &&
-      g_strcmp0(g_dbus_message_get_member(message), "SelectSources") == 0) {
+      g_strcmp0(g_dbus_message_get_interface(message), kScreenCast) == 0) {
     GVariant* body = g_dbus_message_get_body(message);
-    if (body && g_variant_is_of_type(body, G_VARIANT_TYPE("(oa{sv})"))) {
+    const auto* method = g_dbus_message_get_member(message);
+    const bool select = g_strcmp0(method, "SelectSources") == 0 && body &&
+                        g_variant_is_of_type(body, G_VARIANT_TYPE("(oa{sv})"));
+    const bool start = g_strcmp0(method, "Start") == 0 && body &&
+                       g_variant_is_of_type(body, G_VARIANT_TYPE("(osa{sv})"));
+    if (select || start) {
       g_autoptr(GVariant) handle = g_variant_get_child_value(body, 0);
-      auto* selection = new Selection{*static_cast<Shared*>(data),
-                                      g_variant_get_string(handle, nullptr)};
+      const auto& sessions = *static_cast<Shared*>(data);
+      std::string request;
+      if (start) {
+        g_autoptr(GVariant) options = g_variant_get_child_value(body, 2);
+        const char* token = nullptr;
+        if (!g_variant_lookup(options, "handle_token", "&s", &token))
+          return message;
+        std::string sender =
+            g_dbus_connection_get_unique_name(sessions->bus) + 1;
+        std::replace(sender.begin(), sender.end(), '.', '_');
+        request =
+            "/org/freedesktop/portal/desktop/request/" + sender + "/" + token;
+      }
+      auto* selection = new Selection{
+          sessions, g_variant_get_string(handle, nullptr), request};
       g_main_context_invoke_full(
           nullptr, G_PRIORITY_HIGH,
           [](gpointer arg) -> gboolean {
             auto* event = static_cast<Selection*>(arg);
-            event->sessions->selected(event->path);
+            if (event->request.empty()) {
+              event->sessions->selected(event->path);
+            } else if (event->sessions->paths.count(event->path)) {
+              event->sessions->start_request = event->request;
+            }
             return G_SOURCE_REMOVE;
           },
           selection, [](gpointer arg) { delete static_cast<Selection*>(arg); });
     }
   }
   return message;
+}
+
+void responded(GDBusConnection*, const gchar*, const gchar* path, const gchar*,
+               const gchar*, GVariant* args, gpointer data) {
+  auto& sessions = **static_cast<Shared*>(data);
+  if (!sessions.active || sessions.start_request != path) return;
+  sessions.start_request.clear();
+  if (!g_variant_is_of_type(args, G_VARIANT_TYPE("(ua{sv})"))) return;
+  g_autoptr(GVariant) code = g_variant_get_child_value(args, 0);
+  g_autoptr(GVariant) results = g_variant_get_child_value(args, 1);
+  g_autoptr(GVariant) streams =
+      g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
+  const bool allowed = g_variant_get_uint32(code) == 0 && streams &&
+                       g_variant_n_children(streams) > 0;
+  g_autoptr(FlMethodChannel) channel =
+      FL_METHOD_CHANNEL(g_weak_ref_get(&sessions.channel));
+  if (channel) {
+    g_autoptr(FlValue) token = fl_value_new_int(sessions.token);
+    fl_method_channel_invoke_method(channel, allowed ? "granted" : "revoked",
+                                    token, nullptr, nullptr, nullptr);
+  }
 }
 
 void closed(GDBusConnection*, const gchar*, const gchar* path, const gchar*,
@@ -124,10 +170,12 @@ struct Registration {
   Shared sessions;
   guint filter_id;
   guint subscription_id;
+  guint response_id;
   ~Registration() {
     sessions->stop();
     g_dbus_connection_remove_filter(sessions->bus, filter_id);
     g_dbus_connection_signal_unsubscribe(sessions->bus, subscription_id);
+    g_dbus_connection_signal_unsubscribe(sessions->bus, response_id);
   }
 };
 
@@ -180,12 +228,17 @@ void register_screencast_portal(FlView* view, GDBusConnection* bus) {
   guint subscription_id = g_dbus_connection_signal_subscribe(
       bus, kPortal, kSession, "Closed", nullptr, nullptr,
       G_DBUS_SIGNAL_FLAGS_NONE, closed, new Shared(sessions), destroy);
+  guint response_id = g_dbus_connection_signal_subscribe(
+      bus, kPortal, "org.freedesktop.portal.Request", "Response", nullptr,
+      nullptr, G_DBUS_SIGNAL_FLAGS_NONE, responded, new Shared(sessions),
+      destroy);
   g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
   g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
       fl_engine_get_binary_messenger(fl_view_get_engine(view)),
       "social.waddle.flutter/screen_capture", FL_METHOD_CODEC(codec));
   g_weak_ref_set(&sessions->channel, channel);
   fl_method_channel_set_method_call_handler(
-      channel, handle, new Registration{sessions, filter_id, subscription_id},
+      channel, handle,
+      new Registration{sessions, filter_id, subscription_id, response_id},
       [](gpointer data) { delete static_cast<Registration*>(data); });
 }

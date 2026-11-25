@@ -323,8 +323,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: "${{ github.sha }}"
-      - name: Configure independent Android SDK paths
-        run: "printf 'ANDROID_HOME=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nprintf 'ANDROID_SDK_ROOT=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
+      - name: Configure independent Android SDK and Gradle repositories
+        run: "install -Dm644 scripts/flutter-ci.init.gradle \"$RUNNER_TEMP/waddle-flutter-gradle/init.d/maven-central.gradle\"\nprintf 'GRADLE_USER_HOME=%s/waddle-flutter-gradle\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nprintf 'ANDROID_HOME=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nprintf 'ANDROID_SDK_ROOT=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:

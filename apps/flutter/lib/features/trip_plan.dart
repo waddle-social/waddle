@@ -84,6 +84,7 @@ class _TripPlanState extends State<TripPlanScreen> {
   Future<void> _edit(String kind, [_Item? item]) async {
     final result = await showDialog<_Item>(
       context: context,
+      useRootNavigator: false,
       builder: (_) => _PlanEditor(kind: kind, item: item),
     );
     if (mounted && result != null) await _save(result);
@@ -92,6 +93,7 @@ class _TripPlanState extends State<TripPlanScreen> {
   Future<void> _remove(_Item item) async {
     final confirmed = await showDialog<bool>(
       context: context,
+      useRootNavigator: false,
       builder: (context) => AlertDialog(
         title: Text('Remove ${item['title']}?'),
         actions: [

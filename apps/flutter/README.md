@@ -59,8 +59,8 @@ ownership, threads, paging, durable origin IDs, acknowledgement/echo races and
 Unicode mention offsets. Encrypted transfers validate HTTPS slots, allowed
 headers, AES-GCM authentication and hashes before exposing bytes to a viewer.
 
-Notifications use independent push identities. Android supports UnifiedPush and
-an optional foreground connection. The browser uses a separate Web Push worker.
+Notifications use independent push identities. Android supports UnifiedPush,
+optional Firebase Cloud Messaging and an optional foreground connection. The browser uses a separate Web Push worker.
 A process owner coordinates plugin-created background engines with the visible
 application before restoring credentials or opening a connection. Inline replies
 use the same durable conversation send path.
@@ -111,6 +111,14 @@ consent cleanup on a disposable compositor, run this from the repository root.
 nix develop .#flutter --command bash scripts/flutter-wayland-capture-smoke.sh
 ```
 
+To verify remote screen sharing, point `WADDLE_LIVEKIT_FIXTURE` at a local
+JSON file before running the same command. The test connects two participants
+to a test LiveKit server and checks that the viewer decodes shared video.
+Supply `publisher` and `viewer` objects, each with `url` (a `wss://` address),
+`room`, `identity` and a short-lived `token`. Use distinct identities in the
+same room with permission to publish and subscribe. For a private test CA,
+set the optional top-level `cert` field to its absolute PEM file path.
+
 For an independent Android APK, run these commands from the repository root.
 Gradle builds the Rust libraries for arm64 and x86_64 as part of the app build.
 After SDK setup, `flutter run -d <device-id>` from `apps/flutter` uses the same
@@ -159,7 +167,7 @@ handoff, authentication cancellation and stale operations; encrypted transfers;
 call permission/SID races; and the UI in light/dark/wallpaper colors, wide panes,
 320px/2× text, both reading orders and keyboard/reply/mention layouts. Android
 and headless Weston smoke tests exercise the standalone bootstrap, secure storage
-and packaged Rust library under their respective operating systems. Each claim of passing verification must be tied to its run result.
+and packaged Rust library under their respective operating systems.
 
 To export synthetic UI previews:
 
@@ -167,10 +175,10 @@ To export synthetic UI previews:
 flutter test test/layout_test.dart --dart-define=WADDLE_PREVIEW_DIR=build/design-previews
 ```
 
-Builds and fixtures do not establish full physical-device feature parity.
-Notification wakeups, distributor behavior, encrypted file viewers and 1:1/group
-media need device testing. The PR records current evidence, limitations and the
-latest standalone APK download.
+The Wayland media tests exercise portal teardown, MP4 recording and remote
+screen-share decoding. Notification wakeups through a deployed distributor,
+physical camera performance and external file viewers require testing on the
+target devices.
 
 Room edits and retractions use archive author identities and immutable presence
 attribution captured when a live message arrives. A target with a known stable

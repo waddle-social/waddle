@@ -6,7 +6,11 @@ import 'package:waddle_flutter/runtime/context.dart';
 import 'package:waddle_flutter/runtime/notification_service.dart';
 import 'package:waddle_flutter/transport/transport.dart';
 
-class FakeNotificationBackend implements NotificationBackend {
+class FakeNotificationBackend
+    implements NotificationBackend, DesktopNotificationPresentation {
+  final presentations = <String?>[];
+  @override
+  Future<void> present(String? token) async => presentations.add(token);
   void Function(Map<String, dynamic>)? emit;
   final notices = <NotificationNotice>[];
   final unsubscribed = <String>[];
@@ -822,9 +826,11 @@ void main() {
           service.handleOwnerEvent({
             'type': 'action',
             'action': id,
+            'activationToken': 'trusted-token',
             'payload': target,
           });
       final previouslyCanceled = backend.canceled.length;
+      await action('compose', {...owned, 'instance': 'retired'});
       await action('markRead', {...owned, 'instance': 'retired'});
       expect(
         context.calls.where((call) => call.$1 == 'mark_inbox_read'),
@@ -836,11 +842,13 @@ void main() {
         {'partner_jid': 'alex@example.org', 'thread_id': 'thread-1'},
       );
       expect(backend.canceled, hasLength(previouslyCanceled + 1));
+      expect(backend.presentations, isEmpty);
       final navigation = service.events.firstWhere(
         (event) => event['topic'] == 'navigate',
       );
       await action('compose', owned);
       expect((await navigation)['data'], containsPair('compose', true));
+      expect(backend.presentations, ['trusted-token']);
       await service.dispose();
     },
   );

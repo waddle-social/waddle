@@ -2,6 +2,10 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ -n "${WADDLE_LIVEKIT_FIXTURE:-}" ]]; then
+  WADDLE_LIVEKIT_FIXTURE=$(realpath -e "$WADDLE_LIVEKIT_FIXTURE")
+  export WADDLE_LIVEKIT_FIXTURE
+fi
 cd "$repo"
 # Use the compositor and portal implementations from the project's pinned nixpkgs.
 tool() { nix build --no-link --print-out-paths --inputs-from . "nixpkgs#$1^out"; }
@@ -45,6 +49,9 @@ dbus-run-session "${bus_config[@]}" -- bash -eu <<'SESSION'
     sleep 0.1
   done
   : "${WAYLAND_DISPLAY:?The isolated Wayland compositor did not start}"
+  # A separate animated client continues generating damage while the camera
+  # plugin waits synchronously for its next captured frame on GTK's thread.
+  weston-presentation-shm -f > /dev/null 2>"$XDG_RUNTIME_DIR/animation.log" &
   "$pipewire/bin/pipewire" >"$XDG_RUNTIME_DIR/pipewire.log" 2>&1 &
   "$pipewire/bin/pipewire-pulse" >"$XDG_RUNTIME_DIR/pulse.log" 2>&1 &
   "$wireplumber/bin/wireplumber" >"$XDG_RUNTIME_DIR/wireplumber.log" 2>&1 &
@@ -66,9 +73,15 @@ dbus-run-session "${bus_config[@]}" -- bash -eu <<'SESSION'
     done
     [[ "$reply" == *"boolean true"* ]] || { cat "$XDG_RUNTIME_DIR/"{portal,wlr}.log >&2; exit 1; }
   done
-  WADDLE_CAPTURE_TRACE="$XDG_RUNTIME_DIR/wlr.log" WADDLE_ISOLATED_CAPTURE=1 \
-    flutter test --no-pub -d linux integration_test/wayland_screen_capture_test.dart || {
+  export WADDLE_CAPTURE_TRACE="$XDG_RUNTIME_DIR/wlr.log" WADDLE_ISOLATED_CAPTURE=1
+  tests=(integration_test/wayland_screen_capture_test.dart)
+  if [[ -n "${WADDLE_LIVEKIT_FIXTURE:-}" ]]; then
+    tests+=(integration_test/wayland_sfu_test.dart)
+  fi
+  for test in "${tests[@]}"; do
+    flutter test --no-pub -d linux "$test" || {
       cat "$XDG_RUNTIME_DIR/"{portal,wlr,wireplumber}.log >&2
       exit 1
     }
+  done
 SESSION

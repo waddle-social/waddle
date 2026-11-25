@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/runtime/surfaces_runtime.dart';
 import 'platform_test_context.dart';
@@ -31,8 +33,11 @@ void main() {
         'launchToken': 'fixture-signature',
         'roomJid': room,
       };
+      final delayedItems = Completer<List<dynamic>>();
+      var reads = 0;
       context.handler = (method, args) async => switch (method) {
         'discover_extension_routes' => [route],
+        'fetch_extension_route_items' when reads++ == 0 => delayedItems.future,
         'fetch_extension_route_items' => [
           {
             'id': 'item',
@@ -54,7 +59,13 @@ void main() {
           await runtime.invoke('extensions.list', {'jid': room}) as List;
       final routeKey = views.single['key'];
       final request = {'jid': room, 'route': routeKey};
+      final staleRead = expectLater(
+        runtime.invoke('extensions.items', request),
+        throwsStateError,
+      );
       final items = await runtime.invoke('extensions.items', request) as List;
+      delayedItems.complete([]);
+      await staleRead;
       final action = (items.single['actions'] as List).single;
       expect(action.keys, unorderedEquals(['key', 'label']));
       final args = {

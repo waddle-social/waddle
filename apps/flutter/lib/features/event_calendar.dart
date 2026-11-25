@@ -28,6 +28,7 @@ class _EventCalendarState extends State<EventCalendar> {
   Future<void> _edit(EventData row, {required bool occurrence}) async {
     final input = await showDialog<EventData>(
       context: context,
+      useRootNavigator: false,
       builder: (_) => CalendarEditor(
         event: occurrence ? row : row['master'],
         occurrence: occurrence,
@@ -49,6 +50,7 @@ class _EventCalendarState extends State<EventCalendar> {
         : 'Cancel the entire series?';
     final confirmed = await showDialog<bool>(
       context: context,
+      useRootNavigator: false,
       builder: (dialog) => AlertDialog(
         title: Text(title),
         content: Text('${row['summary']}'),

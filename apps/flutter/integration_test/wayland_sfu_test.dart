@@ -30,7 +30,15 @@ void main() {
         expect(media.snapshot['mediaState'], 'connected');
         await media.screenShare(true);
         final deadline = DateTime.now().add(const Duration(seconds: 25));
+        var bright = false;
         while (true) {
+          // Supply desktop damage so the compositor delivers new frames.
+          bright = !bright;
+          await tester.pumpWidget(
+            MaterialApp(
+              home: ColoredBox(color: bright ? Colors.blue : Colors.green),
+            ),
+          );
           final track = peer.remoteParticipants.values
               .expand((person) => person.videoTrackPublications)
               .where(
