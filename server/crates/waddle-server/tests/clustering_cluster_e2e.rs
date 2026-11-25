@@ -68,10 +68,11 @@ mod pep_caps_support;
 
 use base64::Engine;
 use cluster_support::{
-    activate_mailbox_epoch, cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool,
-    join_fanout_room, muc_join_presence, open_control_db, readiness_status, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server, spawn_cluster_server_with_envs,
-    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, epoch_zero_schema_url, fanout_message,
+    free_tcp_port, generate_pool, join_fanout_room, muc_join_presence, open_control_db,
+    readiness_status, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server,
+    spawn_cluster_server_with_envs, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
+    CLUSTER_PEER_USERNAME,
 };
 use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
@@ -1051,15 +1052,10 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    partial_room_fanout_completes_on_retransmission_after_relay_recovery(
-        &db,
-        &server_a,
-        &server_b,
-        &mut relay_b,
-        &node_a,
-        &node_b,
-    )
-    .await;
+    // The relay-fault scenario of a blocked remote occupant lives in
+    // `xep0045_partial_fanout`: this test activated the mailbox epoch above,
+    // where the durable mailbox, not the relay `RelaySleep` blocks, carries
+    // the remote occupant's copy.
 
     // --- Exit criterion (part 1): the receiver-applied ask budgets. A 5s
     // handler exceeds relay_a's receiver-side reply budget (1.5s): the
@@ -2767,6 +2763,27 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     node_a: &str,
     node_b: &str,
 ) {
+    let epoch: i64 = {
+        let conn = db.guard().await.expect("epoch guard");
+        let mut rows = conn
+            .query(
+                "SELECT epoch::bigint FROM ingress_protocol_epoch WHERE id = 1",
+                (),
+            )
+            .await
+            .expect("ingress protocol epoch");
+        rows.next()
+            .await
+            .expect("epoch query")
+            .expect("epoch row")
+            .get(0)
+            .expect("epoch")
+    };
+    assert!(
+        epoch < 2,
+        "blocking B's relay blocks the remote copy only below the mailbox epoch (epoch {epoch}); \
+         the durable mailbox carries it from epoch 2 on"
+    );
     let room: jid::BareJid = format!("partial-{}@muc.localhost", uuid::Uuid::new_v4())
         .parse()
         .expect("unique partial room");
