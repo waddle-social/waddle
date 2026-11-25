@@ -30,6 +30,14 @@ struct CallCommands {
         }
     }
 
+    /// Opens or closes the microphone, as holding a key to talk does.
+    var setMicrophone: @MainActor (Bool) async -> Void {
+        { [calls, media, sid] on in
+            guard let media, calls.state.sid == sid, calls.state.isEstablished else { return }
+            await media.setMicrophone(on)
+        }
+    }
+
     /// As `toggleMicrophone`.
     var toggleCamera: @MainActor () -> Void {
         onThisCall { [calls, media] in

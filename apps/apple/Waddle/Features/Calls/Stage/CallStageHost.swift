@@ -195,6 +195,11 @@ struct CallStageHost: View {
             tileSource: model.tileSource,
             actions: actions(for: call.sid)
         )
+        .callPushToTalk(
+            hasMedia: call.status != .connecting, isMicrophoneOn: media?.isMicrophoneOn ?? false,
+            coversConversation: memory.size != .split,
+            setMicrophone: CallCommands(calls: session.calls, media: media).setMicrophone
+        )
         // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.
         .onChange(
             of: Roster(
