@@ -1125,6 +1125,10 @@ pub struct SendMessageOptions {
     /// XEP-0333 `<markable/>` request for displayed markers on this
     /// outbound chat/groupchat message.
     pub request_displayed_marker: bool,
+    /// XEP-0085 §5.1: attach `<active/>` to this content message so the
+    /// recipient can negotiate chat states implicitly. Callers set it only
+    /// while the user's chat-state preference allows sending notifications.
+    pub chat_state_active: bool,
     /// XEP-0045 §7.5: this message is a MUC private message addressed to
     /// an occupant JID. The builder appends an
     /// `<x xmlns='http://jabber.org/protocol/muc#user'/>` element so the

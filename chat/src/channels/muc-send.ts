@@ -19,6 +19,7 @@ import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
 import { findMessageById } from "@/lib/message-ids";
 import { applyForumContext } from "@/channels/timeline";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
+import { useChatStatePreference } from "@/preferences/chat-states";
 
 // Derived from the wasm client's return shape — `OutboundSendResult | null`
 // today, but tracked through the actual method so the union stays in sync
@@ -52,6 +53,9 @@ type UseMucSendDeps = {
 };
 
 export function useMucSend(deps: UseMucSendDeps) {
+  // XEP-0085 §5.1: content messages carry <active/> while the user allows
+  // chat state notifications.
+  const { sendChatStates } = useChatStatePreference();
   const {
     session,
     xmppClient,
@@ -172,6 +176,7 @@ export function useMucSend(deps: UseMucSendDeps) {
         markup,
         references,
         files: attachments,
+        chatStateActive: sendChatStates.value,
         ...(freshLinkPreview ? { linkPreviewToken: freshLinkPreview.token } : {}),
         ...(freshLinkPreview ? { linkPreviewExpiresAt: freshLinkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),

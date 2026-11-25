@@ -942,6 +942,8 @@ pub struct WaddleSendOptions {
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_preview_token: Option<String>,
     pub request_displayed_marker: bool,
+    /// XEP-0085 §5.1: attach `<active/>` to the content message.
+    pub chat_state_active: bool,
     /// XEP-0045 §7.5: mark the message as a MUC private message so
     /// the sender's other clients can classify the sent-carbon copy
     /// without knowing the room.

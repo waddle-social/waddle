@@ -559,6 +559,7 @@ export interface WasmSendOptions {
   thread?: { id: string; parent?: string };
   link_preview_token?: string;
   request_displayed_marker?: boolean;
+  chat_state_active?: boolean;
   /** XEP-0045 §7.5 MUC private message marker. */
   muc_pm?: boolean;
   shared_files?: Array<{

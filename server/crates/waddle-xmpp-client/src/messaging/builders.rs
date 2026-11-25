@@ -405,6 +405,11 @@ pub fn build_outbound_message(
         builder = builder.append(Element::builder("markable", NS_CHAT_MARKERS).build());
     }
 
+    // XEP-0085 §5.1: content messages SHOULD carry <active/>.
+    if options.chat_state_active && matches!(message_type, "chat" | "groupchat") {
+        builder = builder.append(Element::builder("active", NS_CHAT_STATES).build());
+    }
+
     // XEP-0045 §7.5: mark MUC private messages with an empty
     // `<x xmlns='http://jabber.org/protocol/muc#user'/>` so the sender's
     // other clients can classify the XEP-0280 sent-carbon copy as a MUC

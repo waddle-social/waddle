@@ -4260,6 +4260,14 @@ export class BrowserXmppClient {
       });
       if (!message.body && !message.subject) return;
     }
+    // XEP-0085 §5.1: a content message carrying a chat state shows the
+    // sender supports the protocol. The message itself continues down the
+    // normal path.
+    if (message.chat_state && message.body && !message.is_muc && !message.carbon?.sent
+      && bareJidKey(message.from ?? "") !== bareJidKey(this.session.jid)) {
+      const occupant = this.mucPmOccupant(message);
+      this.events.emit("dmChatState", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
+    }
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
       else {

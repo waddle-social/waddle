@@ -19,3 +19,13 @@ describe("buildWasmSendOptions MUC-PM marker", () => {
     expect(buildWasmSendOptions(opts, 0).muc_pm).toBeUndefined();
   });
 });
+
+describe("buildWasmSendOptions XEP-0085 active", () => {
+  test("maps chatStateActive to chat_state_active", () => {
+    expect(buildWasmSendOptions({ id: "m3", chatStateActive: true }, 0).chat_state_active).toBe(true);
+  });
+
+  test("omits chat_state_active by default", () => {
+    expect(buildWasmSendOptions({ id: "m4" }, 0).chat_state_active).toBeUndefined();
+  });
+});

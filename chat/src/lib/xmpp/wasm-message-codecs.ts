@@ -876,6 +876,9 @@ export function buildWasmSendOptions(
   if (opts.requestDisplayedMarker) {
     wasmOpts.request_displayed_marker = true;
   }
+  if (opts.chatStateActive) {
+    wasmOpts.chat_state_active = true;
+  }
   if ((opts as SendDirectMessageOptions).mucPm) {
     wasmOpts.muc_pm = true;
   }

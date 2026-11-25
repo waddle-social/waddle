@@ -43,6 +43,8 @@ export interface SendGroupMessageOptions {
   parentThreadId?: string;
   id?: string;
   requestDisplayedMarker?: boolean;
+  /** XEP-0085 §5.1: carry `<active/>` on this content message. */
+  chatStateActive?: boolean;
   threadCreate?: WaddleThreadCreate;
   threadReply?: WaddleThreadReply;
 }
@@ -58,6 +60,8 @@ export interface SendDirectMessageOptions {
   parentThreadId?: string;
   id?: string;
   requestDisplayedMarker?: boolean;
+  /** XEP-0085 §5.1: carry `<active/>` on this content message. */
+  chatStateActive?: boolean;
   /**
    * XEP-0045 §7.5: this send addresses a MUC occupant JID. The wasm
    * builder appends `<x xmlns='http://jabber.org/protocol/muc#user'/>`

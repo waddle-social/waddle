@@ -13099,6 +13099,11 @@ data class WaddleSendOptions (
     var `requestDisplayedMarker`: kotlin.Boolean
     ,
     /**
+     * XEP-0085 §5.1: attach `<active/>` to the content message.
+     */
+    var `chatStateActive`: kotlin.Boolean
+    ,
+    /**
      * XEP-0045 §7.5: mark the message as a MUC private message so
      * the sender's other clients can classify the sent-carbon copy
      * without knowing the room.
@@ -13143,6 +13148,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterOptionalTypeWaddleStickerRef.read(buf),
             FfiConverterOptionalTypeWaddleMentionDirectory.read(buf),
         )
@@ -13159,6 +13165,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterSequenceTypeWaddleSharedFile.allocationSize(value.`sharedFiles`) +
             FfiConverterOptionalString.allocationSize(value.`linkPreviewToken`) +
             FfiConverterBoolean.allocationSize(value.`requestDisplayedMarker`) +
+            FfiConverterBoolean.allocationSize(value.`chatStateActive`) +
             FfiConverterBoolean.allocationSize(value.`mucPm`) +
             FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`sticker`) +
             FfiConverterOptionalTypeWaddleMentionDirectory.allocationSize(value.`mentionDirectory`)
@@ -13175,6 +13182,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterSequenceTypeWaddleSharedFile.write(value.`sharedFiles`, buf)
             FfiConverterOptionalString.write(value.`linkPreviewToken`, buf)
             FfiConverterBoolean.write(value.`requestDisplayedMarker`, buf)
+            FfiConverterBoolean.write(value.`chatStateActive`, buf)
             FfiConverterBoolean.write(value.`mucPm`, buf)
             FfiConverterOptionalTypeWaddleStickerRef.write(value.`sticker`, buf)
             FfiConverterOptionalTypeWaddleMentionDirectory.write(value.`mentionDirectory`, buf)
