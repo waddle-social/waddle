@@ -9176,6 +9176,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "waddle-broker-core",
  "waddle-extensions",
  "waddle-sfu",
  "waddle-ws-test-support",

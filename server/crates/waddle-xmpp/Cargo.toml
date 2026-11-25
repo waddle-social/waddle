@@ -81,6 +81,7 @@ zeroize = { workspace = true }
 reqwest = { workspace = true }
 
 # Wasm extension runtime
+waddle-broker-core = { path = "../waddle-broker-core" }
 waddle-extensions = { path = "../waddle-extensions" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
 waddle-sfu = { path = "../waddle-sfu" }
