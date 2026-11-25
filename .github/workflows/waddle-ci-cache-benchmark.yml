@@ -39,6 +39,7 @@ jobs:
     name: Cargo target volume / seed
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'cargo' && github.ref == 'refs/heads/main' }}
     outputs:
+      attempt: ${{ github.run_attempt }}
       inventory: ${{ steps.seed.outputs.inventory }}
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache
@@ -72,7 +73,7 @@ jobs:
       - cargo-seed
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-      - nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-${{ needs.cargo-seed.outputs.attempt }}
       - nscloud-cache-size-50gb
       - nscloud-cache-allow-commit-from-main
       - nscloud-cache-exp-do-not-commit

@@ -4,11 +4,14 @@ import wc "github.com/waddle-social/waddle/ci/contributors"
 
 #CargoVolumeJob: {
 	_phase: "seed" | "restore"
-	name:   "Cargo target volume / \(_phase)"
-	if:     "${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'cargo' && github.ref == 'refs/heads/main' }}"
+	_seedAttempt: string
+	if _phase == "seed" {_seedAttempt: "${{ github.run_attempt }}"}
+	if _phase == "restore" {_seedAttempt: "${{ needs.cargo-seed.outputs.attempt }}"}
+	name: "Cargo target volume / \(_phase)"
+	if:   "${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'cargo' && github.ref == 'refs/heads/main' }}"
 	"runs-on": [
 		"nscloud-ubuntu-24.04-amd64-8x16-with-cache",
-		"nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}",
+		"nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-\(_seedAttempt)",
 		"nscloud-cache-size-50gb",
 		"nscloud-cache-allow-commit-from-main",
 		if _phase == "restore" {"nscloud-cache-exp-do-not-commit"},
@@ -16,7 +19,10 @@ import wc "github.com/waddle-social/waddle/ci/contributors"
 	permissions: contents: "read"
 	"timeout-minutes": 100
 	if _phase == "seed" {
-		outputs: inventory: "${{ steps.seed.outputs.inventory }}"
+		outputs: {
+			attempt:   "${{ github.run_attempt }}"
+			inventory: "${{ steps.seed.outputs.inventory }}"
+		}
 	}
 	if _phase == "restore" {needs: ["cargo-seed"]}
 	steps: [
