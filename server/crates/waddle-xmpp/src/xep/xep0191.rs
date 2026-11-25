@@ -512,7 +512,9 @@ fn blocking_item(jid: &Jid) -> Element {
 pub fn build_blocking_error(original_iq: &Iq, error: &BlockingError) -> Iq {
     let (error_type, condition) = error.stanza_error_kind();
     let payload = match original_iq {
-        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload.clone()),
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+            crate::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(payload)
+        }
         Iq::Result { .. } | Iq::Error { .. } => None,
     };
 
