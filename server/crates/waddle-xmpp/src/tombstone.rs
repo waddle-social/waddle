@@ -83,7 +83,13 @@ impl TombstoneTarget {
     ///      - [`Self::Direct`]: wire `id` equals `wire_id` AND the
     ///        message's `from` bare-equals `author`, OR an
     ///        archive-stamped `<stanza-id id=wire_id by=archive/>`
-    ///        child.
+    ///        child, OR a XEP-0308 correction of the target: a
+    ///        `<replace xmlns='urn:xmpp:message-correct:0' id=wire_id/>`
+    ///        child on a message whose `from` bare-equals `author`
+    ///        (XEP-0424 §Tombstones: a retraction applies to the
+    ///        original and each of its corrections). A retraction
+    ///        stanza that carries a `<replace/>` fallback is never
+    ///        treated as a correction.
     ///
     /// XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`; the
     /// namespace is matched explicitly so an unrelated extension
@@ -118,7 +124,9 @@ impl TombstoneTarget {
                         .attr("from")
                         .map(|s| jid_bare_equals(s, author))
                         .unwrap_or(false);
-                wire_match || has_stanza_id_by(el, wire_id, archive)
+                wire_match
+                    || has_stanza_id_by(el, wire_id, archive)
+                    || is_correction_by(el, wire_id, author)
             }
         }
     }
@@ -134,6 +142,26 @@ fn has_stanza_id_by(el: &minidom::Element, target_id: &str, by_jid: &jid::BareJi
                 .map(|by| jid_bare_equals(by, by_jid))
                 .unwrap_or(false)
     })
+}
+
+/// True iff `el` is a XEP-0308 correction of `target_id` sent by `author`:
+/// it carries `<replace xmlns='urn:xmpp:message-correct:0' id=target_id/>`,
+/// its `from` bare-equals `author`, and it is not itself a XEP-0424
+/// retraction (whose fallback may carry a `<replace/>` that MUST NOT be
+/// applied as a correction and must still be delivered).
+fn is_correction_by(el: &minidom::Element, target_id: &str, author: &jid::BareJid) -> bool {
+    let from_author = el
+        .attr("from")
+        .map(|s| jid_bare_equals(s, author))
+        .unwrap_or(false);
+    from_author
+        && !el
+            .children()
+            .any(|c| c.is("retract", crate::xep::xep0424::NS_MESSAGE_RETRACT))
+        && el.children().any(|c| {
+            c.is("replace", crate::xep::xep0308::NS_MESSAGE_CORRECT)
+                && c.attr("id") == Some(target_id)
+        })
 }
 
 /// Select the sequences of unacked outbound `<message/>` entries that
@@ -290,5 +318,56 @@ mod tests {
             !target.matches_message_element(&forged),
             "a stanza-id whose by= is not the archive must never match"
         );
+    }
+
+    fn correction(from: &str, to: &str, replaces: &str) -> minidom::Element {
+        format!(
+            "<message xmlns='jabber:client' from='{from}' to='{to}' id='fix-1'>\
+             <body>fixed</body>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='{replaces}'/></message>"
+        )
+        .parse()
+        .expect("valid message element")
+    }
+
+    #[test]
+    fn direct_retraction_scrubs_same_author_corrections_of_the_target() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el = correction("Alice@Example.com/web", "bob@example.com", "orig-1");
+        assert!(target.matches_message_element(&el));
+        let other_target = correction("alice@example.com/web", "bob@example.com", "orig-2");
+        assert!(!target.matches_message_element(&other_target));
+    }
+
+    #[test]
+    fn direct_retraction_never_scrubs_another_authors_replace() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el = correction("bob@example.com/web", "alice@example.com", "orig-1");
+        assert!(!target.matches_message_element(&el));
+        let mallory = correction("mallory@example.com/web", "bob@example.com", "orig-1");
+        assert!(!target.matches_message_element(&mallory));
+    }
+
+    #[test]
+    fn replace_in_a_retraction_fallback_is_not_scrubbed_as_a_correction() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let retraction: minidom::Element =
+            "<message xmlns='jabber:client' from='alice@example.com/web' to='bob@example.com' \
+             id='r1'><retract xmlns='urn:xmpp:message-retract:1' id='orig-1'/>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='orig-1'/></message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&retraction));
+    }
+
+    #[test]
+    fn replace_in_another_namespace_is_not_a_correction() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el: minidom::Element =
+            "<message xmlns='jabber:client' from='alice@example.com/web' to='bob@example.com' \
+             id='x'><replace xmlns='urn:example:other' id='orig-1'/></message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&el));
     }
 }

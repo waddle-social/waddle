@@ -668,3 +668,74 @@ async fn tombstone_replay_snapshot_precedes_pending_deletion_and_preserves_other
         .expect("retry snapshot")
         .is_empty());
 }
+
+/// XEP-0424 §Tombstones: a retraction applies to the original and each of
+/// its XEP-0308 corrections, so queued copies of the author's corrections
+/// (`<replace id=original/>`) must be scrubbed from the offline queue too,
+/// while another sender's `<replace>` naming the same id must survive.
+#[tokio::test]
+async fn tombstone_scrub_removes_same_author_corrections_only() {
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
+    };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+    use waddle_xmpp::tombstone::TombstoneTarget;
+    let storage =
+        InMemoryPendingDeliveryStorage::new(waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited);
+    let recipient: jid::BareJid = "reader@example.com".parse().expect("reader");
+    let target = TombstoneTarget::Direct {
+        wire_id: "original".into(),
+        author: "author@example.com".parse().expect("author"),
+        archive: recipient.clone(),
+    };
+    // (sender, wire id, replaces)
+    let cases = [
+        ("author@example.com/phone", "original", None),
+        ("author@example.com/phone", "fix-1", Some("original")),
+        ("other@example.com/phone", "fix-2", Some("original")),
+        ("author@example.com/phone", "fix-3", Some("unrelated")),
+    ];
+    let mut rows = Vec::new();
+    for (sender, id, replaces) in cases {
+        let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+        message.from = Some(sender.parse().expect("sender"));
+        message.id = Some(xmpp_parsers::message::Id(id.into()));
+        if let Some(replaces) = replaces {
+            message.payloads.push(
+                format!("<replace xmlns='urn:xmpp:message-correct:0' id='{replaces}'/>")
+                    .parse::<minidom::Element>()
+                    .expect("replace element"),
+            );
+        }
+        let row = PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: recipient.clone(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        };
+        rows.push(row.id.clone());
+        storage.insert(row).await.expect("queued");
+    }
+    let scrub = storage
+        .scrub_for_tombstone_with_row_ids(&target)
+        .await
+        .expect("scrub");
+    let mut scrubbed = scrub.row_ids.clone();
+    scrubbed.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    let mut expected = vec![rows[0].clone(), rows[1].clone()];
+    expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(
+        scrubbed, expected,
+        "original and its same-author correction"
+    );
+    let remaining: Vec<_> = storage
+        .list(&recipient)
+        .await
+        .expect("remaining")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(remaining, vec![rows[2].clone(), rows[3].clone()]);
+}

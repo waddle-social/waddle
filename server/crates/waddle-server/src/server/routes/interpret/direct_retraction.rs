@@ -71,22 +71,39 @@ pub(super) async fn apply_retraction_tombstone(
     // still tombstones the archive but skips the cache scrub — without
     // an author the wire-id match cannot be made precise, and a
     // cross-sender scrub is the worse failure.
-    let scrub_target = match retraction_message.from.as_ref().map(|from| from.to_bare()) {
-        Some(author) => Some(waddle_xmpp::tombstone::TombstoneTarget::Direct {
-            wire_id: target_wire_id.to_string(),
-            author,
-            archive: archive.clone(),
-        }),
-        None => {
-            warn!(
-                archive = %archive,
-                target = target_wire_id,
-                "ApplyRetractionTombstone: retraction stanza missing from JID; \
-                 the unacked/pending cache scrub is skipped (no author scope)"
-            );
-            None
-        }
-    };
+    // XEP-0424 §Tombstones: a retraction applies to the original and each
+    // of its XEP-0308 corrections. A correction is cached with
+    // `<replace id=…/>` naming the original's wire id or, for clients that
+    // reference it, its origin-id (the same identities the archive cascade
+    // uses), so one scrub target per distinct id; the matcher scopes
+    // `<replace/>` matches to the same author.
+    let scrub_targets: Vec<waddle_xmpp::tombstone::TombstoneTarget> =
+        match retraction_message.from.as_ref().map(|from| from.to_bare()) {
+            Some(author) => {
+                let mut ids = vec![target_wire_id.to_string()];
+                if let Some(origin) = original.origin_id.as_ref() {
+                    if !ids.iter().any(|id| id == origin.as_str()) {
+                        ids.push(origin.as_str().to_string());
+                    }
+                }
+                ids.into_iter()
+                    .map(|wire_id| waddle_xmpp::tombstone::TombstoneTarget::Direct {
+                        wire_id,
+                        author: author.clone(),
+                        archive: archive.clone(),
+                    })
+                    .collect()
+            }
+            None => {
+                warn!(
+                    archive = %archive,
+                    target = target_wire_id,
+                    "ApplyRetractionTombstone: retraction stanza missing from JID; \
+                     the unacked/pending cache scrub is skipped (no author scope)"
+                );
+                Vec::new()
+            }
+        };
     let Some(retraction_id) = retraction_message
         .id
         .as_ref()
@@ -125,8 +142,8 @@ pub(super) async fn apply_retraction_tombstone(
                 tombstone,
             },
         ))));
-        if let Some(target) = scrub_target {
-            if !super::groupchat_archive::plan_tombstone_replay(deps, target).await {
+        for scrub_target in scrub_targets {
+            if !super::groupchat_archive::plan_tombstone_replay(deps, scrub_target).await {
                 return None;
             }
         }
@@ -149,7 +166,7 @@ pub(super) async fn apply_retraction_tombstone(
                 original_id = %original.id,
                 "ApplyRetractionTombstone: target row not found at replace time"
             );
-            if let Some(scrub_target) = scrub_target.as_ref() {
+            for scrub_target in &scrub_targets {
                 scrub_unacked_for_tombstone(
                     sm_session_registry,
                     pending_storage,
@@ -167,7 +184,7 @@ pub(super) async fn apply_retraction_tombstone(
                 %error,
                 "ApplyRetractionTombstone: replace_with_tombstone failed"
             );
-            if let Some(scrub_target) = scrub_target.as_ref() {
+            for scrub_target in &scrub_targets {
                 scrub_unacked_for_tombstone(
                     sm_session_registry,
                     pending_storage,
@@ -187,7 +204,7 @@ pub(super) async fn apply_retraction_tombstone(
     // in another conversation is not accidentally scrubbed (Codex P1),
     // and by the retraction author so a colliding wire id from a
     // DIFFERENT sender in the same conversation survives.
-    if let Some(scrub_target) = scrub_target.as_ref() {
+    for scrub_target in &scrub_targets {
         scrub_unacked_for_tombstone(
             sm_session_registry,
             pending_storage,
