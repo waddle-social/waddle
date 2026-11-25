@@ -1,108 +1,10 @@
 use super::{
     build_activity_element_with_specific, build_mood_clear_element, build_mood_element,
     build_pep_items_iq, build_pep_publish_iq, build_pep_publish_iq_with_item_id,
-    build_publish_mood_iq, build_publish_tune_iq, build_retract_activity_iq,
-    build_tune_clear_element, build_tune_element, parse, parse_pep_activity, parse_pep_mood,
-    parse_pep_tune, Element, PepItem, UserActivity, UserMood, UserTune, NS_ACTIVITY, NS_CLIENT,
-    NS_MOOD, NS_PUBSUB, NS_PUBSUB_EVENT, NS_TUNE,
+    build_publish_mood_iq, build_publish_tune_iq, build_retract_activity_iq, build_tune_element,
+    parse_pep_activity, parse_pep_mood, parse_pep_tune, Element, UserActivity, UserMood, UserTune,
+    NS_ACTIVITY, NS_CLIENT, NS_MOOD, NS_PUBSUB, NS_PUBSUB_EVENT, NS_TUNE,
 };
-
-fn make_pep_message(node: &str, payload: Element) -> Element {
-    Element::builder("message", NS_CLIENT)
-        .attr(
-            minidom::rxml::xml_ncname!("from").to_owned(),
-            "user@example.com",
-        )
-        .append(
-            Element::builder("event", NS_PUBSUB_EVENT)
-                .append(
-                    Element::builder("items", NS_PUBSUB_EVENT)
-                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-                        .append(
-                            Element::builder("item", NS_PUBSUB_EVENT)
-                                .attr(minidom::rxml::xml_ncname!("id").to_owned(), "current")
-                                .append(payload)
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build(),
-        )
-        .build()
-}
-
-#[test]
-fn parse_mood_happy_path() {
-    let msg = make_pep_message(NS_MOOD, build_mood_element("happy", Some("feeling good")));
-    assert_eq!(
-        parse(&msg),
-        Some(PepItem::Mood(UserMood {
-            mood: "happy".to_string(),
-            text: Some("feeling good".to_string()),
-        }))
-    );
-}
-
-#[test]
-fn parse_mood_cleared() {
-    let msg = make_pep_message(NS_MOOD, build_mood_clear_element());
-    assert_eq!(parse(&msg), Some(PepItem::MoodCleared));
-}
-
-#[test]
-fn parse_activity_with_specific_and_text() {
-    let msg = make_pep_message(
-        NS_ACTIVITY,
-        build_activity_element_with_specific(
-            "working",
-            Some("coding"),
-            Some("rewriting waddle"),
-            None,
-        ),
-    );
-    assert_eq!(
-        parse(&msg),
-        Some(PepItem::Activity(UserActivity {
-            activity: "working".to_string(),
-            specific: Some("coding".to_string()),
-            text: Some("rewriting waddle".to_string()),
-        }))
-    );
-}
-
-#[test]
-fn parse_tune_full() {
-    let msg = make_pep_message(
-        NS_TUNE,
-        build_tune_element(&UserTune {
-            artist: Some("Artist Name".to_string()),
-            title: Some("Song Title".to_string()),
-            source: Some("Album".to_string()),
-            length: Some(213),
-            rating: Some(9),
-            track: Some("7".to_string()),
-            uri: Some("https://example.com/song".to_string()),
-        }),
-    );
-    assert_eq!(
-        parse(&msg),
-        Some(PepItem::Tune(UserTune {
-            artist: Some("Artist Name".to_string()),
-            title: Some("Song Title".to_string()),
-            source: Some("Album".to_string()),
-            length: Some(213),
-            rating: Some(9),
-            track: Some("7".to_string()),
-            uri: Some("https://example.com/song".to_string()),
-        }))
-    );
-}
-
-#[test]
-fn parse_tune_cleared() {
-    let msg = make_pep_message(NS_TUNE, build_tune_clear_element());
-    assert_eq!(parse(&msg), Some(PepItem::TuneCleared));
-}
 
 #[test]
 fn build_pep_publish_iq_uses_current_item_id() {
@@ -306,24 +208,6 @@ fn parse_pep_iq_results_round_trip() {
             uri: Some("https://example.com/tune".to_string()),
         })
     );
-}
-
-#[test]
-fn parse_ignores_non_pep_message() {
-    let msg = Element::builder("message", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "chat")
-        .append(Element::builder("body", NS_CLIENT).append("Hello!").build())
-        .build();
-    assert_eq!(parse(&msg), None);
-}
-
-#[test]
-fn parse_ignores_iq() {
-    let iq = Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "some-id")
-        .build();
-    assert_eq!(parse(&iq), None);
 }
 
 fn activity_event(from: &str, kind: Option<&str>, child: Element) -> Element {

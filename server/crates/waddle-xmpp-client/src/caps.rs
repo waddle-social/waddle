@@ -98,9 +98,10 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // fastening payload when received MUST specify 'urn:xmpp:fasten:0'.
         // The client parses `<apply-to/>` (xep/safety_scores.rs).
         crate::xep::safety_scores::NS_FASTEN,
-        // NOTE: mood+notify and tune+notify are not advertised: the client
-        // parses those PEP events but PepItem carries no sender and nothing
-        // downstream consumes them.
+        // NOTE: mood+notify and tune+notify are not advertised: no client
+        // surface displays a contact's mood or tune, so a subscription would
+        // only make the server fan out notifications nothing reads. The
+        // client only publishes and fetches its own mood and tune.
         // NOTE: no feature is advertised for XEP-0353 Jingle Message
         // Initiation (the XEP intentionally defines no discovery), XEP-0272
         // Muji (no disco clause), XEP-0447 file sharing, XEP-0449 stickers,

@@ -92,61 +92,6 @@ pub struct UserTune {
     pub uri: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Supported user mood, activity, and tune publications or retractions.
-#[non_exhaustive]
-pub enum PepItem {
-    /// A published XEP-0107 user mood.
-    Mood(UserMood),
-    /// A published XEP-0108 user activity.
-    Activity(UserActivity),
-    /// A published XEP-0118 tune.
-    Tune(UserTune),
-    /// The user retracted their published mood.
-    MoodCleared,
-    /// The user retracted their published activity.
-    ActivityCleared,
-    /// The user retracted their published tune.
-    TuneCleared,
-}
-
-/// Parse a PEP event from an incoming `<message>` stanza.
-#[must_use]
-pub fn parse(element: &Element) -> Option<PepItem> {
-    if element.name() != "message" {
-        return None;
-    }
-
-    let event = element.get_child("event", NS_PUBSUB_EVENT)?;
-    let items = event.get_child("items", NS_PUBSUB_EVENT)?;
-    let node = items.attr("node")?;
-
-    match node {
-        NS_MOOD => parse_mood_event(items),
-        NS_ACTIVITY => parse_activity_event(items),
-        NS_TUNE => parse_tune_event(items),
-        _ => None,
-    }
-}
-
-fn parse_mood_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let mood = item.get_child("mood", NS_MOOD)?;
-    match parse_mood_payload(mood) {
-        Some(payload) => Some(PepItem::Mood(payload)),
-        None => Some(PepItem::MoodCleared),
-    }
-}
-
-fn parse_activity_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let activity = item.get_child("activity", NS_ACTIVITY)?;
-    match parse_activity_payload(activity) {
-        Some(payload) => Some(PepItem::Activity(payload)),
-        None => Some(PepItem::ActivityCleared),
-    }
-}
-
 /// The activity a peer's PEP service says the account has now: `Some(None)`
 /// when it has none, `None` when the stanza is not an activity notification
 /// this client may believe.
@@ -199,15 +144,6 @@ fn published_by(item: &Element, owner: &BareJid) -> bool {
             .parse::<jid::Jid>()
             .is_ok_and(|publisher| publisher.to_bare() == *owner)
     })
-}
-
-fn parse_tune_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let tune = item.get_child("tune", NS_TUNE)?;
-    match parse_tune_payload(tune) {
-        Some(payload) => Some(PepItem::Tune(payload)),
-        None => Some(PepItem::TuneCleared),
-    }
 }
 
 fn parse_mood_payload(element: &Element) -> Option<UserMood> {

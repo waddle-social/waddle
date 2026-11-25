@@ -10,7 +10,7 @@ use crate::bootstrap::{
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::{InboundCallEvent, MessageRejection, MessagingEvent};
-use crate::pep::{PepItem, UserActivity};
+use crate::pep::UserActivity;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
@@ -47,8 +47,6 @@ pub enum ClientEvent {
     /// unsolicited headline pushes are source-marked and surfaced to
     /// application callbacks.
     InboxStreamEntry(InboxStreamEntry),
-    /// Typed PEP user-state event (mood, activity, tune).
-    PepEvent(PepItem),
     /// XEP-0060 §7.2.2.1 item retraction pushed from a pubsub/PEP
     /// node. Emitted alongside the [`ClientEvent::Messaging`] event
     /// that carried the notification. No consumer maps it yet: the
