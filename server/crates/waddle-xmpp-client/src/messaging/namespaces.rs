@@ -1,5 +1,8 @@
 //! Namespace constants used by the messaging payload parsers and builders.
 
+/// Protocol token `urn:xmpp:blocking` for XEP-0191.
+pub use xmpp_parsers::ns::BLOCKING as NS_BLOCKING;
+
 pub(crate) const NS_DELAY: &str = "urn:xmpp:delay";
 /// `urn:xmpp:sid:0` — XEP-0359 Unique and Stable Stanza IDs. `pub` so the
 /// XEP-0115 caps advertisement references the canonical constant.

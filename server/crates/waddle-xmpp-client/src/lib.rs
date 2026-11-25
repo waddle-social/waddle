@@ -5,6 +5,7 @@
 
 pub mod admin_commands;
 pub mod avatar;
+pub mod blocking;
 pub mod bootstrap;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod call_lifecycle;
