@@ -147,7 +147,7 @@ struct CallStageHost: View {
             )
         }
         // The microphone starts a moment after media connects; until then it is not a mute.
-        let isSelfMuted = call.status != .connecting && media?.isMicrophoneOn == false
+        let isSelfMuted = call.status.hasMedia && media?.isMicrophoneOn == false
         let tiles: [CallStageTile]
         let subtitle: String
         switch call.kind {
@@ -175,7 +175,9 @@ struct CallStageHost: View {
         return CallStageView(
             title: call.title,
             subtitle: subtitle,
-            status: status(of: call),
+            status: call.status,
+            // The media session keeps when it connected, so the stage and a dock show one clock.
+            connectedSince: media?.connectedSince,
             tiles: tiles,
             presentation: memory.presentation,
             promotedSpeaker: memory.promotedSpeaker,
@@ -207,7 +209,7 @@ struct CallStageHost: View {
             model.update(call.sid) { $0.sawChat(upTo: newest) }
         }
         .callPushToTalk(
-            hasMedia: call.status != .connecting, isMicrophoneOn: media?.isMicrophoneOn ?? false,
+            hasMedia: call.status.hasMedia, isMicrophoneOn: media?.isMicrophoneOn ?? false,
             coversConversation: memory.size != .split,
             setMicrophone: CallCommands(calls: session.calls, media: media).setMicrophone
         )
@@ -224,11 +226,6 @@ struct CallStageHost: View {
         .onChange(of: media?.activeSpeakersLoudestFirst ?? [], initial: true) { _, speakers in
             model.update(call.sid) { $0.speakersChanged(speakers) }
         }
-    }
-
-    /// The media session keeps when it connected, so the stage and a dock show one clock.
-    private func status(of call: Call) -> CallStageStatus {
-        call.status == .inCall(since: nil) ? .inCall(since: media?.connectedSince) : call.status
     }
 
     /// A stage narrower than this gives the panel the tiles' place.
@@ -359,7 +356,7 @@ struct CallStageHost: View {
         var isRoom: Bool { if case .room = kind { true } else { false } }
         let title: String
         let media: CallMedia
-        let status: CallStageStatus
+        let status: CallSessionStatus
         /// The identity we join the SFU as.
         let own: JID
 
@@ -379,11 +376,7 @@ struct CallStageHost: View {
             }
             guard let own = JID(parsing: join.identity) ?? session.account.fullJID else { return nil }
             self.own = own
-            status = switch phase {
-            case .idle, .connecting: .connecting
-            case .connected: .inCall(since: nil)
-            case .reconnecting: .reconnecting
-            }
+            status = CallSessionStatus(phase)
         }
     }
 }

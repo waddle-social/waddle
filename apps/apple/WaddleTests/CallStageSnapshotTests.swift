@@ -41,7 +41,7 @@ final class CallStageSnapshotTests: XCTestCase {
     }
 
     private func assertStage(
-        title: String = "#design", subtitle: String = "2 others in call", status: CallStageStatus = .inCall(since: nil),
+        title: String = "#design", subtitle: String = "2 others in call", status: CallSessionStatus = .connected,
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, issues: [CallMediaIssue] = [],
         checkingIssues: Set<CallMediaIssue.Kind> = [],
@@ -166,7 +166,7 @@ final class CallStageSnapshotTests: XCTestCase {
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
-                title: "#design", subtitle: "2 others in call", status: .inCall(since: nil),
+                title: "#design", subtitle: "2 others in call", status: .connected,
                 tiles: [Self.you, Self.linus, Self.grace], size: .expanded, isMicrophoneOn: true, isHandRaised: false,
                 isSharingScreen: true,
                 ownScreen: CallStageTile(
@@ -224,7 +224,7 @@ final class CallStageSnapshotTests: XCTestCase {
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallStageView(
-                title: title, subtitle: "2 others in call", status: .inCall(since: nil),
+                title: title, subtitle: "2 others in call", status: .connected,
                 tiles: [Self.you, Self.linus, Self.grace], isMicrophoneOn: true, isHandRaised: false,
                 connection: quality, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
             )
@@ -279,7 +279,7 @@ final class CallStageSnapshotTests: XCTestCase {
     ) async throws {
         try await assertScreenSnapshot(
             of: CallStageView(
-                title: "#design", subtitle: "3 others in call", status: .inCall(since: nil), tiles: tiles,
+                title: "#design", subtitle: "3 others in call", status: .connected, tiles: tiles,
                 size: .expanded, participants: Self.rows(of: tiles), canResetVolumes: true, participantsCoverTiles: coverTiles, isMicrophoneOn: true,
                 isHandRaised: false, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
             ),

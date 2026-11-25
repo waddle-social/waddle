@@ -1,14 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-/// How a call in session is doing, for the stage's header.
-enum CallStageStatus: Equatable {
-    case connecting
-    /// Media is up, since `since` when that is known.
-    case inCall(since: Date?)
-    case reconnecting
-}
-
 /// A call in session as a stage (web `CallSplitContainer`): who it is with,
 /// everyone's tile, and the controls. It keeps the Night ground in both
 /// appearances, as a cinema does: pictures read best on dark.
@@ -18,7 +10,9 @@ struct CallStageView: View {
     /// The peer, or the room.
     let title: String
     let subtitle: String
-    let status: CallStageStatus
+    let status: CallSessionStatus
+    /// When media connected, for the header's clock; `nil` shows "In call" with no clock.
+    var connectedSince: Date?
     let tiles: [CallStageTile]
     var presentation = CallStagePresentation()
     /// Who the speaker view shows large.
@@ -64,7 +58,7 @@ struct CallStageView: View {
     /// The letter keys that do something on this stage as it is.
     private var shortcuts: [CallShortcut] {
         CallShortcut.available(
-            hasMedia: status != .connecting, canShareScreen: isSharingScreen != nil, hasHands: isHandRaised != nil,
+            hasMedia: status.hasMedia, canShareScreen: isSharingScreen != nil, hasHands: isHandRaised != nil,
             size: size
         )
     }
@@ -81,7 +75,9 @@ struct CallStageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CallStageHeader(title: title, subtitle: subtitle, status: status, connection: connectionChip)
+            CallStageHeader(
+                title: title, subtitle: subtitle, status: status, connectedSince: connectedSince, connection: connectionChip
+            )
             if !issues.isEmpty {
                 CallMediaNotice(
                     issues: issues, checking: checkingIssues, retry: actions.retryMediaIssue,
@@ -119,11 +115,11 @@ struct CallStageView: View {
             .padding(.top, WaddleTokens.Spacing.s1Half)
             .padding(.bottom, Theme.Spacing.m)
             CallControlBar(
-                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
+                isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status.hasMedia,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
                 isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
                 showsParticipants: participants != nil, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
-                showsChat: showsChat, canReact: status != .connecting, actions: actions
+                showsChat: showsChat, canReact: status.hasMedia, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)
@@ -154,18 +150,12 @@ struct CallStageView: View {
 
     /// The indicator of a live call. While it reconnects, the header's own status says so.
     private var connectionChip: CallConnectionChip? {
-        guard case .inCall = status, let connection else { return nil }
+        guard status == .connected, let connection else { return nil }
         return CallConnectionChip(quality: connection)
     }
 
     /// What VoiceOver says when the status changes; never the ticking clock.
-    private var announcement: String {
-        switch status {
-        case .connecting: "Connecting"
-        case .inCall: "Call connected"
-        case .reconnecting: "Reconnecting"
-        }
-    }
+    private var announcement: String { status.announcement }
 }
 
 /// Our own connection in a call's header (web `CallConnectionIndicator`):
@@ -221,7 +211,9 @@ struct CallConnectionIndicator: View {
 private struct CallStageHeader: View {
     let title: String
     let subtitle: String
-    let status: CallStageStatus
+    let status: CallSessionStatus
+    /// Used only while connected: a call that is connecting or reconnecting shows no clock.
+    var connectedSince: Date?
     var connection: CallConnectionChip?
 
     var body: some View {
@@ -253,7 +245,7 @@ private struct CallStageHeader: View {
     }
 
     private var isLive: Bool {
-        if case .inCall = status { true } else { false }
+        status == .connected
     }
 
     private var dot: some View {
@@ -270,14 +262,14 @@ private struct CallStageHeader: View {
 
     @ViewBuilder
     private var statusText: some View {
-        switch status {
-        case .connecting:
+        switch (status, connectedSince) {
+        case (.connecting, _):
             Text("Connecting…").foregroundStyle(Theme.Colors.fgMuted)
-        case .reconnecting:
+        case (.reconnecting, _):
             Text("Reconnecting…").foregroundStyle(Theme.Colors.warningText)
-        case .inCall(nil):
+        case (.connected, nil):
             Text("In call").foregroundStyle(Theme.Colors.fgMuted)
-        case .inCall(let since?):
+        case (.connected, let since?):
             // Only the clock is redrawn each second, never the tiles.
             TimelineView(.periodic(from: since, by: 1)) { context in
                 Text(CallClock.string(for: .seconds(context.date.timeIntervalSince(since))))

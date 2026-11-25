@@ -43,7 +43,7 @@ final class CallStageRedrawTests: XCTestCase {
 
         var body: some View {
             CallStageView(
-                title: "#design", subtitle: "2 others in call", status: .inCall(since: nil), tiles: roster.tiles,
+                title: "#design", subtitle: "2 others in call", status: .connected, tiles: roster.tiles,
                 presentation: CallStagePresentation(viewMode: .speaker), tileSource: source, announcesChanges: false,
                 actions: CallStageActions(
                     toggleMicrophone: {}, toggleCamera: {}, toggleHand: {}, setViewMode: { _ in }, toggleSelfView: {},

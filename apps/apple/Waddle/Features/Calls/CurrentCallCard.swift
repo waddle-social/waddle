@@ -221,11 +221,7 @@ struct CurrentCallCardHost: View {
 
     private func card(for conversation: ConversationID, sid: String, state: CallState) -> some View {
         let header = ConversationHeaderText.make(for: conversation, session: session)
-        let status: CallCardSummary.Status = switch media?.phase ?? .idle {
-        case .idle, .connecting: .connecting
-        case .connected: .connected
-        case .reconnecting: .reconnecting
-        }
+        let status = CallSessionStatus(media?.phase ?? .idle)
         let kind: CallCardSummary.Kind = if case .active(let call) = state {
             .direct(call.media)
         } else {
@@ -238,7 +234,7 @@ struct CurrentCallCardHost: View {
             title: conversation.isRoom ? header.title : header.name,
             summary: CallCardSummary.line(status: status, kind: kind),
             isConnected: status == .connected,
-            hasMedia: status != .connecting,
+            hasMedia: status.hasMedia,
             isMicrophoneOn: media?.isMicrophoneOn ?? false,
             isCameraOn: media?.isCameraOn ?? false,
             notice: media?.deviceNotice,
@@ -264,12 +260,7 @@ struct CurrentCallCardHost: View {
         // back, as the dock and the stage do. Not on arrival: the surface
         // the call came from has already said how it is doing.
         .onChange(of: status) { _, status in
-            let text = switch status {
-            case .connecting: "Connecting"
-            case .connected: "Call connected"
-            case .reconnecting: "Reconnecting"
-            }
-            AccessibilityNotification.Announcement(text).post()
+            AccessibilityNotification.Announcement(status.announcement).post()
         }
     }
 }
