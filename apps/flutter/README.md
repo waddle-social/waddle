@@ -122,9 +122,11 @@ consent cleanup on a disposable compositor, run this from the repository root.
 nix develop .#flutter --command bash scripts/flutter-wayland-capture-smoke.sh
 ```
 
-To verify remote screen sharing, point `WADDLE_LIVEKIT_FIXTURE` at a local
-JSON file before running the same command. The test connects two participants
-to a test LiveKit server and checks that the viewer decodes shared video.
+For a two-participant call, set `WADDLE_LIVEKIT_FIXTURE` to the path of a
+local JSON file before running the same command. The viewer decodes the
+shared screen and samples the synthetic camera with replacement, blur and
+effects disabled. The test also changes live microphone processing and remote
+playback gain, then reads the RTP statistics.
 Supply `publisher` and `viewer` objects, each with `url` (a `wss://` address),
 `room`, `identity` and a short-lived `token`. Use distinct identities in the
 same room with permission to publish and subscribe. For a private test CA,
