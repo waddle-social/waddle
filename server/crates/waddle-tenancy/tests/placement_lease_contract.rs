@@ -54,7 +54,7 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
             &shared_role,
             PlacementMode::SharedPool,
             &holder_a,
-            300,
+            500,
         )
         .await
         .expect("claim A");
@@ -73,8 +73,8 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
         .expect("write fence A");
     trace1.emit_tenant_write("cell-a", "t-expiry", &holder_a, lease_a.generation);
 
-    // Wait past authoritative DB TTL (300ms).
-    tokio::time::sleep(Duration::from_millis(420)).await;
+    // Wait past authoritative DB TTL (500ms).
+    tokio::time::sleep(Duration::from_millis(620)).await;
 
     assert!(matches!(
         lease_store
