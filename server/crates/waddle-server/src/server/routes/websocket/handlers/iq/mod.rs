@@ -108,6 +108,7 @@ mod muc_admin;
 pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
 pub(crate) mod muc_admin_relay;
+mod muc_avatar;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
 // `handlers::message::muc_invite` persists the granted membership with
 // the exact same tuple write the admin affiliation path uses.
@@ -182,7 +183,7 @@ use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{
-    build_muc_owner_config_response, build_xmpp_error_response, muc_owner_authorized,
+    build_muc_owner_config_response, build_xmpp_error_response, room_action_authorized,
     server_affiliation_for_requester, space_affiliation_for_requester,
     spaces_node_mutation_allowed,
 };

@@ -444,12 +444,47 @@ pub(super) async fn delete_channel_parent_tuple(
     }
 }
 
+/// Whether `sender_jid` may perform `action` on `room_jid`: a room an
+/// enrolled host-grant scope manages is decided by the canonical grants
+/// alone (no room affiliation confers `manage` or `delete` there); any
+/// other room by the sender's honoured owner affiliation.
+pub(super) async fn room_action_authorized(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    sender_jid: &FullJid,
+    session: Option<&Session>,
+    evidence: &crate::permissions::host_grant::PrincipalEvidence,
+    action: crate::permissions::host_grant::HostGrantAction,
+) -> Result<bool, XmppError> {
+    use crate::permissions::host_grant::{RoomBinding, RoomGate};
+    match state
+        .deps
+        .app_state
+        .host_grants
+        .allows_as(
+            RoomBinding::Room(room_jid),
+            &sender_jid.to_bare(),
+            evidence,
+            action,
+        )
+        .await
+    {
+        RoomGate::Unmanaged => {
+            muc_owner_authorized(state, room_jid, sender_jid, session, evidence).await
+        }
+        RoomGate::Managed(allowed) => Ok(allowed),
+        RoomGate::Unavailable => Err(XmppError::internal(
+            "the host-grant authority is unavailable",
+        )),
+    }
+}
+
 /// Whether a room no enrolled scope manages holds `sender_jid` as an
 /// owner, as that standing is honoured for a request that reached the room
 /// with `evidence`: as stored for a session of this deployment, and for a
 /// remote principal only for a trusted home on a `pkix` stream (ADR-0020
 /// D8).
-pub(super) async fn muc_owner_authorized(
+async fn muc_owner_authorized(
     state: &WebSocketState,
     room_jid: &BareJid,
     sender_jid: &FullJid,
