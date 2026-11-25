@@ -11,7 +11,15 @@ use wasmtime::component::{Resource, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use super::http::execute_runtime_http_request;
+use super::inference::{
+    DenyingExtensionInferenceHost, ExtensionInferenceHost, HostInferenceChunk, HostInferenceError,
+    HostInferenceErrorCode, HostInferenceMessage, HostInferenceRequest, InferenceCredentialRef,
+    InferenceStream, VerifiedInferenceUsage,
+};
 use super::waddle::extension::host_tools::Host as HostToolsHost;
+use super::waddle::extension::inference::{
+    self as wit_inference, Host as InferenceHost, HostInferenceStream,
+};
 use super::waddle::extension::runtime::Host as RuntimeHost;
 use super::waddle::extension::types as wit_types;
 use super::wasi::logging::logging::{Host as LoggingHost, Level as LogLevel};
@@ -162,6 +170,7 @@ pub struct HostState {
     table: ResourceTable,
     delivery: Option<Resource<DeliveryKey>>,
     tools: Arc<dyn ExtensionHostTools>,
+    inference: Arc<dyn ExtensionInferenceHost>,
     context: InvocationContext,
     /// Guest configuration returned by the runtime configuration host import.
     pub config: String,
@@ -171,6 +180,31 @@ pub struct HostState {
     runtime_limits: RuntimeLimits,
     http: super::http::HttpRuntime,
     http_requests: u32,
+    inference_invocation: bool,
+}
+
+/// Construction parameters for [`HostState::from_spec`].
+pub struct HostStateSpec {
+    /// Host tools service implementation.
+    pub tools: Arc<dyn ExtensionHostTools>,
+    /// Brokered inference stream host implementation.
+    pub inference: Arc<dyn ExtensionInferenceHost>,
+    /// Invocation authority and room/tenant context.
+    pub context: InvocationContext,
+    /// Serialized extension configuration JSON.
+    pub config: String,
+    /// Granted capabilities for this extension module.
+    pub grants: HashSet<ExtensionCapability>,
+    /// Allowed HTTPS origins for non-inference HTTP calls.
+    pub allowed_http_origins: Vec<String>,
+    /// Per-invocation runtime limits.
+    pub runtime_limits: RuntimeLimits,
+    /// Shared host HTTP runtime.
+    pub http: super::http::HttpRuntime,
+    /// Optional per-tenant memory quota tracker.
+    pub tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    /// Whether this invocation is an inference invocation.
+    pub inference_invocation: bool,
 }
 
 impl HostState {
@@ -185,26 +219,63 @@ impl HostState {
         http: super::http::HttpRuntime,
         tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
     ) -> Self {
-        let mut wasi_builder = WasiCtxBuilder::new();
-        if context.kind != InvocationKind::RoomMessageObserve {
-            wasi_builder.inherit_stderr();
-        }
-        let wasi = wasi_builder.build();
-        let limits = AggregateStoreLimits::new(runtime_limits.memory_bytes, tenant_memory_tracker);
-        Self {
-            wasi,
-            table: ResourceTable::new(),
-            delivery: None,
+        Self::from_spec(HostStateSpec {
             tools,
+            inference: Arc::new(DenyingExtensionInferenceHost),
             context,
             config,
             grants,
             allowed_http_origins,
-            limits,
             runtime_limits,
             http,
+            tenant_memory_tracker,
+            inference_invocation: false,
+        })
+    }
+
+    /// Construct a [`HostState`] from a [`HostStateSpec`].
+    #[must_use]
+    pub fn from_spec(spec: HostStateSpec) -> Self {
+        let mut wasi_builder = WasiCtxBuilder::new();
+        // Stderr is never inherited from the guest onto the host pod stderr.
+        let wasi = wasi_builder.build();
+        let limits =
+            AggregateStoreLimits::new(spec.runtime_limits.memory_bytes, spec.tenant_memory_tracker);
+        let is_inference =
+            spec.inference_invocation || is_inference_plugin(&spec.context.plugin_id);
+        let effective_allowed_origins = if is_inference {
+            Vec::new()
+        } else {
+            spec.allowed_http_origins
+        };
+        Self {
+            wasi,
+            table: ResourceTable::new(),
+            delivery: None,
+            tools: spec.tools,
+            inference: spec.inference,
+            context: spec.context,
+            config: spec.config,
+            grants: spec.grants,
+            allowed_http_origins: effective_allowed_origins,
+            limits,
+            runtime_limits: spec.runtime_limits,
+            http: spec.http,
             http_requests: 0,
+            inference_invocation: is_inference,
         }
+    }
+
+    /// Invoke the guest logging handler (`wasi:logging/logging`) for integration
+    /// testing of log suppression on inference/command invocations.
+    pub async fn emit_guest_log_for_test(&mut self, context: &str, message: &str) {
+        let _ = <Self as LoggingHost>::log(
+            self,
+            LogLevel::Error,
+            context.to_owned(),
+            message.to_owned(),
+        )
+        .await;
     }
 
     pub(super) async fn bind_delivery(
@@ -338,9 +409,13 @@ impl LoggingHost for HostState {
         context: String,
         message: String,
     ) -> wasmtime::Result<()> {
-        // Background observations may contain private message bodies and provider credentials.
-        // Their typed outcome is logged by the host; arbitrary guest logs are suppressed.
-        if self.context.kind == InvocationKind::RoomMessageObserve {
+        // Background observations and inference invocations may contain private
+        // prompts, message bodies, model outputs, or credential metadata.
+        // Guest log forwarding is unconditionally suppressed for them.
+        if self.context.kind == InvocationKind::RoomMessageObserve
+            || self.context.kind == InvocationKind::Command
+            || self.inference_invocation
+        {
             return Ok(());
         }
         let context_display = if context.is_empty() {
@@ -513,6 +588,13 @@ impl RuntimeHost for HostState {
         request: wit_types::OutgoingHttpRequest,
     ) -> wasmtime::Result<std::result::Result<wit_types::HttpResponse, wit_types::HostToolError>>
     {
+        if self.inference_invocation {
+            return Ok(Err(HostToolError::denied(
+                DisplayText::try_new("outbound.http.request is disabled for inference invocations")
+                    .expect("static denial"),
+            )
+            .into()));
+        }
         let result = match self
             .validate_delivery()
             .await
@@ -561,4 +643,121 @@ impl super::waddle::extension::delivery::HostDeliveryKey for HostState {
         self.table.delete(resource)?;
         Ok(())
     }
+}
+
+impl InferenceHost for HostState {
+    async fn start_stream(
+        &mut self,
+        request: wit_inference::InferenceRequest,
+    ) -> wasmtime::Result<Result<Resource<InferenceStream>, wit_inference::InferenceError>> {
+        let domain_req = HostInferenceRequest {
+            credential: match request.credential {
+                wit_inference::CredentialRef::Tenant(name) => InferenceCredentialRef::Tenant(name),
+                wit_inference::CredentialRef::InvokingUser(provider) => {
+                    InferenceCredentialRef::InvokingUser(provider)
+                }
+            },
+            provider: request.provider.value,
+            deployment: request.deployment,
+            model: request.model.value,
+            messages: request
+                .messages
+                .into_iter()
+                .map(|m| HostInferenceMessage {
+                    role: m.role,
+                    content: m.content,
+                })
+                .collect(),
+            max_output_tokens: request.max_output_tokens,
+        };
+
+        match self.inference.start_stream(&self.context, domain_req).await {
+            Ok(opened) => {
+                let resource = self.table.push(InferenceStream::from_opened(opened))?;
+                Ok(Ok(resource))
+            }
+            Err(err) => Ok(Err(err.into())),
+        }
+    }
+}
+
+impl HostInferenceStream for HostState {
+    async fn next_chunk(
+        &mut self,
+        resource: Resource<InferenceStream>,
+    ) -> wasmtime::Result<
+        Result<Option<wit_inference::InferenceChunk>, wit_inference::InferenceError>,
+    > {
+        let stream = self.table.get_mut(&resource)?;
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => Ok(Ok(Some(chunk.into()))),
+            Ok(None) => Ok(Ok(None)),
+            Err(err) => Ok(Err(err.into())),
+        }
+    }
+
+    async fn terminal_usage(
+        &mut self,
+        resource: Resource<InferenceStream>,
+    ) -> wasmtime::Result<Option<wit_inference::VerifiedUsage>> {
+        let stream = self.table.get(&resource)?;
+        Ok(stream.terminal_usage().map(Into::into))
+    }
+
+    async fn drop(&mut self, resource: Resource<InferenceStream>) -> wasmtime::Result<()> {
+        // Removing from ResourceTable drops InferenceStream synchronously, which
+        // fires `Drop::drop` -> `cancel.cancel_sync()` unconditionally.
+        let _ = self.table.delete(resource)?;
+        Ok(())
+    }
+}
+
+impl From<HostInferenceChunk> for wit_inference::InferenceChunk {
+    fn from(value: HostInferenceChunk) -> Self {
+        Self {
+            delta: value.delta,
+            sequence: value.sequence,
+            finish_reason: value.finish_reason,
+        }
+    }
+}
+
+impl From<VerifiedInferenceUsage> for wit_inference::VerifiedUsage {
+    fn from(value: VerifiedInferenceUsage) -> Self {
+        Self {
+            provider: wit_types::ProviderId {
+                value: value.provider,
+            },
+            model: wit_types::ModelId { value: value.model },
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+            cost_microcents: value.cost_microcents,
+        }
+    }
+}
+
+impl From<HostInferenceErrorCode> for wit_inference::InferenceErrorCode {
+    fn from(value: HostInferenceErrorCode) -> Self {
+        match value {
+            HostInferenceErrorCode::Denied => Self::Denied,
+            HostInferenceErrorCode::InvalidRequest => Self::InvalidRequest,
+            HostInferenceErrorCode::Canceled => Self::Canceled,
+            HostInferenceErrorCode::RateLimited => Self::RateLimited,
+            HostInferenceErrorCode::TemporaryFailure => Self::TemporaryFailure,
+            HostInferenceErrorCode::ChunkLimitExceeded => Self::ChunkLimitExceeded,
+        }
+    }
+}
+
+impl From<HostInferenceError> for wit_inference::InferenceError {
+    fn from(value: HostInferenceError) -> Self {
+        Self {
+            code: value.code.into(),
+            message: value.message,
+        }
+    }
+}
+
+pub(crate) fn is_inference_plugin(plugin_id: &PluginId) -> bool {
+    matches!(plugin_id.as_str(), "ai-chatbot" | "jev-judgments")
 }

@@ -22,11 +22,19 @@ mod domain_to_wit;
 mod host_state;
 mod host_tool_conversions;
 mod http;
+pub mod inference;
 mod loader;
 #[cfg(test)]
 mod tests;
 mod ui_conversions;
 mod wit_to_domain;
 
-pub use host_state::{DeliveryKey, HostState};
-pub use loader::{LoadedExtension, WasmRuntime};
+pub use host_state::{DeliveryKey, HostState, HostStateSpec};
+pub use http::HttpRuntime;
+pub use inference::{
+    DenyingExtensionInferenceHost, ExtensionInferenceHost, HostInferenceChunk, HostInferenceError,
+    HostInferenceErrorCode, HostInferenceMessage, HostInferenceRequest, InferenceCredentialRef,
+    InferenceStream, OpenedInferenceStream, StreamCancelHandle, StreamItem, VerifiedInferenceUsage,
+    DEFAULT_MAX_STREAM_CHUNK_BYTES, DEFAULT_STREAM_CHANNEL_CAPACITY,
+};
+pub use loader::{InferenceInvocationParams, LoadedExtension, WasmRuntime};

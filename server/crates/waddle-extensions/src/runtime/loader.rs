@@ -12,6 +12,8 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store};
 
 use super::exports::waddle::extension as wit_exports;
+use super::host_state::HostStateSpec;
+use super::inference::{DenyingExtensionInferenceHost, ExtensionInferenceHost};
 use super::{waddle, wasi, HostState, WaddleExtension};
 use crate::host_tools::{
     DeliveryInvocation, ExtensionDeliveryCapability, ExtensionHostTools, InvocationContext,
@@ -20,6 +22,10 @@ use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, Exten
 use std::sync::mpsc;
 use std::time::Duration;
 use waddle_broker_core::quotas::TenantMemoryTracker;
+use wasmtime_wasi::clocks::{WasiClocks, WasiClocksView as _};
+use wasmtime_wasi::p2::bindings::{clocks as wasi_clocks, random as wasi_random};
+use wasmtime_wasi::random::WasiRandom;
+use wasmtime_wasi::WasiView;
 
 /// Interval at which the Wasmtime engine epoch counter advances.
 const EPOCH_TICK_INTERVAL_MS: u64 = 50;
@@ -132,9 +138,9 @@ impl LoadedExtension {
             })?;
 
         let mut linker = Linker::<HostState>::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        add_narrow_wasi_to_linker(&mut linker)
             .map_err(anyhow::Error::from)
-            .context("failed to add wasi linker imports")?;
+            .context("failed to add narrow wasi linker imports")?;
         wasi::logging::logging::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add wasi:logging linker imports")?;
@@ -144,6 +150,9 @@ impl LoadedExtension {
         waddle::extension::delivery::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add delivery capability linker imports")?;
+        waddle::extension::inference::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(anyhow::Error::from)
+            .context("failed to add waddle inference linker imports")?;
         waddle::extension::runtime::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add waddle runtime linker imports")?;
@@ -156,6 +165,18 @@ impl LoadedExtension {
             limits: RuntimeLimits::default(),
             _epoch_ticker: Arc::clone(&runtime._epoch_ticker),
         })
+    }
+
+    /// Borrow the compiled Wasmtime [`Component`] for testing or inspection.
+    #[must_use]
+    pub fn component(&self) -> &Component {
+        &self.component
+    }
+
+    /// Borrow the narrowed [`Linker<HostState>`] configured for this extension.
+    #[must_use]
+    pub fn linker(&self) -> &Linker<HostState> {
+        &self.linker
     }
 
     /// Replace the execution and network resource limits used when creating invocation stores.
@@ -270,17 +291,45 @@ impl LoadedExtension {
         allowed_http_origins: Vec<String>,
         tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
     ) -> Result<ExtensionResponse> {
-        self.invoke_with_deadline(
+        self.call_handle_event_with_inference(InferenceInvocationParams {
             event,
             tools,
-            InvocationBinding {
-                context,
-                delivery: None,
-                tenant_memory_tracker,
-            },
+            inference: Arc::new(DenyingExtensionInferenceHost),
+            context,
             config,
             grants,
             allowed_http_origins,
+            tenant_memory_tracker,
+            inference_invocation: false,
+        })
+        .await
+    }
+
+    /// Invoke a guest with an explicit brokered [`ExtensionInferenceHost`],
+    /// rejecting `outbound.http.request` and suppressing guest logs/stderr when
+    /// `inference_invocation` is `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    pub async fn call_handle_event_with_inference(
+        &self,
+        params: InferenceInvocationParams,
+    ) -> Result<ExtensionResponse> {
+        self.invoke_with_deadline(
+            params.event,
+            params.tools,
+            InvocationBinding {
+                context: params.context,
+                delivery: None,
+                inference: params.inference,
+                tenant_memory_tracker: params.tenant_memory_tracker,
+                inference_invocation: params.inference_invocation,
+            },
+            params.config,
+            params.grants,
+            params.allowed_http_origins,
         )
         .await
         .map_err(|(failure, message)| match message {
@@ -313,7 +362,9 @@ impl LoadedExtension {
             InvocationBinding {
                 context,
                 delivery: None,
+                inference: Arc::new(DenyingExtensionInferenceHost),
                 tenant_memory_tracker: None,
+                inference_invocation: false,
             },
             config,
             grants,
@@ -373,7 +424,9 @@ impl LoadedExtension {
             InvocationBinding {
                 context: invocation.context,
                 delivery: Some(invocation.capability),
+                inference: Arc::new(DenyingExtensionInferenceHost),
                 tenant_memory_tracker,
+                inference_invocation: false,
             },
             config,
             grants,
@@ -400,7 +453,9 @@ impl LoadedExtension {
             InvocationBinding {
                 context,
                 delivery: None,
+                inference: Arc::new(DenyingExtensionInferenceHost),
                 tenant_memory_tracker,
+                inference_invocation: false,
             },
             config,
             grants,
@@ -445,19 +500,30 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
-        use crate::types::ObservationFailure;
+        let is_inference_invocation = invocation.inference_invocation
+            || super::host_state::is_inference_plugin(&invocation.context.plugin_id);
+        if is_inference_invocation
+            && (grants.contains(&ExtensionCapability::OutboundHttpRequest)
+                || !allowed_http_origins.is_empty())
+        {
+            return Err((ObservationFailure::Denied, Some(
+                "outbound.http.request and allowed_http_origins are forbidden for inference invocations".to_owned(),
+            )));
+        }
         let mut store = Store::new(
             &self.engine,
-            HostState::new(
+            HostState::from_spec(HostStateSpec {
                 tools,
-                invocation.context,
+                inference: invocation.inference,
+                context: invocation.context,
                 config,
                 grants,
                 allowed_http_origins,
-                self.limits.clone(),
-                self.http.clone(),
-                invocation.tenant_memory_tracker,
-            ),
+                runtime_limits: self.limits.clone(),
+                http: self.http.clone(),
+                tenant_memory_tracker: invocation.tenant_memory_tracker,
+                inference_invocation: invocation.inference_invocation,
+            }),
         );
         if let Some(capability) = invocation.delivery {
             let ExtensionEvent::RoomMessageObserve(observation) = &event else {
@@ -511,10 +577,59 @@ impl LoadedExtension {
     }
 }
 
+/// Parameters for invoking a Wasm extension with an explicit brokered
+/// [`ExtensionInferenceHost`].
+pub struct InferenceInvocationParams {
+    /// Event payload delivered to `handle-event`.
+    pub event: ExtensionEvent,
+    /// Host tool service implementation.
+    pub tools: Arc<dyn ExtensionHostTools>,
+    /// Brokered inference stream host implementation.
+    pub inference: Arc<dyn ExtensionInferenceHost>,
+    /// Invocation authority and room/tenant context.
+    pub context: InvocationContext,
+    /// Serialized extension configuration JSON.
+    pub config: String,
+    /// Granted capabilities for this extension module.
+    pub grants: HashSet<ExtensionCapability>,
+    /// Allowed HTTPS origins for non-inference HTTP calls.
+    pub allowed_http_origins: Vec<String>,
+    /// Optional per-tenant linear memory quota tracker.
+    pub tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    /// Whether this invocation is an inference invocation (`outbound.http.request`
+    /// and guest log forwarding disabled).
+    pub inference_invocation: bool,
+}
+
 struct InvocationBinding {
     context: InvocationContext,
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
+    inference: Arc<dyn ExtensionInferenceHost>,
     tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    inference_invocation: bool,
+}
+
+struct HasIo;
+
+impl wasmtime::component::HasData for HasIo {
+    type Data<'a> = &'a mut wasmtime::component::ResourceTable;
+}
+
+/// Narrow WASI linking: exposes ONLY `wasi:clocks`, `wasi:io`, and `wasi:random`.
+/// Deliberately omits `wasi:filesystem`, `wasi:sockets`, and `wasi:cli`.
+fn add_narrow_wasi_to_linker(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+    use wasmtime_wasi::p2::bindings::io;
+
+    io::error::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    io::poll::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    io::streams::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    wasi_clocks::wall_clock::add_to_linker::<HostState, WasiClocks>(linker, HostState::clocks)?;
+    wasi_clocks::monotonic_clock::add_to_linker::<HostState, WasiClocks>(
+        linker,
+        HostState::clocks,
+    )?;
+    wasi_random::random::add_to_linker::<HostState, WasiRandom>(linker, |t| t.ctx().ctx.random())?;
+    Ok(())
 }
 
 fn classify_delivery_error(error: HostToolError) -> ObservationFailure {

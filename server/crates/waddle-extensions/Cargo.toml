@@ -35,6 +35,7 @@ xmpp-parsers = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
 dhat = "0.3"
 memory-stats = "1"
 
