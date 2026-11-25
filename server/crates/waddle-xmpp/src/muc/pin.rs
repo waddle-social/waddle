@@ -1,8 +1,8 @@
 //! MUC pinned-message state.
 //!
-//! Per-room pin entries projected from XEP-0470 attachment events. The
+//! Per-room pin entries kept from `urn:waddle:pin:0` pin changes. The
 //! per-message pin marker on the wire is `<pinned xmlns='urn:waddle:pin:0'/>`
-//! (see `crate::xep::xep0470`); this module owns the canonical room-level
+//! (see `crate::xep::xep_waddle_pin`); this module owns the canonical room-level
 //! list of pinned entries that the projection IQ query and live system
 //! events serialize from.
 

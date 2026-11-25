@@ -51,7 +51,7 @@ scenario: #Scenario & {
 			captureStanzaIdBy: roomJid
 		},
 
-		// Alice (owner) pins Bob's message via XEP-0470 attachment.
+		// Alice (owner) pins Bob's message via a urn:waddle:pin:0 message marker.
 		#SendMessage & {
 			from:  alicePhone
 			toJid: roomJid

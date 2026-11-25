@@ -13,8 +13,8 @@
 //!    §7.4 (only occupants may send) + Waddle managed-room policy.
 //! 2. [`canonicalize::MucCanonicalizeHandler`] — XEP-0359 stanza-id
 //!    `by=room`, XEP-0421 occupant-id stamp, `from='room/nick'` rewrite.
-//! 3. [`pin::MucPinHandler`] — XEP-0470 attachment with `urn:waddle:pin:0`
-//!    `<pinned/>` / `<unpinned/>` marker. Enforces affiliation-based
+//! 3. [`pin::MucPinHandler`] — `urn:waddle:pin:0`
+//!    `<pinned/>` / `<unpinned/>` message marker. Enforces affiliation-based
 //!    authorization; on allow halts with [`super::event::OutboundEvent::ApplyPinChange`]
 //!    + [`super::event::OutboundEvent::BroadcastRoomSystemMessage`].
 //! 4. [`subject::MucSubjectHandler`] — XEP-0045 §8.1 subject-change

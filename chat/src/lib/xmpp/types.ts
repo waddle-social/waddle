@@ -283,7 +283,7 @@ export interface LiveRoomMessage {
   /** XEP-0444 groupchat reaction target: room-assigned XEP-0359 stanza-id. */
   reactionTargetId?: string;
   /**
-   * XEP-0461 §3.2 replyable id. For groupchat: only set when the message
+   * XEP-0461 §4.1 (Using the correct ID) replyable id. For groupchat: only set when the message
    * carries a room-assigned XEP-0359 stanza-id. Absent means the message
    * cannot be replied to (the spec is explicit about this). For DMs:
    * origin-id then message @id, per the same section.
@@ -359,7 +359,7 @@ export interface LiveDmMessage {
   forumPostKind?: "topic" | "reply";
   forumTitle?: string;
   forumThreadTitle?: string;
-  /** XEP-0461 §3.2 replyable id (origin-id then message @id for DMs). */
+  /** XEP-0461 §4.1 (Using the correct ID) replyable id (origin-id then message @id for DMs). */
   replyableId?: string;
   /** XEP-0359 user-server-injected stanza-id, used by XEP-0490 MDS. */
   stanzaId?: string;
