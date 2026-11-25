@@ -39,3 +39,32 @@ fn xep0333_markable_with_message_id_is_detected() {
     assert!(has_markable(&msg));
     assert_eq!(extract_marker_from_message(&msg), Some(Marker::Markable));
 }
+
+#[test]
+fn xep0333_acknowledged_marker_reads_like_displayed() {
+    let xml = "<message xmlns='jabber:client' type='chat'>\
+                <acknowledged xmlns='urn:xmpp:chat-markers:0' id='msg-9'/>\
+                </message>";
+    let msg = Message::try_from(xml.parse::<minidom::Element>().expect("valid xml"))
+        .expect("valid message");
+
+    let marker = extract_marker_from_message(&msg).expect("acknowledged marker");
+    assert_eq!(marker, Marker::Acknowledged("msg-9".to_owned()));
+    assert_eq!(marker.read_through_id(), Some("msg-9"));
+    assert_eq!(
+        Marker::Displayed("msg-9".to_owned()).read_through_id(),
+        Some("msg-9")
+    );
+    assert_eq!(Marker::Markable.read_through_id(), None);
+}
+
+#[test]
+fn xep0333_marker_without_an_id_references_no_message() {
+    let xml = "<message xmlns='jabber:client' type='chat'>\
+                <acknowledged xmlns='urn:xmpp:chat-markers:0'/>\
+                </message>";
+    let msg = Message::try_from(xml.parse::<minidom::Element>().expect("valid xml"))
+        .expect("valid message");
+
+    assert_eq!(extract_marker_from_message(&msg), None);
+}

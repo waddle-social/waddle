@@ -36,6 +36,7 @@ use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, PubSubEvent, PubSubIt
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::build_pubsub_retract_event;
+use waddle_xmpp_core::pubsub::{build_pubsub_delete_event, build_pubsub_purge_event};
 use xmpp_parsers::message::Message;
 
 use super::super::WebSocketState;
@@ -47,13 +48,13 @@ use caps::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
 pub(crate) use last_item::{last_item_for_new_subscription, replay_last_published_items};
 
 mod implementation;
-pub use implementation::fan_out_pep_retract;
 pub use implementation::fan_out_publish;
 pub use implementation::fan_out_retract;
 pub use implementation::fan_out_service_retract;
 use implementation::FanOutMetrics;
 pub use implementation::FanOutRequest;
 pub use implementation::FanOutRetractRequest;
+pub use implementation::{fan_out_delete, fan_out_pep_retract, fan_out_purge};
 
 /// Cancel `contact`'s subscriptions to `owner`'s PEP nodes that its current
 /// roster standing no longer allows (XEP-0163, XEP-0060 §4.5.1). Failures are

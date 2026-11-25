@@ -94,6 +94,25 @@ impl InboxStorage for FailingInboxStorage {
         Ok(None)
     }
 
+    async fn read_position(
+        &self,
+        _user: &jid::BareJid,
+        _partner: &jid::BareJid,
+        _thread_id: Option<&str>,
+    ) -> Result<Option<waddle_xmpp::mam::ArchiveOrdinal>, InboxStorageError> {
+        Ok(None)
+    }
+
+    async fn mark_read_through(
+        &self,
+        _user: &jid::BareJid,
+        _partner: &jid::BareJid,
+        _thread_id: Option<&str>,
+        _through: waddle_xmpp::inbox::ReadThrough,
+    ) -> Result<Option<InboxEntry>, InboxStorageError> {
+        Ok(None)
+    }
+
     async fn total_unread(&self, _user: &jid::BareJid) -> Result<u64, InboxStorageError> {
         Ok(0)
     }
@@ -268,10 +287,10 @@ async fn displayed_marker_boundary_records_read_timestamp_and_push_route() {
     .expect("seed displayed target");
 
     let _ = interpret(
-        vec![OutboundEvent::MarkInboxReadFromDisplayed {
+        vec![OutboundEvent::MarkInboxReadFromMarker {
             owner: owner.clone(),
-            room: room.clone(),
-            displayed_message_id: "msg-1".to_string(),
+            conversation: waddle_xmpp::protocol::MarkerConversation::Room(room.clone()),
+            marked_message_id: "msg-1".to_string(),
         }],
         &deps,
     )

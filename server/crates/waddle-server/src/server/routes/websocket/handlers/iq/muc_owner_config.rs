@@ -680,7 +680,7 @@ pub(super) async fn apply_muc_owner_config_as(
             if let Some(changesubject) = data_form_bool(form, "muc#roomconfig_changesubject") {
                 config.occupants_may_change_subject = changesubject;
             }
-            if let Some(forum) = data_form_bool(form, "muc#roomconfig_forum") {
+            if let Some(forum) = data_form_bool(form, "{urn:waddle:roomconfig}forum") {
                 config.forum = forum;
             }
             // XEP-0045 muc#roomconfig_allowpm (#1257): who may send

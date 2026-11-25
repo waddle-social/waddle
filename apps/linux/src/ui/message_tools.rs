@@ -195,6 +195,7 @@ impl WaddleWindow {
             .is_some_and(|conversation| conversation.thread.is_none());
         imp.pins_button.set_visible(usable);
         imp.search_button.set_visible(usable);
+        self.refresh_call_button();
         let key = conversation.as_ref().map(Conversation::key);
         let moved = imp.tools.borrow().search_for != key;
         if moved || !usable {

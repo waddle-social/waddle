@@ -362,6 +362,10 @@ async fn displayed_marker_replay(fixture: IngressFixture) {
                     owner: owner.clone(),
                     channel: room,
                     thread: thread.clone(),
+                    through: waddle_xmpp::inbox::ReadThrough {
+                        ordinal: waddle_xmpp::mam::ArchiveOrdinal::FIRST,
+                        unread_cleared: u32::MAX,
+                    },
                 },
             ))));
         read.plan.plan.push(PlannedEffect::new(Effect::External(

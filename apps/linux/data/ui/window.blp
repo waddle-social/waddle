@@ -323,6 +323,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 }
 
                 [end]
+                Button call_button {
+                  visible: false;
+                  icon-name: "call-start-symbolic";
+                  tooltip-text: _("Start Voice Call");
+                  action-name: "win.start-call";
+                }
+
+                [end]
                 Button details_button {
                   visible: false;
                   icon-name: "dialog-information-symbolic";

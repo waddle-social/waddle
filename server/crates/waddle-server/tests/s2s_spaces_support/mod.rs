@@ -42,7 +42,7 @@ pub const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 
 /// The field of a Space's configuration form that opens it to other
 /// servers.
-pub const FIELD_FEDERATED: &str = "urn:waddle:spaces:federated";
+pub const FIELD_FEDERATED: &str = "{urn:waddle:spaces}federated";
 
 /// `example.com` serving its Spaces to `home-b.test`.
 pub async fn hosting(pki: &Pki) -> Federated {

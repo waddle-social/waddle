@@ -2,7 +2,8 @@
 //!
 //! Responses are XEP-0050 `status='completed'` commands carrying a
 //! XEP-0004 result form. List commands put rows in `<item/>` children
-//! and the pagination cursor in a top-level `next_cursor` field;
+//! and the pagination cursor in an XEP-0059 `<set><last/></set>` beside the
+//! form (a multi-item result form cannot carry top-level fields);
 //! single-entity commands carry top-level fields only. Parsing walks
 //! the raw `minidom::Element` (not `xmpp_parsers::DataForm`, which
 //! does not model the §3.4 multiple-items shape) exactly once into
@@ -11,6 +12,8 @@
 use minidom::Element;
 
 use crate::xep::xep0050::{NS_COMMANDS, NS_DATA_FORMS};
+
+const NS_RSM: &str = "http://jabber.org/protocol/rsm";
 
 use super::types::{
     AdminChannelAffiliationEntry, AdminChannelListEntry, AdminChannelOccupantEntry,
@@ -112,8 +115,15 @@ fn items(form: &Element) -> impl Iterator<Item = &Element> {
     form.children().filter(|child| child.name() == "item")
 }
 
-fn next_cursor(form: &Element) -> Option<String> {
-    field_text_opt(form, "next_cursor")
+/// The continuation token of a paged result: the XEP-0059 `<last/>` of the
+/// `<set/>` beside the form. A multi-item result form (XEP-0004 §3.4) cannot
+/// carry it as a field.
+fn next_cursor(iq: &Element) -> Option<String> {
+    iq.get_child("command", NS_COMMANDS)
+        .and_then(|command| command.get_child("set", NS_RSM))
+        .and_then(|set| set.get_child("last", NS_RSM))
+        .map(Element::text)
+        .filter(|cursor| !cursor.is_empty())
 }
 
 // ── V1 users panel ───────────────────────────────────────────────────
@@ -142,7 +152,7 @@ pub fn parse_admin_users_list_result(iq: &Element) -> ParseResult<AdminUsersPage
         .collect();
     Ok(AdminUsersPage {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 
@@ -171,7 +181,7 @@ pub fn parse_admin_spaces_list_result(iq: &Element) -> ParseResult<AdminSpacesLi
     }
     Ok(AdminSpacesListResult {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 
@@ -209,7 +219,7 @@ pub fn parse_admin_spaces_members_result(iq: &Element) -> ParseResult<AdminSpace
     }
     Ok(AdminSpacesMembersResult {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 
@@ -255,7 +265,7 @@ pub fn parse_admin_channels_list_result(iq: &Element) -> ParseResult<AdminChanne
     }
     Ok(AdminChannelsListResult {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 
@@ -298,7 +308,7 @@ pub fn parse_admin_channels_occupants_result(
     }
     Ok(AdminChannelsOccupantsResult {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 
@@ -323,7 +333,7 @@ pub fn parse_admin_channels_affiliations_result(
     }
     Ok(AdminChannelsAffiliationsResult {
         entries,
-        next_cursor: next_cursor(form),
+        next_cursor: next_cursor(iq),
     })
 }
 

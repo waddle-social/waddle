@@ -360,7 +360,7 @@ fn outbound_variant_name(event: &OutboundEvent) -> &'static str {
         OutboundEvent::SetTimer { .. } => "SetTimer",
         OutboundEvent::CancelTimer(_) => "CancelTimer",
         OutboundEvent::QueueOfflineDelivery { .. } => "QueueOfflineDelivery",
-        OutboundEvent::MarkInboxReadFromDisplayed { .. } => "MarkInboxReadFromDisplayed",
+        OutboundEvent::MarkInboxReadFromMarker { .. } => "MarkInboxReadFromMarker",
     }
 }
 

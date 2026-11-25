@@ -295,6 +295,76 @@ fn configure_form_result_emits_pubsub_type_for_typed_node() {
 }
 
 #[test]
+fn space_presets_carry_the_spaces_pubsub_type_and_the_calendar_does_not() {
+    use crate::pubsub::{NodeConfig, PubSubNodeType};
+    assert_eq!(
+        NodeConfig::spaces_public().node_type,
+        Some(PubSubNodeType::Space)
+    );
+    assert_eq!(
+        NodeConfig::spaces_private().node_type,
+        Some(PubSubNodeType::Space)
+    );
+    assert_eq!(NodeConfig::community_calendar().node_type, None);
+}
+
+#[test]
+fn configure_form_reports_purge_offline_false_and_refuses_true() {
+    let iq = iq_with_payload(
+        "cfg-purge",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Get(Element::builder("query", "jabber:iq:version").build()),
+    );
+    let Iq::Result {
+        payload: Some(pubsub),
+        ..
+    } = build_pubsub_configure_form_result(
+        &iq,
+        "space",
+        &crate::pubsub::NodeConfig::spaces_public(),
+    )
+    else {
+        panic!("expected result payload");
+    };
+    let form = pubsub
+        .get_child("configure", NS_PUBSUB_OWNER)
+        .and_then(|configure| configure.get_child("x", NS_XDATA))
+        .expect("configure data form");
+    assert_eq!(
+        xdata_field_value(form, "pubsub#purge_offline").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        xdata_field_value(form, "pubsub#type").as_deref(),
+        Some("urn:xmpp:spaces:0")
+    );
+
+    for (value, accepted) in [("0", true), ("false", true), ("1", false), ("true", false)] {
+        let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+            .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
+            .append(
+                Element::builder("x", NS_XDATA)
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                    .append(xdata_field("pubsub#purge_offline", value))
+                    .build(),
+            )
+            .build();
+        let iq = iq_with_payload(
+            "cfg-purge-set",
+            Some("owner@example.com"),
+            None,
+            TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+        );
+        assert_eq!(
+            parse_pubsub_iq(&iq).is_ok(),
+            accepted,
+            "purge_offline={value}"
+        );
+    }
+}
+
+#[test]
 fn parse_owner_subscriptions_get() {
     let subscriptions = Element::builder("subscriptions", NS_PUBSUB_OWNER)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), "space")
@@ -582,6 +652,7 @@ fn publish_options_form_rejects_unknown_field_and_wrong_form_type() {
 fn publish_without_a_data_form_in_publish_options_is_bad_request() {
     let publish = Element::builder("publish", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n")
+        .append(Element::builder("item", NS_PUBSUB).build())
         .build();
     let options = Element::builder("publish-options", NS_PUBSUB).build();
     let iq = iq_with_payload(
@@ -764,4 +835,43 @@ fn publish_options_roster_groups_precondition_compares_the_group_set() {
     assert!(patch.met_by("urn:example:node", &config));
     config.roster_groups_allowed.push("work".to_owned());
     assert!(!patch.met_by("urn:example:node", &config));
+}
+
+#[test]
+fn purge_event_is_a_single_empty_purge_element() {
+    let service: jid::Jid = "pubsub.example.test".parse().expect("jid");
+    let subscriber: jid::Jid = "bob@example.test/a".parse().expect("jid");
+    let message = super::build_pubsub_purge_event(&service, &subscriber, "n");
+    let event = message.payloads.first().expect("event");
+    assert!(event.is("event", NS_PUBSUB_EVENT));
+    let purge = event.get_child("purge", NS_PUBSUB_EVENT).expect("purge");
+    assert_eq!(purge.attr("node"), Some("n"));
+    assert_eq!(purge.children().count(), 0);
+}
+
+#[test]
+fn request_without_a_node_or_item_maps_to_the_pubsub_condition() {
+    for (child, expected) in [
+        (
+            Element::builder("publish", NS_PUBSUB),
+            PubSubError::NodeIdRequired,
+        ),
+        (
+            Element::builder("create", NS_PUBSUB),
+            PubSubError::InstantNodesUnsupported,
+        ),
+        (
+            Element::builder("publish", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n"),
+            PubSubError::ItemRequired,
+        ),
+    ] {
+        let iq = iq_with_payload(
+            "e",
+            None,
+            None,
+            TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [child.build()])),
+        );
+        assert_eq!(parse_pubsub_iq(&iq).expect_err("rejected"), expected);
+    }
 }

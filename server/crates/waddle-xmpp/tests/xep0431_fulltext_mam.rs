@@ -211,3 +211,117 @@ fn xep0431_search_result_carries_optional_room_jid_for_muc_results() {
         "direct-message result has no room JID"
     );
 }
+
+// ── §"Querying": the sqlx-backed archive honours the search intent ──
+
+mod sqlx_archive {
+    use chrono::Utc;
+    use jid::{BareJid, Jid};
+    use waddle_xmpp::mam::{ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage};
+    use waddle_xmpp_core::mam::RichText;
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::message::MessageType;
+
+    const ROOM: &str = "room@conference.example.com";
+
+    fn room() -> BareJid {
+        ROOM.parse().expect("room jid")
+    }
+
+    fn row(id: &str, body: &str) -> ArchivedMessage {
+        let room_jid: Jid = ROOM.parse().expect("room jid");
+        ArchivedMessage {
+            ordinal: None,
+            id: id.to_string(),
+            timestamp: Utc::now(),
+            from: format!("{ROOM}/alice").parse().expect("occupant jid"),
+            to: room_jid.clone(),
+            body: Some(body.to_string()),
+            stanza_id: Some(StanzaId::new(format!("wire-{id}"), room_jid)),
+            thread: None,
+            reply: None,
+            origin_id: None,
+            message_type: MessageType::Groupchat,
+            stanza_xml: None,
+            rich: None,
+            nickname_generation: Some(0),
+        }
+    }
+
+    async fn search(bodies: &[&str], needle: &str) -> Vec<String> {
+        let storage = SqlxMamStorage::open_in_memory().await.expect("open sqlite");
+        for (index, body) in bodies.iter().enumerate() {
+            storage
+                .store_message(&room(), &row(&format!("m{index}"), body))
+                .await
+                .expect("store");
+        }
+        let result = storage
+            .query_messages(
+                &room(),
+                MamArchiveKind::Room,
+                &MamQuery {
+                    fulltext: RichText::try_new(needle),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("query");
+        result
+            .messages
+            .into_iter()
+            .map(|m| m.body.unwrap_or_default())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn percent_in_term_is_literal() {
+        // "the intent is that a reasonable full-text search is performed
+        // based on the input": `100%` must not act as a wildcard.
+        let hits = search(&["1000 apples", "100% done"], "100%").await;
+        assert_eq!(hits, vec!["100% done"]);
+    }
+
+    #[tokio::test]
+    async fn underscore_in_term_is_literal() {
+        let hits = search(&["axb", "a_b"], "a_b").await;
+        assert_eq!(hits, vec!["a_b"]);
+    }
+
+    #[tokio::test]
+    async fn backslash_and_glob_metacharacters_are_literal() {
+        let hits = search(&["abc", "a*c", "a?c", "a[b]c", "a\\c"], "a*c").await;
+        assert_eq!(hits, vec!["a*c"]);
+        let hits = search(&["abc", "a*c", "a?c", "a[b]c", "a\\c"], "a?c").await;
+        assert_eq!(hits, vec!["a?c"]);
+        let hits = search(&["abc", "a*c", "a?c", "a[b]c", "a\\c"], "a[b]c").await;
+        assert_eq!(hits, vec!["a[b]c"]);
+        let hits = search(&["abc", "a*c", "a?c", "a[b]c", "a\\c"], "a\\c").await;
+        assert_eq!(hits, vec!["a\\c"]);
+    }
+
+    #[tokio::test]
+    async fn matching_is_unicode_case_insensitive() {
+        // SQLite's LOWER()/LIKE fold only ASCII; the archive must agree
+        // with the in-memory `matches_fulltext` on non-ASCII text.
+        assert_eq!(search(&["\u{dc}ber alles"], "\u{fc}ber").await.len(), 1);
+        assert_eq!(search(&["\u{fc}ber alles"], "\u{dc}BER").await.len(), 1);
+        assert_eq!(search(&["Hello World"], "wORLD").await.len(), 1);
+        assert_eq!(
+            search(
+                &["\u{3a3}\u{39f}\u{3a6}\u{39f}\u{3a3}"],
+                "\u{3c3}\u{3bf}\u{3c6}\u{3bf}"
+            )
+            .await
+            .len(),
+            1
+        );
+        assert!(search(&["Uber alles"], "\u{fc}ber").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn all_terms_must_match() {
+        let hits = search(&["release notes", "release"], "release NOTES").await;
+        assert_eq!(hits, vec!["release notes"]);
+    }
+}

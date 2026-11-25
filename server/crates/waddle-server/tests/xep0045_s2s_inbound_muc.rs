@@ -1144,7 +1144,7 @@ async fn an_owner_of_a_trusted_home_configures_and_destroys_the_room() {
         .filter_map(|field| field.attr("var").map(str::to_owned))
         .collect();
     assert!(
-        fields.contains(&"urn:waddle:roomconfig:federated".to_owned()),
+        fields.contains(&"{urn:waddle:roomconfig}federated".to_owned()),
         "{fields:?}"
     );
     hosted

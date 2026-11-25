@@ -56,6 +56,21 @@ pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &st
     message
 }
 
+/// Build an XEP-0060 §8.5.2 node purge notification: a single empty `<purge/>`.
+#[must_use]
+pub fn build_pubsub_purge_event(from: &Jid, to: &Jid, node: &str) -> Message {
+    let purge = Element::builder("purge", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .build();
+    let event = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(purge)
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event);
+    message
+}
+
 /// Build an XEP-0060 node deletion notification without a redirect.
 #[must_use]
 pub fn build_pubsub_delete_event(from: &Jid, to: &Jid, node: &str) -> Message {
@@ -136,11 +151,17 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         }
         PubSubError::BadRequest
         | PubSubError::InvalidJid
+        | PubSubError::InvalidSubscriberJid
+        | PubSubError::ItemRequired
+        | PubSubError::NodeIdRequired
         | PubSubError::InvalidPayload
         | PubSubError::PayloadRequired
         | PubSubError::SubscriptionIdRequired => (ErrorType::Modify, DefinedCondition::BadRequest),
         PubSubError::InvalidSubscriptionId => (ErrorType::Modify, DefinedCondition::NotAcceptable),
         PubSubError::UnsupportedAccessModel => (ErrorType::Cancel, DefinedCondition::NotAcceptable),
+        PubSubError::InstantNodesUnsupported => {
+            (ErrorType::Modify, DefinedCondition::NotAcceptable)
+        }
         PubSubError::NotSubscribed => (ErrorType::Cancel, DefinedCondition::UnexpectedRequest),
         PubSubError::InternalServerError => {
             (ErrorType::Wait, DefinedCondition::InternalServerError)
@@ -187,6 +208,16 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
         // <conflict/> with the pubsub-specific <precondition-not-met/>.
         stanza_error.other =
             Some(Element::builder("precondition-not-met", NS_PUBSUB_ERRORS).build());
+    } else if let Some(condition) = match error {
+        PubSubError::InvalidSubscriberJid => Some("invalid-jid"),
+        PubSubError::ItemRequired => Some("item-required"),
+        PubSubError::NodeIdRequired | PubSubError::InstantNodesUnsupported => {
+            Some("nodeid-required")
+        }
+        _ => None,
+    } {
+        // XEP-0060 §6.1.3.1, §7.1.3.6, §7.2.3, §8.1.2.4, §8.4.3.
+        stanza_error.other = Some(Element::builder(condition, NS_PUBSUB_ERRORS).build());
     } else if let PubSubError::PayloadRequired = error {
         // XEP-0060 §7.1.3.3.
         stanza_error.other = Some(Element::builder("payload-required", NS_PUBSUB_ERRORS).build());
@@ -367,6 +398,21 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
     if let Some(node_type) = config.node_type {
         form_builder = form_builder.append(field("pubsub#type", node_type.as_str()));
     }
+    // XEP-0060 §8.2.4: the service never purges a node when its publisher
+    // goes offline, which XEP-0503 requires of every Space.
+    form_builder = form_builder.append(
+        Element::builder("field", "jabber:x:data")
+            .attr(
+                minidom::rxml::xml_ncname!("var").to_owned(),
+                "pubsub#purge_offline",
+            )
+            .append(
+                Element::builder("value", "jabber:x:data")
+                    .append("0")
+                    .build(),
+            )
+            .build(),
+    );
     // XEP-0060 §16.4.4 list-multi: one <value/> per allowed roster group.
     // Offered for the `roster` model (or when a list is stored) so the
     // field never appears on nodes it cannot apply to.

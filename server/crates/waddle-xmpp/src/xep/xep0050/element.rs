@@ -1,6 +1,7 @@
 use minidom::Element;
 
 use crate::xep::xep0004::{DataForm, FromElement, ToElement, NS_DATA_FORMS};
+use crate::xep::xep0059::{build_rsm_response_element, extract_rsm_response};
 
 use super::{Action, AllowedActions, Command, CommandError, Note, NoteType, Status, NS_COMMANDS};
 
@@ -80,6 +81,56 @@ impl ToElement for AllowedActions {
     }
 }
 
+impl Command {
+    /// Parse a requester-originated `<command/>` (responder side).
+    ///
+    /// XEP-0050 §2.4: the `status` attribute "SHOULD be set only by the
+    /// responder. If specified by the requester, the responder MUST ignore
+    /// it", so `status`, `<actions/>` and `<note/>` are never read from a
+    /// request, whatever they contain. Only `node`, `sessionid`, `action`,
+    /// `xml:lang` and the data form are taken.
+    pub fn from_request_element(elem: &Element) -> Result<Self, CommandError> {
+        if elem.name() != "command" || elem.ns() != NS_COMMANDS {
+            return Err(CommandError::NotACommand);
+        }
+
+        let node = elem
+            .attr("node")
+            .ok_or(CommandError::MissingNode)?
+            .to_string();
+
+        let action = elem
+            .attr("action")
+            .map(|a| a.parse::<Action>())
+            .transpose()?;
+
+        let form = elem
+            .children()
+            .find(|c| c.name() == "x" && c.ns() == NS_DATA_FORMS)
+            .map(DataForm::from_element)
+            .transpose()?;
+
+        Ok(Self {
+            node,
+            session_id: elem.attr("sessionid").map(|s| s.to_string()),
+            action,
+            status: None,
+            actions: None,
+            notes: Vec::new(),
+            form,
+            result_set: None,
+            lang: command_lang(elem),
+        })
+    }
+}
+
+fn command_lang(elem: &Element) -> Option<String> {
+    elem.attr_ns(&minidom::rxml::Namespace::XML, "lang")
+        .map(str::to_string)
+}
+
+/// Parse a responder-originated `<command/>` (requester side). Strict:
+/// every attribute and child must be well-formed.
 impl FromElement for Command {
     type Error = CommandError;
 
@@ -123,6 +174,8 @@ impl FromElement for Command {
             .map(DataForm::from_element)
             .transpose()?;
 
+        let result_set = extract_rsm_response(elem).and_then(Result::ok);
+
         Ok(Self {
             node,
             session_id,
@@ -131,6 +184,8 @@ impl FromElement for Command {
             actions,
             notes,
             form,
+            result_set,
+            lang: command_lang(elem),
         })
     }
 }
@@ -151,6 +206,14 @@ impl ToElement for Command {
             );
         }
 
+        if let Some(ref lang) = self.lang {
+            builder = builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang.as_str(),
+            );
+        }
+
         if let Some(status) = self.status {
             builder = builder.attr(
                 minidom::rxml::xml_ncname!("status").to_owned(),
@@ -168,6 +231,10 @@ impl ToElement for Command {
 
         if let Some(ref form) = self.form {
             builder = builder.append(form.to_element());
+        }
+
+        if let Some(ref result_set) = self.result_set {
+            builder = builder.append(build_rsm_response_element(result_set));
         }
 
         builder.build()

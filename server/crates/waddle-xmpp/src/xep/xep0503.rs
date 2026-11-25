@@ -489,7 +489,7 @@ pub fn build_space_parent_form(spaces_service: &str, node: &str) -> Element {
 /// Build Waddle-specific room metadata for values not standardized by XEP-0045.
 ///
 /// `pin_permission` carries the room's current
-/// `urn:waddle:roomconfig:pinpermission` value (#415, #422). Surfacing it
+/// `{urn:waddle:roomconfig}pinpermission` value (#415, #422). Surfacing it
 /// here on disco-info lets non-owner clients render the Pin action
 /// correctly under the `anyone` policy without going through the
 /// owner-config GET (which would require Owner affiliation).

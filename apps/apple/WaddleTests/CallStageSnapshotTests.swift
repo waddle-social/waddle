@@ -43,7 +43,8 @@ final class CallStageSnapshotTests: XCTestCase {
     private func assertStage(
         title: String = "#design", subtitle: String = "2 others in call", status: CallStageStatus = .inCall(since: nil),
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
-        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, notice: String? = nil,
+        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, issues: [CallMediaIssue] = [],
+        checkingIssues: Set<CallMediaIssue.Kind> = [],
         stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
         // SF Symbols in every control: allow for their redraws between OS releases.
@@ -52,7 +53,7 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
                 promotedSpeaker: promotedSpeaker, size: stageSize, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
-                isHandRaised: isHandRaised, notice: notice, tileSource: Self.cameras, announcesChanges: false,
+                isHandRaised: isHandRaised, issues: issues, checkingIssues: checkingIssues, tileSource: Self.cameras, announcesChanges: false,
                 actions: Self.actions
             )
             .frame(width: size.width, height: size.height),
@@ -88,7 +89,7 @@ final class CallStageSnapshotTests: XCTestCase {
     func testDirectReconnectingWithTheCameraRefused() {
         assertStage(
             title: "linus", subtitle: "Voice call", status: .reconnecting, tiles: [Self.you, Self.linus],
-            isHandRaised: nil, notice: "Waddle is not allowed to use the camera. Change that in Settings."
+            isHandRaised: nil, issues: [CallMediaIssue(kind: .camera, reason: .denied)]
         )
     }
 
@@ -199,6 +200,20 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
     #endif
+
+    // MARK: - Notices about our own devices
+
+    /// Microphone and camera both refused, the camera being checked again; and a share that failed.
+    func testRoomWithEveryNotice() {
+        assertStage(
+            tiles: [Self.you, Self.linus, Self.grace], isMicrophoneOn: false,
+            issues: [
+                CallMediaIssue(kind: .microphone, reason: .denied), CallMediaIssue(kind: .camera, reason: .denied),
+                CallMediaIssue(kind: .screen, reason: .failed),
+            ],
+            checkingIssues: [.camera], stageSize: .expanded, size: CGSize(width: 1000, height: 760)
+        )
+    }
 
     // MARK: - Connection
 

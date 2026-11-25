@@ -8,7 +8,7 @@ use super::dispatch_to_room;
 use super::effects;
 
 use super::groupchat_archive;
-use super::mark_inbox_read_from_displayed;
+use super::mark_inbox_read_from_marker;
 use super::message_plan;
 
 use super::preview_plan;
@@ -362,12 +362,12 @@ pub(in crate::server::routes::interpret) async fn interpret_with_depth(
             } => {
                 send_carbons(registry, deps, owner, message, kind, exclude).await;
             }
-            OutboundEvent::MarkInboxReadFromDisplayed {
+            OutboundEvent::MarkInboxReadFromMarker {
                 owner,
-                room,
-                displayed_message_id,
+                conversation,
+                marked_message_id,
             } => {
-                mark_inbox_read_from_displayed(deps, owner, room, displayed_message_id).await;
+                mark_inbox_read_from_marker(deps, owner, conversation, marked_message_id).await;
             }
             OutboundEvent::LookupArchivedMessage {
                 id,

@@ -6,8 +6,8 @@
 //! - owner can list users
 //! - non-owner gets `<forbidden/>`
 //! - `prefix` filter narrows results to a specific localpart
-//! - seek pagination (`page_size` + `next_cursor`) round-trips and
-//!   the final page omits `next_cursor`
+//! - seek pagination (`page_size` + the XEP-0059 `<last/>` cursor) round-trips and
+//!   the final page omits the `<set/>`
 //!
 //! Constants are inlined rather than pulled from the server crate so
 //! this test file documents the wire shape — a regression in the
@@ -252,22 +252,15 @@ async fn pagination_cursor_round_trips() {
     let _ = admin.close().await;
 }
 
-/// Cheap regex-free extractor: look for `<field var="next_cursor">`
-/// or `var='next_cursor'`, then the next `<value>...</value>`. Good
-/// enough for the test surface; if the response shape ever changes
-/// this will break loudly.
+/// Cheap regex-free extractor for the XEP-0059 continuation token: the
+/// `<last>` of the `<set xmlns='http://jabber.org/protocol/rsm'>` beside the
+/// result form. A multi-item result form (XEP-0004 §3.4) cannot carry it as a
+/// field. If the response shape ever changes this will break loudly.
 fn extract_cursor(frame: &str) -> Option<String> {
-    const DOUBLE_QUOTED: &str = r#"var="next_cursor""#;
-    const SINGLE_QUOTED: &str = r#"var='next_cursor'"#;
-    let needle = if let Some(idx) = frame.find(DOUBLE_QUOTED) {
-        idx + DOUBLE_QUOTED.len()
-    } else {
-        let idx = frame.find(SINGLE_QUOTED)?;
-        idx + SINGLE_QUOTED.len()
-    };
-    let rest = &frame[needle..];
-    let open = rest.find("<value>")?;
-    let after_open = &rest[open + "<value>".len()..];
-    let close = after_open.find("</value>")?;
+    let set = frame.find("<set ")?;
+    let rest = &frame[set..];
+    let open = rest.find("<last>")?;
+    let after_open = &rest[open + "<last>".len()..];
+    let close = after_open.find("</last>")?;
     Some(after_open[..close].to_string())
 }

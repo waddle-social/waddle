@@ -39,7 +39,7 @@ mod implementation;
 pub(crate) use implementation::find_in_transaction;
 pub(crate) use implementation::get_in_prepared_transaction;
 pub(crate) use implementation::insert_groupchat_notification_recovery_in_transaction;
-pub(crate) use implementation::mark_read_in_transaction;
+pub(crate) use implementation::mark_read_through_in_transaction;
 pub(crate) use implementation::upsert_in_prepared_transaction;
 #[cfg(test)]
 pub(crate) use implementation::upsert_in_transaction;

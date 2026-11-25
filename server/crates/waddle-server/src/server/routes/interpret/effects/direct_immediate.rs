@@ -32,12 +32,18 @@ pub(super) async fn execute_durable(effect: DurableDirectEffect, deps: &Deps<'_>
             owner,
             channel,
             thread,
+            through,
         } => {
             let Some(storage) = deps.inbox_storage else {
                 return EffectOutcome::Unavailable;
             };
             match storage
-                .mark_read(&owner, &channel, thread.as_ref().map(|id| id.as_str()))
+                .mark_read_through(
+                    &owner,
+                    &channel,
+                    thread.as_ref().map(|id| id.as_str()),
+                    through,
+                )
                 .await
             {
                 Ok(Some(entry)) => EffectOutcome::Inbox(Ok(entry)),

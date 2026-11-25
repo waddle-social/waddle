@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::error::{StanzaErrorCondition, StanzaErrorType};
 use crate::xep::xep0004::{DataForm, DataFormError};
+use crate::xep::xep0059::RsmResponse;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -327,6 +328,18 @@ impl AllowedActions {
         self
     }
 
+    /// Whether the responder permits `action` at this stage. `execute` and
+    /// `cancel` are not stage-specific actions, so neither can be an
+    /// `execute` default.
+    pub fn permits(&self, action: Action) -> bool {
+        match action {
+            Action::Next => self.next,
+            Action::Prev => self.prev,
+            Action::Complete => self.complete,
+            Action::Execute | Action::Cancel => false,
+        }
+    }
+
     /// Allow the `complete` action.
     pub fn with_complete(mut self) -> Self {
         self.complete = true;
@@ -355,6 +368,13 @@ pub struct Command {
     pub notes: Vec<Note>,
     /// Embedded data form payload.
     pub form: Option<DataForm>,
+    /// XEP-0059 result-set metadata describing the page of a multi-item
+    /// result form (XEP-0004 §3.4), emitted as a `<set/>` sibling of the
+    /// form because such a form cannot carry paging fields itself.
+    pub result_set: Option<RsmResponse>,
+    /// `xml:lang` of the command element. Responders SHOULD state it on
+    /// every response (XEP-0050 §2.4).
+    pub lang: Option<String>,
 }
 
 impl Command {
@@ -368,6 +388,8 @@ impl Command {
             actions: None,
             notes: Vec::new(),
             form: None,
+            result_set: None,
+            lang: None,
         }
     }
 
@@ -380,6 +402,12 @@ impl Command {
     /// Set the action.
     pub fn with_action(mut self, action: Action) -> Self {
         self.action = Some(action);
+        self
+    }
+
+    /// Set the `xml:lang` of the command element.
+    pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = Some(lang.into());
         self
     }
 

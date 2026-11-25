@@ -264,8 +264,23 @@ pub enum PubSubError {
     NodeExists,
     /// The request is malformed, with optional explanatory text.
     BadRequest,
-    /// The supplied address is not a valid JID.
+    /// The supplied address is not a valid JID (plain `<bad-request/>`).
     InvalidJid,
+    /// XEP-0060 §6.1.3.1: `<bad-request/>` + pubsub-namespaced
+    /// `<invalid-jid/>`: a subscriber or affiliate JID is unparsable, or its
+    /// bare JID differs from the requester's.
+    InvalidSubscriberJid,
+    /// XEP-0060 §7.1.3.6 / §7.2.3.2: `<bad-request/>` + pubsub-namespaced
+    /// `<item-required/>`: a publish or retract carried no `<item/>` (or no
+    /// item id) where one is required.
+    ItemRequired,
+    /// XEP-0060 §7.2.3.1 / §8.4.3: `<bad-request/>` + pubsub-namespaced
+    /// `<nodeid-required/>`: the request named no node.
+    NodeIdRequired,
+    /// XEP-0060 §8.1.2.4: `<not-acceptable/>` + pubsub-namespaced
+    /// `<nodeid-required/>`: a create request without a node on a service
+    /// that does not support instant nodes.
+    InstantNodesUnsupported,
     /// XEP-0060 §7.1.3.4: `<bad-request/>` + pubsub-namespaced
     /// `<invalid-payload/>` extension. Used when a publish item's
     /// payload fails the per-node payload-conformance contract
@@ -288,6 +303,12 @@ pub enum PubSubError {
     InternalServerError,
     /// The operation requires a PubSub feature unsupported by this service.
     UnsupportedFeature(PubSubUnsupportedFeature),
+}
+
+impl From<CoreError> for PubSubError {
+    fn from(_: CoreError) -> Self {
+        Self::BadRequest
+    }
 }
 
 /// Check if an IQ is a PubSub request.
@@ -345,8 +366,12 @@ pub fn parse_pubsub_event(message: &Message) -> CoreResult<PubSubEvent> {
 ///
 /// # Errors
 ///
-/// Returns `CoreError::BadRequest` for a missing PubSub payload, malformed operation, invalid JID or subscription state, or missing required attributes.
-pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
+/// Returns the XEP-0060 error condition the request earns: `NodeIdRequired`
+/// for a missing `node`, `ItemRequired` for a publish without `<item/>` or a
+/// retract without an item id, `InstantNodesUnsupported` for a `<create/>`
+/// without a node, `InvalidSubscriberJid` for an unparsable subscriber JID, and
+/// `BadRequest` for any other malformed request.
+pub fn parse_pubsub_iq(iq: &Iq) -> Result<PubSubRequest, PubSubError> {
     let pubsub_elem = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. }
             if payload.name() == "pubsub"
@@ -355,23 +380,21 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
             payload
         }
         Iq::Get { .. } | Iq::Set { .. } => {
-            return Err(CoreError::bad_request(Some(
-                "Expected pubsub element".to_string(),
-            )));
+            return Err(PubSubError::BadRequest);
         }
         _ => {
-            return Err(CoreError::bad_request(Some(
-                "PubSub IQ must be get or set".to_string(),
-            )));
+            return Err(PubSubError::BadRequest);
         }
     };
 
     if let Some(publish) = pubsub_elem.get_child("publish", NS_PUBSUB) {
-        let node = required_attr(publish, "node")?;
+        let node = node_attr(publish)?;
+        // §7.1.3.6: every Waddle node persists items, so a publish without
+        // an `<item/>` is rejected.
         let item = publish
             .get_child("item", NS_PUBSUB)
             .map(PubSubItem::from_element)
-            .unwrap_or_else(|| PubSubItem::new(None, None));
+            .ok_or(PubSubError::ItemRequired)?;
         // XEP-0060 §7.1.5: <publish-options/> MUST contain a data form.
         let publish_options = match pubsub_elem.get_child("publish-options", NS_PUBSUB) {
             None => None,
@@ -379,11 +402,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
                 options
                     .get_child("x", "jabber:x:data")
                     .cloned()
-                    .ok_or_else(|| {
-                        CoreError::bad_request(Some(
-                            "publish-options must contain a data form".to_string(),
-                        ))
-                    })?,
+                    .ok_or(PubSubError::BadRequest)?,
             )),
         };
         return Ok(PubSubRequest::Publish {
@@ -394,7 +413,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     }
 
     if let Some(retract) = pubsub_elem.get_child("retract", NS_PUBSUB) {
-        let node = required_attr(retract, "node")?;
+        let node = node_attr(retract)?;
         let notify = retract
             .attr("notify")
             .map(|value| value == "true" || value == "1")
@@ -402,7 +421,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
         let item_id = retract
             .get_child("item", NS_PUBSUB)
             .and_then(|item| item.attr("id"))
-            .ok_or_else(|| CoreError::bad_request(Some("Missing item id".to_string())))?
+            .ok_or(PubSubError::ItemRequired)?
             .to_string();
 
         return Ok(PubSubRequest::Retract {
@@ -413,7 +432,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     }
 
     if let Some(items) = pubsub_elem.get_child("items", NS_PUBSUB) {
-        let node = required_attr(items, "node")?;
+        let node = node_attr(items)?;
         let max_items = items.attr("max_items").and_then(|value| value.parse().ok());
         let item_ids = items
             .children()
@@ -430,24 +449,27 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
 
     if let Some(create) = pubsub_elem.get_child("create", NS_PUBSUB) {
         return Ok(PubSubRequest::CreateNode {
-            node: required_attr(create, "node")?,
+            node: create
+                .attr("node")
+                .map(str::to_owned)
+                .ok_or(PubSubError::InstantNodesUnsupported)?,
         });
     }
 
     if let Some(delete) = pubsub_elem.get_child("delete", NS_PUBSUB_OWNER) {
         return Ok(PubSubRequest::DeleteNode {
-            node: required_attr(delete, "node")?,
+            node: node_attr(delete)?,
         });
     }
 
     if let Some(purge) = pubsub_elem.get_child("purge", NS_PUBSUB_OWNER) {
         return Ok(PubSubRequest::PurgeNode {
-            node: required_attr(purge, "node")?,
+            node: node_attr(purge)?,
         });
     }
 
     if let Some(affs) = pubsub_elem.get_child("affiliations", NS_PUBSUB_OWNER) {
-        let node = required_attr(affs, "node")?;
+        let node = node_attr(affs)?;
         let mut changes: Vec<(jid::BareJid, Affiliation)> = Vec::new();
         for child in affs
             .children()
@@ -456,7 +478,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
             let entity_raw = required_attr(child, "jid")?;
             let entity: jid::BareJid = entity_raw
                 .parse()
-                .map_err(|e: jid::Error| CoreError::bad_request(Some(e.to_string())))?;
+                .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
             let aff_raw = required_attr(child, "affiliation")?;
             let aff: Affiliation = aff_raw.parse().map_err(|_| {
                 CoreError::bad_request(Some(format!("invalid affiliation: {aff_raw}")))
@@ -470,7 +492,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     }
 
     if let Some(subscriptions) = pubsub_elem.get_child("subscriptions", NS_PUBSUB_OWNER) {
-        let node = required_attr(subscriptions, "node")?;
+        let node = node_attr(subscriptions)?;
         let mut changes = Vec::new();
         for child in subscriptions
             .children()
@@ -479,7 +501,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
             let jid_raw = required_attr(child, "jid")?;
             let jid: jid::Jid = jid_raw
                 .parse()
-                .map_err(|e: jid::Error| CoreError::bad_request(Some(e.to_string())))?;
+                .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
             let state_raw = required_attr(child, "subscription")?;
             let state: SubscriptionState = state_raw.parse().map_err(|_| {
                 CoreError::bad_request(Some(format!("invalid subscription: {state_raw}")))
@@ -495,7 +517,7 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     // Some clients send <configure/> under NS_PUBSUB; XEP-0060 puts it under NS_PUBSUB_OWNER.
     for ns in &[NS_PUBSUB_OWNER, NS_PUBSUB] {
         if let Some(configure) = pubsub_elem.get_child("configure", *ns) {
-            let node = required_attr(configure, "node")?;
+            let node = node_attr(configure)?;
             if let Some(form) = configure.get_child("x", "jabber:x:data") {
                 let config = parse_configure_form(form)?;
                 return Ok(PubSubRequest::ConfigureNodeSet { node, config });
@@ -505,28 +527,32 @@ pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     }
 
     if let Some(subscribe) = pubsub_elem.get_child("subscribe", NS_PUBSUB) {
-        let node = required_attr(subscribe, "node")?;
-        let jid = required_attr(subscribe, "jid")?.parse().map_err(|error| {
-            CoreError::bad_request(Some(format!("Invalid jid attribute: {error}")))
-        })?;
+        let node = node_attr(subscribe)?;
+        let jid = required_attr(subscribe, "jid")?
+            .parse()
+            .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
         return Ok(PubSubRequest::Subscribe { node, jid });
     }
 
     if let Some(unsubscribe) = pubsub_elem.get_child("unsubscribe", NS_PUBSUB) {
-        let node = required_attr(unsubscribe, "node")?;
+        let node = node_attr(unsubscribe)?;
         let jid = required_attr(unsubscribe, "jid")?
             .parse()
-            .map_err(|error| {
-                CoreError::bad_request(Some(format!("Invalid jid attribute: {error}")))
-            })?;
+            .map_err(|_: jid::Error| PubSubError::InvalidSubscriberJid)?;
         let subid = unsubscribe.attr("subid").map(str::to_owned);
 
         return Ok(PubSubRequest::Unsubscribe { node, jid, subid });
     }
 
-    Err(CoreError::bad_request(Some(
-        "Unsupported PubSub operation".to_string(),
-    )))
+    Err(PubSubError::BadRequest)
+}
+
+/// The mandatory `node` attribute; its absence is `<nodeid-required/>`.
+fn node_attr(element: &Element) -> Result<String, PubSubError> {
+    element
+        .attr("node")
+        .map(str::to_owned)
+        .ok_or(PubSubError::NodeIdRequired)
 }
 
 pub(in crate::pubsub::stanzas) fn required_attr(
@@ -620,6 +646,21 @@ fn parse_node_config_fields(form: &Element, reject_unknown: bool) -> CoreResult<
                     CoreError::bad_request(Some(format!("invalid pubsub#type: {value}")))
                 })?);
             }
+            // Purging on publisher departure is not supported: only the
+            // value the node already has (false) may be submitted.
+            "pubsub#purge_offline" => match value.as_str() {
+                "0" | "false" => {}
+                "1" | "true" => {
+                    return Err(CoreError::bad_request(Some(
+                        "pubsub#purge_offline is not supported".to_owned(),
+                    )))
+                }
+                _ => {
+                    return Err(CoreError::bad_request(Some(format!(
+                        "invalid pubsub#purge_offline: {value}"
+                    ))))
+                }
+            },
             "pubsub#max_items" => {
                 // XEP-0060 §16.4.3 + XEP-0490 §3 publish-options use the
                 // literal token "max" to mean "no upper bound". Accept it

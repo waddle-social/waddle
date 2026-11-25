@@ -1128,6 +1128,11 @@
               pkgs.blueprint-compiler
               pkgs.desktop-file-utils
               pkgs.appstream
+              # Call media: libwebrtc's prebuilt archive (fetched by the
+              # livekit crate's build script) is built against Chromium's
+              # libc++, and its C++ bridges need clang 21 or later to
+              # compile against it.
+              pkgs.clang_21
             ];
             buildInputs = [
               pkgs.gtk4
@@ -1135,10 +1140,14 @@
               # Decoding shared images within a pixel budget.
               pkgs.gdk-pixbuf
             ];
+            env.CXX = "${pkgs.clang_21}/bin/clang++";
             # The toolchain's linker leaves no runtime path to the GTK
             # stack, so `cargo run` and tests that touch GTK need this to
-            # find the libraries.
+            # find the libraries. libwebrtc opens PulseAudio and ALSA at
+            # run time.
             env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.libpulseaudio
+              pkgs.alsa-lib
               pkgs.gtk4
               pkgs.libadwaita
               pkgs.gdk-pixbuf

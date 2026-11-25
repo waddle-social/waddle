@@ -14,9 +14,9 @@ type HybridClient = Partial<WaddleClient> & {
   send_raw_iq?: (xml: string) => Promise<string>;
 };
 
-export const FIELD_PIN_PERMISSION = "urn:waddle:roomconfig:pinpermission";
+export const FIELD_PIN_PERMISSION = "{urn:waddle:roomconfig}pinpermission";
 /** Whether accounts on other servers may reach the room (owner form, off by default). */
-export const FIELD_ROOM_FEDERATED = "urn:waddle:roomconfig:federated";
+export const FIELD_ROOM_FEDERATED = "{urn:waddle:roomconfig}federated";
 const FIELD_ROOM_NAME = "muc#roomconfig_roomname";
 const FIELD_ROOM_DESC = "muc#roomconfig_roomdesc";
 
@@ -145,7 +145,7 @@ export async function createMucRoom(client: HybridClient, mucServiceJid: string,
     dataField("FORM_TYPE", NS_MUC_ROOMCONFIG),
     dataField("muc#roomconfig_roomname", params.name),
     ...(params.description ? [dataField("muc#roomconfig_roomdesc", params.description)] : []),
-    ...(params.mucType === "forum" ? [dataField("muc#roomconfig_forum", "1")] : []),
+    ...(params.mucType === "forum" ? [dataField("{urn:waddle:roomconfig}forum", "1")] : []),
   ];
   await sendIq(client, "set", { name: "query", ns: NS_MUC_OWNER, children: [submitForm(fields)] }, roomJid);
   try { await leaveRoom(client, roomJid, params.nick); } catch {}

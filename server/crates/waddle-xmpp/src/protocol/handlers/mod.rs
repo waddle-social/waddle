@@ -30,6 +30,7 @@ pub mod call_lifecycle;
 pub mod canonicalize;
 pub mod carbons;
 pub mod carbons_message;
+pub mod direct_marker;
 pub mod enrichment_dispatch;
 pub mod errors;
 pub mod extdisco;
@@ -116,9 +117,11 @@ pub fn register_call_handlers(
 ///    user.
 /// 8. [`inbox::InboxHandler`] — project the conversation into the
 ///    Waddle inbox.
-/// 9. [`route::RouteHandler`] — final stage for the content stanza:
-///    route 1:1 to the destination connection, dispatch groupchat to
-///    the room chain, or write to the local wire on the recipient pass.
+/// 9. [`direct_marker::DirectMarkerHandler`] (XEP-0333 / XEP-0430) — move
+///    the sender's inbox read position through a one-to-one chat marker.
+/// 10. [`route::RouteHandler`] — final stage for the content stanza:
+///     route 1:1 to the destination connection, dispatch groupchat to
+///     the room chain, or write to the local wire on the recipient pass.
 ///
 /// XEP-0184 delivery receipts are deliberately NOT generated here:
 /// XEP-0184 §7 assigns ack generation to the receiving *entity* (the
@@ -138,6 +141,7 @@ pub fn register_default_message_handlers(dispatcher: &mut StanzaDispatcher) {
     dispatcher.register_message(Arc::new(offline_delivery::OfflineDeliveryHandler));
     dispatcher.register_message(Arc::new(carbons_message::CarbonsMessageHandler));
     dispatcher.register_message(Arc::new(inbox::InboxHandler));
+    dispatcher.register_message(Arc::new(direct_marker::DirectMarkerHandler));
     dispatcher.register_message(Arc::new(route::RouteHandler));
 }
 

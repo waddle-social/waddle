@@ -130,6 +130,10 @@ async fn committed_inbox_projection(fixture: IngressFixture) {
                 owner: fixture.principal.bare_jid().clone(),
                 channel: "juliet@example.com".parse().expect("peer"),
                 thread: None,
+                through: waddle_xmpp::inbox::ReadThrough {
+                    ordinal: waddle_xmpp::mam::ArchiveOrdinal::FIRST,
+                    unread_cleared: u32::MAX,
+                },
             },
         ))));
     read.plan.plan.push(PlannedEffect::new(Effect::External(

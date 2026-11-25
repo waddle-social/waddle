@@ -83,6 +83,9 @@ pub const SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION: i64 = 2023;
 /// Version of the migration that creates the last-logout record of each
 /// account (XEP-0012).
 pub const ACCOUNT_LAST_ACTIVITY_VERSION: i64 = 2024;
+/// Version of the migration that adds the chat-marker read position to inbox
+/// conversations (XEP-0430, XEP-0333).
+pub const INBOX_READ_POSITION_VERSION: i64 = 2025;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -303,6 +306,14 @@ pub fn all() -> Vec<Migration> {
             ),
             sql_postgres: include_str!(
                 "../../../sql/migrations/2024_account_last_activity.postgres.sql"
+            ),
+        },
+        Migration {
+            version: INBOX_READ_POSITION_VERSION,
+            description: "inbox read position".to_owned(),
+            sql_sqlite: include_str!("../../../sql/migrations/2025_inbox_read_position.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2025_inbox_read_position.postgres.sql"
             ),
         },
     ]
@@ -544,13 +555,13 @@ mod tests {
         HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
         HOST_GRANT_SPACES_VERSION, HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION,
         HOST_GRANT_SPACE_CONFIGURATION_VERSION, HOST_GRANT_SPACE_DELETIONS_VERSION,
-        LOCAL_SPACE_NOTIFICATION_ORDER_VERSION, LOCAL_SPACE_SUBSCRIPTIONS_VERSION,
-        MISSED_CALL_NOTIFICATIONS_VERSION, OFFLINE_CALL_NOTIFICATIONS_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
-        S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
-        S2S_SPACE_SUBSCRIPTIONS_VERSION, S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
-        SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION,
+        INBOX_READ_POSITION_VERSION, LOCAL_SPACE_NOTIFICATION_ORDER_VERSION,
+        LOCAL_SPACE_SUBSCRIPTIONS_VERSION, MISSED_CALL_NOTIFICATIONS_VERSION,
+        OFFLINE_CALL_NOTIFICATIONS_VERSION, RETIRED_ACCOUNT_JIDS_VERSION,
+        S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION,
+        S2S_LOCAL_ROOM_SEATS_VERSION, S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION,
+        S2S_REMOTE_ROOMS_VERSION, S2S_SPACE_SUBSCRIPTIONS_VERSION,
+        S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION, SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION,
     };
 
     #[test]
@@ -591,6 +602,7 @@ mod tests {
                 HOST_GRANT_SPACE_DELETIONS_VERSION,
                 SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION,
                 ACCOUNT_LAST_ACTIVITY_VERSION,
+                INBOX_READ_POSITION_VERSION,
             ]
         );
     }

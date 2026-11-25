@@ -237,9 +237,11 @@ pub(super) async fn apply_durable(
                 owner,
                 channel,
                 thread,
+                through,
             }) => {
                 if let Some(entry) =
-                    InboxRepository::mark_read(tx, key, owner, channel, thread.as_ref()).await?
+                    InboxRepository::mark_read(tx, key, owner, channel, thread.as_ref(), *through)
+                        .await?
                 {
                     applied
                         .outcomes
@@ -347,6 +349,7 @@ fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
                 owner,
                 channel,
                 thread,
+                ..
             }),
             IngressEffectIntent::InboxProject {
                 owner: stored,
@@ -362,6 +365,9 @@ fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
                         room,
                         thread_id,
                     } => room == channel && thread.as_ref() == Some(thread_id),
+                    waddle_xmpp::ingress::InboxProjectionMutation::DirectRead { peer } => {
+                        peer == channel && thread.is_none()
+                    }
                     _ => false,
                 }
         }
