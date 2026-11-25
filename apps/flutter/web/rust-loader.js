@@ -53,7 +53,15 @@
   "cancel_raw_iq": [
     "id"
   ],
+  "change_remote_subscription": [
+    "address",
+    "follow",
+    "subid"
+  ],
   "connect": [],
+  "describe_remote_community": [
+    "address"
+  ],
   "disable_push_device": [
     "service_jid",
     "node",
@@ -68,9 +76,29 @@
     "user_jid"
   ],
   "discover_upload_service": [],
+  "edit_calendar_event": [
+    "community_jid",
+    "item_id",
+    "edit"
+  ],
   "enable_push_notifications": [
     "service_jid",
     "node"
+  ],
+  "event_planning_items": [
+    "room_jid"
+  ],
+  "event_planning_publish": [
+    "room_jid",
+    "input"
+  ],
+  "event_planning_retract": [
+    "room_jid",
+    "item_id"
+  ],
+  "event_room_create": [
+    "name",
+    "private_room"
   ],
   "feed_items": [
     "spaces_jid",
@@ -137,6 +165,15 @@
   "fetch_room_pins": [
     "room_jid"
   ],
+  "fetch_saved_remote_spaces": [],
+  "fetch_stories": [
+    "author_jid",
+    "max_items"
+  ],
+  "fetch_story_reactions": [
+    "author_jid",
+    "story_id"
+  ],
   "fetch_threads": [
     "opts"
   ],
@@ -150,7 +187,6 @@
   "fetch_vcard4": [
     "jid"
   ],
-  "resume_state": [],
   "get_server_version": [],
   "is_community_owner": [],
   "join_room": [
@@ -192,6 +228,9 @@
   "publish_mood": [
     "mood_json"
   ],
+  "publish_story": [
+    "input"
+  ],
   "publish_tune": [
     "tune_json"
   ],
@@ -205,6 +244,11 @@
     "jid",
     "known_ids"
   ],
+  "request_remote_room_presence": [
+    "room_jid",
+    "nick",
+    "join"
+  ],
   "request_stream_management_ack": [],
   "request_upload_slot": [
     "service_jid",
@@ -212,6 +256,7 @@
     "size",
     "content_type"
   ],
+  "resume_state": [],
   "retract_activity": [],
   "retract_mood": [],
   "retract_tune": [],
@@ -375,19 +420,15 @@
   "set_room_notification_mode": [
     "options"
   ],
+  "set_story_reactions": [
+    "author_jid",
+    "story_id",
+    "emojis"
+  ],
   "status_preference_fetch": [],
   "status_preference_publish": [
     "input"
   ],
-  "event_planning_items": ["room_jid"],
-  "event_planning_publish": ["room_jid", "input"],
-  "event_planning_retract": ["room_jid", "item_id"],
-  "event_room_create": ["name", "private_room"],
-  "story_authors": [],
-  "fetch_stories": ["author_jid", "max_items"],
-  "publish_story": ["input"],
-  "fetch_story_reactions": ["author_jid", "story_id"],
-  "set_story_reactions": ["author_jid", "story_id", "emojis"],
   "stories_items": [
     "community_jid",
     "max_items"
@@ -396,6 +437,7 @@
     "community_jid",
     "input"
   ],
+  "story_authors": [],
   "story_reads_fetch": [],
   "story_reads_publish": [
     "input"
@@ -421,7 +463,16 @@
     "video",
     "in_call"
   ],
-  "edit_calendar_event": ["community_jid", "item_id", "edit"],
+  "update_remote_room_bookmark": [
+    "room_jid",
+    "name",
+    "autojoin",
+    "forget"
+  ],
+  "update_saved_remote_space": [
+    "entry",
+    "forget"
+  ],
   "xcal_items": [
     "community_jid",
     "max_items"

@@ -174,6 +174,16 @@ pub(crate) async fn send_iq_command(
         .map_err(iq_rejection)
 }
 
+/// Federation routing can take 30 seconds plus the home server's expiry sweep.
+pub(crate) async fn send_federated_iq_command(
+    inner: Rc<RefCell<WaddleClientInner>>,
+    stanza: Element,
+) -> Result<Element, JsValue> {
+    send_iq_roundtrip_with_deadline(&inner, stanza, 45_000)
+        .await?
+        .map_err(iq_rejection)
+}
+
 /// Fields the JS side reads off a rejected IQ promise for an RFC 6120
 /// §8.3 stanza error (`stanzaErrorContext` in chat's `client-muc-admin.ts`).
 /// Split from [`iq_rejection`] so the mapping is testable on native targets,

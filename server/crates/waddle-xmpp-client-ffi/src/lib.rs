@@ -47,7 +47,13 @@ mod extension_commands;
 #[cfg(feature = "serde")]
 mod flutter_extension_routes;
 #[cfg(feature = "serde")]
+mod flutter_remote_communities;
+#[cfg(feature = "serde")]
 pub use flutter_extension_routes::{WaddleExtensionRoute, WaddleExtensionRouteItem};
+#[cfg(feature = "serde")]
+pub use flutter_remote_communities::{
+    WaddleRemoteCommunity, WaddleRemoteSubscription, WaddleSavedSpace,
+};
 mod group_dm;
 mod inbox_verbs;
 mod jid_parts;
@@ -447,3 +453,6 @@ impl WaddleClient {
         Some(SessionId(value))
     }
 }
+
+#[cfg(all(test, feature = "serde"))]
+mod flutter_remote_communities_tests;

@@ -10,6 +10,7 @@ import 'context.dart';
 part 'admin_runtime.dart';
 part 'community_runtime.dart';
 part 'extension_routes_runtime.dart';
+part 'remote_communities_runtime.dart';
 
 /// Presentation commands are translated into the shared Rust client's typed
 /// verbs. Dart retains only account-fenced caches and UI projections.
@@ -38,6 +39,11 @@ class SurfaceRuntime {
   final _forms = <String, Set<String>>{};
   Future<void> _storyReadWrite = Future.value();
   List<Map<String, dynamic>>? _commands;
+  final _remoteOffers = <String, Map<String, dynamic>>{};
+  final _remoteUnsaved = <String, Map<String, dynamic>>{};
+  final _remoteBusy = <String, Object>{};
+  final _remotePresence = <String, _RoomPresenceWait>{};
+  final _remoteNicks = <String, String>{};
   final _roomRoutes = <String, Map<String, dynamic>>{};
   int _routeListRevision = 0;
   final _routePages = <(String, String), Map<String, Map<String, dynamic>>>{};
@@ -104,6 +110,7 @@ class SurfaceRuntime {
     if (_disposed) {
       throw StateError('This controller is closed.');
     }
+    if (method.startsWith('remote.')) return _remote(method, args);
     if (method.startsWith('admin.')) return _admin(method, args);
     switch (method) {
       case 'community.feed':
@@ -781,6 +788,7 @@ class SurfaceRuntime {
 
   Future<void> onEvent(Map<String, dynamic> event) async {
     final data = runtimeMap(event['data']);
+    if (event['type'] == 'presence') _remotePresenceEvent(data);
     if (event['type'] == 'avatarChanged') {
       final owner = data['jid'];
       if (owner is! String) {
@@ -810,6 +818,9 @@ class SurfaceRuntime {
   }
 
   void onAccountChanged() {
+    remoteDisconnected();
+    _remoteUnsaved.clear();
+    _remoteBusy.clear();
     _profile = {};
     _profileLoaded = false;
     _avatars.clear();

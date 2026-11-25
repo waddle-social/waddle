@@ -554,6 +554,7 @@ class SessionRuntime implements RuntimeContext {
   Future<void> _notifyDisconnected(int captured) {
     if (_disconnectNotified) return _disconnectFuture;
     _accountPresence.disconnect();
+    surfaces.remoteDisconnected();
     _disconnectNotified = true;
     final event = {'type': 'disconnected', 'data': <String, dynamic>{}};
     rawEventObserver?.call(event);
@@ -742,6 +743,9 @@ class SessionRuntime implements RuntimeContext {
               _joined.remove(bareJid(from));
             }
           } else {
+            if ((data['muc_status_codes'] as List? ?? []).contains(110)) {
+              _joined.add(bareJid(from));
+            }
             _presence[from] = data;
           }
           _emitHome();
@@ -1053,10 +1057,15 @@ class SessionRuntime implements RuntimeContext {
   void _emitHome() {
     final peopleByJid = <String, Map<String, dynamic>>{};
     final occupants = <String, List<Map<String, dynamic>>>{};
+    final confirmedRooms = <String>{};
     for (final entry in _presence.entries) {
       final value = entry.value;
       final from = entry.key;
       final room = bareJid(from);
+      if (_connected &&
+          (value['muc_status_codes'] as List? ?? []).contains(110)) {
+        confirmedRooms.add(room);
+      }
       final inRoom =
           value['muc_jid'] != null ||
           value['muc_role'] != null ||
@@ -1172,6 +1181,7 @@ class SessionRuntime implements RuntimeContext {
       'canCreate': _canManage,
       'isCommunityOwner': _canManage,
       'rooms': _channels.map(row).toList(),
+      'confirmedRooms': confirmedRooms.toList(),
       'people': people,
       'dmPeers': dmPeers,
     });

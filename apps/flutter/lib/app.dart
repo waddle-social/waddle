@@ -10,6 +10,7 @@ import 'features/threads.dart';
 import 'features/presence_input.dart';
 import 'features/trip_plan.dart';
 import 'features/community.dart';
+import 'features/remote_communities.dart';
 
 List<Map<String, dynamic>> records(dynamic value) => value is List
     ? value
@@ -1031,6 +1032,11 @@ class _CommunityState extends State<_Community> with RestorationMixin {
                 label: 'Trips',
                 onTap: () => _push(TripPlansScreen(bridge: bridge)),
               ),
+              _CommunityPill(
+                icon: Icons.public,
+                label: 'Remote communities',
+                onTap: () => _push(RemoteCommunitiesScreen(bridge: bridge)),
+              ),
               if (totalUnread > 0)
                 _CommunityPill(
                   icon: Icons.mark_chat_unread_outlined,
@@ -1469,10 +1475,12 @@ class _CommunityPill extends StatelessWidget {
               children: [
                 Icon(icon, size: 16, color: colors.primary),
                 const SizedBox(width: 7),
-                Text(
-                  label,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
+                Flexible(
+                  child: Text(
+                    label,
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ],

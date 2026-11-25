@@ -18,3 +18,8 @@ pub struct InvalidInput(String);
 fn invalid_input(reason: impl Into<String>) -> InvalidInput {
     InvalidInput(reason.into())
 }
+
+pub mod remote_address;
+pub mod remote_bookmark;
+pub mod remote_community;
+pub mod remote_preferences;

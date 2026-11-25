@@ -21,8 +21,9 @@ use waddle_xmpp_client_ffi::{
     WaddleJidParts, WaddleJingleReason, WaddleLinkPreviewLookup, WaddleMamPage,
     WaddleMdsDisplayedEntry, WaddleMessageAudience, WaddleMucAffiliation, WaddleNotifyMode,
     WaddlePepProfile, WaddlePinEntry, WaddlePlanningItem, WaddlePushDeviceCredentials,
-    WaddlePushEnvironment, WaddlePushVapidLookup, WaddleRegisterDeviceResult, WaddleRoomBot,
-    WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry, WaddleSendMessageOutcome,
+    WaddlePushEnvironment, WaddlePushVapidLookup, WaddleRegisterDeviceResult,
+    WaddleRemoteCommunity, WaddleRemoteSubscription, WaddleRoomBot, WaddleRoomConfig,
+    WaddleRoomConfigPatch, WaddleRoomMemberEntry, WaddleSavedSpace, WaddleSendMessageOutcome,
     WaddleSendOptions, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
     WaddleSpaceRole, WaddleStatusPreference, WaddleStickerPack, WaddleStory, WaddleStoryInput,
     WaddleStoryReactions, WaddleStoryReads, WaddleStoryReadsInput, WaddleThreadsPage,
@@ -90,6 +91,11 @@ pub(crate) enum Operation {
         page_size: Option<u32>,
         after_cursor: Option<String>,
     },
+    ChangeRemoteSubscription {
+        address: String,
+        follow: bool,
+        subid: Option<String>,
+    },
     ConsistentColorHue {
         input: String,
     },
@@ -101,6 +107,9 @@ pub(crate) enum Operation {
         localpart: String,
         nick: String,
         patch: WaddleRoomConfigPatch,
+    },
+    DescribeRemoteCommunity {
+        address: String,
     },
     DestroyRoom {
         room_jid: jid::Jid,
@@ -196,6 +205,7 @@ pub(crate) enum Operation {
         max_messages: u32,
         before_id: Option<String>,
     },
+    FetchSavedRemoteSpaces {},
     FetchStatusPreference {},
     FetchStickerPack {
         owner_jid: jid::Jid,
@@ -325,6 +335,11 @@ pub(crate) enum Operation {
     RequestAvatar {
         jid: jid::Jid,
         known_ids: Vec<String>,
+    },
+    RequestRemoteRoomPresence {
+        room_jid: jid::Jid,
+        nick: String,
+        join: bool,
     },
     RequestUploadSlot {
         service_jid: jid::Jid,
@@ -540,6 +555,16 @@ pub(crate) enum Operation {
         video: bool,
         flags: WaddleInCallPresenceFlags,
     },
+    UpdateRemoteRoomBookmark {
+        room_jid: jid::Jid,
+        name: Option<String>,
+        autojoin: bool,
+        forget: bool,
+    },
+    UpdateSavedRemoteSpace {
+        entry: WaddleSavedSpace,
+        forget: bool,
+    },
     XcalItems {
         community_jid: jid::Jid,
         max_items: Option<u32>,
@@ -583,9 +608,11 @@ pub(crate) enum Output {
     AdminSpacesSetRole(WaddleAdminSpacesSetRoleResult),
     AdminSpacesUpdate(WaddleAdminSpaceRef),
     AdminUsersList(WaddleAdminUsersPage),
+    ChangeRemoteSubscription(WaddleRemoteSubscription),
     ConsistentColorHue(f64),
     CreateGroupDm(String),
     CreateRoom(String),
+    DescribeRemoteCommunity(WaddleRemoteCommunity),
     DisablePushDevice(bool),
     DisablePushNotifications(bool),
     DiscoverExtensionCommands(Vec<WaddleExtensionCommand>),
@@ -610,6 +637,7 @@ pub(crate) enum Output {
     FetchRoomHistory(WaddleMamPage),
     FetchRoomPins(Vec<WaddlePinEntry>),
     FetchRoomThreadHistory(WaddleMamPage),
+    FetchSavedRemoteSpaces(Vec<WaddleSavedSpace>),
     FetchStatusPreference(WaddleStatusPreference),
     FetchStickerPack(Option<WaddleStickerPack>),
     FetchStickerPacks(Vec<WaddleStickerPack>),
@@ -806,6 +834,16 @@ impl Operation {
                     .await
                     .map_err(RuntimeError::from)?,
             )),
+            Self::ChangeRemoteSubscription {
+                address,
+                follow,
+                subid,
+            } => Ok(Output::ChangeRemoteSubscription(
+                client
+                    .change_remote_subscription(address, follow, subid)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
             Self::ConsistentColorHue { input } => Ok(Output::ConsistentColorHue(
                 waddle_xmpp_client_ffi::consistent_color_hue(input),
             )),
@@ -828,6 +866,12 @@ impl Operation {
             } => Ok(Output::CreateRoom(
                 client
                     .create_room(localpart, nick, patch)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::DescribeRemoteCommunity { address } => Ok(Output::DescribeRemoteCommunity(
+                client
+                    .describe_remote_community(address)
                     .await
                     .map_err(RuntimeError::from)?,
             )),
@@ -1037,6 +1081,12 @@ impl Operation {
                         max_messages,
                         before_id,
                     )
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::FetchSavedRemoteSpaces {} => Ok(Output::FetchSavedRemoteSpaces(
+                client
+                    .fetch_saved_remote_spaces()
                     .await
                     .map_err(RuntimeError::from)?,
             )),
@@ -1311,6 +1361,17 @@ impl Operation {
                     .await
                     .map_err(RuntimeError::from)?,
             )),
+            Self::RequestRemoteRoomPresence {
+                room_jid,
+                nick,
+                join,
+            } => {
+                client
+                    .request_remote_room_presence(room_jid.to_string(), nick, join)
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
             Self::RequestUploadSlot {
                 service_jid,
                 filename,
@@ -1739,6 +1800,25 @@ impl Operation {
                         video,
                         flags,
                     )
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
+            Self::UpdateRemoteRoomBookmark {
+                room_jid,
+                name,
+                autojoin,
+                forget,
+            } => {
+                client
+                    .update_remote_room_bookmark(room_jid.to_string(), name, autojoin, forget)
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
+            Self::UpdateSavedRemoteSpace { entry, forget } => {
+                client
+                    .update_saved_remote_space(entry, forget)
                     .await
                     .map_err(RuntimeError::from)?;
                 Ok(Output::Unit)

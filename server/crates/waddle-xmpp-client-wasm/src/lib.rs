@@ -83,6 +83,7 @@ mod client_flutter_parity;
 mod client_history;
 mod client_messaging;
 mod client_pep_stories;
+mod client_remote_communities;
 mod client_rooms;
 mod client_social_feed;
 mod client_status_preference;
