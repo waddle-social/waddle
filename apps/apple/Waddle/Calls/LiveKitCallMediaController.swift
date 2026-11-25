@@ -106,11 +106,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     @ObservationIgnored private let defaults: UserDefaults
     /// Consent, cameras and screens: all the controller has of the hardware.
     @ObservationIgnored private let capture: any CallCaptureSources
-<<<<<<< HEAD
-    private static let devicePreferencesKey = "callDevicePreferences"
-=======
-    private static let audioProcessingKey = "callAudioProcessing"
->>>>>>> 283b72606 (refactor(apple): give a call's devices a catalog of their own)
     private static let backgroundKey = "callBackground"
     private(set) var background = CallBackground.off
     private(set) var isBackgroundFailing = false
@@ -134,16 +129,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     init(defaults: UserDefaults = .standard, capture: any CallCaptureSources = SystemCaptureSources()) {
         self.defaults = defaults
         self.capture = capture
-<<<<<<< HEAD
-        devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
-<<<<<<< HEAD
         remoteVolumes = CallRemoteVolumes(roomAccess: roomAccess)
-=======
->>>>>>> 283b72606 (refactor(apple): give a call's devices a catalog of their own)
-        audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
-=======
         microphoneProcessing = CallMicrophoneProcessing(roomAccess: roomAccess, defaults: defaults)
->>>>>>> 6175c1f41 (refactor(apple): give the microphone's processing a module of its own)
         background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
         videoMeter = CallVideoMeter(roomAccess: roomAccess)
         roomAccess.tracksChanged = { [weak self] in self?.refreshTracks() }
@@ -716,13 +703,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         failingBackgrounds = []
         cameraFailedToStartBlurred = false
         if isBackgroundFailing { isBackgroundFailing = false }
-<<<<<<< HEAD
         videoMeter.roomWentAway()
-        audioProcessingPublications = []
-=======
-        measuredTracks = [:]
-        videoWatchers = 0
->>>>>>> 6175c1f41 (refactor(apple): give the microphone's processing a module of its own)
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
         wantsScreenShare = false
