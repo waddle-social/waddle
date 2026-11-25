@@ -167,6 +167,7 @@
 		3698902C5BEAEBC577DC9ED2 /* ComposerExtraButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CA1A7AD03017BC561B9267 /* ComposerExtraButtons.swift */; };
 		36A78F7D3970F69724FFAB5A /* CallSplitHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90FBDD682CE060917E3DF182 /* CallSplitHost.swift */; };
 		36E9C0282D19E679ACB15680 /* TimelineDayLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B981349099DC164D28D158 /* TimelineDayLabel.swift */; };
+		37D9F04CED1B4599E98B678A /* CallAnchorCardSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF79AFD3B52A4EA14BBB1DF1 /* CallAnchorCardSnapshotTests.swift */; };
 		38017566CDB55F105E0004AC /* ProfileAvatarEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E7D2EFE74CE0E7AA324637B /* ProfileAvatarEncoder.swift */; };
 		388A0B3BBF6C487B3D34ECDB /* RemoteImageDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD90267CD2CEC512024017D9 /* RemoteImageDataView.swift */; };
 		38AE4281C3EEF348D3AEA4B2 /* FFIOutbound+Values.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883F76BB4172D356990947A1 /* FFIOutbound+Values.swift */; };
@@ -180,6 +181,7 @@
 		3CB5B2205876D8B3E335CCF2 /* ConversationScreenSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15A7BF380E056296FA159338 /* ConversationScreenSnapshotTests.swift */; };
 		3CFF53C6E468C3E7D895AF40 /* MessageSafetyScoresButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB3CC66C2E14BDDAD64BBC5 /* MessageSafetyScoresButton.swift */; };
 		3D3CC4E01C2B3209E01ABAB7 /* HomeList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B6166199D282F6AAEDD0C /* HomeList.swift */; };
+		3D9F07444016E6B9D479F18B /* CallAnchorCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DBBCE8559F05F8C3E016CB1 /* CallAnchorCardView.swift */; };
 		3DA6E62AAD3B1DB7DAAB6C7C /* ProfileMoodEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F0CFB8B8A9EF99839CFEE4 /* ProfileMoodEditor.swift */; };
 		3E0FF660DD115C0352051EBC /* PeerDetailsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E570A12B625BCB30023E6AB0 /* PeerDetailsSection.swift */; };
 		3E1D9FBAA270732A4CCB5EC1 /* HuddleColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17173B8296B26DFD2A19423E /* HuddleColor.swift */; };
@@ -566,6 +568,7 @@
 		B7A7653778DCBAFE6E77A901 /* GroupCallDockSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68BF996F6153724EA370719 /* GroupCallDockSnapshotTests.swift */; };
 		B7B0453D59244126B71A44C3 /* FFIXmppPort+Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */; };
 		B82B7AA5F8C8483A1E17A739 /* ComposerCommandCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF3F0EF8F7344EF314C694C /* ComposerCommandCenter.swift */; };
+		B8C0B889A275EF991E36E432 /* CallAnchorCardSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF79AFD3B52A4EA14BBB1DF1 /* CallAnchorCardSnapshotTests.swift */; };
 		B92D8577885DB6EF57D70947 /* ProfileAvailabilityOption.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8BD216820ED9BAEB871364 /* ProfileAvailabilityOption.swift */; };
 		B93419865916DB1E5C937A2F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FE8ACEF477622BE73C019935 /* PrivacyInfo.xcprivacy */; };
 		B964326EE3BC2FF209F85776 /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE739129D4CC16065C7E43F2 /* Controls.swift */; };
@@ -777,6 +780,7 @@
 		FC6F1956D1AC2EA8B891F5AF /* ServerSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C4C5589906A2053A7CA1626 /* ServerSettings.swift */; };
 		FC90840ACA1B8FE883CDC3C0 /* RoomManagementDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F0E780FA955770757065E1 /* RoomManagementDialogs.swift */; };
 		FDAD268EFCA5BCB6C676CB7C /* FFIXmppPort+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7ACA7D569146655E5BCC497 /* FFIXmppPort+Events.swift */; };
+		FED198AE05DC2E647EB73BB9 /* CallAnchorCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DBBCE8559F05F8C3E016CB1 /* CallAnchorCardView.swift */; };
 		FF57199F25C36E3793972072 /* EventsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 749944689EAAD79B60977AEA /* EventsView.swift */; };
 		FFB4C250C0EE9ADDDAE95657 /* CallSplitHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90FBDD682CE060917E3DF182 /* CallSplitHost.swift */; };
 		FFBC23F25B83865D973095D0 /* StickerPackComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35D9C8B1EC651E89CC813604 /* StickerPackComposer.swift */; };
@@ -865,6 +869,7 @@
 		2C4C5589906A2053A7CA1626 /* ServerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSettings.swift; sourceTree = "<group>"; };
 		2D0D65230C6007672A41EB65 /* CallStageRedrawTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallStageRedrawTests.swift; sourceTree = "<group>"; };
 		2D57D4986811AD186C88D991 /* ConversationRowTrailing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRowTrailing.swift; sourceTree = "<group>"; };
+		2DBBCE8559F05F8C3E016CB1 /* CallAnchorCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAnchorCardView.swift; sourceTree = "<group>"; };
 		2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Commands.swift"; sourceTree = "<group>"; };
 		2DE2907041A875E132FBDE57 /* MessageRichBody.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRichBody.swift; sourceTree = "<group>"; };
 		2E00651FCAAF785065B02539 /* ComposerPasteContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerPasteContent.swift; sourceTree = "<group>"; };
@@ -1072,6 +1077,7 @@
 		BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDockSnapshotTests.swift; sourceTree = "<group>"; };
 		BDB24A68F639E15A8EF908C6 /* ExtensionCommandCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionCommandCopy.swift; sourceTree = "<group>"; };
 		BE82E554569A1E4A76B2E0FA /* PeopleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleView.swift; sourceTree = "<group>"; };
+		BF79AFD3B52A4EA14BBB1DF1 /* CallAnchorCardSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAnchorCardSnapshotTests.swift; sourceTree = "<group>"; };
 		C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifSearchClient.swift; sourceTree = "<group>"; };
 		C06B7010B667045F63391C16 /* SettingsTilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTilePicker.swift; sourceTree = "<group>"; };
 		C07143C4C647180CA4F906E6 /* ThreadScreenSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadScreenSnapshotTests.swift; sourceTree = "<group>"; };
@@ -1292,6 +1298,7 @@
 		2E3B92A0E5362BD811889858 /* Calls */ = {
 			isa = PBXGroup;
 			children = (
+				2DBBCE8559F05F8C3E016CB1 /* CallAnchorCardView.swift */,
 				931B91F62774BEC1541CC962 /* CallDock.swift */,
 				2126DCBE7C2DCC8744EA459B /* CallDockParts.swift */,
 				07BC38BD586BF667F9FB3E85 /* CallDockView.swift */,
@@ -1504,6 +1511,7 @@
 				2F15D15AB9657DED5C897B67 /* AccountSnapshotTests.swift */,
 				7804D992CBAB9F6BA1094ED5 /* AdminListNoticeTests.swift */,
 				51ED97ED724C87F39F1DAD8E /* AdminSnapshotTests.swift */,
+				BF79AFD3B52A4EA14BBB1DF1 /* CallAnchorCardSnapshotTests.swift */,
 				467769E03D180224C2EB64BD /* CallBackgroundProcessorTests.swift */,
 				BD3974E28827CDAC990D9C3D /* CallDockSnapshotTests.swift */,
 				E72E154AC39A146AFA6A40E0 /* CallSettingsSnapshotTests.swift */,
@@ -2395,6 +2403,7 @@
 				E6F035620B04948CE18CF1D0 /* AuthClient.swift in Sources */,
 				985578F2C1EDA16F80D1107A /* AuthModels.swift in Sources */,
 				9D90003806BC9B327D9027EB /* BridgeLog.swift in Sources */,
+				3D9F07444016E6B9D479F18B /* CallAnchorCardView.swift in Sources */,
 				5E9324CFA5AB9954D2988F71 /* CallBackgroundProcessor.swift in Sources */,
 				9318BA8E9F9BE0AD8FA8EAF6 /* CallControlBar.swift in Sources */,
 				CF31EC6ECBD11B78A393FEBA /* CallDock.swift in Sources */,
@@ -2690,6 +2699,7 @@
 				0F8ADE43DCE6F7EA0D9F5DF5 /* AccountSnapshotTests.swift in Sources */,
 				75FCA77647ECF4B938C8F18A /* AdminListNoticeTests.swift in Sources */,
 				F25354ABC94D24BE37A6FD4F /* AdminSnapshotTests.swift in Sources */,
+				37D9F04CED1B4599E98B678A /* CallAnchorCardSnapshotTests.swift in Sources */,
 				9A3AA2A1BAE5BFA94DFDCA9E /* CallBackgroundProcessorTests.swift in Sources */,
 				4AF4FCA24C77C80C374A8BCC /* CallDockSnapshotTests.swift in Sources */,
 				805F1B5BE90C0384E5C89F68 /* CallSettingsSnapshotTests.swift in Sources */,
@@ -2782,6 +2792,7 @@
 				EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */,
 				75D23D1E2FCEFE3EAC005FAA /* AuthModels.swift in Sources */,
 				CA5B7C430658157869D10090 /* BridgeLog.swift in Sources */,
+				FED198AE05DC2E647EB73BB9 /* CallAnchorCardView.swift in Sources */,
 				8C4C9EEFC89E448A36BCBFA8 /* CallBackgroundProcessor.swift in Sources */,
 				D6B197EAAECDB9DCA6D90E70 /* CallControlBar.swift in Sources */,
 				0C36753DC620BCF8966005B4 /* CallDock.swift in Sources */,
@@ -3077,6 +3088,7 @@
 				057904D097CA64B518BB522C /* AccountSnapshotTests.swift in Sources */,
 				8C946A47D716A3049A308D0D /* AdminListNoticeTests.swift in Sources */,
 				0F4C1B64D4FD0B15E9A3A001 /* AdminSnapshotTests.swift in Sources */,
+				B8C0B889A275EF991E36E432 /* CallAnchorCardSnapshotTests.swift in Sources */,
 				0F2F5490E1C4F9B490578343 /* CallBackgroundProcessorTests.swift in Sources */,
 				069F331022C7D27B64F21AD1 /* CallDockSnapshotTests.swift in Sources */,
 				7670F1A352830E3B477E1EBF /* CallSettingsSnapshotTests.swift in Sources */,

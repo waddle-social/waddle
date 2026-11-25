@@ -768,7 +768,8 @@ public final class SessionCoordinator {
 
     /// Unread and alerts for a genuinely new, live, feed-visible row.
     private func recordActivity(_ item: TimelineItem, message: WireMessage, route: MessageRoute) {
-        guard message.isLive, !route.isMine, item.isFeedVisible else { return }
+        // A call starting is said by the call's own surfaces, not counted as a message unread.
+        guard message.isLive, !route.isMine, item.isFeedVisible, item.callAnchor == nil else { return }
         let conversation = route.conversation
         var ids = item.identity.all
         ids.insert(item.id)

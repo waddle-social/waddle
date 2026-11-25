@@ -47,6 +47,9 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// `urn:waddle:safety-scores:1`), visible to every participant. Nil
     /// until judged, after a clear, and on removed messages.
     public var safetyScores: SafetyScores?
+    /// The call this row announced is over, as the room said (XEP-0422,
+    /// `urn:waddle:call-thread:0`).
+    public var callEnded: CallThreadEnded?
     /// Local send not yet reflected or archived.
     public var isLocalEcho: Bool
     /// When this client first saw the row. Live stanzas carry no timestamp,
@@ -119,10 +122,21 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return from.description
     }
 
-    /// Thread replies render only inside their thread.
+    /// Thread replies render only inside their thread. A call's
+    /// announcement is the head of its thread, the call's chat, though the
+    /// thread has an id of its own and not the announcement's.
     public var isFeedVisible: Bool {
         guard let thread = message.thread else { return true }
-        return identity.all.contains(thread)
+        return identity.all.contains(thread) || callAnchor != nil
+    }
+
+    /// The call this row announces, when the room itself posted it: the
+    /// server writes the announcement from the room's bare JID, and an
+    /// occupant who marks a message of their own as one is not believed.
+    public var callAnchor: CallThreadAnchor? {
+        guard let anchor = message.callThread, anchor.kind == .room, conversation.isRoom, message.isGroupchat,
+              let from = message.from, from.resource == nil, from.bare == conversation.jid else { return nil }
+        return anchor
     }
 
     /// The XEP-0359 stanza id the room assigned (`by` is the room). In a

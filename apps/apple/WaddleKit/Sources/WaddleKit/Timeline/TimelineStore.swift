@@ -401,6 +401,10 @@ public final class TimelineStore {
                     && item.identity.originID == fastening.targetOriginID
                     && item.conversation.jid == fastening.targetStanzaBy
             }
+            if case .callEnded = mutation {
+                // The fastening names the id the room itself gave its announcement.
+                return item.callAnchor != nil && item.identity.originID == target
+            }
             return item.roomStanzaID == target
         }
         return item.id == target || item.identity.all.contains(target)
@@ -487,6 +491,7 @@ public final class TimelineStore {
         item.reactions = aggregate(state.reactionsBySender, isGroupchat: item.conversation.isRoom)
         // Scores annotate content; a removed message shows none.
         item.safetyScores = state.tombstone == nil ? state.safetyScores : nil
+        item.callEnded = state.callEnded
         return item
     }
 
@@ -574,6 +579,8 @@ private struct MutationState: Hashable {
     var safetyScores: SafetyScores?
     var safetyScoresRank: Rank?
     var safetyScoresRevisionID: String?
+    var callEnded: CallThreadEnded?
+    var callEndedRank: Rank?
 }
 
 private struct Entry: Hashable {
@@ -661,6 +668,15 @@ private struct Entry: Hashable {
             next.mutations.safetyScores = fastening.scores
             next.mutations.safetyScoresRank = ranked.rank
             next.mutations.safetyScoresRevisionID = fastening.sourceRevisionID
+        case let .callEnded(_, from, ended):
+            // Only the room (its bare JID) announces a call and its end; an
+            // occupant claiming either is a spoof.
+            guard from.resource == nil, from.bare == conversation.jid, item.callAnchor != nil else { return self }
+            if let current = mutations.callEndedRank, current > ranked.rank {
+                return self
+            }
+            next.mutations.callEnded = ended
+            next.mutations.callEndedRank = ranked.rank
         }
         return next
     }
