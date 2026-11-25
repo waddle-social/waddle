@@ -73,7 +73,7 @@ struct CallControlBar: View {
         )
         .disabled(!hasMedia)
         if isInBar(.viewChoice, layout) { viewSwitch }
-        if let isHandRaised {
+        if let isHandRaised, isInBar(.hand, layout) {
             CallControlButton(
                 title: isHandRaised ? "Lower hand" : "Raise hand", symbol: "hand.raised",
                 tone: isHandRaised ? .chosen : .plain, action: { perform(.toggleHand) }

@@ -52,8 +52,15 @@ final class FakeCallMedia: CallMediaControls {
 
     func setVolume(_ gain: Double, of identity: String) { record(.setVolume(gain, identity)) }
     func resetVolumes() { record(.resetVolumes) }
-    func setMicrophone(_ on: Bool) async { record(.setMicrophone(on)) }
-    func setCamera(_ on: Bool) async { record(.setCamera(on)) }
+    func setMicrophone(_ on: Bool) async {
+        isMicrophoneOn = on
+        record(.setMicrophone(on))
+    }
+
+    func setCamera(_ on: Bool) async {
+        isCameraOn = on
+        record(.setCamera(on))
+    }
     func refreshDevices() async { record(.refreshDevices) }
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async { record(.chooseDevice(kind, id)) }
     func setMeasuresVideo(_ on: Bool) async { record(.setMeasuresVideo(on)) }
