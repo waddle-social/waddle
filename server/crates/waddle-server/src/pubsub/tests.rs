@@ -126,7 +126,7 @@ async fn database_node_config_persists_pubsub_type() {
         .await
         .expect("node");
     storage
-        .update_node_config(&owner, node, &NodeConfig::community_stories())
+        .update_node_config(&owner, node, &NodeConfig::pep_stories())
         .await
         .expect("config");
 

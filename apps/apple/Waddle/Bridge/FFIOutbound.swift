@@ -45,6 +45,7 @@ enum FFIOutbound {
             sharedFiles: options.sharedFiles.map(sharedFile),
             linkPreviewToken: nil,
             requestDisplayedMarker: options.requestDisplayedMarker,
+            chatStateActive: options.chatStateActive,
             mucPm: false,
             sticker: options.sticker.map { WaddleStickerRef(packId: $0.packID, packJid: nil, packNode: nil) },
             mentionDirectory: options.mentionDirectory.map(mentionDirectory)

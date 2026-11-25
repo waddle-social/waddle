@@ -1,8 +1,9 @@
 //! The community feed and stories over the session's `WaddleClient`.
 //!
 //! Like `session.rs` this only adapts: wire records become the plain types
-//! `feed.rs` and `stories.rs` work with. The server's feed and stories
-//! live on `community.<domain>`.
+//! `feed.rs` and `stories.rs` work with. The server's feed lives on
+//! `community.<domain>`; XEP-0501 stories live on each author's own PEP
+//! node, so the story list gathers the account's and its contacts'.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,35 +55,54 @@ impl Session {
             .map_err(|error| describe(&error))
     }
 
-    /// The stories still up, in the server's order.
+    /// The stories still up: the account's own and those of the roster
+    /// contacts whose stories the server lets it read (XEP-0501 nodes are
+    /// presence-gated, so a contact that refuses is skipped).
     pub async fn stories(&self, now_ms: i64) -> Result<Vec<Story>, String> {
-        let (client, community) = (Arc::clone(&self.client), self.feed_community());
-        let wire =
-            runtime::spawn(
-                async move { client.fetch_stories(community, Some(feed::PAGE_SIZE)).await },
-            )
-            .await
-            .map_err(|_| interrupted())?
-            .map_err(|error| describe(&error))?;
+        let me = self.me.bare.to_string();
+        let contacts = self.contacts().await.unwrap_or_default();
+        let mut authors = vec![me.clone()];
+        authors.extend(
+            contacts
+                .into_iter()
+                .map(|contact| contact.jid)
+                .filter(|jid| *jid != me),
+        );
+        let mut wire = Vec::new();
+        for author in authors {
+            let client = Arc::clone(&self.client);
+            let own = author == me;
+            let fetched =
+                runtime::spawn(
+                    async move { client.fetch_stories(author, Some(feed::PAGE_SIZE)).await },
+                )
+                .await
+                .map_err(|_| interrupted())?;
+            match fetched {
+                Ok(stories) => wire.extend(stories),
+                Err(error) if own => return Err(describe(&error)),
+                Err(error) => tracing::debug!(?error, "a contact's stories were not readable"),
+            }
+        }
         Ok(stories::active(wire, now_ms))
     }
 
     /// Share a picture already uploaded as a story that lasts the default
-    /// day.
+    /// day. It goes to the account's own XEP-0501 node.
     pub async fn publish_story(
         &self,
         media_url: String,
         media_type: String,
         caption: Option<String>,
     ) -> Result<Story, String> {
-        let (client, community) = (Arc::clone(&self.client), self.feed_community());
+        let client = Arc::clone(&self.client);
         let post = WaddleStoryPost {
             body: caption,
             media_url,
             media_type: Some(media_type),
             expiry_hours: None,
         };
-        runtime::spawn(async move { client.publish_story(community, post).await })
+        runtime::spawn(async move { client.publish_story(post).await })
             .await
             .map_err(|_| interrupted())?
             .map(Story::from_wire)
@@ -108,10 +128,20 @@ impl Session {
             .map_err(|error| describe(&error))
     }
 
+    /// The XEP-0470 attachments of a story live beside it, on its author's
+    /// PEP service; a story without a stamped author is the account's own.
+    fn story_host(&self, author: Option<String>) -> String {
+        author.unwrap_or_else(|| self.me.bare.to_string())
+    }
+
     /// The reactions on one story and which are this account's.
-    pub async fn story_reactions(&self, story_id: String) -> Result<Reactions, String> {
-        let (client, community) = (Arc::clone(&self.client), self.feed_community());
-        runtime::spawn(async move { client.fetch_story_reactions(community, story_id).await })
+    pub async fn story_reactions(
+        &self,
+        author: Option<String>,
+        story_id: String,
+    ) -> Result<Reactions, String> {
+        let (client, host) = (Arc::clone(&self.client), self.story_host(author));
+        runtime::spawn(async move { client.fetch_story_reactions(host, story_id).await })
             .await
             .map_err(|_| interrupted())?
             .map(Reactions::from_wire)
@@ -121,18 +151,15 @@ impl Session {
     /// Make `emojis` this account's reactions to the story.
     pub async fn set_story_reactions(
         &self,
+        author: Option<String>,
         story_id: String,
         emojis: Vec<String>,
     ) -> Result<(), String> {
-        let (client, community) = (Arc::clone(&self.client), self.feed_community());
-        runtime::spawn(async move {
-            client
-                .set_story_reactions(community, story_id, emojis)
-                .await
-        })
-        .await
-        .map_err(|_| interrupted())?
-        .map_err(|error| describe(&error))
+        let (client, host) = (Arc::clone(&self.client), self.story_host(author));
+        runtime::spawn(async move { client.set_story_reactions(host, story_id, emojis).await })
+            .await
+            .map_err(|_| interrupted())?
+            .map_err(|error| describe(&error))
     }
 
     /// Upload a file as it is (XEP-0363) and return its address. For what

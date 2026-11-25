@@ -28,13 +28,12 @@ pub use self::payloads::{
 use super::namespaces::{
     NS_CLIENT, NS_DELAY, NS_MARKUP, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC_USER,
     NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_OPENGRAPH_VIDEO, NS_ORIGIN_ID, NS_RDF_SYNTAX,
-    NS_REFERENCES, NS_SFS, NS_SIMS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
+    NS_REFERENCES, NS_SFS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
 };
 use super::presence::parse_presence;
 use super::types::{
     InCallSignal, InboundMessage, LinkPreviewData, LinkPreviewImageData, LinkPreviewPlayer,
     LinkPreviewVideoData, MdsDisplayedEntry, MessagingEvent, ReferenceData, SharedFile,
-    SharedFileDisposition,
 };
 use url::Url;
 

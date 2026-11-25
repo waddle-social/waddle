@@ -12,6 +12,9 @@ final class FFIXmppPort: XmppPort {
     let signals: FFISessionSignals
     /// XEP-0363 service, discovered once; rediscovered while unknown.
     let uploadService = FFILocked<BareJID?>(nil)
+    /// Story id to the author whose PEP service hosts the story and its
+    /// reactions, filled by each stories fetch and post.
+    let storyHosts = FFILocked<[String: BareJID]>([:])
     private let continuation: AsyncStream<XmppEvent>.Continuation
 
     init(config: WaddleConfig) {

@@ -3,7 +3,8 @@ import { effectScope, ref } from "vue";
 import { useStories } from "../src/services/stories";
 import type { BrowserXmppClient, PubsubEvent, Story, StoryReactionItem, StoryReactionSummary } from "../src/lib/xmpp-client";
 
-const COMMUNITY = "community.example.com";
+/** The story author: each account hosts its own stories PEP node. */
+const AUTHOR = "bob@example.com";
 
 type MockClient = BrowserXmppClient & {
   fetchStories: ReturnType<typeof mock>;
@@ -13,8 +14,6 @@ type MockClient = BrowserXmppClient & {
   fetchStoryReactionSummary: ReturnType<typeof mock>;
   publishStoryReactions: ReturnType<typeof mock>;
   retractStoryReactions: ReturnType<typeof mock>;
-  subscribeStories: ReturnType<typeof mock>;
-  subscribeStoryReactionSummaries: ReturnType<typeof mock>;
   setPubsubEventHandler: ReturnType<typeof mock>;
   addPubsubEventHandler: ReturnType<typeof mock>;
   emitPubsubEvent: (event: PubsubEvent) => void;
@@ -39,8 +38,6 @@ function makeClient(stories: Story[] = []): MockClient {
     ),
     publishStoryReactions: mock(() => Promise.resolve()),
     retractStoryReactions: mock(() => Promise.resolve()),
-    subscribeStories: mock(() => Promise.resolve()),
-    subscribeStoryReactionSummaries: mock(() => Promise.resolve()),
     setPubsubEventHandler: mock((handler: ((event: PubsubEvent) => void) | null) => {
       pubsubEventHandlers.clear();
       if (handler) pubsubEventHandlers.add(handler);
@@ -52,7 +49,7 @@ function makeClient(stories: Story[] = []): MockClient {
     emitPubsubEvent: (event: PubsubEvent) => {
       for (const handler of pubsubEventHandlers) handler(event);
     },
-    publishStory: mock((_jid: string, input: { body?: string; mediaUrl: string; author?: string }) =>
+    publishStory: mock((input: { body?: string; mediaUrl: string; author?: string }) =>
       Promise.resolve({
         id: "new-story",
         ...(input.body ? { body: input.body } : {}),
@@ -65,6 +62,11 @@ function makeClient(stories: Story[] = []): MockClient {
   } as unknown as MockClient;
   client.fetchStoryReactionSummary = mock((_: string, storyId: string) => Promise.resolve(reactionSummary(storyId))) as unknown as MockClient["fetchStoryReactionSummary"];
   return client;
+}
+
+/** Let the in-flight refresh get past its story fetch, so the stories' hosts are known. */
+async function settleFetch(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
 }
 
 function withScope<T>(fn: () => T): T {
@@ -87,17 +89,63 @@ describe("useStories", () => {
       { id: "newest", body: "newest", postedMs: now, expiresMs: future },
     ]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     story.nowMs.value = now;
     await story.refresh();
     expect(story.activeStories.value.map((s) => s.id)).toEqual(["newest", "later"]);
   });
 
+  test("refresh reads every author's own stories node and routes reactions to the story's host", async () => {
+    const now = Date.parse("2026-06-01T12:00:00Z");
+    const future = now + 10 * 60_000;
+    const client = makeClient([]);
+    client.fetchStories = mock((author: string) =>
+      author === "carol@example.com"
+        ? Promise.resolve([{ id: "carol-story", body: "c", postedMs: now - 1000, expiresMs: future }])
+        : author === "dave@example.com"
+          ? Promise.reject(new Error("presence subscription required"))
+          : Promise.resolve([{ id: "bob-story", body: "b", postedMs: now, expiresMs: future }]),
+    ) as unknown as MockClient["fetchStories"];
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), {
+        authorJids: ref<readonly string[]>([AUTHOR, "carol@example.com", "dave@example.com"]),
+      }),
+    );
+    story.nowMs.value = now;
+    await story.refresh();
+
+    expect(story.activeStories.value.map((s) => s.id)).toEqual(["bob-story", "carol-story"]);
+    expect(client.fetchStoryReactionSummary).toHaveBeenCalledWith("carol@example.com", "carol-story");
+    expect(client.fetchStoryReactionSummary).toHaveBeenCalledWith(AUTHOR, "bob-story");
+    // An unreadable contact node is the empty case, not a failure of the rail.
+    expect(story.error.value).toBeNull();
+
+    await story.toggleReaction("carol-story", "👍");
+    expect(client.publishStoryReactions).toHaveBeenLastCalledWith(
+      "carol@example.com",
+      "carol-story",
+      ["👍"],
+      [],
+    );
+  });
+
+  test("a story published on the user's own node is hosted by the user", async () => {
+    const client = makeClient([]);
+    const story = withScope(() =>
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>(["alice@example.com"]) }),
+    );
+    const posted = await story.post({ mediaUrl: "https://example.com/story.jpg" });
+    expect(posted?.id).toBe("new-story");
+    expect(client.publishStory).toHaveBeenCalledWith({ mediaUrl: "https://example.com/story.jpg" });
+    await story.toggleReaction("new-story", "❤️");
+    expect(client.publishStoryReactions).toHaveBeenLastCalledWith("alice@example.com", "new-story", ["❤️"], []);
+  });
+
   test("post appends locally and skips empty input", async () => {
     const client = makeClient([]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     story.nowMs.value = Date.parse("2026-06-01T12:00:00Z");
     const empty = await story.post({ body: "  ", mediaUrl: "  " });
@@ -123,7 +171,7 @@ describe("useStories", () => {
       { id: "later", body: "later", postedMs: t0, expiresMs: t0 + 3_600_000 },
     ]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     story.nowMs.value = t0;
     await story.refresh();
@@ -135,7 +183,7 @@ describe("useStories", () => {
   test("reaction summaries load counts, toggle optimistically, and roll back", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 
@@ -145,7 +193,7 @@ describe("useStories", () => {
     await story.toggleReaction("s1", "👍");
     expect(story.reactionSummary("s1").counts).toEqual({ "👍": 2, "❤️": 1 });
     expect(client.publishStoryReactions).toHaveBeenLastCalledWith(
-      COMMUNITY,
+      AUTHOR,
       "s1",
       ["❤️", "👍"],
       ["<future xmlns=\"urn:test\"/>"],
@@ -159,7 +207,7 @@ describe("useStories", () => {
     client.publishStoryReactions = mock(() => Promise.resolve()) as unknown as MockClient["publishStoryReactions"];
     await story.toggleReaction("s1", "👍");
     await story.toggleReaction("s1", "❤️");
-    expect(client.retractStoryReactions).toHaveBeenCalledWith(COMMUNITY, "s1");
+    expect(client.retractStoryReactions).toHaveBeenCalledWith(AUTHOR, "s1");
   });
 
   test("refresh reads story counts from summary payloads instead of raw attachments", async () => {
@@ -173,13 +221,12 @@ describe("useStories", () => {
     client.fetchMyStoryReactions = mock(() => Promise.resolve(null)) as unknown as MockClient["fetchMyStoryReactions"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 
-    expect(client.fetchStoryReactionSummary).toHaveBeenCalledWith(COMMUNITY, "s1");
-    expect(client.subscribeStories).toHaveBeenCalledWith(COMMUNITY);
-    expect(client.subscribeStoryReactionSummaries).toHaveBeenCalledWith(COMMUNITY);
+    expect(client.fetchStoryReactionSummary).toHaveBeenCalledWith(AUTHOR, "s1");
+    expect(client.fetchStories).toHaveBeenCalledWith(AUTHOR, 50);
     expect(client.fetchStoryReactions).not.toHaveBeenCalled();
     expect(story.reactionSummary("s1")).toEqual({
       counts: { "👍": 3 },
@@ -192,12 +239,12 @@ describe("useStories", () => {
   test("typed summary pubsub event updates the story reaction store", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -217,7 +264,7 @@ describe("useStories", () => {
     });
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:example:unrelated",
       items: [{ id: "s1", payload: { kind: "opaque", xml: "<future/>" } }],
     });
@@ -227,14 +274,14 @@ describe("useStories", () => {
   test("typed story retract pubsub event removes the story and its reactions", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     expect(story.activeStories.value.map((item) => item.id)).toEqual(["s1"]);
     expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -250,14 +297,14 @@ describe("useStories", () => {
   test("typed summary retract pubsub event removes reaction state", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     expect(story.activeStories.value.map((item) => item.id)).toEqual(["s1"]);
     expect(story.reactionSummary("s1").counts).toEqual({ "👍": 1, "❤️": 1 });
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -278,14 +325,14 @@ describe("useStories", () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     client.publishStoryReactions = mock(() => pendingPublish) as unknown as MockClient["publishStoryReactions"];
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     const toggle = story.toggleReaction("s1", "👍");
-    await Promise.resolve();
+    await settleFetch();
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -308,13 +355,13 @@ describe("useStories", () => {
   test("typed summary pubsub event uses canonical counts after local publish settles", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     await story.toggleReaction("s1", "👍");
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -338,13 +385,13 @@ describe("useStories", () => {
     client.fetchStoryReactionSummary = mock(() => pendingSummary) as unknown as MockClient["fetchStoryReactionSummary"];
     client.fetchMyStoryReactions = mock(() => Promise.resolve(null)) as unknown as MockClient["fetchMyStoryReactions"];
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
 
     const refresh = story.refresh();
-    await Promise.resolve();
+    await settleFetch();
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -366,16 +413,16 @@ describe("useStories", () => {
     const firstScope = effectScope();
     const secondScope = effectScope();
     const first = firstScope.run(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     )!;
     const second = secondScope.run(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     )!;
     await first.refresh();
     await second.refresh();
 
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -390,7 +437,7 @@ describe("useStories", () => {
 
     firstScope.stop();
     client.emitPubsubEvent({
-      from: COMMUNITY,
+      from: AUTHOR,
       node: "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0",
       items: [{
         id: "s1",
@@ -408,7 +455,7 @@ describe("useStories", () => {
   test("summary pubsub events are scoped to the active community", async () => {
     const client = makeClient([{ id: "s1", body: "story", postedMs: 1 }]);
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 
@@ -442,7 +489,7 @@ describe("useStories", () => {
     }) as unknown as MockClient["fetchStoryReactionSummary"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     const first = story.refresh();
     for (let i = 0; i < 5 && reactionFetchCount === 0; i += 1) {
@@ -468,10 +515,10 @@ describe("useStories", () => {
     client.fetchStoryReactionSummary = mock(() => pendingReactions) as unknown as MockClient["fetchStoryReactionSummary"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     const refresh = story.refresh();
-    await Promise.resolve();
+    await settleFetch();
     await story.toggleReaction("s1", "🎉");
     expect(story.reactionSummary("s1").counts).toEqual({ "🎉": 1 });
 
@@ -499,13 +546,13 @@ describe("useStories", () => {
     client.fetchMyStoryReactions = mock(() => Promise.resolve(staleSelf)) as unknown as MockClient["fetchMyStoryReactions"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
 
     const refresh = story.refresh();
-    await Promise.resolve();
+    await settleFetch();
     await story.toggleReaction("s1", "❤️");
     expect(story.reactionSummary("s1").mine).toEqual([]);
 
@@ -533,13 +580,13 @@ describe("useStories", () => {
     client.fetchMyStoryReactions = mock(() => Promise.resolve(staleSelf)) as unknown as MockClient["fetchMyStoryReactions"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     expect(story.reactionSummary("s1").mine).toEqual(["❤️"]);
 
     const refresh = story.refresh();
-    await Promise.resolve();
+    await settleFetch();
     await story.toggleReaction("s1", "👍");
 
     resolveSummary({ counts: { "❤️": 1, "🔥": 1 }, reactors: {}, mine: [] });
@@ -564,12 +611,12 @@ describe("useStories", () => {
     }) as unknown as MockClient["publishStoryReactions"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 
     const firstToggle = story.toggleReaction("s1", "🎉");
-    await Promise.resolve();
+    await settleFetch();
     const secondToggle = await story.toggleReaction("s1", "👍");
     expect(secondToggle).toBe(true);
     expect(story.reactionSummary("s1").mine).toEqual(["🎉", "👍"]);
@@ -612,14 +659,14 @@ describe("useStories", () => {
     }) as unknown as MockClient["fetchMyStoryReactions"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
     expect(story.reactionSummary("s2").mine).toEqual(["❤️"]);
 
     phase = "pending";
     const refresh = story.refresh();
-    await Promise.resolve();
+    await settleFetch();
     await story.toggleReaction("s1", "🎉");
     resolveS1({ counts: { "👍": 1 }, reactors: {}, mine: [] });
     resolveS2({ counts: { "🔥": 1 }, reactors: {}, mine: [] });
@@ -646,7 +693,7 @@ describe("useStories", () => {
     }) as unknown as MockClient["fetchStoryReactionSummary"];
 
     const story = withScope(() =>
-      useStories(ref<BrowserXmppClient | null>(client), { communityJid: ref<string | null>(COMMUNITY) }),
+      useStories(ref<BrowserXmppClient | null>(client), { authorJids: ref<readonly string[]>([AUTHOR]) }),
     );
     await story.refresh();
 

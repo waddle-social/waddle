@@ -9,8 +9,8 @@ mod types;
 pub use memory::InMemoryPubSubStorage;
 pub use traits::PubSubStorage;
 pub use types::{
-    PubSubNode, PublicationError, PublicationFingerprint, PublicationNode, PublicationVersion,
-    PublishResult, StoredItem, VersionedPublishResult,
+    ExpiredItem, PubSubNode, PublicationError, PublicationFingerprint, PublicationNode,
+    PublicationVersion, PublishResult, StoredItem, VersionedPublishResult,
 };
 
 #[cfg(test)]

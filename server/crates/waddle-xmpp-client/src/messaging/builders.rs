@@ -14,9 +14,9 @@ use waddle_xmpp_core::CoreError;
 use super::mentions::{resolve_typed_mentions, BroadcastMention};
 use super::namespaces::{
     NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_FILE_METADATA, NS_HINTS, NS_MARKUP,
-    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC, NS_MUC_USER, NS_ORIGIN_ID,
-    NS_REACTIONS, NS_REFERENCES, NS_SFS, NS_URL_DATA, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW,
-    NS_WADDLE_MARKUP, NS_WADDLE_PIN_V0,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC, NS_MUC_USER, NS_OOB,
+    NS_ORIGIN_ID, NS_REACTIONS, NS_REFERENCES, NS_SFS, NS_URL_DATA, NS_WADDLE_IN_CALL,
+    NS_WADDLE_LINK_PREVIEW, NS_WADDLE_MARKUP, NS_WADDLE_PIN_V0,
 };
 use super::parsing::payloads::validate_chat_state;
 use super::types::{
@@ -406,6 +406,11 @@ pub fn build_outbound_message(
         builder = builder.append(Element::builder("markable", NS_CHAT_MARKERS).build());
     }
 
+    // XEP-0085 §5.1: content messages SHOULD carry <active/>.
+    if options.chat_state_active && matches!(message_type, "chat" | "groupchat") {
+        builder = builder.append(Element::builder("active", NS_CHAT_STATES).build());
+    }
+
     // XEP-0045 §7.5: mark MUC private messages with an empty
     // `<x xmlns='http://jabber.org/protocol/muc#user'/>` so the sender's
     // other clients can classify the XEP-0280 sent-carbon copy as a MUC
@@ -486,8 +491,41 @@ pub fn build_outbound_message(
         }
         builder = builder.append(ref_builder.build());
     }
-    for file in &options.shared_files {
-        builder = builder.append(build_file_sharing_element(file)?);
+    // XEP-0447 (multiple files): "It MUST add an id attribute with differing
+    // values to each of these <file-sharing/> elements."
+    let multiple_files = options.shared_files.len() > 1;
+    for (index, file) in options.shared_files.iter().enumerate() {
+        let mut file_sharing = build_file_sharing_element(file)?;
+        if multiple_files {
+            file_sharing.set_attr(
+                minidom::rxml::Namespace::NONE,
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                format!("sfs-{index}"),
+            );
+        }
+        builder = builder.append(file_sharing);
+    }
+    // XEP-0447: for a single file whose `<url-data/>` is one URL, adding a
+    // XEP-0066 x-oob reference is RECOMMENDED for legacy clients. Encrypted
+    // shares expose no plaintext URL, so they get none. When the body is just
+    // that URL it is only a fallback for `<file-sharing/>` and MUST carry a
+    // XEP-0428 `<fallback for='urn:xmpp:sfs:0'/>` indicator.
+    if let [file] = options.shared_files.as_slice() {
+        let url = file.url.trim();
+        if file.encrypted.is_none() && !url.is_empty() {
+            builder = builder.append(
+                Element::builder("x", NS_OOB)
+                    .append(Element::builder("url", NS_OOB).append(url).build())
+                    .build(),
+            );
+            if body.trim() == url {
+                builder = builder.append(
+                    Element::builder("fallback", NS_FALLBACK)
+                        .attr(minidom::rxml::xml_ncname!("for").to_owned(), NS_SFS)
+                        .build(),
+                );
+            }
+        }
     }
     // XEP-0449: mark the message as a sticker. The marker travels
     // alongside the XEP-0447 file-sharing payload built above.

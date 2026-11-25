@@ -111,7 +111,7 @@ export function useChatAppController() {
   );
 
   // Community service (`community.<user-domain>`) hosts the
-  // XEP-0472 social feed and XEP-0501 stories nodes. Kept distinct
+  // XEP-0472 social feed and the calendar nodes. Kept distinct
   // from the spaces service so the spaces sidebar enumerates only
   // real community spaces, not pubsub leaf nodes.
   const communityJid = computed(() => {
@@ -121,7 +121,16 @@ export function useChatAppController() {
     return domain ? `community.${domain}` : null;
   });
   const socialFeed = useSocialFeed(xmppClient, { communityJid });
-  const stories = useStories(xmppClient, { communityJid });
+  // XEP-0501 stories live on each account's own PEP node: read the user's
+  // own and those of the contacts the user is subscribed to.
+  const storyAuthorJids = computed(() => {
+    const self = session.value ? barePeerJid(session.value.jid) : null;
+    const contacts = rosterContacts.contacts.value
+      .filter((contact) => contact.subscription === "to" || contact.subscription === "both")
+      .map((contact) => contact.jid);
+    return self ? [self, ...contacts] : [];
+  });
+  const stories = useStories(xmppClient, { authorJids: storyAuthorJids });
   const communityEvents = useCommunityEvents(xmppClient, { communityJid });
 
   const dmMessaging = useDirectMessages(

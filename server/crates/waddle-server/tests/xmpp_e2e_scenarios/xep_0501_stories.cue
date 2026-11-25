@@ -14,14 +14,14 @@ scenario: #Scenario & {
 	let adminPhone = users.admin.devices.phone
 
 	steps: [
-		// 1. disco#info on the community service MUST advertise the
-		//    XEP-0501 stories namespace so clients can discover
-		//    support before subscribing or publishing.
+		// 1. disco#info on the account (its PEP service, XEP-0163) MUST
+		//    advertise the XEP-0501 stories namespace so clients can
+		//    discover support before subscribing or publishing.
 		#SendIq & {
 			actor: adminPhone
 			type:  "get"
 			id:    "cue-stories-disco"
-			to:    "community.\(scenario.domain)"
+			to:    "admin@\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "query"
 				ns:   "http://jabber.org/protocol/disco#info"
@@ -35,15 +35,13 @@ scenario: #Scenario & {
 				"var='urn:xmpp:pubsub-social-feed:stories:0'",
 			]
 		},
-		// 2. Publish a story to the bootstrapped community stories
-		//    node. The server bootstraps this node at startup with
-		//    the XEP-0501 story profile; server-owner affiliation
-		//    seed grants admin Publisher access.
+		// 2. Publish a story to the account's own PEP stories node
+		//    (no "to": the stanza goes to the sender's account). The
+		//    node is created on first publish with the XEP-0501 profile.
 		#SendIq & {
 			actor: adminPhone
 			type:  "set"
 			id:    "cue-story-publish"
-			to:    "community.\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
 				ns:   "http://jabber.org/protocol/pubsub"
@@ -134,7 +132,7 @@ scenario: #Scenario & {
 			actor: adminPhone
 			type:  "get"
 			id:    "cue-story-items"
-			to:    "community.\(scenario.domain)"
+			to:    "admin@\(scenario.domain)"
 			payload: #XmlElement & {
 				name: "pubsub"
 				ns:   "http://jabber.org/protocol/pubsub"

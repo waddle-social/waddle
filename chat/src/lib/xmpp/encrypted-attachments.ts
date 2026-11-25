@@ -24,6 +24,10 @@ interface EncryptedAttachmentDescriptor {
   url: string;
   name?: string;
   mediaType?: string;
+  /** Declared `<size/>` of the plaintext file (XEP-0446). */
+  size?: number;
+  /** XEP-0300 plaintext `<hash/>` values from the file metadata. */
+  hashes?: EncryptedFileHash[];
   encrypted?: WaddleEncryptedFile;
 }
 
@@ -167,6 +171,33 @@ async function decryptCiphertext(
   return subtle.decrypt({ name: AES_GCM_NAME, iv: toArrayBuffer(ivBytes) }, cryptoKey, ciphertext);
 }
 
+/**
+ * XEP-0448: "If the resulting file is larger than the number of bytes
+ * specified in the <size/> metadata element, the additional bytes are cut off."
+ */
+function truncateToDeclaredSize(plaintext: ArrayBuffer, size: number | undefined): ArrayBuffer {
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return plaintext;
+  return plaintext.byteLength > size ? plaintext.slice(0, size) : plaintext;
+}
+
+/**
+ * XEP-0447: the receiver SHOULD verify that the `<hash/>` of the announced
+ * file matches the obtained file before presenting it. Only sha-256 is
+ * supported; other algorithms are skipped, and the check applies when at
+ * least one sha-256 hash is announced.
+ */
+async function verifyPlaintextHashes(
+  plaintext: ArrayBuffer,
+  hashes: EncryptedFileHash[] | undefined,
+): Promise<void> {
+  const sha256Hashes = hashes?.filter((hash) => hash.algo.toLowerCase() === SHA_256) ?? [];
+  if (sha256Hashes.length === 0) return;
+  const actualHash = await sha256Base64(plaintext);
+  if (!sha256Hashes.some((hash) => hash.valueB64 === actualHash)) {
+    throw new Error("Attachment integrity check failed.");
+  }
+}
+
 const inFlightDecryptionCache = new Map<string, Promise<Blob>>();
 
 export async function decryptEncryptedAttachment(
@@ -186,7 +217,9 @@ export async function decryptEncryptedAttachment(
           throw new Error(`Failed to fetch encrypted attachment with HTTP ${response.status}`);
         }
         const ciphertext = await response.arrayBuffer();
-        const plaintext = await decryptCiphertext(ciphertext, attachment.encrypted);
+        const decrypted = await decryptCiphertext(ciphertext, attachment.encrypted);
+        const plaintext = truncateToDeclaredSize(decrypted, attachment.size);
+        await verifyPlaintextHashes(plaintext, attachment.hashes);
         return new Blob([plaintext], { type: attachment.mediaType || "application/octet-stream" });
       } catch (error) {
         lastError = error;

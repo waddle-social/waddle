@@ -3043,3 +3043,134 @@ fn muc_join_presence_is_recognised_by_its_xep0045_payload() {
     let message = Element::builder("message", "jabber:client").build();
     assert!(!is_muc_join_presence(&message));
 }
+
+fn plain_shared_file(url: &str) -> SharedFile {
+    SharedFile {
+        url: url.to_string(),
+        name: None,
+        media_type: Some("image/png".to_string()),
+        size: None,
+        width: None,
+        height: None,
+        desc: None,
+        hashes: Vec::new(),
+        disposition: SharedFileDisposition::Attachment,
+        encrypted: None,
+    }
+}
+
+#[test]
+fn build_outbound_message_gives_multiple_file_sharing_differing_ids() {
+    // XEP-0447: "It MUST add an id attribute with differing values to each
+    // of these <file-sharing/> elements."
+    let options = SendMessageOptions {
+        shared_files: vec![
+            plain_shared_file("https://files.example.com/a.png"),
+            plain_shared_file("https://files.example.com/b.png"),
+        ],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "two", &options).unwrap();
+    let ids: Vec<_> = stanza
+        .children()
+        .filter(|c| c.is("file-sharing", NS_SFS))
+        .map(|c| c.attr("id").expect("id on every file-sharing").to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    // No x-oob for multi-file messages (the oob reference is single-URL).
+    assert!(stanza.get_child("x", "jabber:x:oob").is_none());
+}
+
+#[test]
+fn build_outbound_message_single_file_sharing_has_no_id() {
+    let options = SendMessageOptions {
+        shared_files: vec![plain_shared_file("https://files.example.com/a.png")],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "one", &options).unwrap();
+    let fs = stanza.get_child("file-sharing", NS_SFS).expect("sfs");
+    assert!(fs.attr("id").is_none());
+}
+
+#[test]
+fn build_outbound_message_single_unencrypted_file_adds_oob_and_fallback() {
+    // XEP-0447: adding a XEP-0066 x-oob reference is RECOMMENDED; a body that
+    // is only the URL MUST carry <fallback for='urn:xmpp:sfs:0'/>.
+    let url = "https://files.example.com/a.png";
+    let options = SendMessageOptions {
+        shared_files: vec![plain_shared_file(url)],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", url, &options).unwrap();
+    let oob = stanza.get_child("x", "jabber:x:oob").expect("x-oob");
+    assert_eq!(
+        oob.get_child("url", "jabber:x:oob").map(|e| e.text()),
+        Some(url.to_string())
+    );
+    let fallback = stanza
+        .get_child("fallback", "urn:xmpp:fallback:0")
+        .expect("fallback indicator");
+    assert_eq!(fallback.attr("for"), Some("urn:xmpp:sfs:0"));
+
+    // A caption body is real content, not fallback text.
+    let (_, captioned) =
+        build_outbound_message("alice@example.com", "chat", "look at this", &options).unwrap();
+    assert!(captioned.get_child("x", "jabber:x:oob").is_some());
+    assert!(captioned
+        .get_child("fallback", "urn:xmpp:fallback:0")
+        .is_none());
+}
+
+#[test]
+fn build_outbound_message_encrypted_file_adds_no_oob() {
+    let options = SendMessageOptions {
+        shared_files: vec![encrypted_shared_file_for_size_tests(Some(4096), 4096)],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "x", &options).unwrap();
+    assert!(stanza.get_child("x", "jabber:x:oob").is_none());
+}
+
+#[test]
+fn parse_message_ignores_sims_children_with_url_attribute() {
+    // XEP-0385 SIMS is not implemented; an arbitrary grandchild carrying a
+    // `url` attribute must never be treated as a shared file.
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <media-sharing xmlns='urn:xmpp:sims:1'>\
+             <sources><x url='https://evil.example/a'/></sources>\
+           </media-sharing>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.shared_files.is_empty());
+}
+
+#[test]
+fn parse_message_ignores_foreign_namespace_url_data_in_data_reference() {
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <reference xmlns='urn:xmpp:reference:0' type='data' uri='https://x.example/a'>\
+             <url-data xmlns='urn:example:other' target='https://evil.example/a'/>\
+             <url>https://evil.example/b</url>\
+           </reference>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.shared_files.is_empty());
+
+    let ok = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <reference xmlns='urn:xmpp:reference:0' type='data' uri='https://x.example/a'>\
+             <url-data xmlns='http://jabber.org/protocol/url-data' target='https://files.example.com/a'/>\
+           </reference>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&ok).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.shared_files.len(), 1);
+    assert_eq!(msg.shared_files[0].url, "https://files.example.com/a");
+}

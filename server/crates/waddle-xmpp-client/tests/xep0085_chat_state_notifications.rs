@@ -6,7 +6,8 @@ use waddle_xmpp_client::caps::{
 };
 use waddle_xmpp_client::discovery::DISCO_INFO_NS;
 use waddle_xmpp_client::messaging::{
-    build_chat_state_message, parse_chat_state_payload, NS_CHAT_STATES, NS_CLIENT,
+    build_chat_state_message, build_outbound_message, parse_chat_state_payload, SendMessageOptions,
+    NS_CHAT_STATES, NS_CLIENT,
 };
 
 #[test]
@@ -77,4 +78,37 @@ fn xep0085_thread_is_the_only_optional_standalone_child() {
     assert_eq!(message.children().count(), 2);
     assert!(message.get_child("composing", NS_CHAT_STATES).is_some());
     assert!(message.get_child("thread", NS_CLIENT).is_some());
+}
+
+fn chat_state_children(stanza: &Element) -> Vec<String> {
+    stanza
+        .children()
+        .filter(|child| child.ns() == NS_CHAT_STATES)
+        .map(|child| child.name().to_owned())
+        .collect()
+}
+
+#[test]
+fn xep0085_content_messages_carry_exactly_one_active_notification() {
+    let mut options = SendMessageOptions::default();
+    options.chat_state_active = true;
+    for message_type in ["chat", "groupchat"] {
+        let (_, stanza) =
+            build_outbound_message("juliet@example.com", message_type, "hello", &options)
+                .expect("content message builds");
+        assert_eq!(chat_state_children(&stanza), vec!["active".to_owned()]);
+        assert!(stanza.get_child("body", NS_CLIENT).is_some());
+    }
+}
+
+#[test]
+fn xep0085_content_messages_omit_active_when_chat_states_disabled() {
+    let (_, stanza) = build_outbound_message(
+        "juliet@example.com",
+        "chat",
+        "hello",
+        &SendMessageOptions::default(),
+    )
+    .expect("content message builds");
+    assert!(chat_state_children(&stanza).is_empty());
 }

@@ -2,7 +2,7 @@ import type { WaddleChannelType } from "@/lib/channel-types";
 import type { PinPermission } from "@/lib/chat-types";
 import type { CallThreadAnchor, ExtensionAnnotation } from "@/lib/chat-ui";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
-import type { WaddleEncryptedFile } from "./extensions/encrypted-file";
+import type { EncryptedFileHash, WaddleEncryptedFile } from "./extensions/encrypted-file";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 /** Shared types for the XMPP client layer. */
@@ -380,6 +380,8 @@ export interface SharedFileInfo {
   desc?: string;
   url: string;
   disposition: "inline" | "attachment";
+  /** XEP-0300 plaintext content hashes from `<file/>` (XEP-0446). */
+  hashes?: EncryptedFileHash[];
   encrypted?: WaddleEncryptedFile;
 }
 

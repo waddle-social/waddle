@@ -43,6 +43,7 @@ internal fun sendOptionsFor(stanzaId: String): WaddleSendOptions = WaddleSendOpt
     sharedFiles = emptyList(),
     linkPreviewToken = null,
     requestDisplayedMarker = true,
+    chatStateActive = true,
     mucPm = false,
     sticker = null,
     mentionDirectory = null,

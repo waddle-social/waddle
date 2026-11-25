@@ -116,7 +116,7 @@ impl Identity {
     }
 
     /// Identity for the community pubsub service that hosts the
-    /// XEP-0472 social feed and XEP-0501 stories nodes. Same shape
+    /// XEP-0472 social feed and xCal events nodes. Same shape
     /// as a generic pubsub service; the name is what shows up in a
     /// disco#items enumeration of the deployment.
     #[must_use]
@@ -599,9 +599,6 @@ pub fn community_service_features() -> Vec<Feature> {
         // XEP-0472 Pubsub Social Feed — community feed node lives
         // here at `urn:xmpp:pubsub-social-feed:1`.
         Feature::social_feed(),
-        // XEP-0501 Pubsub Stories — community stories node lives
-        // here at `urn:xmpp:pubsub-social-feed:stories:0`.
-        Feature::stories(),
         // xCal community events node — payload is iCalendar in XML
         // (`urn:ietf:params:xml:ns:xcal`) per the XSF ProtoXEP
         // "Calendaring Extensions to Publish-Subscribe".

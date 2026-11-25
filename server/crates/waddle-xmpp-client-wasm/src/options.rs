@@ -87,6 +87,7 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
         .transpose()
         .map_err(|err| js_error(err.to_string()))?;
     outbound_options.request_displayed_marker = options.request_displayed_marker;
+    outbound_options.chat_state_active = options.chat_state_active;
     outbound_options.muc_pm = options.muc_pm;
     outbound_options.markup_spans = options
         .markup_spans

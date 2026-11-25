@@ -183,6 +183,9 @@ function sharedFileFromWasm(file: WasmSharedFile): SharedFileInfo {
     ...(typeof file.size === "number" ? { size: file.size } : {}),
     ...(typeof file.width === "number" ? { width: file.width } : {}),
     ...(typeof file.height === "number" ? { height: file.height } : {}),
+    ...(file.hashes?.length
+      ? { hashes: file.hashes.map((hash) => ({ algo: hash.algo, valueB64: hash.value_b64 })) }
+      : {}),
     ...(file.encrypted ? { encrypted: encryptedFromWasm(file.encrypted) } : {}),
   };
 }
@@ -875,6 +878,9 @@ export function buildWasmSendOptions(
   }
   if (opts.requestDisplayedMarker) {
     wasmOpts.request_displayed_marker = true;
+  }
+  if (opts.chatStateActive) {
+    wasmOpts.chat_state_active = true;
   }
   if ((opts as SendDirectMessageOptions).mucPm) {
     wasmOpts.muc_pm = true;

@@ -169,11 +169,12 @@ const NODE_COLUMNS: &[Column] = &[
     text("send_last_published_item", true),
     bigint("created_at_ms", true),
     text("roster_groups_allowed", false),
+    bigint("item_expire", false),
 ];
 /// The version 8 columns of `pubsub_nodes`, which the PostgreSQL baseline
-/// creates: every current column except the trailing
-/// `roster_groups_allowed`, which migration 2027 adds with version 9.
-const NODE_COLUMNS_V8: &[Column] = NODE_COLUMNS.split_at(NODE_COLUMNS.len() - 1).0;
+/// creates: every current column except the trailing `roster_groups_allowed`
+/// (migration 2027, version 9) and `item_expire` (migration 2028, version 10).
+const NODE_COLUMNS_V8: &[Column] = NODE_COLUMNS.split_at(NODE_COLUMNS.len() - 2).0;
 const ITEM_COLUMNS: &[Column] = &[
     Column {
         name: "seq",
@@ -773,7 +774,7 @@ pub(crate) async fn verify_space_binding_baseline(
         .iter()
         .filter(|table| table.name != PUBSUB_SCHEMA_MARKER_TABLE)
     {
-        // The baseline is version 8, before `roster_groups_allowed`.
+        // The baseline is version 8, before `roster_groups_allowed` and `item_expire`.
         let baseline = Table {
             columns: if current.name == "pubsub_nodes" {
                 NODE_COLUMNS_V8
@@ -2046,9 +2047,25 @@ mod baseline_shape_tests {
             .skip(NODE_COLUMNS_V8.len())
             .map(|column| column.name)
             .collect();
-        assert_eq!(added, ["roster_groups_allowed"]);
+        assert_eq!(added, ["roster_groups_allowed", "item_expire"]);
         let migration = include_str!("../../sql/migrations/2027_pubsub_roster_groups.postgres.sql");
         assert!(migration.contains("ADD COLUMN IF NOT EXISTS roster_groups_allowed text"));
         assert!(migration.contains("SET version = 9"));
+    }
+
+    #[test]
+    fn migration_2028_adds_item_expire_and_moves_the_version_to_10() {
+        let migration = include_str!("../../sql/migrations/2028_pubsub_item_expire.postgres.sql");
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS item_expire bigint"));
+        assert!(migration.contains("version NOT IN (9, 10)"));
+        assert!(migration.contains("SET version = 10 WHERE version = 9"));
+        assert_eq!(
+            NODE_COLUMNS
+                .last()
+                .map(|column| (column.name, column.kind, column.not_null)),
+            Some(("item_expire", "bigint", false))
+        );
+        let sqlite = include_str!("../../sql/migrations/2028_pubsub_item_expire.sqlite.sql");
+        assert!(sqlite.trim_end().ends_with("SELECT 1;"));
     }
 }

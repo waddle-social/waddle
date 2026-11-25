@@ -45,6 +45,17 @@ pub struct StoriesState {
     viewer: Option<Viewer>,
 }
 
+impl StoriesState {
+    /// The author stamped on a listed story: its reactions live on that
+    /// account's PEP service.
+    fn author_of(&self, id: &str) -> Option<String> {
+        self.items
+            .iter()
+            .find(|story| story.id == id)
+            .and_then(|story| story.author.clone())
+    }
+}
+
 /// An open viewer.
 struct Viewer {
     dialog: adw::Dialog,
@@ -794,10 +805,11 @@ impl WaddleWindow {
         if !imp.feed.borrow_mut().stories.asked.insert(id.to_string()) {
             return;
         }
+        let author = imp.feed.borrow().stories.author_of(id);
         let (window, session, id) = (self.clone(), session.clone(), id.to_string());
         let generation = imp.generation.get();
         glib::spawn_future_local(async move {
-            let result = session.story_reactions(id.clone()).await;
+            let result = session.story_reactions(author, id.clone()).await;
             if window.imp().generation.get() != generation {
                 return;
             }
@@ -898,12 +910,15 @@ impl WaddleWindow {
             return;
         }
         let (window, generation) = (self.clone(), imp.generation.get());
+        let author = imp.feed.borrow().stories.author_of(&id);
         glib::spawn_future_local(async move {
             loop {
                 let Some(sent) = window.imp().feed.borrow_mut().stories.writes.next(&id) else {
                     break;
                 };
-                let result = session.set_story_reactions(id.clone(), sent.clone()).await;
+                let result = session
+                    .set_story_reactions(author.clone(), id.clone(), sent.clone())
+                    .await;
                 if window.imp().generation.get() != generation {
                     return;
                 }

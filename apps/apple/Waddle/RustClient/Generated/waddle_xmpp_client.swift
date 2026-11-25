@@ -1527,16 +1527,18 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func retractStickerPack(packId: String) async  -> Bool
 
     /**
-     * XEP-0501: fetch the stories on `community_jid` (the
-     * `community.<domain>` service). Expired stories are included.
+     * XEP-0501: fetch the stories on the stories node of `author_jid`,
+     * the account's own bare JID or a contact's. Expired stories are
+     * included.
      */
-    func fetchStories(communityJid: String, maxItems: UInt32?) async throws  -> [WaddleStory]
+    func fetchStories(authorJid: String, maxItems: UInt32?) async throws  -> [WaddleStory]
 
     /**
      * XEP-0470: fetch the reaction counts on one story and which
-     * emoji this account reacted with.
+     * emoji this account reacted with. `author_jid` is the story's
+     * author, whose PEP service hosts the reactions.
      */
-    func fetchStoryReactions(communityJid: String, storyId: String) async throws  -> WaddleStoryReactions
+    func fetchStoryReactions(authorJid: String, storyId: String) async throws  -> WaddleStoryReactions
 
     /**
      * Fetch which stories this account has seen, from its private
@@ -1545,10 +1547,11 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func fetchStoryReads() async throws  -> [WaddleStoryRead]
 
     /**
-     * XEP-0501: post a story and return it as published, so the
-     * caller can show it without fetching again.
+     * XEP-0501: post a story on the account's own stories node and
+     * return it as published, so the caller can show it without
+     * fetching again.
      */
-    func publishStory(communityJid: String, post: WaddleStoryPost) async throws  -> WaddleStory
+    func publishStory(post: WaddleStoryPost) async throws  -> WaddleStory
 
     /**
      * Replace this account's read state with `reads`. The item holds
@@ -1559,9 +1562,10 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     /**
      * XEP-0470: make `emojis` this account's reactions to one story,
      * replacing the ones it had; an empty list removes them. At most
-     * 12 reactions, each a single emoji.
+     * 12 reactions, each a single emoji. `author_jid` is the story's
+     * author.
      */
-    func setStoryReactions(communityJid: String, storyId: String, emojis: [String]) async throws
+    func setStoryReactions(authorJid: String, storyId: String, emojis: [String]) async throws
 
 }
 open class WaddleClient: WaddleClientProtocol, @unchecked Sendable {
@@ -4510,16 +4514,17 @@ open func retractStickerPack(packId: String)async  -> Bool  {
 }
 
     /**
-     * XEP-0501: fetch the stories on `community_jid` (the
-     * `community.<domain>` service). Expired stories are included.
+     * XEP-0501: fetch the stories on the stories node of `author_jid`,
+     * the account's own bare JID or a contact's. Expired stories are
+     * included.
      */
-open func fetchStories(communityJid: String, maxItems: UInt32?)async throws  -> [WaddleStory]  {
+open func fetchStories(authorJid: String, maxItems: UInt32?)async throws  -> [WaddleStory]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(communityJid),FfiConverterOptionUInt32.lower(maxItems)
+                    FfiConverterString.lower(authorJid),FfiConverterOptionUInt32.lower(maxItems)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
@@ -4532,15 +4537,16 @@ open func fetchStories(communityJid: String, maxItems: UInt32?)async throws  -> 
 
     /**
      * XEP-0470: fetch the reaction counts on one story and which
-     * emoji this account reacted with.
+     * emoji this account reacted with. `author_jid` is the story's
+     * author, whose PEP service hosts the reactions.
      */
-open func fetchStoryReactions(communityJid: String, storyId: String)async throws  -> WaddleStoryReactions  {
+open func fetchStoryReactions(authorJid: String, storyId: String)async throws  -> WaddleStoryReactions  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(communityJid),FfiConverterString.lower(storyId)
+                    FfiConverterString.lower(authorJid),FfiConverterString.lower(storyId)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
@@ -4573,16 +4579,17 @@ open func fetchStoryReads()async throws  -> [WaddleStoryRead]  {
 }
 
     /**
-     * XEP-0501: post a story and return it as published, so the
-     * caller can show it without fetching again.
+     * XEP-0501: post a story on the account's own stories node and
+     * return it as published, so the caller can show it without
+     * fetching again.
      */
-open func publishStory(communityJid: String, post: WaddleStoryPost)async throws  -> WaddleStory  {
+open func publishStory(post: WaddleStoryPost)async throws  -> WaddleStory  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(communityJid),FfiConverterTypeWaddleStoryPost_lower(post)
+                    FfiConverterTypeWaddleStoryPost_lower(post)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
@@ -4617,15 +4624,16 @@ open func publishStoryReads(reads: [WaddleStoryRead])async throws   {
     /**
      * XEP-0470: make `emojis` this account's reactions to one story,
      * replacing the ones it had; an empty list removes them. At most
-     * 12 reactions, each a single emoji.
+     * 12 reactions, each a single emoji. `author_jid` is the story's
+     * author.
      */
-open func setStoryReactions(communityJid: String, storyId: String, emojis: [String])async throws   {
+open func setStoryReactions(authorJid: String, storyId: String, emojis: [String])async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(communityJid),FfiConverterString.lower(storyId),FfiConverterSequenceString.lower(emojis)
+                    FfiConverterString.lower(authorJid),FfiConverterString.lower(storyId),FfiConverterSequenceString.lower(emojis)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
@@ -12639,6 +12647,10 @@ public struct WaddleSendOptions: Equatable, Hashable {
     public var linkPreviewToken: String?
     public var requestDisplayedMarker: Bool
     /**
+     * XEP-0085 §5.1: attach `<active/>` to the content message.
+     */
+    public var chatStateActive: Bool
+    /**
      * XEP-0045 §7.5: mark the message as a MUC private message so
      * the sender's other clients can classify the sent-carbon copy
      * without knowing the room.
@@ -12668,6 +12680,9 @@ public struct WaddleSendOptions: Equatable, Hashable {
          * XEP-0372 references (mentions) attached to the send.
          */references: [WaddleReference], sharedFiles: [WaddleSharedFile], linkPreviewToken: String?, requestDisplayedMarker: Bool,
         /**
+         * XEP-0085 §5.1: attach `<active/>` to the content message.
+         */chatStateActive: Bool,
+        /**
          * XEP-0045 §7.5: mark the message as a MUC private message so
          * the sender's other clients can classify the sent-carbon copy
          * without knowing the room.
@@ -12690,6 +12705,7 @@ public struct WaddleSendOptions: Equatable, Hashable {
         self.sharedFiles = sharedFiles
         self.linkPreviewToken = linkPreviewToken
         self.requestDisplayedMarker = requestDisplayedMarker
+        self.chatStateActive = chatStateActive
         self.mucPm = mucPm
         self.sticker = sticker
         self.mentionDirectory = mentionDirectory
@@ -12721,6 +12737,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 linkPreviewToken: FfiConverterOptionString.read(from: &buf),
                 requestDisplayedMarker: FfiConverterBool.read(from: &buf),
+                chatStateActive: FfiConverterBool.read(from: &buf),
                 mucPm: FfiConverterBool.read(from: &buf),
                 sticker: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf),
                 mentionDirectory: FfiConverterOptionTypeWaddleMentionDirectory.read(from: &buf)
@@ -12738,6 +12755,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionString.write(value.linkPreviewToken, into: &buf)
         FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
+        FfiConverterBool.write(value.chatStateActive, into: &buf)
         FfiConverterBool.write(value.mucPm, into: &buf)
         FfiConverterOptionTypeWaddleStickerRef.write(value.sticker, into: &buf)
         FfiConverterOptionTypeWaddleMentionDirectory.write(value.mentionDirectory, into: &buf)
@@ -22746,22 +22764,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 30988) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 54370) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 10812) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 55531) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reads() != 37503) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21939) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21585) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story_reads() != 61647) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 32798) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 4359) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {

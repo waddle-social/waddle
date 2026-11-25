@@ -230,6 +230,7 @@ async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
         "urn:xmpp:jingle:apps:rtp:audio",
         "urn:xmpp:jingle:apps:rtp:video",
         "urn:waddle:transports:livekit:0",
+        "urn:xmpp:coin:1",
     ] {
         assert!(resp.contains(ns), "mixer must advertise {ns}; got: {resp}");
     }

@@ -92,6 +92,9 @@ pub const XMPP_OAUTH_GRANTS_VERSION: i64 = 2026;
 /// Version of the migration that brings the PostgreSQL baseline's PubSub
 /// store to schema version 9 (`pubsub_nodes.roster_groups_allowed`).
 pub const PUBSUB_ROSTER_GROUPS_VERSION: i64 = 2027;
+/// Version of the migration that brings the PostgreSQL PubSub store to
+/// schema version 10 (`pubsub_nodes.item_expire`).
+pub const PUBSUB_ITEM_EXPIRE_VERSION: i64 = 2028;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -340,6 +343,14 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2027_pubsub_roster_groups.postgres.sql"
             ),
         },
+        Migration {
+            version: PUBSUB_ITEM_EXPIRE_VERSION,
+            description: "pubsub item expiry".to_owned(),
+            sql_sqlite: include_str!("../../../sql/migrations/2028_pubsub_item_expire.sqlite.sql"),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2028_pubsub_item_expire.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -581,9 +592,9 @@ mod tests {
         HOST_GRANT_SPACE_CONFIGURATION_VERSION, HOST_GRANT_SPACE_DELETIONS_VERSION,
         INBOX_READ_POSITION_VERSION, LOCAL_SPACE_NOTIFICATION_ORDER_VERSION,
         LOCAL_SPACE_SUBSCRIPTIONS_VERSION, MISSED_CALL_NOTIFICATIONS_VERSION,
-        OFFLINE_CALL_NOTIFICATIONS_VERSION, PUBSUB_ROSTER_GROUPS_VERSION,
-        RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION, S2S_FEDERATED_SPACES_VERSION,
-        S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
+        OFFLINE_CALL_NOTIFICATIONS_VERSION, PUBSUB_ITEM_EXPIRE_VERSION,
+        PUBSUB_ROSTER_GROUPS_VERSION, RETIRED_ACCOUNT_JIDS_VERSION, S2S_ACCOUNT_TRAFFIC_VERSION,
+        S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
         S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
         S2S_SPACE_SUBSCRIPTIONS_VERSION, S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
         SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION, XMPP_OAUTH_GRANTS_VERSION,
@@ -630,6 +641,7 @@ mod tests {
                 INBOX_READ_POSITION_VERSION,
                 XMPP_OAUTH_GRANTS_VERSION,
                 PUBSUB_ROSTER_GROUPS_VERSION,
+                PUBSUB_ITEM_EXPIRE_VERSION,
             ]
         );
     }

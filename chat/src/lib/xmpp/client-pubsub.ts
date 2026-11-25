@@ -41,7 +41,6 @@ import {
 import {
   NS_PUBSUB_ATTACHMENTS,
   NS_PUBSUB_ATTACHMENTS_SUMMARY,
-  STORIES_NODE,
   STORY_REACTIONS_SUMMARY_NODE,
   normalizeStoryReactions,
   storyAttachmentNode,
@@ -222,8 +221,8 @@ export type PubsubWasmClient = {
   }) => Promise<SetDmNotificationModeResult>;
   feed_items?: (communityJid: string, maxItems: number | null) => Promise<WasmFeedEntry[] | undefined>;
   feed_publish?: (communityJid: string, entry: unknown) => Promise<WasmFeedEntry | undefined>;
-  stories_items?: (communityJid: string, maxItems: number | null) => Promise<WasmStory[] | undefined>;
-  stories_publish?: (communityJid: string, input: unknown) => Promise<WasmStory | undefined>;
+  stories_items?: (authorJid: string, maxItems: number | null) => Promise<WasmStory[] | undefined>;
+  stories_publish?: (input: unknown) => Promise<WasmStory | undefined>;
   story_reads_fetch?: () => Promise<WasmStoryReads | undefined>;
   story_reads_publish?: (input: unknown) => Promise<WasmStoryReads | undefined>;
   status_preference_publish?: (input: StatusPreferenceWire) => Promise<StatusPreferenceWire | null>;
@@ -253,30 +252,6 @@ export class PubsubManager {
 
   private selfBare(): string {
     return barePeerJid(this.deps.sessionJid());
-  }
-
-  async subscribeStoryReactionSummaries(communityJid: string): Promise<void> {
-    const xmpp = await this.deps.requireConnectedXmpp();
-    if (typeof xmpp.send_raw_iq !== "function") return;
-    try {
-      await xmpp.send_raw_iq(
-        `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><subscribe node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}" jid="${escapeXml(this.selfBare())}"/></pubsub></iq>`,
-      );
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  async subscribeStories(communityJid: string): Promise<void> {
-    const xmpp = await this.deps.requireConnectedXmpp();
-    if (typeof xmpp.send_raw_iq !== "function") return;
-    try {
-      await xmpp.send_raw_iq(
-        `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><subscribe node="${escapeXml(STORIES_NODE)}" jid="${escapeXml(this.selfBare())}"/></pubsub></iq>`,
-      );
-    } catch {
-      /* best-effort */
-    }
   }
 
   async fetchUserBookmarks(): Promise<UserBookmarkItem[]> {
@@ -446,13 +421,14 @@ export class PubsubManager {
   }
 
   /**
-   * Fetch the latest XEP-0501 stories from the community stories
-   * node. Returns ALL items (including expired); the chat filters
-   * active vs expired locally.
+   * Fetch the XEP-0501 stories on the stories PEP node of `authorJid`
+   * (the user or a contact). Returns ALL items (including expired); the
+   * chat filters active vs expired locally. Live updates need no
+   * subscription: the client advertises `urn:xmpp:pubsub-social-feed:stories:0+notify`.
    */
-  async fetchStories(communityJid: string, maxItems: number | undefined = undefined): Promise<Story[]> {
+  async fetchStories(authorJid: string, maxItems: number | undefined = undefined): Promise<Story[]> {
     const xmpp = await this.deps.requireConnectedXmpp();
-    const result = await xmpp.stories_items?.(communityJid, maxItems ?? null);
+    const result = await xmpp.stories_items?.(authorJid, maxItems ?? null);
     return (result ?? []).map(storyFromWasm);
   }
 
@@ -502,16 +478,17 @@ export class PubsubManager {
   }
 
   /**
-   * Publish a XEP-0501 story. `mediaUrl` is required; `body` is
-   * optional text content attached to that media.
+   * Publish a XEP-0501 story on the user's own stories PEP node.
+   * `mediaUrl` is required; `body` is optional text content attached to
+   * that media.
    */
-  async publishStory(communityJid: string, input: StoryPostInput): Promise<Story> {
+  async publishStory(input: StoryPostInput): Promise<Story> {
     const mediaUrl = input.mediaUrl.trim();
     if (!mediaUrl) {
       throw new Error("Story mediaUrl is required");
     }
     const xmpp = await this.deps.requireConnectedXmpp();
-    const result = await xmpp.stories_publish?.(communityJid, {
+    const result = await xmpp.stories_publish?.({
       ...(input.body ? { body: input.body } : {}),
       media_url: mediaUrl,
       ...(input.mediaType ? { media_type: input.mediaType } : {}),
@@ -524,64 +501,64 @@ export class PubsubManager {
     return storyFromWasm(result);
   }
 
-  async fetchStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem[]> {
+  async fetchStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem[]> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (typeof xmpp.send_raw_iq !== "function") return [];
-    const node = storyAttachmentNode(communityJid, storyId);
+    const node = storyAttachmentNode(hostJid, storyId);
     const responseXml = await xmpp.send_raw_iq(
-      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"/></pubsub></iq>`,
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(hostJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"/></pubsub></iq>`,
     );
     return parseStoryReactionItems(responseXml);
   }
 
-  async fetchMyStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem | null> {
+  async fetchMyStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem | null> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (typeof xmpp.send_raw_iq !== "function") return null;
-    const node = storyAttachmentNode(communityJid, storyId);
+    const node = storyAttachmentNode(hostJid, storyId);
     const self = this.selfBare();
     const responseXml = await xmpp.send_raw_iq(
-      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"><item id="${escapeXml(self)}"/></items></pubsub></iq>`,
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(hostJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(node)}"><item id="${escapeXml(self)}"/></items></pubsub></iq>`,
     );
     return parseStoryReactionItems(responseXml)
       .find((item) => item.jid.toLowerCase() === self.toLowerCase()) ?? null;
   }
 
-  async fetchStoryReactionSummary(communityJid: string, storyId: string): Promise<StoryReactionSummary> {
+  async fetchStoryReactionSummary(hostJid: string, storyId: string): Promise<StoryReactionSummary> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (typeof xmpp.send_raw_iq !== "function") return { counts: {}, reactors: {}, mine: [] };
     const responseXml = await xmpp.send_raw_iq(
-      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}"><item id="${escapeXml(storyId)}"/></items></pubsub></iq>`,
+      `<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(hostJid)}"><pubsub xmlns="${NS_PUBSUB}"><items node="${escapeXml(STORY_REACTIONS_SUMMARY_NODE)}"><item id="${escapeXml(storyId)}"/></items></pubsub></iq>`,
     );
     return parseStoryReactionSummary(responseXml);
   }
 
   async publishStoryReactions(
-    communityJid: string,
+    hostJid: string,
     storyId: string,
     emojis: readonly string[],
     unknownChildrenXml: readonly string[] = [],
   ): Promise<void> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (typeof xmpp.send_raw_iq !== "function") throw new Error("XMPP session is not ready");
-    const node = storyAttachmentNode(communityJid, storyId);
+    const node = storyAttachmentNode(hostJid, storyId);
     const normalized = normalizeStoryReactions(emojis);
     if (normalized.length === 0) {
-      await this.retractStoryReactions(communityJid, storyId);
+      await this.retractStoryReactions(hostJid, storyId);
       return;
     }
     const reactionsXml = `<reactions>${normalized.map((emoji) => `<reaction>${escapeXml(emoji)}</reaction>`).join("")}</reactions>`;
     const preservedXml = unknownChildrenXml.join("");
     await xmpp.send_raw_iq(
-      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><publish node="${escapeXml(node)}"><item id="${escapeXml(this.selfBare())}"><attachments xmlns="${NS_PUBSUB_ATTACHMENTS}">${reactionsXml}${preservedXml}</attachments></item></publish></pubsub></iq>`,
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(hostJid)}"><pubsub xmlns="${NS_PUBSUB}"><publish node="${escapeXml(node)}"><item id="${escapeXml(this.selfBare())}"><attachments xmlns="${NS_PUBSUB_ATTACHMENTS}">${reactionsXml}${preservedXml}</attachments></item></publish></pubsub></iq>`,
     );
   }
 
-  async retractStoryReactions(communityJid: string, storyId: string): Promise<void> {
+  async retractStoryReactions(hostJid: string, storyId: string): Promise<void> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (typeof xmpp.send_raw_iq !== "function") throw new Error("XMPP session is not ready");
-    const node = storyAttachmentNode(communityJid, storyId);
+    const node = storyAttachmentNode(hostJid, storyId);
     await xmpp.send_raw_iq(
-      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(communityJid)}"><pubsub xmlns="${NS_PUBSUB}"><retract node="${escapeXml(node)}"><item id="${escapeXml(this.selfBare())}"/></retract></pubsub></iq>`,
+      `<iq type="set" id="${crypto.randomUUID()}" to="${escapeXml(hostJid)}"><pubsub xmlns="${NS_PUBSUB}"><retract node="${escapeXml(node)}"><item id="${escapeXml(this.selfBare())}"/></retract></pubsub></iq>`,
     );
   }
 

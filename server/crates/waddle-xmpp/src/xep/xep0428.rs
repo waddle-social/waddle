@@ -123,12 +123,17 @@ impl FallbackIndication {
     }
 
     /// `<fallback/>` — no `for`, no children. Per the spec, this means
-    /// every body and every subject in the carrier message is fallback.
+    /// every body and every subject in the carrier message is fallback, so
+    /// both regions are `Whole`; the builder emits it childless.
     pub fn whole_message() -> Self {
+        Self::whole_message_for(None)
+    }
+
+    fn whole_message_for(for_ns: Option<String>) -> Self {
         Self {
-            for_ns: None,
-            body: None,
-            subject: None,
+            for_ns,
+            body: Some(FallbackRegion::Whole),
+            subject: Some(FallbackRegion::Whole),
         }
     }
 }
@@ -145,16 +150,17 @@ fn parse_usize_attr(elem: &Element, name: &str) -> Result<Option<usize>, ()> {
     }
 }
 
-/// Parse a `<body/>` or `<subject/>` child of `<fallback/>`. Returns the
-/// range, or `Whole` when no offsets are provided. `Err(())` flags a parse
-/// failure (one-sided offsets, end-before-start, non-integer) so the caller
-/// can reject the whole indication.
-fn parse_region_child(elem: &Element) -> Result<FallbackRange, ()> {
+/// Parse the optional offsets of a `<body/>` or `<subject/>` child of
+/// `<fallback/>`. `Ok(None)` means no offsets were supplied (the whole element
+/// is fallback); `Ok(Some(range))` is a well-formed range. `Err(())` flags a
+/// malformed child (one-sided offsets, end-before-start, non-integer) so the
+/// caller can reject the whole indication.
+fn parse_region_child(elem: &Element) -> Result<Option<FallbackRange>, ()> {
     let start = parse_usize_attr(elem, "start")?;
     let end = parse_usize_attr(elem, "end")?;
     match (start, end) {
-        (Some(start), Some(end)) if end >= start => Ok(FallbackRange { start, end }),
-        (None, None) => Err(()), // caller distinguishes via separate path
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) if end >= start => Ok(Some(FallbackRange { start, end })),
         _ => Err(()),
     }
 }
@@ -165,48 +171,41 @@ fn parse_region_child(elem: &Element) -> Result<FallbackRange, ()> {
 /// Returns:
 /// - `Ok(None)` if no children of that kind exist (the region is not
 ///   targeted by this indication).
-/// - `Ok(Some(Whole))` if there is exactly one child with no offsets — the
-///   spec's "the whole element is fallback" shape.
+/// - `Ok(Some(Whole))` if any child has no offsets: XEP-0428 says the whole
+///   respective element is then fallback, which subsumes any ranges given
+///   by sibling children.
 /// - `Ok(Some(Ranges([…])))` if all children declared offsets.
-/// - `Err(())` if the element mixed offsets with no-offset children, or
-///   carried malformed offsets — the indication is rejected.
+/// - `Err(())` if any child carried malformed offsets — the indication is
+///   rejected.
 fn collect_region(fallback_elem: &Element, child_name: &str) -> Result<Option<FallbackRegion>, ()> {
-    let children: Vec<&Element> = fallback_elem
+    let mut seen = false;
+    let mut whole = false;
+    let mut ranges = Vec::new();
+    for child in fallback_elem
         .children()
         .filter(|child| child.name() == child_name && child.ns() == NS_FALLBACK)
-        .collect();
-    if children.is_empty() {
-        return Ok(None);
-    }
-    // A single child with no offsets is the canonical "whole element"
-    // form. Multiple children require every one of them to declare a range.
-    if children.len() == 1 {
-        let only = children[0];
-        let start = parse_usize_attr(only, "start")?;
-        let end = parse_usize_attr(only, "end")?;
-        match (start, end) {
-            (None, None) => return Ok(Some(FallbackRegion::Whole)),
-            (Some(start), Some(end)) if end >= start => {
-                return Ok(Some(FallbackRegion::Ranges(vec![FallbackRange {
-                    start,
-                    end,
-                }])));
-            }
-            _ => return Err(()),
+    {
+        seen = true;
+        match parse_region_child(child)? {
+            None => whole = true,
+            Some(range) => ranges.push(range),
         }
     }
-    let mut ranges = Vec::with_capacity(children.len());
-    for child in children {
-        ranges.push(parse_region_child(child)?);
-    }
-    Ok(Some(FallbackRegion::Ranges(ranges)))
+    Ok(match (seen, whole) {
+        (false, _) => None,
+        (true, true) => Some(FallbackRegion::Whole),
+        (true, false) => Some(FallbackRegion::Ranges(ranges)),
+    })
 }
 
 /// Parse all `<fallback/>` payloads attached to a message.
 ///
-/// Conformant inputs that are silently rejected:
-/// - Malformed offsets (non-integer, end before start, half-supplied).
-/// - Mixed "whole element" + range children in the same region.
+/// A `<fallback/>` without children covers every body and subject
+/// (`body` and `subject` are both `Whole`). A child without offsets makes
+/// its whole region `Whole`, subsuming sibling ranges.
+///
+/// Conformant inputs that are silently rejected: malformed offsets
+/// (non-integer, end before start, half-supplied).
 ///
 /// `for=` is honoured as optional per the spec: a missing attribute leaves
 /// `for_ns` as `None` and means the indication applies to every body and
@@ -221,6 +220,9 @@ pub fn parse_fallbacks_from_message(msg: &Message) -> Vec<FallbackIndication> {
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned);
+            if elem.children().next().is_none() {
+                return Some(FallbackIndication::whole_message_for(for_ns));
+            }
             let body = collect_region(elem, "body").ok()?;
             let subject = collect_region(elem, "subject").ok()?;
             Some(FallbackIndication {
@@ -263,6 +265,12 @@ pub fn build_fallback_element(fallback: &FallbackIndication) -> Element {
         builder = builder.attr(minidom::rxml::xml_ncname!("for").to_owned(), for_ns);
     }
     let mut elem = builder.build();
+    // Whole body and whole subject is the childless shorthand on the wire.
+    if fallback.body == Some(FallbackRegion::Whole)
+        && fallback.subject == Some(FallbackRegion::Whole)
+    {
+        return elem;
+    }
     if let Some(subject) = &fallback.subject {
         append_region(&mut elem, subject, "subject");
     }

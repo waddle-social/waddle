@@ -279,12 +279,12 @@ async fn roster_model_notifications_and_last_item_reach_only_allowed_groups() {
     // Last-item replay on becoming available (XEP-0163 §4).
     go_available_with_caps(&mut w.bob, "bob", &[NS_DISCO_INFO, &notify]).await;
     go_available_with_caps(&mut w.carol, "carol", &[NS_DISCO_INFO, &notify]).await;
-    let replay = wait_for_event(&mut w.bob, Duration::from_secs(3))
+    let replay = wait_for_event(&mut w.bob, NODE, Duration::from_secs(3))
         .await
         .expect("allowed-group contact receives the last item");
     assert!(replay.contains("id='item-1'"), "{replay}");
     assert!(
-        wait_for_event(&mut w.carol, Duration::from_millis(800))
+        wait_for_event(&mut w.carol, NODE, Duration::from_millis(800))
             .await
             .is_none(),
         "contact outside the allowed groups MUST NOT receive the replayed item"
@@ -292,12 +292,12 @@ async fn roster_model_notifications_and_last_item_reach_only_allowed_groups() {
 
     // Live fan-out.
     publish(&mut w.alice, "pub-2", "item-2").await;
-    let live = wait_for_event(&mut w.bob, Duration::from_secs(3))
+    let live = wait_for_event(&mut w.bob, NODE, Duration::from_secs(3))
         .await
         .expect("allowed-group contact is notified");
     assert!(live.contains("id='item-2'"), "{live}");
     assert!(
-        wait_for_event(&mut w.carol, Duration::from_millis(800))
+        wait_for_event(&mut w.carol, NODE, Duration::from_millis(800))
             .await
             .is_none(),
         "contact outside the allowed groups MUST NOT be notified"
@@ -306,7 +306,7 @@ async fn roster_model_notifications_and_last_item_reach_only_allowed_groups() {
     // Recalculation: filing carol under Friends admits her to later events.
     file_contact(&mut w.alice, "grp-carol-3", CAROL, "Friends").await;
     publish(&mut w.alice, "pub-3", "item-3").await;
-    let live = wait_for_event(&mut w.carol, Duration::from_secs(3))
+    let live = wait_for_event(&mut w.carol, NODE, Duration::from_secs(3))
         .await
         .expect("carol is notified once in an allowed group");
     assert!(live.contains("id='item-3'"), "{live}");
@@ -319,14 +319,14 @@ async fn roster_model_without_allowed_groups_notifies_nobody_but_owner() {
     let notify = format!("{NODE}+notify");
     go_available_with_caps(&mut w.bob, "bob", &[NS_DISCO_INFO, &notify]).await;
     assert!(
-        wait_for_event(&mut w.bob, Duration::from_millis(800))
+        wait_for_event(&mut w.bob, NODE, Duration::from_millis(800))
             .await
             .is_none(),
         "empty roster_groups_allowed MUST NOT replay to contacts"
     );
     publish(&mut w.alice, "pub-2", "item-2").await;
     assert!(
-        wait_for_event(&mut w.bob, Duration::from_millis(800))
+        wait_for_event(&mut w.bob, NODE, Duration::from_millis(800))
             .await
             .is_none(),
         "empty roster_groups_allowed MUST NOT notify contacts"
@@ -381,7 +381,7 @@ async fn explicit_subscribers_honour_xep0191_blocking_on_open_nodes() {
         assert!(r.contains("type='result'"), "open node subscribe: {r}");
         // XEP-0163 §4: a new subscriber is first sent the last published
         // item (the world's `item-1`) with a XEP-0203 delay.
-        let replay = wait_for_event(client, Duration::from_secs(3))
+        let replay = wait_for_event(client, NODE, Duration::from_secs(3))
             .await
             .expect("new subscriber receives the last published item");
         assert!(replay.contains("item-1"), "last item is item-1: {replay}");
@@ -389,7 +389,7 @@ async fn explicit_subscribers_honour_xep0191_blocking_on_open_nodes() {
     }
     publish(&mut w.alice, "pub-2", "item-2").await;
     for client in [&mut w.bob, &mut w.carol] {
-        let live = wait_for_event(client, Duration::from_secs(3))
+        let live = wait_for_event(client, NODE, Duration::from_secs(3))
             .await
             .expect("explicit subscribers are notified before any block");
         assert!(live.contains("item-2"), "live publish: {live}");
@@ -421,7 +421,7 @@ async fn explicit_subscribers_honour_xep0191_blocking_on_open_nodes() {
         (&mut w.carol, "blocking the owner"),
     ] {
         assert!(
-            wait_for_event(client, Duration::from_millis(800))
+            wait_for_event(client, NODE, Duration::from_millis(800))
                 .await
                 .is_none(),
             "XEP-0163 §4: subscriber {who} MUST NOT be notified"

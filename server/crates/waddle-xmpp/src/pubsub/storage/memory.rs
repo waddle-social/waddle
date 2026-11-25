@@ -8,8 +8,8 @@ use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
 use super::{
-    PubSubNode, PubSubStorage, PublicationError, PublicationFingerprint, PublicationNode,
-    PublicationVersion, PublishResult, StoredItem, VersionedPublishResult,
+    ExpiredItem, PubSubNode, PubSubStorage, PublicationError, PublicationFingerprint,
+    PublicationNode, PublicationVersion, PublishResult, StoredItem, VersionedPublishResult,
 };
 
 /// In-memory implementation of PubSub storage.
@@ -360,6 +360,35 @@ impl PubSubStorage for InMemoryPubSubStorage {
         }
         items.remove(index);
         Ok(true)
+    }
+
+    async fn purge_expired_items(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ExpiredItem>, XmppError> {
+        let mut expired = Vec::new();
+        for node in self.nodes.iter() {
+            let Some(secs) = node.config.item_expire else {
+                continue;
+            };
+            let key = Self::key(&node.owner, &node.node_name);
+            let Some(mut items) = self.items.get_mut(&key) else {
+                continue;
+            };
+            let cutoff = now - chrono::Duration::seconds(i64::from(secs));
+            items.retain(|item| {
+                let keep = item.published_at > cutoff;
+                if !keep {
+                    expired.push(ExpiredItem {
+                        owner: node.owner.clone(),
+                        node_name: node.node_name.clone(),
+                        item_id: item.id.clone(),
+                    });
+                }
+                keep
+            });
+        }
+        Ok(expired)
     }
 
     async fn list_nodes(&self, owner: &BareJid) -> Result<Vec<String>, XmppError> {

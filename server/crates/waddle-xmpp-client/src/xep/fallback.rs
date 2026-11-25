@@ -35,13 +35,7 @@ pub fn has_whole_body_fallback_for(message: &Element, feature_ns: &str) -> bool 
 }
 
 fn fallback_marks_whole_body(fallback: &Element) -> bool {
-    let mut body_children = fallback
-        .children()
-        .filter(|child| child.name() == "body" && child.ns() == NS_FALLBACK);
-    let Some(body) = body_children.next() else {
-        return fallback.children().next().is_none();
-    };
-    body.attr("start").is_none() && body.attr("end").is_none() && body_children.next().is_none()
+    parse_body_fallback(fallback) == Some(BodyFallback::Whole)
 }
 
 /// Collect valid body fallback declarations for the requested feature, ignoring malformed declarations.
@@ -59,21 +53,24 @@ pub fn body_fallbacks_for(message: &Element, feature_ns: &str) -> Vec<BodyFallba
 }
 
 fn parse_body_fallback(fallback: &Element) -> Option<BodyFallback> {
-    let body_children: Vec<&Element> = fallback
-        .children()
-        .filter(|child| child.name() == "body" && child.ns() == NS_FALLBACK)
-        .collect();
-
-    if body_children.is_empty() {
-        return None;
+    // A childless <fallback/> applies to every body and subject (XEP-0428 §2.2).
+    if fallback.children().next().is_none() {
+        return Some(BodyFallback::Whole);
     }
 
+    let mut body_children = fallback
+        .children()
+        .filter(|child| child.name() == "body" && child.ns() == NS_FALLBACK)
+        .peekable();
+    body_children.peek()?;
+
+    // A body child without offsets covers the whole body and subsumes any
+    // range siblings; malformed offsets reject the declaration.
+    let mut whole = false;
     let mut ranges = Vec::new();
-    let body_count = body_children.len();
     for body in body_children {
         match (body.attr("start"), body.attr("end")) {
-            (None, None) if body_count == 1 => return Some(BodyFallback::Whole),
-            (None, None) => return None,
+            (None, None) => whole = true,
             (Some(start), Some(end)) => {
                 let start = start.parse::<usize>().ok()?;
                 let end = end.parse::<usize>().ok()?;
@@ -85,7 +82,11 @@ fn parse_body_fallback(fallback: &Element) -> Option<BodyFallback> {
             _ => return None,
         }
     }
-    Some(BodyFallback::Ranges(ranges))
+    Some(if whole {
+        BodyFallback::Whole
+    } else {
+        BodyFallback::Ranges(ranges)
+    })
 }
 
 /// Remove the specified Unicode-character ranges from the body, clamping ranges to its length.
@@ -153,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mixed_whole_body_and_ranged_body_fallback() {
+    fn whole_body_child_subsumes_ranged_body_siblings() {
         let message = "<message xmlns='jabber:client'>\
             <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
               <body/>\
@@ -163,18 +164,41 @@ mod tests {
             .parse::<Element>()
             .expect("message");
 
-        assert!(body_fallbacks_for(&message, "urn:xmpp:reply:0").is_empty());
+        assert_eq!(
+            body_fallbacks_for(&message, "urn:xmpp:reply:0"),
+            vec![BodyFallback::Whole]
+        );
     }
 
     #[test]
-    fn ignores_childless_feature_scoped_fallback_for_body_stripping() {
+    fn multiple_offsetless_body_children_are_whole() {
+        let message = "<message xmlns='jabber:client'>\
+            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
+              <body/><body/>\
+            </fallback>\
+        </message>"
+            .parse::<Element>()
+            .expect("message");
+
+        assert_eq!(
+            body_fallbacks_for(&message, "urn:xmpp:reply:0"),
+            vec![BodyFallback::Whole]
+        );
+    }
+
+    #[test]
+    fn childless_feature_scoped_fallback_covers_whole_body() {
         let message = "<message xmlns='jabber:client'>\
             <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'/>\
         </message>"
             .parse::<Element>()
             .expect("message");
 
-        assert!(body_fallbacks_for(&message, "urn:xmpp:reply:0").is_empty());
+        assert_eq!(
+            body_fallbacks_for(&message, "urn:xmpp:reply:0"),
+            vec![BodyFallback::Whole]
+        );
+        assert!(has_whole_body_fallback_for(&message, "urn:xmpp:reply:0"));
     }
 
     #[test]

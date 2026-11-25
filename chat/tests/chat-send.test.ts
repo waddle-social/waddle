@@ -74,6 +74,36 @@ describe("useChatSend.sendMessage — happy path", () => {
     expect(h.onSendComplete).toHaveBeenCalledTimes(1);
   });
 
+  test("content message requests <active/> and no standalone active follows (XEP-0085 §5.1)", async () => {
+    const sendDirectMessage = mock(async () => ({ id: "dm-active", state: "sending" }));
+    const sendDmChatState = mock(async () => undefined);
+    const client = makeClient({ sendDirectMessage, sendDmChatState } as Partial<BrowserXmppClient>);
+    const h = harness({ client, draft: "hello" });
+
+    await h.send.sendMessage(undefined, []);
+    await h.send.sendMessage(undefined, []);
+
+    const options = (sendDirectMessage as unknown as ReturnType<typeof mock>).mock.calls[0]![2] as Record<string, unknown>;
+    expect(options.chatStateActive).toBe(true);
+    expect(sendDmChatState).not.toHaveBeenCalled();
+  });
+
+  test("content message omits <active/> when chat states are disabled", async () => {
+    const { useChatStatePreference } = await import("../src/preferences/chat-states");
+    const pref = useChatStatePreference();
+    pref.setChatStatePreference("suppress");
+    try {
+      const sendDirectMessage = mock(async () => ({ id: "dm-quiet", state: "sending" }));
+      const client = makeClient({ sendDirectMessage } as Partial<BrowserXmppClient>);
+      const h = harness({ client, draft: "hello" });
+      await h.send.sendMessage(undefined, []);
+      const options = (sendDirectMessage as unknown as ReturnType<typeof mock>).mock.calls[0]![2] as Record<string, unknown>;
+      expect(options.chatStateActive).toBe(false);
+    } finally {
+      pref.setChatStatePreference("send");
+    }
+  });
+
   test("sends immediately without preview metadata while composer lookup is still loading", async () => {
     const sendDirectMessage = mock(async () => ({ id: "dm-link", state: "sending" }));
     const lookupLinkPreview = mock(() => new Promise<never>(() => {}));

@@ -8,16 +8,16 @@
 //! Thin wrapper over [`xmpp_parsers::extdisco`] — namespace constant
 //! plus Waddle-specific builder helpers that translate a
 //! [`waddle_sfu::TurnCredential`] into the `<service/>` entries the
-//! responder sends back on a `services` IQ.
+//! responder sends back on a `services` or `credentials` IQ.
 //!
-//! xmpp-parsers' [`ServiceType`] enum is the subset {Stun, Turn}; the
-//! XEP-0215 §3.6.5 `stuns`/`turns` variants do not exist in the
-//! typed surface. Because Waddle advertises TLS-protected TURN
-//! (terminated at the cluster `tlsroute` for `turn.waddle.social`),
-//! the TURN entry MUST go out on the wire with `type='turns'` per
-//! the XEP, so we build that `<service/>` element manually via
-//! [`minidom::Element::builder`] rather than going through the
-//! typed [`Service`] enum.
+//! The `type` attribute is "the service type as registered with the
+//! Registrar" (XEP-0215, Service element attributes). Waddle uses
+//! `stun`, `turn` (TURN over UDP) and `turns` (TURN over TLS,
+//! terminated at the cluster `tlsroute` for `turn.waddle.social`).
+//! xmpp-parsers' [`ServiceType`] only models `stun` and `turn`, so
+//! every `<service/>` entry is built manually via
+//! [`minidom::Element::builder`] and the request filter is modelled
+//! by [`ServiceKind`].
 
 pub use xmpp_parsers::extdisco::{
     Action, Credentials, Service, ServicesQuery, ServicesResult, Transport, Type as ServiceType,
@@ -29,49 +29,128 @@ use waddle_sfu::{TurnCredential, TurnHost};
 
 pub const NS_EXT_DISCO: &str = "urn:xmpp:extdisco:2";
 
-/// Wire-form `type` value for TLS-protected TURN per XEP-0215
-/// §3.6.5. Modelled as a constant — and not an enum variant — so
-/// the (untyped) wire shape is the single source of truth.
+/// Wire-form `type` value for TLS-protected TURN.
 pub const TYPE_TURNS: &str = "turns";
 
-/// Build the pair of `<service/>` entries Waddle advertises: one
-/// `turns` (TURN-over-TLS on port 443, matching the cluster's
-/// `tlsroute` for `turn.waddle.social`) and one plain `stun` on the
-/// UDP port. The TURN entry carries the time-limited credential
-/// pair; STUN does not need credentials.
+/// A service type Waddle understands, as carried in the `type`
+/// attribute of `<services/>` filters, `<service/>` entries and
+/// `<credentials/>` requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKind {
+    Stun,
+    Stuns,
+    Turn,
+    Turns,
+}
+
+impl ServiceKind {
+    /// Parse a wire `type` value; `None` for an unknown type.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stun" => Some(Self::Stun),
+            "stuns" => Some(Self::Stuns),
+            "turn" => Some(Self::Turn),
+            TYPE_TURNS => Some(Self::Turns),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stun => "stun",
+            Self::Stuns => "stuns",
+            Self::Turn => "turn",
+            Self::Turns => TYPE_TURNS,
+        }
+    }
+}
+
+/// Build the `<service/>` entries Waddle advertises: `turn` (UDP) and
+/// `turns` (TLS on port 443, matching the cluster's `tlsroute` for
+/// `turn.waddle.social`) carrying the time-limited credential pair,
+/// plus a plain `stun` entry on the UDP port.
 pub fn build_services(
     turn_host: &TurnHost,
     turn_tls_port: u16,
-    stun_udp_port: u16,
+    turn_udp_port: u16,
     cred: &TurnCredential,
 ) -> Vec<Element> {
     vec![
-        build_turn_service(turn_host, turn_tls_port, cred),
-        build_stun_service_element(turn_host, stun_udp_port),
+        build_turn_service(turn_host, turn_udp_port, cred),
+        build_turns_service(turn_host, turn_tls_port, cred),
+        build_stun_service_element(turn_host, turn_udp_port),
     ]
 }
 
-/// XEP-0215 §3.6.5 TLS-protected TURN entry with HMAC-derived
-/// credentials. Returned as a [`minidom::Element`] because the
-/// `xmpp_parsers::extdisco::Type` enum lacks a `Turns` variant —
-/// emitting the literal `type="turns"` attribute string is the only
-/// XEP-conformant wire shape here.
+/// TURN-over-UDP entry (`type='turn'`) with HMAC-derived credentials.
 pub fn build_turn_service(
+    turn_host: &TurnHost,
+    turn_udp_port: u16,
+    cred: &TurnCredential,
+) -> Element {
+    turn_entry(
+        ServiceKind::Turn,
+        "udp",
+        turn_host,
+        turn_udp_port,
+        cred,
+        true,
+    )
+}
+
+/// TURN-over-TLS entry (`type='turns'`) with HMAC-derived credentials.
+pub fn build_turns_service(
     turn_host: &TurnHost,
     turn_tls_port: u16,
     cred: &TurnCredential,
 ) -> Element {
-    Element::builder("service", NS_EXT_DISCO)
-        .attr(minidom::rxml::xml_ncname!("action").to_owned(), "add")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), TYPE_TURNS)
-        .attr(minidom::rxml::xml_ncname!("transport").to_owned(), "tcp")
+    turn_entry(
+        ServiceKind::Turns,
+        "tcp",
+        turn_host,
+        turn_tls_port,
+        cred,
+        true,
+    )
+}
+
+/// `<service/>` child of a `<credentials/>` result: identifies the
+/// service by host, type and port and carries the minted credential.
+pub fn build_credentials_service(
+    kind: ServiceKind,
+    turn_host: &TurnHost,
+    port: u16,
+    cred: &TurnCredential,
+) -> Element {
+    turn_entry(kind, "", turn_host, port, cred, false)
+}
+
+fn turn_entry(
+    kind: ServiceKind,
+    transport: &str,
+    turn_host: &TurnHost,
+    port: u16,
+    cred: &TurnCredential,
+    services_entry: bool,
+) -> Element {
+    let mut builder = Element::builder("service", NS_EXT_DISCO);
+    if services_entry {
+        builder = builder
+            .attr(minidom::rxml::xml_ncname!("action").to_owned(), "add")
+            .attr(
+                minidom::rxml::xml_ncname!("transport").to_owned(),
+                transport,
+            );
+    }
+    builder
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), kind.as_str())
         .attr(
             minidom::rxml::xml_ncname!("host").to_owned(),
             turn_host.as_str(),
         )
         .attr(
             minidom::rxml::xml_ncname!("port").to_owned(),
-            turn_tls_port.to_string(),
+            port.to_string(),
         )
         .attr(
             minidom::rxml::xml_ncname!("username").to_owned(),
@@ -81,28 +160,17 @@ pub fn build_turn_service(
             minidom::rxml::xml_ncname!("password").to_owned(),
             cred.password.as_str(),
         )
-        // XEP-0082 / XEP-0215 §3.6.5: `expires` is a RFC 3339
-        // timestamp. Render via chrono directly — same wire shape
-        // `xmpp_parsers::date::DateTime` would emit via its
-        // `IntoAttributeValue` impl.
+        // XEP-0082: `expires` is an RFC 3339 timestamp.
         .attr(
             minidom::rxml::xml_ncname!("expires").to_owned(),
             cred.expires_at.fixed_offset().to_rfc3339(),
         )
-        .attr(minidom::rxml::xml_ncname!("restricted").to_owned(), "1")
         .build()
 }
 
 /// XEP-0215 STUN entry. No credentials, so it's cheap to build and
 /// safe to serve to anyone who can already authenticate to the XMPP
 /// stream.
-///
-/// Emitted as a [`minidom::Element`] directly because the typed
-/// [`Service`] struct's fields are private in xmpp-parsers 0.22 and
-/// the crate exposes no constructor; building the wire shape with
-/// [`Element::builder`] is the only conformant path. (The TURN entry
-/// already uses the same builder for the same reason — there is no
-/// `Type::Turns` variant to construct.)
 pub fn build_stun_service_element(turn_host: &TurnHost, stun_udp_port: u16) -> Element {
     Element::builder("service", NS_EXT_DISCO)
         .attr(minidom::rxml::xml_ncname!("action").to_owned(), "add")
@@ -121,16 +189,21 @@ pub fn build_stun_service_element(turn_host: &TurnHost, stun_udp_port: u16) -> E
 
 /// Build the `<services xmlns='urn:xmpp:extdisco:2'/>` wrapper
 /// element from a list of `<service/>` children, with an optional
-/// `type` attribute pinning the filter that produced the result
-/// (XEP-0215 §3.6.1). Built manually rather than via
-/// [`ServicesResult`] so the result can hold the manually-built
-/// `turns` child — which the typed `ServicesResult.services:
-/// Vec<Service>` cannot represent.
+/// `type` attribute echoing the filter that produced the result.
 pub fn build_services_result_element(type_filter: Option<&str>, services: Vec<Element>) -> Element {
     let mut builder = Element::builder("services", NS_EXT_DISCO);
     if let Some(t) = type_filter {
         builder = builder.attr(minidom::rxml::xml_ncname!("type").to_owned(), t);
     }
+    for service in services {
+        builder = builder.append(service);
+    }
+    builder.build()
+}
+
+/// Build the `<credentials xmlns='urn:xmpp:extdisco:2'/>` result.
+pub fn build_credentials_result_element(services: Vec<Element>) -> Element {
+    let mut builder = Element::builder("credentials", NS_EXT_DISCO);
     for service in services {
         builder = builder.append(service);
     }
@@ -177,15 +250,21 @@ mod tests {
         let cred = fixture_credential();
         let services = build_services(&host, 443, 3478, &cred);
 
-        assert_eq!(services.len(), 2);
+        assert_eq!(services.len(), 3);
 
-        let turns = &services[0];
+        let turn = &services[0];
+        assert_eq!(turn.attr("type"), Some("turn"));
+        assert_eq!(turn.attr("transport"), Some("udp"));
+        assert_eq!(turn.attr("port"), Some("3478"));
+        assert!(turn.attr("username").is_some());
+
+        let turns = &services[1];
         assert_eq!(turns.name(), "service");
         assert_eq!(turns.ns(), NS_EXT_DISCO);
         assert_eq!(
             turns.attr("type"),
             Some(TYPE_TURNS),
-            "TLS TURN must be advertised as type='turns' per XEP-0215 §3.6.5"
+            "TLS TURN must be advertised as type='turns'"
         );
         assert_ne!(
             turns.attr("type"),
@@ -198,9 +277,9 @@ mod tests {
         assert!(turns.attr("username").is_some());
         assert!(turns.attr("password").is_some());
         assert!(turns.attr("expires").is_some());
-        assert_eq!(turns.attr("restricted"), Some("1"));
+        assert!(turns.attr("restricted").is_none());
 
-        let stun = &services[1];
+        let stun = &services[2];
         assert_eq!(stun.name(), "service");
         assert_eq!(stun.attr("type"), Some("stun"));
         assert_eq!(stun.attr("transport"), Some("udp"));
@@ -212,12 +291,9 @@ mod tests {
     fn build_turn_service_pins_turns_wire_shape() {
         let host = TurnHost::new("turn.waddle.social");
         let cred = fixture_credential();
-        let turn = build_turn_service(&host, 443, &cred);
+        let turn = build_turns_service(&host, 443, &cred);
 
-        // XEP-0215 §3.6.5: TLS-protected TURN is `type='turns'`,
-        // not `type='turn'`. This is the test that fails loudly
-        // if someone reverts to the typed `ServiceType::Turn`
-        // path (which would emit `type='turn'`).
+        // TLS-protected TURN is `type='turns'`, not `type='turn'`.
         assert_eq!(turn.attr("type"), Some(TYPE_TURNS));
         assert_ne!(turn.attr("type"), Some("turn"));
     }
@@ -232,6 +308,8 @@ mod tests {
         assert_eq!(wrapper.name(), "services");
         assert_eq!(wrapper.ns(), NS_EXT_DISCO);
         let mut children = wrapper.children().filter(|c| c.is("service", NS_EXT_DISCO));
+        let turn = children.next().expect("turn child present");
+        assert_eq!(turn.attr("type"), Some("turn"));
         let turns = children.next().expect("turns child present");
         assert_eq!(turns.attr("type"), Some(TYPE_TURNS));
         let stun = children.next().expect("stun child present");

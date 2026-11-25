@@ -67,6 +67,17 @@ impl StoredItem {
     }
 }
 
+/// An item a node's `pubsub#item_expire` retention removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredItem {
+    /// Owner of the node, the PEP account or the service JID.
+    pub owner: BareJid,
+    /// Node the item was removed from.
+    pub node_name: String,
+    /// Identifier of the removed item.
+    pub item_id: String,
+}
+
 /// Result of a publish operation.
 #[derive(Debug)]
 pub struct PublishResult {

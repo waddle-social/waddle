@@ -430,18 +430,18 @@ fn test_spaces_service_features_include_xep0503_required_features() {
             "spaces service missing {feature}"
         );
     }
-    // Feed + stories live on the community service, not spaces — the
-    // spaces service MUST NOT advertise these or clients enumerate
-    // them as space members.
+    // The feed lives on the community service, not spaces — the spaces
+    // service MUST NOT advertise it or clients enumerate it as a space
+    // member. Stories live on each account's own PEP service.
     assert!(!features.contains(&Feature::social_feed()));
     assert!(!features.contains(&Feature::stories()));
 }
 
 #[test]
-fn test_community_service_features_advertise_feed_and_stories() {
+fn test_community_service_features_advertise_feed_but_not_stories() {
     let features = community_service_features();
     assert!(features.contains(&Feature::social_feed()));
-    assert!(features.contains(&Feature::stories()));
+    assert!(!features.contains(&Feature::stories()));
     assert!(features.contains(&Feature::pubsub()));
     assert!(features.contains(&Feature::disco_info()));
 }
@@ -487,6 +487,7 @@ fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
         "urn:waddle:transports:livekit:0"
     );
     assert_eq!(Feature::muji().0, "urn:xmpp:jingle:muji:0");
+    assert_eq!(Feature::coin().0, "urn:xmpp:coin:1");
     assert_eq!(
         Feature::waddle_call_lifecycle().0,
         "urn:waddle:call-lifecycle:0"

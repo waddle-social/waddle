@@ -233,6 +233,58 @@ fn parse_configure_set_keeps_partial_fields_partial() {
     }
 }
 
+fn parse_item_expire(value: &str) -> Result<Option<Option<u32>>, ()> {
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "stories")
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(xdata_field("pubsub#item_expire", value))
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "cfg-expire",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+    );
+    match parse_pubsub_iq(&iq) {
+        Ok(PubSubRequest::ConfigureNodeSet { config, .. }) => Ok(config.item_expire),
+        _ => Err(()),
+    }
+}
+
+#[test]
+fn configure_set_parses_item_expire_seconds_and_max() {
+    // XEP-0060 §16.4.4: "pubsub#item_expire ... number of seconds after
+    // which to automatically purge items" ("max" means no expiry).
+    assert_eq!(parse_item_expire("86400"), Ok(Some(Some(86_400))));
+    assert_eq!(parse_item_expire("max"), Ok(Some(None)));
+    assert_eq!(parse_item_expire("0"), Err(()));
+    assert_eq!(parse_item_expire("soon"), Err(()));
+}
+
+#[test]
+fn item_expire_patch_applies_and_clears() {
+    use crate::pubsub::{NodeConfig, NodeConfigPatch};
+
+    let stories = NodeConfig::pep_stories();
+    assert_eq!(stories.item_expire, Some(86_400));
+    let cleared = NodeConfigPatch {
+        item_expire: Some(None),
+        ..NodeConfigPatch::default()
+    }
+    .apply_to(stories.clone());
+    assert_eq!(cleared.item_expire, None);
+    let shortened = NodeConfigPatch {
+        item_expire: Some(Some(60)),
+        ..NodeConfigPatch::default()
+    }
+    .apply_to(stories);
+    assert_eq!(shortened.item_expire, Some(60));
+}
+
 #[test]
 fn parse_configure_set_accepts_typed_pubsub_type() {
     let configure = Element::builder("configure", NS_PUBSUB_OWNER)
@@ -274,7 +326,7 @@ fn configure_form_result_emits_pubsub_type_for_typed_node() {
     let result = build_pubsub_configure_form_result(
         &iq,
         "stories",
-        &crate::pubsub::NodeConfig::community_stories(),
+        &crate::pubsub::NodeConfig::pep_stories(),
     );
     let Iq::Result {
         payload: Some(pubsub),

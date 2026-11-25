@@ -1499,6 +1499,8 @@ pub struct WaddleSendOptions {
     pub link_preview_token: Option<String>,
     /// Request a displayed marker from the recipient.
     pub request_displayed_marker: bool,
+    /// XEP-0085 §5.1: attach `<active/>` to the content message.
+    pub chat_state_active: bool,
     /// XEP-0045 §7.5 MUC private message marker (see `SendMessageOptions::muc_pm`).
     pub muc_pm: bool,
     /// Shared attachment metadata extracted from the message.

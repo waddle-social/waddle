@@ -120,8 +120,8 @@ XEP-0425 = ["crates/waddle-server/tests/xep0425_message_moderation_ws.rs"]
 id = "audio-video-calls"
 server_maturity = "beta"
 availability = "configured"
-protocols = ["XEP-0166", "XEP-0167", "XEP-0215", "XEP-0272", "XEP-0353"]
-advertised_features = ["urn:xmpp:jingle:1", "urn:xmpp:jingle:apps:rtp:1", "urn:xmpp:jingle:apps:rtp:audio", "urn:xmpp:jingle:apps:rtp:video", "urn:xmpp:jingle-message:0", "urn:xmpp:extdisco:2", "urn:xmpp:jingle:muji:0"]
+protocols = ["XEP-0166", "XEP-0167", "XEP-0215", "XEP-0272", "XEP-0298", "XEP-0353"]
+advertised_features = ["urn:xmpp:jingle:1", "urn:xmpp:jingle:apps:rtp:1", "urn:xmpp:jingle:apps:rtp:audio", "urn:xmpp:jingle:apps:rtp:video", "urn:xmpp:jingle-message:0", "urn:xmpp:extdisco:2", "urn:xmpp:jingle:muji:0", "urn:xmpp:coin:1"]
 custom_namespaces = ["urn:waddle:transports:livekit:0", "urn:waddle:call-lifecycle:0"]
 server_evidence = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 topologies = { local = "beta", federated = "unsupported" }
@@ -130,6 +130,7 @@ XEP-0166 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 XEP-0167 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 XEP-0215 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 XEP-0272 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
+XEP-0298 = ["crates/waddle-server/tests/calls_e2e_ws.rs", "crates/waddle-xmpp/tests/xep0298_coin.rs"]
 XEP-0353 = ["crates/waddle-server/tests/calls_e2e_ws.rs"]
 
 [[capability]]
@@ -159,7 +160,7 @@ XEP-0503 = ["crates/waddle-server/tests/xep0503_spaces_ws.rs"]
 id = "community-feed-stories"
 server_maturity = "experimental"
 protocols = ["XEP-0060", "XEP-0472", "XEP-0501"]
-advertised_features = ["http://jabber.org/protocol/pubsub", "urn:xmpp:pubsub-social-feed:1", "urn:xmpp:pubsub-social-feed:stories:0"]
+advertised_features = ["http://jabber.org/protocol/pubsub", "urn:xmpp:pubsub-social-feed:1"]
 server_evidence = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs", "crates/waddle-server/tests/xep0501_stories_ws.rs"]
 topologies = { local = "experimental", federated = "unsupported" }
 [capability.protocol_evidence]
