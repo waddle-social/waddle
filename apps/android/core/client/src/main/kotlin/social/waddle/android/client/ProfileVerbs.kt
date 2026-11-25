@@ -10,6 +10,7 @@ import social.waddle.client.ffi.WaddleMood
 import social.waddle.client.ffi.WaddleTune
 import social.waddle.client.ffi.WaddleVCard4
 import java.security.MessageDigest
+import java.util.Locale
 
 /** XEP-0084 §3.2: the mandated pubsub item id — SHA-1 hex of the raw
  *  image bytes (mirrors the FFI's `compute_avatar_item_id`). */
@@ -286,7 +287,7 @@ internal class ProfileVerbs(
     /** XEP-0108: publish an activity; the store reflects it on success. */
     suspend fun setActivity(general: String, specific: String?, text: String?): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotConnected
-        val result = unitVerb(lease) { it.publishActivity(general, specific, text) }
+        val result = unitVerb(lease) { it.publishActivity(general, specific, text, Locale.getDefault().toLanguageTag()) }
         if (result == VerbResult.Ok && !activeSession.applyIfCurrent(lease) {
                 stores.profileStore.setSelfActivity(
                     WaddleActivity(general = general, specific = specific, text = text),

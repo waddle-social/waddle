@@ -166,7 +166,12 @@ impl Session {
             match activity {
                 Some(activity) => {
                     client
-                        .publish_activity(activity.general, activity.specific, activity.text)
+                        .publish_activity(
+                            activity.general,
+                            activity.specific,
+                            activity.text,
+                            ui_language_tag(),
+                        )
                         .await
                 }
                 None => client.retract_activity().await,
@@ -200,4 +205,18 @@ impl Session {
             Err(_) => None,
         }
     }
+}
+
+/// BCP 47 tag of the UI locale (for example `en-US`) taken from the GLib
+/// language list, used as `xml:lang` on free-text XEP-0108 activity text.
+fn ui_language_tag() -> Option<String> {
+    gtk::glib::language_names()
+        .iter()
+        .map(|name| {
+            name.split(['.', '@'])
+                .next()
+                .unwrap_or_default()
+                .replace('_', "-")
+        })
+        .find(|tag| !tag.is_empty() && tag != "C" && tag != "POSIX")
 }

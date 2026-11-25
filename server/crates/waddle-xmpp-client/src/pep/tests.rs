@@ -53,7 +53,12 @@ fn parse_mood_cleared() {
 fn parse_activity_with_specific_and_text() {
     let msg = make_pep_message(
         NS_ACTIVITY,
-        build_activity_element_with_specific("working", Some("coding"), Some("rewriting waddle")),
+        build_activity_element_with_specific(
+            "working",
+            Some("coding"),
+            Some("rewriting waddle"),
+            None,
+        ),
     );
     assert_eq!(
         parse(&msg),
@@ -245,6 +250,7 @@ fn parse_pep_iq_results_round_trip() {
                                     "working",
                                     Some("coding"),
                                     Some("flow"),
+                                    None,
                                 ))
                                 .build(),
                         )
@@ -362,7 +368,7 @@ fn on_the_phone() -> UserActivity {
 }
 
 fn on_the_phone_payload() -> Element {
-    build_activity_element_with_specific("talking", Some("on_the_phone"), None)
+    build_activity_element_with_specific("talking", Some("on_the_phone"), None, None)
 }
 
 #[test]
