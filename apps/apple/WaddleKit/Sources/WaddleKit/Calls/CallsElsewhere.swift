@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 /// A 1:1 call that another of our devices is in (web `DmCallActivity` with
@@ -8,13 +9,25 @@ public struct CallElsewhere: Identifiable, Equatable, Sendable {
     public let peer: BareJID
     /// What the call was proposed with; `nil` when we came online after the proposal.
     public let media: CallMedia?
+    /// When it was answered, as far as this device saw.
+    public let since: Date
 
     public var id: String { sid }
 
-    public init(sid: String, peer: BareJID, media: CallMedia?) {
+    /// A call is not shown for longer than this (web: the same day's window).
+    /// Its end is a message that a device which dies mid-call never sends,
+    /// and a card must not outlive its call for good.
+    public static let longestShown: TimeInterval = 24 * 60 * 60
+
+    public init(sid: String, peer: BareJID, media: CallMedia?, since: Date = .distantPast) {
         self.sid = sid
         self.peer = peer
         self.media = media
+        self.since = since
+    }
+
+    public func isShown(at now: Date) -> Bool {
+        now.timeIntervalSince(since) < Self.longestShown
     }
 }
 
@@ -45,7 +58,8 @@ struct CallsElsewhereLedger: Equatable, Sendable {
     /// - Parameters:
     ///   - own: Our account.
     ///   - device: This device's full address: what it sends itself is no other device's doing.
-    mutating func apply(_ event: CallEvent, own: BareJID, device: JID?) {
+    mutating func apply(_ event: CallEvent, own: BareJID, device: JID?, at now: Date) {
+        live.removeAll { !$0.isShown(at: now) }
         guard event.from != device else { return }
         let isOurs = event.from.bare == own
         switch event.kind {
@@ -58,16 +72,22 @@ struct CallsElsewhereLedger: Equatable, Sendable {
                 // Another of our devices answered the peer's invitation.
                 let invitation = invitations[event.sid]
                 guard invitation?.isOurs != true, let peer = invitation?.peer ?? event.to?.bare, peer != own else { return }
-                goLive(CallElsewhere(sid: event.sid, peer: peer, media: invitation?.media))
+                goLive(CallElsewhere(sid: event.sid, peer: peer, media: invitation?.media, since: now))
             } else {
                 // The peer answered an invitation another of our devices placed. One
                 // this device placed is its own call, and is not among the invitations.
                 guard let invitation = invitations[event.sid], invitation.isOurs, invitation.peer == event.from.bare,
                       event.to == nil || event.to != device else { return }
-                goLive(CallElsewhere(sid: event.sid, peer: invitation.peer, media: invitation.media))
+                goLive(CallElsewhere(sid: event.sid, peer: invitation.peer, media: invitation.media, since: now))
             }
-        case .reject, .retract, .finish:
-            // Only a party to the call ends it: someone who learned the sid does not.
+        case .reject, .retract:
+            // An invitation is declined or taken back by a party to it: someone
+            // who learned the sid does neither. A call already answered is not
+            // undone by this: a second device declining the ring it still shows,
+            // a moment after the first answered, has not ended the call.
+            guard let invitation = invitations[event.sid], isOurs || event.from.bare == invitation.peer else { return }
+            dropInvitation(event.sid)
+        case .finish:
             let peer = invitations[event.sid]?.peer ?? live.first { $0.sid == event.sid }?.peer
             guard isOurs || event.from.bare == peer else { return }
             forget(event.sid)
@@ -115,8 +135,8 @@ struct CallsElsewhereLedger: Equatable, Sendable {
 
     public init() { /* no calls known yet */ }
 
-    func apply(_ event: CallEvent, own: BareJID, device: JID?) {
-        ledger.apply(event, own: own, device: device)
+    func apply(_ event: CallEvent, own: BareJID, device: JID?, at now: Date) {
+        ledger.apply(event, own: own, device: device, at: now)
         publish()
     }
 

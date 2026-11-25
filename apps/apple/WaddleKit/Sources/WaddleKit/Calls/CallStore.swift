@@ -115,7 +115,7 @@ import Observation
 
     /// Reduce arrivals synchronously; only remote-originated effects enter the serial queue.
     public func handle(_ event: CallEvent) {
-        elsewhere.apply(event, own: ownBareJID, device: ownJID())
+        elsewhere.apply(event, own: ownBareJID, device: ownJID(), at: Date())
         if case .propose = event.kind, isFinished(sid: event.sid) {
             if let index = declinedBeforeProposalSids.firstIndex(of: event.sid) {
                 declinedBeforeProposalSids.remove(at: index)

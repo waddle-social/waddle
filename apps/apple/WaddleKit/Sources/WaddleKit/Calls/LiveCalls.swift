@@ -127,7 +127,7 @@ public enum LiveCalls {
     ///
     /// - Parameter elsewhere: The calls of two our other devices are in, each with the other person's name.
     public static func list(
-        _ rooms: [Room], elsewhere: [(call: CallElsewhere, name: String)] = [], state: CallState
+        _ rooms: [Room], elsewhere: [(call: CallElsewhere, name: String)] = [], state: CallState, now: Date = Date()
     ) -> [LiveCall] {
         let inRooms = rooms
             .filter { !$0.people.isEmpty && !state.isInGroupCall(in: $0.room) }
@@ -137,9 +137,10 @@ public enum LiveCalls {
                     action: $0.canJoin ? .join : .open
                 )
             }
-        // A call this device has since taken up itself is its own, with its own card.
+        // A call this device has since taken up itself is its own, with its own
+        // card. One whose ring merely ended here is still live where it was answered.
         let onOtherDevices = elsewhere
-            .filter { $0.call.sid != state.sid }
+            .filter { $0.call.isShown(at: now) && !(state.isLive && state.sid == $0.call.sid) }
             .map { LiveCall(elsewhere: $0.call, name: $0.name) }
         return (inRooms + onOtherDevices).sorted { left, right in
             if left.action != right.action { return left.action == .join }

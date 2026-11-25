@@ -52,7 +52,7 @@ final class LiveCallsSnapshotTests: XCTestCase {
 
     /// A call of two that our phone answered: this device can open the conversation, not the call.
     func testACallOnAnotherOfOurDevicesBesideARoomsCall() {
-        let ada = CallElsewhere(sid: "s1", peer: BareJID(parsing: "ada@waddle.test")!, media: CallMedia(audio: true, video: true))
+        let ada = CallElsewhere(sid: "s1", peer: BareJID(parsing: "ada@waddle.test")!, media: CallMedia(audio: true, video: true), since: Date())
         assertList([
             call("design", people("Linus", "Grace")),
             LiveCall(elsewhere: ada, name: "Ada Lovelace"),
