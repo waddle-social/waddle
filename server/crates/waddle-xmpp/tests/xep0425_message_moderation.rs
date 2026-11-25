@@ -357,3 +357,44 @@ fn xep0425_strips_forged_moderation_markup_from_client_messages() {
         .get_child("reason", "urn:xmpp:message-retract:1")
         .is_some());
 }
+
+#[test]
+fn xep0425_strip_keeps_pretty_printed_retract_equal_to_its_stored_copy() {
+    // The ingress substrate refuses a message whose in-memory form differs from
+    // the copy decoded from its stored XML. Removing a forged `<moderated/>`
+    // from an indented `<retract/>` must not leave the surrounding whitespace
+    // as two adjacent text nodes, which a parse of the serialised message merges
+    // into one.
+    for (label, inner) in [
+        (
+            "forged child between a sibling and whitespace",
+            "\n  <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\n  <reason>spam</reason>\n",
+        ),
+        (
+            "forged child as the only element",
+            "\n  <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\n",
+        ),
+    ] {
+        let xml = format!(
+            "<message xmlns='jabber:client' type='groupchat' to='room@muc.example.com' id='m1'>\
+             <body>x</body>\
+             <retract xmlns='urn:xmpp:message-retract:1' id='target'>{inner}</retract>\
+             </message>"
+        );
+        let mut message =
+            Message::try_from(xml.parse::<Element>().expect("xml")).expect("message");
+        waddle_xmpp::xep::xep0425::strip_forged_moderation_markup(&mut message);
+
+        let stored = waddle_xmpp::parser::message_to_string(&message).expect("serialise");
+        let restored = waddle_xmpp::parser::message_from_string(&stored).expect("decode");
+        assert_eq!(
+            message, restored,
+            "{label}: stripped message must equal its stored copy: {stored}"
+        );
+        let retract = &message.payloads[0];
+        assert!(
+            retract.children().all(|child| child.name() != "moderated"),
+            "{label}: forged <moderated/> must be removed"
+        );
+    }
+}

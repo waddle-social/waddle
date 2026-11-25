@@ -70,33 +70,39 @@ pub fn server_features() -> Vec<Feature> {
     features
 }
 
-/// XMPP-native A/V calling feature namespaces. Returned as a separate
-/// list so disco-info builders only emit them when the
-/// LiveKit-backed handlers are actually registered at startup. Each
-/// namespace is covered by a custom test suite (per the CLAUDE.md
-/// "advertised feature must have testable behavior" rule) and a real
-/// handler — see [`crate::protocol::handlers::jingle`],
-/// [`crate::protocol::handlers::extdisco`],
-/// [`crate::protocol::handlers::call_lifecycle`], and the typed XEP
-/// modules under `crate::xep`.
+/// XMPP-native A/V calling features the bare server domain
+/// advertises. Returned as a separate list so disco-info builders only
+/// emit them when the LiveKit-backed handlers are actually registered
+/// at startup.
+///
+/// The domain is not itself a Jingle or RTP endpoint: 1:1 sessions run
+/// between clients (which advertise `urn:xmpp:jingle:1` and the RTP
+/// features in their own capabilities) and the Muji responder is the
+/// `calls.<domain>` mixer ([`calls_mixer_features`]). Advertising
+/// `urn:xmpp:jingle:1` or `urn:xmpp:jingle:apps:rtp:*` here would claim
+/// behaviour the domain does not have (XEP-0166 / XEP-0167: the
+/// advertisement asserts that the entity itself supports them).
 pub fn call_features() -> Vec<Feature> {
-    // `Feature::muji()` (XEP-0272) is advertised once the Jingle
-    // dispatcher has been wired to accept session-initiate stanzas
-    // addressed to the mixer JID and carrying `<muji room='…'/>` —
-    // see [`crate::protocol::handlers::jingle`]. The presence-side
-    // `<muji/>` shape flows through the MUC presence pipeline
-    // unchanged; the room actor stores typed Muji elements per
-    // occupant (`MucRoom::muji_state`) and re-broadcasts them.
     vec![
-        Feature::jingle(),
-        Feature::jingle_rtp(),
-        Feature::jingle_rtp_audio(),
-        Feature::jingle_rtp_video(),
         Feature::jingle_message(),
         Feature::ext_disco(),
         Feature::waddle_livekit_transport(),
         Feature::waddle_call_lifecycle(),
+    ]
+}
+
+/// Features of the `calls.<domain>` Muji mixer, which is the Jingle
+/// responder for XEP-0272 group calls (session-initiate carrying
+/// `<muji room='…'/>`, answered with a LiveKit-backed session-accept).
+pub fn calls_mixer_features() -> Vec<Feature> {
+    vec![
+        Feature::disco_info(),
         Feature::muji(),
+        Feature::jingle(),
+        Feature::jingle_rtp(),
+        Feature::jingle_rtp_audio(),
+        Feature::jingle_rtp_video(),
+        Feature::waddle_livekit_transport(),
     ]
 }
 
@@ -129,18 +135,13 @@ mod tests {
     }
 
     #[test]
-    fn call_features_returns_nine_canonical_namespaces() {
+    fn call_features_omit_endpoint_features_the_domain_cannot_act_on() {
         let features = call_features();
         let expected = [
-            "urn:xmpp:jingle:1",
-            "urn:xmpp:jingle:apps:rtp:1",
-            "urn:xmpp:jingle:apps:rtp:audio",
-            "urn:xmpp:jingle:apps:rtp:video",
             "urn:xmpp:jingle-message:0",
             "urn:xmpp:extdisco:2",
             "urn:waddle:transports:livekit:0",
             "urn:waddle:call-lifecycle:0",
-            "urn:xmpp:jingle:muji:0",
         ];
         assert_eq!(features.len(), expected.len());
         for ns in expected {
@@ -149,16 +150,34 @@ mod tests {
                 "call_features() missing {ns}"
             );
         }
+        for ns in [
+            "urn:xmpp:jingle:1",
+            "urn:xmpp:jingle:apps:rtp:1",
+            "urn:xmpp:jingle:apps:rtp:audio",
+            "urn:xmpp:jingle:apps:rtp:video",
+            "urn:xmpp:jingle:muji:0",
+        ] {
+            assert!(
+                !features.contains(&Feature::new(ns)),
+                "the server domain must not advertise {ns}"
+            );
+        }
     }
 
     #[test]
-    fn call_features_advertises_muji_with_backing_handler() {
-        // XEP-0272's `urn:xmpp:jingle:muji:0` IQ surface is
-        // implemented as a Muji branch in the Jingle dispatcher
-        // (session-initiate to mixer JID + `<muji room='…'/>`).
-        // Advertising it is correct per the CLAUDE.md rule
-        // "advertised feature must have testable backing behavior."
-        let features = call_features();
-        assert!(features.contains(&Feature::muji()));
+    fn calls_mixer_features_advertise_the_muji_responder_surface() {
+        // XEP-0272's `urn:xmpp:jingle:muji:0` surface is implemented
+        // by the Muji branch of the Jingle dispatcher, whose responder
+        // is the `calls.<domain>` mixer.
+        let features = calls_mixer_features();
+        for ns in [
+            "urn:xmpp:jingle:muji:0",
+            "urn:xmpp:jingle:1",
+            "urn:xmpp:jingle:apps:rtp:1",
+            "urn:xmpp:jingle:apps:rtp:audio",
+            "urn:xmpp:jingle:apps:rtp:video",
+        ] {
+            assert!(features.contains(&Feature::new(ns)), "mixer missing {ns}");
+        }
     }
 }

@@ -1708,6 +1708,7 @@ fn advertised_feature_vars() -> BTreeSet<String> {
             waddle_xmpp_core::types::Moderation::Unmoderated,
         ))
         .chain(waddle_xmpp::disco::info::call_features())
+        .chain(waddle_xmpp::disco::info::calls_mixer_features())
         .chain(waddle_xmpp::pubsub::pep_features())
         .chain([waddle_xmpp::disco::Feature::new("jabber:iq:search")])
         .map(|feature| feature.0)

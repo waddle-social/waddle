@@ -215,27 +215,28 @@ fn is_moderation_namespace(ns: &str) -> bool {
     ns.starts_with("urn:xmpp:message-moderate:")
 }
 
+/// Drop forged moderation elements below `element`.
+///
+/// A parsed element tree never holds two adjacent text nodes, and the ingress
+/// substrate relies on that: it compares the in-memory message with the copy it
+/// decoded from its stored XML, and `minidom` equality counts text nodes. Text
+/// that surrounded a removed child (pretty-printed indentation) is therefore
+/// merged back into one node instead of being left as two, which made the stored
+/// copy compare unequal and the message be refused as a content conflict.
 fn prune_forged_moderation_children(element: &mut Element) {
-    let mut removed = false;
     for node in element.take_nodes() {
         match node {
             minidom::Node::Element(mut child) => {
                 if is_moderation_namespace(child.ns().as_str())
                     || (child.ns().as_str() == NS_RETRACT && child.name() == "retracted")
                 {
-                    removed = true;
                     continue;
                 }
                 prune_forged_moderation_children(&mut child);
                 element.append_node(minidom::Node::Element(child));
             }
-            other => element.append_node(other),
+            minidom::Node::Text(text) => element.append_text(text),
         }
-    }
-    // Do not leave the indentation of removed children behind as the only
-    // content of an otherwise empty element.
-    if removed && element.children().next().is_none() && element.text().trim().is_empty() {
-        element.take_nodes();
     }
 }
 
