@@ -266,6 +266,8 @@ workflow: {
 				"flake.nix",
 				"flake.lock",
 				"cuenv.lock",
+				"env.cue",
+				"cue.mod/module.cue",
 				".github/workflows/waddle-ci-cache-benchmark.yml",
 			]
 		}

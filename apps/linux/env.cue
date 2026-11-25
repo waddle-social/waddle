@@ -32,7 +32,7 @@ schema.#Project & {
 	runtime: {
 		type:   "nix"
 		flake:  "../.."
-		output: "devShells.x86_64-linux.linux"
+		output: "linux"
 	}
 
 	cache: remote: wc.#NamespaceRemoteCache
