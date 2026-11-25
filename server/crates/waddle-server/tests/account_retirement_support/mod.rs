@@ -353,6 +353,7 @@ pub async fn occupied_room(server: &Server) -> (BareJid, BareJid, WsXmppClient, 
     let room = server.room("bob").await;
     let mut bobs = server.client("bob", "laptop").await;
     enter(&mut bobs, &room, "bob").await;
+    waddle_ws_test_support::iq::unlock_created_room(&mut bobs, room.as_str()).await;
     let mut alices = server.client("alice", "phone").await;
     enter(&mut alices, &room, "alice").await;
     receive(&mut bobs, |frame| {
