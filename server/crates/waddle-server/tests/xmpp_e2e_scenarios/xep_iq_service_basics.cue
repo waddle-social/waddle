@@ -370,7 +370,7 @@ scenario: #Scenario & {
 								ns:   "jabber:x:data"
 								attrs: {var: "q"}
 								children: [
-									#XmlElement & {name: "value", ns: "jabber:x:data"},
+									#XmlElement & {name: "value", ns: "jabber:x:data", text: "general"},
 								]
 							},
 						]

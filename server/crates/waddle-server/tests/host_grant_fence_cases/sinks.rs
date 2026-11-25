@@ -532,11 +532,7 @@ async fn channel_search_finds_a_managed_room_only_for_an_account_that_may_view_i
     let search = |id: &str| {
         build_search_request(
             Jid::from(MUC.parse::<BareJid>().expect("MUC service")),
-            &SearchRequest {
-                query: fixture.grants.scope.channel_id.clone(),
-                max: None,
-                rsm: None,
-            },
+            &SearchRequest::new(fixture.grants.scope.channel_id.clone()),
             id,
         )
     };
