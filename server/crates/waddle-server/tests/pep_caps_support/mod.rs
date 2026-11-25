@@ -31,7 +31,8 @@ pub async fn wait_for_event(
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && frame.contains(&format!(r#"node='{node}'"#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
+                        || frame.contains(&format!(r#"node="{node}""#)))
                 {
                     return Some(frame);
                 }
