@@ -427,15 +427,11 @@ impl WaddleWindow {
         let who = gtk::Box::new(gtk::Orientation::Vertical, 0);
         who.set_valign(gtk::Align::Center);
         who.set_hexpand(true);
-        let color = nick_color::hex(author.unwrap_or(&name));
         let name_label = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .use_markup(true)
-            .label(format!(
-                "<span foreground=\"{color}\" weight=\"bold\">{}</span>",
-                glib::markup_escape_text(&name)
-            ))
+            .label(nick_color::markup(author.unwrap_or(&name), &name, true))
             .build();
         who.append(&name_label);
         let mut meta: Vec<String> = Vec::new();

@@ -91,15 +91,8 @@ impl WaddleWindow {
         let in_room = self
             .current_conversation()
             .is_some_and(|conversation| conversation.kind == Kind::Room);
-        let color = nick_color::hex(nick_color::identifier(
-            in_room,
-            &item.sender,
-            jid.as_deref(),
-        ));
-        sender.set_markup(&format!(
-            "<span foreground=\"{color}\">{}</span>",
-            glib::markup_escape_text(&item.sender)
-        ));
+        let identifier = nick_color::identifier(in_room, &item.sender, jid.as_deref());
+        sender.set_markup(&nick_color::markup(identifier, &item.sender, false));
         let picture = jid.as_deref().and_then(|jid| self.avatar_texture(jid));
         avatar.set_custom_image(picture.as_ref());
         let clickable = jid.is_some() || in_room;

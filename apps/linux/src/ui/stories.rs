@@ -565,11 +565,9 @@ impl WaddleWindow {
             if !author.is_empty() {
                 self.watch_avatar(&viewer.avatar, &author);
             }
-            viewer.who.set_label(&format!(
-                "<span foreground=\"{}\" weight=\"bold\">{}</span>",
-                nick_color::hex(&author),
-                glib::markup_escape_text(&name)
-            ));
+            viewer
+                .who
+                .set_label(&nick_color::markup(&author, &name, true));
             viewer.when.set_label(
                 &story
                     .posted_ms
