@@ -26,7 +26,7 @@ function pinActionReferences(value: any): any {
 }
 
 type Workflow = Record<string, any>;
-export type Lane = { id: string; file: string; workflow: Workflow; paths?: string[] };
+export type Lane = { id: string; file: string; workflow: Workflow; paths?: string[]; mainOwner?: { file: string; paths: Bun.Glob[] } };
 
 // These verification workflows run on demand or after merge. The queue reuses
 // their jobs and the path filters of the matching project workflows. Only
@@ -44,6 +44,13 @@ const queueScopes: Record<string, string[]> = {
   ...Object.fromEntries(["android", "linux"].map(project => [
     `waddle-${project}-queuechecks`, [`waddle-${project}-pullrequest`, `waddle-${project}-default`],
   ])),
+};
+
+// The standalone Apple workflow and the server publisher each run the same
+// verification command as the corresponding candidate lane.
+const mainJobs: Record<string, { file: string; job: string }> = {
+  "waddle-apple-default": { file: "waddle-apple-default.yml", job: "apple-xmpp-client" },
+  "waddle-server-namespacerustchecks": { file: "waddle-server-default.yml", job: "mainTest" },
 };
 
 function triggerPaths(trigger: any, file: string): string[] | undefined {
@@ -95,14 +102,32 @@ export function readLanes(directory = workflowDirectory): Lane[] {
     } else {
       return [];
     }
-    return [{ id: name.replaceAll("-", "_"), file, workflow, paths }];
+    const lane: Lane = { id: name.replaceAll("-", "_"), file, workflow, paths };
+    const owner = mainJobs[name];
+    if (owner) {
+      const main = workflows.get(owner.file);
+      const push = main?.on?.push;
+      const filters = push && !push["paths-ignore"] && triggerPaths(push, owner.file);
+      if (main?.jobs[owner.job] && !main.jobs[owner.job].if && push?.branches?.length === 1 && push.branches[0] === "main" &&
+          filters?.length && filters.every((pattern: string) => simpleGlob.test(pattern))) {
+        lane.mainOwner = { file: owner.file, paths: filters.map((pattern: string) => new Bun.Glob(pattern)) };
+      }
+    }
+    return [lane];
   });
 }
+
+const graphInputs = new Set([
+  outputFile, "ci/rust-tests/queue-paths.cue", "ci/rust-tests/queue-paths.json", "scripts/sync-rust-tests.sh",
+  "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py",
+  "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py",
+]);
+const simpleGlob = /^(?:(?:[A-Za-z0-9_.-]+|\*\*)\/)*(?:[A-Za-z0-9_.-]+|\*\*|\*\.cue)$/;
 
 export function applicable(lane: Lane, files: string[]): boolean {
   // A graph or planner change exercises every lane. Source PR branch filters
   // are deliberately ignored: queue validation can conservatively add coverage.
-  if (files.some(file => [outputFile, "ci/rust-tests/queue-paths.json", "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py"].includes(file))) return true;
+  if (files.some(file => graphInputs.has(file))) return true;
   const patterns = lane.paths ?? lane.workflow.on.pull_request?.paths;
   if (!patterns) return true;
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== "string")) throw new Error(`Invalid paths in ${lane.file}`);
@@ -110,6 +135,25 @@ export function applicable(lane: Lane, files: string[]): boolean {
   // rather than risking a false negative. Checked-in patterns currently use *.
   if (patterns.some(pattern => /[!+\[\]{}()\\]/.test(pattern))) return true;
   return files.some(file => patterns.some(pattern => new Bun.Glob(pattern).match(file) || (!pattern.includes("*") && file.startsWith(pattern + "/"))));
+}
+
+export function selectLanes(lanes: Lane[], files: string[], mergingToMain: boolean): Lane[] {
+  // Classify unknown surfaces before moving work to main. Apple-only changes
+  // still belong to the Apple job even when main will execute that job.
+  const unknown = files.some(file => !lanes.some(lane => applicable(lane, [file])));
+  const selected = unknown ? lanes : lanes.filter(lane => applicable(lane, files));
+  if (!mergingToMain || files.length > 300 || files.some(file => graphInputs.has(file))) return selected;
+  return selected.filter(lane => {
+    const owner = lane.mainOwner;
+    if (!owner || !lane.paths?.every(pattern => simpleGlob.test(pattern))) return true;
+    if (files.includes(`.github/workflows/${lane.file}`) || files.includes(`.github/workflows/${owner.file}`)) return true;
+    if (owner.file === "waddle-server-default.yml" && files.some(file => file === "server/env.cue" || file === "namespace.cue")) return true;
+
+    // Every changed input for this lane must also trigger the owning workflow.
+    // Fixture-only and mixed fixture/source changes retain the candidate check.
+    const covered = (file: string) => owner.paths.some(glob => glob.match(file));
+    return !files.some(covered) || files.some(file => applicable(lane, [file]) && !covered(file));
+  });
 }
 
 export function jobIds(lane: Lane): string[] {
@@ -272,9 +316,8 @@ if (import.meta.main) {
     git(["merge-base", "--is-ancestor", base, sha]);
     const files = git(["diff", "--no-renames", "--name-only", "-z", base, sha]).split("\0").filter(Boolean);
     if (!files.length) throw new Error("Candidate diff is empty; refusing unverified no-op success");
-    const matches = lanes.filter(lane => applicable(lane, files));
-    // An unrecognized surface must not silently become a zero-job success.
-    const selected = files.some(file => !lanes.some(lane => applicable(lane, [file]))) ? lanes : matches;
+    const mergingToMain = process.env.GITHUB_EVENT_NAME === "merge_group" && event.merge_group?.base_ref === "refs/heads/main";
+    const selected = selectLanes(lanes, files, mergingToMain);
     appendFileSync(process.env.GITHUB_OUTPUT!, `base=${base}\n` + selected.map(lane => `${lane.id}=true\n`).join("") + `expected=${JSON.stringify(selected.flatMap(jobIds))}\n`);
     console.log(JSON.stringify({ candidate: sha, base, changedFiles: files, workflows: selected.map(lane => lane.file) }, null, 2));
   } else if (mode === "gate") {

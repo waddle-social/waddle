@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applicable, candidateBase, generate, jobIds, readLanes, verifyGate, type Lane } from "./integration-ci";
+import { applicable, candidateBase, generate, jobIds, readLanes, selectLanes, verifyGate, type Lane } from "./integration-ci";
 
 const lane = (paths?: string[]): Lane => ({ id: "example", file: "example.yml", workflow: {
   name: "example", on: { pull_request: paths ? { paths } : {} }, jobs: {
@@ -102,6 +102,44 @@ describe("graph parity", () => {
     const serverPr = lanes.find(lane => lane.file === "waddle-server-pullrequest.yml")!;
     expect(Object.keys(serverPr.workflow.jobs)).toEqual(["pullRequestChecks"]);
     expect(lanes.some(lane => Object.hasOwn(lane.workflow.jobs, "publishContainerImage"))).toBe(false);
+  });
+
+  test("main covers ordinary namespace tests and keeps fixture, graph and ambiguous changes on the queue", () => {
+    const lanes = readLanes();
+    const rust = lanes.find(lane => lane.file === "waddle-server-namespacerustchecks.yml")!;
+    const source = "server/crates/new-crate/src/lib.rs";
+    const fixture = "server/experiments/native-fixture/src/new.rs";
+    const queued = (files: string[], main = true) => selectLanes(lanes, files, main).includes(rust);
+    for (const path of [source, "server/Cargo.lock", "flake.lock", "infrastructure/waddle.cloud/rules/mimir/new.yaml"]) {
+      expect(queued([path]), path).toBe(false);
+    }
+    expect(queued(["website/src/unrelated.astro"])).toBe(false);
+    for (const files of [[fixture], ["server/experiments/grant-fence/Cargo.toml"], [fixture, source],
+      [source, "scripts/integration-ci.ts"], [source, "ci/rust-tests/queue-paths.cue"], ["namespace.cue"],
+      [".github/workflows/" + rust.file], [".github/workflows/waddle-server-default.yml", source],
+      [source, ...Array.from({length: 300}, (_, n) => `new/file-${n}`)]]) {
+      expect(queued(files), files[0]).toBe(true);
+    }
+    expect(queued([source], false)).toBe(true);
+    const unsupported = {...rust, paths: ["dir/[a-z]*"]};
+    expect(selectLanes([unsupported], [source], true)).toEqual([unsupported]);
+
+    // With no catch-all lane in this graph the unknown path selects all
+    // candidates. A demonstrated publisher match can still remove its repeat.
+    const unknown = "new-component/unknown.ext";
+    expect(selectLanes([rust], [unknown], true)).toEqual([rust]);
+    expect(selectLanes([rust], [unknown, source], true)).toEqual([]);
+  });
+
+  test("Apple sources stay classified while main runs the Swift, simulator and XCFramework checks", () => {
+    const lanes = readLanes();
+    const apple = lanes.find(lane => lane.file === "waddle-apple-default.yml")!;
+    const changed = ["apps/apple/WaddleKit/Sources/New.swift"];
+    const otherAffected = lanes.filter(lane => lane !== apple && applicable(lane, changed));
+    expect(selectLanes(lanes, changed, true)).toEqual(otherAffected);
+    expect(selectLanes(lanes, changed, false)).toContain(apple);
+    expect(selectLanes(lanes, ["server/crates/waddle-xmpp-core/src/new.rs"], true)).not.toContain(apple);
+    expect(apple.workflow.on.workflow_dispatch).toBeDefined();
   });
 
   test("removing a deferred workflow fails queue planning", () => {
@@ -249,8 +287,8 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
     git("config", "user.email", "integration@example.test");
     git("add", "."); git("commit", "-qm", "base");
     const base = git("rev-parse", "HEAD");
-    mkdirSync(join(directory, "new"));
-    renameSync(join(directory, "old/a\nfile.rs"), join(directory, "new/a\nfile.rs"));
+    mkdirSync(join(directory, "server/crates/new"), { recursive: true });
+    renameSync(join(directory, "old/a\nfile.rs"), join(directory, "server/crates/new/a\nfile.rs"));
     git("add", "-A"); git("commit", "-qm", "rename");
     const sha = git("rev-parse", "HEAD");
     const eventPath = join(directory, "event.json"), outputPath = join(directory, "output");
@@ -261,13 +299,18 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
     const expected = readFileSync(outputPath, "utf8").split("\n").find(line => line.startsWith("expected="))!;
     expect(JSON.parse(expected.slice("expected=".length)).filter((id: string) => id.startsWith("example__"))).toEqual(["example__build", "example__verify"]);
     const report = JSON.parse(result.stdout.toString());
-    expect(report.changedFiles).toEqual(["new/a\nfile.rs", "old/a\nfile.rs"]);
+    expect(report.changedFiles).toEqual(["old/a\nfile.rs", "server/crates/new/a\nfile.rs"]);
+    expect(report.workflows).toContain("waddle-server-namespacerustchecks.yml");
+    writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: {
+      head_sha: sha, base_sha: base, base_ref: "refs/heads/main",
+    } }));
     const thin = lane(["old/**"]);
     thin.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
     writeFileSync(join(directory, ".github/workflows/example.yml"), Bun.YAML.stringify(thin.workflow));
     const encodedPath = run([process.execPath, script, "plan"], env);
     expect(encodedPath.exitCode).toBe(0);
-    expect(JSON.parse(encodedPath.stdout.toString()).changedFiles).toEqual(["new/a\nfile.rs", "old/a\nfile.rs"]);
+    expect(JSON.parse(encodedPath.stdout.toString()).workflows).not.toContain("waddle-server-namespacerustchecks.yml");
+    expect(JSON.parse(encodedPath.stdout.toString()).changedFiles).toEqual(["old/a\nfile.rs", "server/crates/new/a\nfile.rs"]);
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: "f".repeat(40) } }));
     expect(run([process.execPath, script, "plan"], env).exitCode).not.toBe(0);
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: sha } }));

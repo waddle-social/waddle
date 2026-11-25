@@ -2,9 +2,7 @@
 
 `waddle-integration` runs on every merge-group `checks_requested` event and
 explicit workflow dispatch. Ordinary PR updates run one unfiltered `PR smoke` job on GitHub-hosted Ubuntu. It checks the candidate diff, parses changed sources and runs dependency-free contracts for the affected projects. The same check runs on the combined merge-group revision.
-The queue adds the affected server builds, default-feature Rust tests, XMPP
-compliance, Android Gradle tasks, Apple simulator and Swift builds, web client
-builds, and Linux and operator Rust checks. The PostgreSQL all-features shards
+The queue adds affected server builds, XMPP compliance, Android Gradle tasks, web client builds, and Linux and operator Rust checks. Affected main pushes run the Apple Swift, XCFramework and simulator tests. The server publication workflow runs the default-feature Rust suite. The queue also runs it when the change includes inputs outside the publisher, including native Cargo fixtures. The PostgreSQL all-features shards
 remain a main publish gate. **Its same-repository `integration`
 aggregate is candidate-controlled and is not eligible as the required trusted
 gate.** A candidate can edit the workflow, generator, adapter, tests or task
@@ -21,7 +19,7 @@ removed the separate human-review prerequisite. The [repository queue policy](..
 
 ## Coverage and candidate identity
 
-The planner derives queue paths from transitive CUE task inputs in `ci/rust-tests/queue-paths.cue` and the main workflow path filters listed in `scripts/integration-ci.ts`. The dispatch-only project workflows provide reusable verification jobs. Chat and operator each share one runner setup for their affected checks. Apple checks the native telemetry contract in its macOS lane. The planner copies only verification jobs from the listed sources. It
+The planner derives queue paths from transitive CUE task inputs in `ci/rust-tests/queue-paths.cue` and the main workflow path filters listed in `scripts/integration-ci.ts`. The dispatch-only project workflows provide reusable verification jobs. Chat and operator each share one runner setup for their affected checks. The PR smoke job checks native telemetry changes and the macOS lane repeats that contract on main. The planner copies only verification jobs from the listed sources. It
 preserves commands, runner sizes,
 dependencies, and internal failure checks. Generated verification jobs are capped
 at `contents: read` (or no permissions for a pure result check). They omit
@@ -52,8 +50,7 @@ candidate-controlled workflow or its task definitions authoritative.
 
 The planner compares the event's full base SHA with the exact candidate SHA.
 Missing objects, invalid event identity, non-ancestor bases, and empty diffs fail.
-An unrecognized surface selects every lane. Planner or generator changes also
-select every lane. The aggregate requires planner success, every applicable job
+An unrecognized surface selects every candidate lane. For merge groups targeting main, the planner then checks whether the main workflow will run the same Apple or default-feature server job. It reads the main push filters and keeps the queue job for uncovered inputs, changed workflow definitions, unfamiliar filter syntax and diffs over 300 paths. Changes to the planner or generator exercise every lane. Manual validation keeps the complete candidate inventory. A newer matching Apple push can supersede unfinished Apple validation. The server publisher waits for the default-feature suite on each revision it publishes. The aggregate requires planner success, every applicable job
 success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
 reuse of prior PR results.

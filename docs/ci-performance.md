@@ -18,7 +18,7 @@ short contracts for affected projects without starting Nix, Gradle, a simulator,
 or a full Cargo build. SonarCloud reports separately through its GitHub App.
 
 The merge queue runs the affected verification lanes on the combined candidate.
-Main owns releases, deployments, and the all-features PostgreSQL publication gate.
+Main owns Apple Swift and simulator builds, releases, deployments, and the all-features PostgreSQL publication gate. Its server publication workflow also runs the default-feature nextest suite. The queue retains that suite for fixture and CI changes that need separate candidate coverage.
 The server lets active main verification finish while newer pending pushes coalesce.
 The [integration workflow](integration-ci.md) describes the checks and their trust
 boundary. The [queue policy](../infrastructure/github/README.md) describes the native
