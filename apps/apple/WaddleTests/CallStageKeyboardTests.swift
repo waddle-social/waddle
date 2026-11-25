@@ -184,16 +184,15 @@ final class CallStageKeyboardTests: XCTestCase {
         keyboard.setMicrophone = { [unowned self] on in
             microphone.append(on)
             if on { await withCheckedContinuation { allow = $0 } }
-            keyboard.isMicrophoneOn = on
         }
         _ = keyboard.handle(space(.keyDown))
         await settle()
         _ = keyboard.handle(space(.keyUp))
         await settle()
-        XCTAssertEqual(microphone, [true, false], "the opening has not finished, and already knows it is not wanted")
+        XCTAssertEqual(microphone, [true, false], "the opening has not finished, and the media session already knows it is not wanted")
         allow?.resume()
         await settle()
-        XCTAssertEqual(microphone, [true, false, false], "and whatever it opened is closed when it is done")
+        XCTAssertEqual(microphone, [true, false], "nothing more is said: a later choice of the person's is not overridden")
     }
 
     private final class FocusableView: NSView {

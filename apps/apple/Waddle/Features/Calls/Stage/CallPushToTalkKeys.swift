@@ -80,8 +80,6 @@ final class CallStageKeyboard {
     var isSpaceDown: @MainActor () -> Bool = {
         CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(CallStageKeyboard.spaceKeyCode))
     }
-    /// The microphone being opened for the key now down, or last down.
-    private var opening: Task<Void, Never>?
 
     func start(watching view: NSView) {
         self.view = view
@@ -162,22 +160,13 @@ final class CallStageKeyboard {
         if talk.release() { set(false) }
     }
 
+    /// Said at once, never queued behind an opening still under way: the
+    /// media session keeps the latest choice and an opening that finishes
+    /// late obeys it, whether that choice is our letting go or the person
+    /// unmuting some other way meanwhile.
     private func set(_ on: Bool) {
         let setMicrophone = setMicrophone
-        guard !on else {
-            opening = Task { await setMicrophone(true) }
-            return
-        }
-        // Said at once, not after the opening: an opening still waiting, as
-        // for the person to allow the microphone, sees that it is no longer
-        // wanted and stops. One that was already past asking opens anyway,
-        // so it is closed again when it is done, unless Space is down once more.
-        Task { [opening] in
-            await setMicrophone(false)
-            guard let opening else { return }
-            await opening.value
-            if !talk.isHolding { await setMicrophone(false) }
-        }
+        Task { await setMicrophone(on) }
     }
 
     private func isOnStage(_ pointInWindow: NSPoint) -> Bool {
