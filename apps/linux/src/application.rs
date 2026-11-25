@@ -181,3 +181,27 @@ impl Default for WaddleApplication {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    #[ignore = "requires a GTK display; run with xvfb-run and --ignored --test-threads=1"]
+    fn the_style_sheet_parses_without_errors_in_both_schemes() {
+        adw::init().expect("GTK display");
+        let sheet = include_str!("../data/style.css");
+        for scheme in [adw::ColorScheme::ForceLight, adw::ColorScheme::ForceDark] {
+            adw::StyleManager::default().set_color_scheme(scheme);
+            let errors = Rc::new(RefCell::new(Vec::new()));
+            let provider = gtk::CssProvider::new();
+            let sink = errors.clone();
+            provider.connect_parsing_error(move |_, section, error| {
+                sink.borrow_mut().push(format!("{section}: {error}"));
+            });
+            provider.load_from_string(sheet);
+            assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+        }
+    }
+}
