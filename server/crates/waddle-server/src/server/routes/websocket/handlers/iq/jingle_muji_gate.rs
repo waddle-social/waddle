@@ -589,6 +589,57 @@ pub(super) fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJi
     muji.room
 }
 
+/// The `sid` of a Jingle IQ with the given `action` addressed to the
+/// calls mixer of `domain`, when it carries no `<muji/>` child.
+fn plain_mixer_jingle_sid(iq: &Iq, domain: &str, action: &str) -> Option<String> {
+    let Iq::Set { payload, to, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE
+        || payload.name() != "jingle"
+        || payload.attr("action") != Some(action)
+        || find_muji(payload).is_some()
+        || to.as_ref()?.to_bare()
+            != waddle_xmpp::protocol::handlers::jingle::calls_mixer_jid(domain)
+    {
+        return None;
+    }
+    payload.attr("sid").map(str::to_owned)
+}
+
+/// The `sid` of a plain (`<muji/>`-less) Jingle `session-terminate`
+/// addressed to the calls mixer of `domain`.
+pub(super) fn plain_mixer_terminate_sid(iq: &Iq, domain: &str) -> Option<String> {
+    plain_mixer_jingle_sid(iq, domain, "session-terminate")
+}
+
+/// The `(sid, room)` of a Muji `session-initiate`.
+pub(super) fn muji_initiate_session(iq: &Iq) -> Option<(String, BareJid)> {
+    let room = muji_session_initiate_room(iq)?;
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    Some((payload.attr("sid")?.to_owned(), room))
+}
+
+/// `iq` with the `<muji room='...'/>` marker of the session's room added,
+/// so a terminate that named its session by `sid` alone is handled exactly
+/// like one that carried the room. Applied to the replica-local copy only;
+/// the client's stanza is not altered on the wire.
+pub(super) fn with_muji_room(iq: &Iq, room: &BareJid) -> Iq {
+    let mut iq = iq.clone();
+    if let Iq::Set { payload, .. } = &mut iq {
+        payload.append_child(
+            Muji {
+                room: Some(room.clone()),
+                ..Muji::default()
+            }
+            .to_element(),
+        );
+    }
+    iq
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
