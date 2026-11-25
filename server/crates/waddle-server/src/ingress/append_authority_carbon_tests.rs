@@ -90,7 +90,16 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             received_at: None,
             authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
-        let original = &submission.plan.sanitized_message;
+        // XEP-0313 4.1.1: a received carbon forwards the recipient's copy,
+        // which omits the sender's archive stamp.
+        let mut original_copy = submission.plan.sanitized_message.clone();
+        if kind == CarbonKind::Received {
+            waddle_xmpp_core::xep0359::remove_stanza_ids_by(
+                &mut original_copy,
+                &submission.sender.to_bare().into(),
+            );
+        }
+        let original = &original_copy;
         let carbon = wrapper(original, &owner, &target, kind);
         let reference =
             IngressAppendObligationRef::for_message(Some(&context), &carbon).expect("carbon key");
@@ -222,6 +231,8 @@ async fn archive_free_carbon_stamps(fixture: IngressFixture) {
         let original = &submission.plan.sanitized_message;
         let mut inner = original.clone();
         if kind == CarbonKind::Received {
+            // XEP-0313 4.1.1: the recipient's copy omits the sender's stamp.
+            waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut inner, &sender.clone().into());
             add_stanza_id(
                 &mut inner,
                 &StanzaId::new("recipient-stamp", owner.clone().into()),

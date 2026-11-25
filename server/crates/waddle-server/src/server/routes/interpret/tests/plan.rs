@@ -70,10 +70,23 @@ async fn offline_dm_plans_both_archives_and_inboxes_without_writes() {
     assert_personal_writes(&plan.plan, &"bob@example.com".parse().expect("recipient"));
     let recipient_archive = plan.plan.iter().find(|item| matches!(&item.effect,
         Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect { archive, .. })) if archive == &"bob@example.com".parse::<jid::BareJid>().expect("recipient"))).expect("recipient archive");
-    for owner in ["alice@example.com", "bob@example.com"] {
-        assert!(recipient_archive.dependencies.iter().any(|dependency| matches!(dependency,
-            PlanEffectDependency::AfterArchive { archive, .. } if archive == &owner.parse::<jid::BareJid>().expect("archive owner"))), "recipient archive payload must track every embedded stanza ID");
-    }
+    // XEP-0313 4.1.1: the recipient copy carries only the recipient's own
+    // archive stamp, so its payload tracks the recipient archive alone.
+    let tracks = |owner: &str| {
+        let owner: jid::BareJid = owner.parse().expect("archive owner");
+        recipient_archive.dependencies.iter().any(|dependency| {
+            matches!(dependency,
+            PlanEffectDependency::AfterArchive { archive, .. } if archive == &owner)
+        })
+    };
+    assert!(
+        tracks("bob@example.com"),
+        "recipient archive payload must track its own stanza ID"
+    );
+    assert!(
+        !tracks("alice@example.com"),
+        "recipient archive payload must not embed the sender archive stanza ID"
+    );
 
     let pending_effect = plan
         .plan

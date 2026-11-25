@@ -525,6 +525,7 @@ async fn authorize_direct_stanza(
     if super::recovery_rebuild::rebuildable_direct_route(&envelope, intents, intent) {
         let mut expected = envelope.message().clone();
         let recipient = target.to_bare();
+        super::recorded::withhold_sender_archive_stamp(&mut expected, &recipient);
         let mut archived_recipient = false;
         for intent in intents {
             if let IngressEffectIntent::ArchiveAuthoritative {

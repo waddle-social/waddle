@@ -283,6 +283,11 @@ fn archived_submission(fixture: &IngressFixture, stamp: &str) -> IngressSubmissi
     let Stanza::Message(message) = stanza.as_mut() else {
         panic!("message")
     };
+    // XEP-0313 4.1.1: the recipient copy omits the sender's archive stamp.
+    waddle_xmpp_core::xep0359::remove_stanza_ids_by(
+        message,
+        &fixture.principal.bare_jid().clone().into(),
+    );
     add_stanza_id(
         message,
         &StanzaId::new(format!("{stamp}-{recipient}"), recipient.into()),
@@ -323,11 +328,9 @@ pub async fn cross_archive_retry(fixture: IngressFixture) {
         .expect("SM XML");
     let delivered = xmpp_parsers::message::Message::try_from(element).expect("delivered message");
     let stamps = extract_stanza_ids(&delivered);
-    assert_eq!(stamps.len(), 2);
-    assert!(stamps.contains(&StanzaId::new(
-        "recorded-stamp-romeo@example.com",
-        fixture.principal.bare_jid().clone().into()
-    )));
+    assert_eq!(stamps.len(), 1);
+    let sender_archive = jid::Jid::from(fixture.principal.bare_jid().clone());
+    assert!(stamps.iter().all(|stamp| stamp.by != sender_archive));
     assert!(stamps.contains(&StanzaId::new(
         "recorded-stamp-juliet@example.com",
         b.to_bare().into()

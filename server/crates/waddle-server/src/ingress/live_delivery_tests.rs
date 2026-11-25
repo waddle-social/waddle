@@ -583,6 +583,11 @@ async fn unarchived_recipient_stamp(hint: Option<waddle_xmpp::xep::xep0334::Hint
         authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     let mut delivered = submission.plan.sanitized_message.clone();
+    // XEP-0313 4.1.1: the recipient copy omits the sender's archive stamp.
+    waddle_xmpp_core::xep0359::remove_stanza_ids_by(
+        &mut delivered,
+        &submission.sender.to_bare().into(),
+    );
     add_stanza_id(
         &mut delivered,
         &StanzaId::new("recipient-signal", target.to_bare().into()),
