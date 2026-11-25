@@ -9,6 +9,7 @@ import 'context.dart';
 
 part 'admin_runtime.dart';
 part 'community_runtime.dart';
+part 'extension_routes_runtime.dart';
 
 /// Presentation commands are translated into the shared Rust client's typed
 /// verbs. Dart retains only account-fenced caches and UI projections.
@@ -37,6 +38,9 @@ class SurfaceRuntime {
   final _forms = <String, Set<String>>{};
   Future<void> _storyReadWrite = Future.value();
   List<Map<String, dynamic>>? _commands;
+  final _roomRoutes = <String, Map<String, dynamic>>{};
+  int _routeListRevision = 0;
+  final _routePages = <(String, String), Map<String, Map<String, dynamic>>>{};
   List<Map<String, dynamic>> _packs = [];
   static final _commandOwner = Object();
   int get _owner => Zone.current[_commandOwner] as int? ?? context.generation;
@@ -330,6 +334,10 @@ class SurfaceRuntime {
         return null;
       case 'stickers.create':
         return _createStickers(args);
+      case 'extensions.list':
+      case 'extensions.items':
+      case 'extensions.invoke':
+        return _extensionRoute(method, args);
       case 'slash.list':
         _commands ??= runtimeRows(await _rpc('discover_extension_commands'));
         return _commands!
@@ -807,6 +815,9 @@ class SurfaceRuntime {
     _avatars.clear();
     _avatarCurrent.clear();
     _forms.clear();
+    _roomRoutes.clear();
+    _routeListRevision++;
+    _routePages.clear();
     _commands = null;
     _packs = [];
   }

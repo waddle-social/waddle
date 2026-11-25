@@ -44,3 +44,16 @@ abstract interface class NotificationBackend {
   Future<void> callForeground(bool active, {bool video = false});
   Future<void> dispose();
 }
+
+abstract interface class FcmNotifications {
+  bool get fcmAvailable;
+  Future<void> initializeFcm(
+    Future<void> Function(NotificationPlatformEvent) receive,
+  );
+  Future<Map<String, dynamic>> subscribeFcm(String instance);
+  Future<void> retireFcm(String instance);
+}
+
+abstract interface class DesktopNotificationPresentation {
+  Future<void> present(String? token);
+}

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_background/flutter_background.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -57,7 +58,36 @@ void notificationResponseBackground(NotificationResponse response) async {
   await NotificationOwner.deliver(_response(response));
 }
 
-class AndroidNotifications implements NotificationBackend {
+class AndroidNotifications implements NotificationBackend, FcmNotifications {
+  static const _fcm = MethodChannel('social.waddle.flutter/fcm');
+  @override
+  bool fcmAvailable = false;
+
+  @override
+  Future<void> initializeFcm(
+    Future<void> Function(NotificationPlatformEvent) receive,
+  ) async {
+    try {
+      fcmAvailable = await _fcm.invokeMethod<bool>('available') == true;
+    } on MissingPluginException {
+      return;
+    }
+    _fcm.setMethodCallHandler((call) async {
+      if (call.method == 'event' && call.arguments is Map && !_disposed) {
+        await receive(Map<String, dynamic>.from(call.arguments as Map));
+      }
+    });
+  }
+
+  @override
+  Future<Map<String, dynamic>> subscribeFcm(String instance) async =>
+      Map<String, dynamic>.from(
+        (await _fcm.invokeMapMethod('subscribe', instance))!,
+      );
+  @override
+  Future<void> retireFcm(String instance) =>
+      _fcm.invokeMethod('unsubscribe', instance);
+
   final _notifications = FlutterLocalNotificationsPlugin();
   bool _disposed = false;
   bool _callStarted = false;
@@ -74,7 +104,11 @@ class AndroidNotifications implements NotificationBackend {
     required bool enabled,
     required bool visible,
     bool sound = true,
-  }) async {}
+  }) async {
+    if (fcmAvailable) {
+      await _fcm.invokeMethod('ready', enabled ? instance : null);
+    }
+  }
 
   @override
   Future<void> initialize(void Function(NotificationPlatformEvent) emit) async {
@@ -283,6 +317,10 @@ class AndroidNotifications implements NotificationBackend {
   @override
   Future<void> dispose() async {
     _disposed = true;
+    if (fcmAvailable) {
+      _fcm.setMethodCallHandler(null);
+      await _fcm.invokeMethod('ready');
+    }
   }
 
   @override

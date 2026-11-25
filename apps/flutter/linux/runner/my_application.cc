@@ -1,4 +1,5 @@
 #include "my_application.h"
+#include "screencast_portal.h"
 
 #include <flutter_linux/flutter_linux.h>
 
@@ -13,6 +14,20 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
 static void first_frame(FlView* view, gpointer) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+static void window_action(FlMethodChannel*, FlMethodCall* call, gpointer data) {
+  if (!g_str_equal(fl_method_call_get_name(call), "present")) {
+    fl_method_call_respond_not_implemented(call, nullptr);
+    return;
+  }
+  auto* window = GTK_WINDOW(data);
+  auto* token = fl_method_call_get_args(call);
+  if (fl_value_get_type(token) == FL_VALUE_TYPE_STRING) {
+    gtk_window_set_startup_id(window, fl_value_get_string(token));
+  }
+  gtk_window_present(window);
+  fl_method_call_respond_success(call, nullptr, nullptr);
 }
 
 static void activate(GApplication* app) {
@@ -34,6 +49,12 @@ static void activate(GApplication* app) {
   gtk_widget_show(GTK_WIDGET(view));
   g_signal_connect(view, "first-frame", G_CALLBACK(first_frame), nullptr);
   gtk_widget_realize(GTK_WIDGET(view));
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "social.waddle.flutter/window", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(channel, window_action, window, nullptr);
+  register_screencast_portal(view, g_application_get_dbus_connection(app));
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

@@ -151,14 +151,6 @@ pub(crate) use events::*;
         reason = "crate facade reexport; source guard checks allowed import context"
     )
 )]
-pub(crate) use extension_routes::*;
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::wildcard_imports,
-        reason = "crate facade reexport; source guard checks allowed import context"
-    )
-)]
 pub(crate) use helpers::*;
 #[cfg_attr(
     not(test),
@@ -194,10 +186,6 @@ const NS_ROSTER: &str = "jabber:iq:roster";
 const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
 const NS_VERSION: &str = "jabber:iq:version";
 const NS_USER_SEARCH: &str = "jabber:iq:search";
-const NS_ADHOC_COMMANDS: &str = "http://jabber.org/protocol/commands";
-const NS_WADDLE_EXTENSION_1: &str = "urn:waddle:extension:1";
-const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
-const EXTENSION_ROUTE_ITEM_LIMIT: u32 = 100;
 
 // ── XEP-0392 Consistent Color Generation ─────────────────────────────
 //

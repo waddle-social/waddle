@@ -3,20 +3,23 @@
 
 import re
 import subprocess
-import sys
+import os
 import time
 from xml.etree import ElementTree
 
 
-def main(adb: str, serial: str) -> None:
+PACKAGE = "social.waddle.flutter"
+
+
+def main() -> None:
     def shell(*args: str) -> str:
         return subprocess.check_output(
-            [adb, "-s", serial, "shell", *args], text=True, timeout=15,
+            ["adb", "shell", *args], text=True, timeout=15,
         )
 
     # This ATD supplies a small system UI with a single positive consent button.
     # Never accept an unrelated permission dialog or send input to a physical device.
-    if (not serial.startswith("emulator-")
+    if (not re.fullmatch(r"emulator-[0-9]+", os.environ.get("ANDROID_SERIAL", ""))
             or shell("getprop", "ro.build.version.sdk").strip() != "35"
             or shell("getprop", "ro.kernel.qemu").strip() != "1"):
         raise RuntimeError("Expected the disposable API 35 emulator")
@@ -38,10 +41,10 @@ def main(adb: str, serial: str) -> None:
 
     for _ in range(100):
         marker = subprocess.run(
-            [adb, "-s", serial, "exec-out", "run-as", "social.waddle.flutter", "cat", "cache/screen-capture.ready"],
+            ["adb", "exec-out", "run-as", PACKAGE, "cat", "cache/screen-capture.ready"],
             capture_output=True, timeout=5,
         )
-        if marker.stdout == b"active" and "social.waddle.flutter" in shell("dumpsys", "media_projection"):
+        if marker.stdout == b"active" and PACKAGE in shell("dumpsys", "media_projection"):
             break
         time.sleep(0.25)
     else:
@@ -53,8 +56,8 @@ def main(adb: str, serial: str) -> None:
     if "00000000" not in result or "ffffffff" in result.lower():
         raise RuntimeError(f"Android refused to stop the projection: {result}")
     for _ in range(100):
-        projecting = "social.waddle.flutter" in shell("dumpsys", "media_projection")
-        service = "ScreenCaptureService" in shell("dumpsys", "activity", "services", "social.waddle.flutter")
+        projecting = PACKAGE in shell("dumpsys", "media_projection")
+        service = "ScreenCaptureService" in shell("dumpsys", "activity", "services", PACKAGE)
         if not projecting and not service:
             print("Android revoked projection and the app retired its foreground service.")
             return
@@ -63,4 +66,4 @@ def main(adb: str, serial: str) -> None:
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:])
+    main()

@@ -2,6 +2,8 @@
 
 pub mod calendar;
 pub mod calendar_edit;
+pub mod extension_route_types;
+pub mod extension_routes;
 pub mod feed;
 pub mod pep_stories;
 pub mod plan_workspace;

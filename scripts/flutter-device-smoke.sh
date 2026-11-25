@@ -143,8 +143,12 @@ if [[ "$SMOKE_BOOTED" != true ]]; then
   exit 1
 fi
 # The ATD has no status bar. Its system projection-stop action requires a privileged caller.
-"$ADB" -s "$SERIAL" root
-"$ADB" -s "$SERIAL" wait-for-device
+for attempt in {1..5}; do
+  "$ADB" -s "$SERIAL" root || true
+  if timeout 15 "$ADB" -s "$SERIAL" wait-for-device && [[ "$("$ADB" -s "$SERIAL" shell id -u | tr -d '\r')" == 0 ]]; then break; fi
+  if [[ "$attempt" == 5 ]]; then echo "The ATD did not grant its system test shell." >&2; exit 1; fi
+  sleep 1
+done
 "$ADB" -s "$SERIAL" shell input keyevent 82
 "$ADB" -s "$SERIAL" shell settings put global window_animation_scale 0
 "$ADB" -s "$SERIAL" shell settings put global transition_animation_scale 0
@@ -153,22 +157,26 @@ fi
 cd "$REPO_ROOT/apps/flutter"
 # Capture is acknowledged only after the current app marker and a complete PNG.
 rm -f "$SMOKE_ARTIFACT/production.png" "$SMOKE_ARTIFACT/production.pending.png"
-capture_production_ui > "$SMOKE_ARTIFACT/capture.log" 2>&1 &
+(
+  capture_production_ui > "$SMOKE_ARTIFACT/capture.log" 2>&1
+  "$ADB" -s "$SERIAL" shell pm grant social.waddle.flutter android.permission.CAMERA
+  "$ADB" -s "$SERIAL" shell pm grant social.waddle.flutter android.permission.RECORD_AUDIO
+  export PATH="$ANDROID_HOME/platform-tools:$PATH" ANDROID_SERIAL="$SERIAL"
+  exec python3 "$REPO_ROOT/scripts/flutter-projection-smoke.py" > "$SMOKE_ARTIFACT/projection.log" 2>&1
+) &
 CAPTURE_PID=$!
 # Desktop test overrides must never hide a missing Android-packaged library.
 timeout 600 env -u WADDLE_FLUTTER_RUNTIME_LIBRARY flutter test \
-  integration_test/standalone_smoke_test.dart -d "$SERIAL" --no-pub --reporter expanded \
+  integration_test/android_smoke_test.dart -d "$SERIAL" --no-pub --reporter expanded \
   --dart-define="WADDLE_SMOKE_CAPTURE_TOKEN=$SMOKE_CAPTURE_TOKEN"
-if wait "$CAPTURE_PID"; then
-  CAPTURE_PID=''
-else
-  CAPTURE_PID=''
-  echo 'The production UI screenshot was not captured and acknowledged.' >&2
-  exit 1
-fi
-
-python3 "$REPO_ROOT/scripts/flutter-projection-smoke.py" "$ADB" "$SERIAL" > "$SMOKE_ARTIFACT/projection.log" 2>&1 &
-CAPTURE_PID=$!
-timeout 600 flutter test integration_test/android_screen_capture_test.dart -d "$SERIAL" --no-pub --reporter expanded
 wait "$CAPTURE_PID"
 CAPTURE_PID=''
+
+# Exercise the configured Firebase SDK and real Keystore using a synthetic
+# Firebase project. The instrumentation test never requests a Google token.
+cd "$REPO_ROOT/apps/flutter/android"
+ANDROID_SERIAL="$SERIAL" ./gradlew :app:connectedDebugAndroidTest --console=plain \
+  -PWADDLE_FIREBASE_PROJECT_ID=waddle-instrumentation \
+  -PWADDLE_FIREBASE_APP_ID=1:0:android:0 \
+  -PWADDLE_FIREBASE_API_KEY=instrumentation-only \
+  -PWADDLE_FIREBASE_SENDER_ID=0

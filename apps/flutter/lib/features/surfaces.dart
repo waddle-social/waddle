@@ -11,7 +11,6 @@ part 'admin_console.dart';
 part 'admin_directory.dart';
 part 'admin_forms.dart';
 
-
 Map<String, dynamic> _map(dynamic value) => value is Map
     ? value.map((key, value) => MapEntry(key.toString(), value))
     : <String, dynamic>{};

@@ -13,7 +13,11 @@ export XDG_RUNTIME_DIR="$scratch/run" XDG_DATA_HOME="$scratch/data"
 export XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache"
 export GDK_BACKEND=wayland WAYLAND_DISPLAY=waddle-smoke LIBGL_ALWAYS_SOFTWARE=1
 mkdir -m 700 "$XDG_RUNTIME_DIR" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
-dbus-run-session -- bash -eu -o pipefail <<'SESSION'
+bus_config=()
+if [[ -n "${WADDLE_DBUS_SESSION_CONFIG:-}" ]]; then
+  bus_config=(--config-file="$WADDLE_DBUS_SESSION_CONFIG")
+fi
+dbus-run-session "${bus_config[@]}" -- bash -eu -o pipefail <<'SESSION'
   weston --no-config --backend=headless --renderer=pixman --socket="$WAYLAND_DISPLAY" --idle-time=0 > "$XDG_RUNTIME_DIR/weston.log" 2>&1 &
   compositor=$!
   trap 'kill "$compositor" 2>/dev/null || true' EXIT

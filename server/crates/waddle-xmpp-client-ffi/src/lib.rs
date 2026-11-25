@@ -42,6 +42,10 @@ mod consistent_color;
 mod convert;
 mod error;
 mod extension_commands;
+#[cfg(feature = "serde")]
+mod flutter_extension_routes;
+#[cfg(feature = "serde")]
+pub use flutter_extension_routes::{WaddleExtensionRoute, WaddleExtensionRouteItem};
 mod group_dm;
 mod inbox_verbs;
 mod jid_parts;

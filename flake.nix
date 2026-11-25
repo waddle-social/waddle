@@ -1034,6 +1034,8 @@
             // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               # GCC's collect2 exceeds Linux's per-argument limit for native
               # Dart assets and the UniFFI cdylib in a long checkout path.
+              WADDLE_DBUS_SESSION_CONFIG = "${pkgs.dbus}/share/dbus-1/session.conf";
+              WADDLE_FFMPEG = "${pkgs.lib.getExe pkgs.ffmpeg}";
               CC = "${pkgs.clang}/bin/clang";
               CXX = "${pkgs.clang}/bin/clang++";
               "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" =
@@ -1066,6 +1068,7 @@
               pkgs.xdg-utils
               pkgs.weston
               pkgs.chromium
+              pkgs.ffmpeg
               pkgs.dbus
               pkgs.gnome-keyring
             ];

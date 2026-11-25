@@ -4,6 +4,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val firebaseNames = listOf("PROJECT_ID", "APP_ID", "API_KEY", "SENDER_ID")
+val firebaseSettings = firebaseNames.associateWith { name ->
+    val key = "WADDLE_FIREBASE_$name"
+    providers.gradleProperty(key).orElse(providers.environmentVariable(key)).orNull?.trim().orEmpty()
+}
+val firebaseConfigured = firebaseSettings.values.any { it.isNotEmpty() }
+require(!firebaseConfigured || firebaseSettings.values.all { it.isNotEmpty() }) {
+    "Configure all four WADDLE_FIREBASE settings for this Android package or leave them all unset"
+}
+
 val runtimeAbis = mapOf("android-arm64" to "arm64-v8a", "android-x64" to "x86_64")
 val targetPlatforms = providers.gradleProperty("target-platform").orNull?.split(",") ?: runtimeAbis.keys
 val targetAbis = targetPlatforms.mapNotNull(runtimeAbis::get)
@@ -28,7 +38,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures { resValues = firebaseConfigured }
+    sourceSets.getByName("main") {
+        java.srcDir(if (firebaseConfigured) "src/fcm/java" else "src/noFcm/java")
+    }
+    if (firebaseConfigured) sourceSets.getByName("androidTest").java.srcDir("src/fcmTest/java")
     defaultConfig {
+        if (firebaseConfigured) {
+            testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+            mapOf("google_app_id" to "APP_ID", "google_api_key" to "API_KEY",
+                "gcm_defaultSenderId" to "SENDER_ID", "project_id" to "PROJECT_ID").forEach { (resource, setting) ->
+                resValue("string", resource, firebaseSettings.getValue(setting))
+            }
+        }
+        manifestPlaceholders["fcmServiceEnabled"] = firebaseConfigured
         applicationId = "social.waddle.flutter"
         minSdk = 26
         targetSdk = flutter.targetSdkVersion
@@ -80,6 +103,13 @@ configurations.configureEach {
 }
 
 dependencies {
+    if (firebaseConfigured) {
+        androidTestImplementation("androidx.test.ext:junit:1.3.0")
+        androidTestImplementation("androidx.test:runner:1.7.0")
+        implementation("com.google.firebase:firebase-messaging:25.1.3")
+        implementation("org.unifiedpush.android:connector:3.3.5")
+        implementation("com.google.crypto.tink:tink-android:1.23.0")
+    }
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     testImplementation("junit:junit:4.13.2")
 }

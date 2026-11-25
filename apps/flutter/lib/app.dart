@@ -33,6 +33,9 @@ Future<void> perform(
   }
 }
 
+String _accountScope(WaddleBridge bridge) =>
+    'account:${bridge.session['serverOrigin'] ?? ''}/${bridge.session['jid']}';
+
 class WaddleShell extends StatelessWidget {
   const WaddleShell({super.key, required this.bridge});
   final WaddleBridge bridge;
@@ -42,7 +45,7 @@ class WaddleShell extends StatelessWidget {
     animation: bridge,
     builder: (context, _) => switch (bridge.session['state']) {
       'ready' => PresenceInput(
-        key: ValueKey('account:${bridge.session['jid']}'),
+        key: ValueKey(_accountScope(bridge)),
         bridge: bridge,
         child: _AccountNavigator(bridge: bridge),
       ),
@@ -397,7 +400,13 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
-  void _open(String jid, String name, bool group, {String? threadId}) {
+  void _open(
+    String jid,
+    String name,
+    bool group, {
+    String? threadId,
+    bool compose = false,
+  }) {
     final top = _observer.top;
     final current = top?.settings.arguments;
     if (top?.settings.name == 'conversation' &&
@@ -413,6 +422,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
         'title': name,
         'group': group,
         'threadId': ?threadId,
+        if (compose) 'compose': true,
       },
     );
   }
@@ -426,6 +436,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
       '${event['title'] ?? event['jid']}',
       event['group'] == true,
       threadId: event['threadId'] as String?,
+      compose: event['compose'] == true,
     );
     widget.bridge.consumeNavigation();
   }
@@ -442,6 +453,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
         title: arguments['title'] as String? ?? arguments['jid'] as String,
         group: arguments['group'] == true,
         threadId: arguments['threadId'] as String?,
+        compose: arguments['compose'] == true,
       ),
       'threads' => ThreadsScreen(bridge: bridge, onOpen: _open),
       'settings' => SettingsScreen(bridge: bridge),
@@ -466,7 +478,7 @@ class _AccountNavigatorState extends State<_AccountNavigator> {
     onPopWithResult: (_) => _navigator.currentState?.pop(),
     child: Navigator(
       key: _navigator,
-      restorationScopeId: 'account:${widget.bridge.session['jid']}',
+      restorationScopeId: _accountScope(widget.bridge),
       observers: [waddleRoutes, _observer],
       onGenerateRoute: _route,
     ),
@@ -481,12 +493,14 @@ class _ConversationPage extends StatefulWidget {
     required this.title,
     required this.group,
     this.threadId,
+    this.compose = false,
   });
   final WaddleBridge bridge;
   final String jid;
   final String title;
   final bool group;
   final String? threadId;
+  final bool compose;
   @override
   State<_ConversationPage> createState() => _ConversationPageState();
 }
@@ -505,6 +519,7 @@ class _ConversationPageState extends State<_ConversationPage> {
       title: widget.title,
       group: widget.group,
       threadId: widget.threadId,
+      focusComposer: widget.compose,
     );
     if (MediaQuery.sizeOf(context).width < 840) {
       return conversation;

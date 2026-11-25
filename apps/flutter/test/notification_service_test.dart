@@ -104,6 +104,32 @@ class FakeNotificationBackend implements NotificationBackend {
   }
 }
 
+class FakeFcmBackend extends FakeNotificationBackend
+    implements FcmNotifications {
+  @override
+  bool fcmAvailable = true;
+  String token = 'token-one';
+  final retired = <String>[];
+  late Future<void> Function(NotificationPlatformEvent) receive;
+  @override
+  Future<void> initializeFcm(
+    Future<void> Function(NotificationPlatformEvent) callback,
+  ) async {
+    receive = callback;
+  }
+
+  @override
+  Future<Map<String, dynamic>> subscribeFcm(String instance) async {
+    lastInstance = instance;
+    return {'registration_token': token, 'p256dh': 'key', 'auth': 'secret'};
+  }
+
+  @override
+  Future<void> retireFcm(String instance) async {
+    retired.add(instance);
+  }
+}
+
 class FakeNotificationContext implements RuntimeContext {
   @override
   String? jid = 'david@example.org';
@@ -192,6 +218,65 @@ ready({
 }
 
 void main() {
+  test(
+    'FCM uses typed device credentials, rotates tokens, fences delivery and can switch to UnifiedPush',
+    () async {
+      final backend = FakeFcmBackend();
+      final context = FakeNotificationContext();
+      final service = NotificationService(
+        context,
+        backend: backend,
+        delay: (_) async {},
+      );
+      addTearDown(service.dispose);
+      await service.initialize();
+      service.onEvent({'type': 'connected'});
+      await service.idle;
+      final instance = backend.lastInstance!;
+      Map<String, dynamic> registration() =>
+          context.calls.lastWhere((c) => c.$1 == 'register_push_device').$2;
+      expect(registration()['credentials'], {
+        'type': 'fcm',
+        'registration_token': 'token-one',
+        'p256dh': 'key',
+        'auth': 'secret',
+      });
+      expect(
+        context.calls.where((c) => c.$1 == 'fetch_push_vapid_public_key'),
+        isEmpty,
+      );
+      backend.token = 'token-two';
+      await backend.receive({'type': 'fcmTokenChanged', 'instance': instance});
+      expect(
+        runtimeMap(registration()['credentials'])['registration_token'],
+        'token-two',
+      );
+      final push = {
+        'type': 'push',
+        'transport': 'fcm',
+        'instance': instance,
+        'decrypted': true,
+        'content': utf8.encode(jsonEncode(payload)),
+      };
+      await backend.receive({...push, 'instance': 'old-recipient'});
+      await backend.receive({...push, 'decrypted': false});
+      expect(backend.notices, isEmpty);
+      await backend.receive(push);
+      expect(backend.notices, hasLength(1));
+      await service.invoke('push.choose');
+      expect(backend.retired, contains(instance));
+      expect(
+        context.calls.where((c) => c.$1 == 'fetch_push_vapid_public_key'),
+        isNotEmpty,
+      );
+      await backend.receive({
+        ...push,
+        'content': utf8.encode(jsonEncode({...payload, 'item': 'stale'})),
+      });
+      expect(backend.notices, hasLength(1));
+    },
+  );
+
   test(
     'a notification action from another issuer cannot reply as the same JID',
     () async {
@@ -717,6 +802,45 @@ void main() {
         isEmpty,
       );
       expect(backend.unsubscribed, isNotEmpty);
+      await service.dispose();
+    },
+  );
+
+  test(
+    'desktop notification actions mark the owned thread read or open its composer',
+    () async {
+      final (service, context, backend) = await ready();
+      await service.invoke('push.reconcile');
+      await service.idle;
+      final owned = {
+        ...payload,
+        'owner': context.jid,
+        'instance': backend.lastInstance,
+        'thread': 'thread-1',
+      };
+      Future<void> action(String id, Map<String, dynamic> target) =>
+          service.handleOwnerEvent({
+            'type': 'action',
+            'action': id,
+            'payload': target,
+          });
+      final previouslyCanceled = backend.canceled.length;
+      await action('markRead', {...owned, 'instance': 'retired'});
+      expect(
+        context.calls.where((call) => call.$1 == 'mark_inbox_read'),
+        isEmpty,
+      );
+      await action('markRead', owned);
+      expect(
+        context.calls.where((call) => call.$1 == 'mark_inbox_read').single.$2,
+        {'partner_jid': 'alex@example.org', 'thread_id': 'thread-1'},
+      );
+      expect(backend.canceled, hasLength(previouslyCanceled + 1));
+      final navigation = service.events.firstWhere(
+        (event) => event['topic'] == 'navigate',
+      );
+      await action('compose', owned);
+      expect((await navigation)['data'], containsPair('compose', true));
       await service.dispose();
     },
   );

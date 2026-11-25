@@ -12,6 +12,7 @@ import '../page_coverage_observer.dart';
 import 'gif_picker.dart';
 import 'message_media.dart';
 import 'trip_plan.dart';
+import 'room_extensions.dart';
 import 'verified_image.dart';
 
 /// Presentation only. Native conversation view models retain ownership of
@@ -24,6 +25,7 @@ class ConversationScreen extends StatefulWidget {
     required this.title,
     required this.group,
     this.threadId,
+    this.focusComposer = false,
   });
 
   final WaddleBridge bridge;
@@ -31,6 +33,7 @@ class ConversationScreen extends StatefulWidget {
   final String title;
   final bool group;
   final String? threadId;
+  final bool focusComposer;
 
   @override
   State<ConversationScreen> createState() => _ConversationScreenState();
@@ -47,6 +50,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   TextEditingController get _draft => _restorableDraft.value;
   final _scroll = ScrollController();
   final _focus = FocusNode();
+  late final StreamSubscription<Map<String, dynamic>> _replyNavigation;
   final _images = VerifiedImageCache();
   final _avatarBytes = <String, Uint8List>{};
   final _avatarPending = <String, Future<Uint8List?>>{};
@@ -153,6 +157,14 @@ class _ConversationScreenState extends State<ConversationScreen>
     WidgetsBinding.instance.addObserver(this);
     widget.bridge.addListener(_bridgeChanged);
     _scroll.addListener(_onScroll);
+    _replyNavigation = widget.bridge.navigation.listen((event) {
+      if (event['compose'] == true &&
+          event['jid'] == widget.jid &&
+          event['threadId'] == widget.threadId &&
+          _route?.isCurrent == true) {
+        _focus.requestFocus();
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _active) {
         unawaited(_open());
@@ -599,6 +611,7 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   @override
   void dispose() {
+    unawaited(_replyNavigation.cancel());
     _active = false;
     WidgetsBinding.instance.removeObserver(this);
     widget.bridge.removeListener(_bridgeChanged);
@@ -705,6 +718,12 @@ class _ConversationScreenState extends State<ConversationScreen>
                 if (widget.group)
                   _menuItem('members', 'Members', Icons.people_outline_rounded),
                 _menuItem('threads', 'Threads', Icons.forum_outlined),
+                if (widget.group && !_isGroupDm)
+                  _menuItem(
+                    'extensions',
+                    'Room extensions',
+                    Icons.extension_outlined,
+                  ),
                 if (widget.group && !_isGroupDm)
                   _menuItem('planning', 'Trip plan', Icons.map_outlined),
                 _menuItem('pins', 'Pinned messages', Icons.push_pin_outlined),
@@ -1841,7 +1860,10 @@ class _ConversationScreenState extends State<ConversationScreen>
         if (_dragOverComposer) setState(() => _dragOverComposer = false);
       },
       onDragDone: (details) {
-        if (!_canRead || _route?.isCurrent != true || _sending || _edit != null) {
+        if (!_canRead ||
+            _route?.isCurrent != true ||
+            _sending ||
+            _edit != null) {
           return;
         }
         final paths = details.files
@@ -2055,6 +2077,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                           child: TextField(
                             controller: _draft,
                             focusNode: _focus,
+                            autofocus: widget.focusComposer,
                             minLines: 1,
                             maxLines: 4,
                             textCapitalization: TextCapitalization.sentences,
@@ -2474,6 +2497,16 @@ class _ConversationScreenState extends State<ConversationScreen>
         await _members();
       case 'threads':
         await _threads();
+      case 'extensions':
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => RoomExtensionsScreen(
+              bridge: widget.bridge,
+              room: widget.jid,
+              showForm: _commandForm,
+            ),
+          ),
+        );
       case 'planning':
         await Navigator.of(context).push(
           MaterialPageRoute<void>(

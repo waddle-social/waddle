@@ -165,6 +165,12 @@
     "args": {},
     "result": "Result<Vec<WaddleExtensionCommand>, WaddleError>"
   },
+  "discover_extension_routes": {
+    "args": {
+      "user_jid": "Option<String>"
+    },
+    "result": "Result<Vec<WaddleExtensionRoute>, WaddleError>"
+  },
   "discover_topology": {
     "args": {},
     "result": "WaddleTopology"
@@ -249,6 +255,13 @@
       "before_id": "Option<String>"
     },
     "result": "Result<WaddleMamPage, WaddleError>"
+  },
+  "fetch_extension_route_items": {
+    "args": {
+      "route": "WaddleExtensionRoute",
+      "room_jid": "String"
+    },
+    "result": "Result<Vec<WaddleExtensionRouteItem>, WaddleError>"
   },
   "fetch_external_services": {
     "args": {},

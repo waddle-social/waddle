@@ -16,7 +16,12 @@ extension on SurfaceRuntime {
         return posts
           ..sort((left, right) => published(right).compareTo(published(left)));
       case 'community.post':
-        final address = _optional(args['link']);
+        var address = _optional(args['link']);
+        if (args['picture'] == true) {
+          final file = await _platform('file.pickFeedPicture');
+          if (file == null) return null;
+          address = _required(runtimeMap(file), 'url');
+        }
         final link = address == null
             ? null
             : Uri.tryParse(
@@ -32,7 +37,9 @@ extension on SurfaceRuntime {
         return _rpc('feed_publish', {
           'spaces_jid': service,
           'entry': {
-            'body': _required(args, 'body'),
+            'body': args['picture'] == true
+                ? _optional(args['body']) ?? ''
+                : _required(args, 'body'),
             'author': jid,
             if (link != null) 'link': link.toString(),
           },
@@ -96,7 +103,10 @@ extension on SurfaceRuntime {
         _storyReadWrite = pending.catchError((Object _) {});
         return pending;
       case 'community.publishStory':
-        final file = await _platform('file.pickStoryMedia');
+        final capture = args['capture'];
+        final file = capture is Map
+            ? await _platform('file.uploadStoryCapture', runtimeMap(capture))
+            : await _platform('file.pickStoryMedia');
         if (file == null) return null;
         final published = runtimeMap(
           await _rpc('publish_story', {

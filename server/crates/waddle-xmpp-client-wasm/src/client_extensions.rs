@@ -1,76 +1,54 @@
 //! Browser discovery of extension routes and retrieval of their PubSub-backed items.
-
 use super::{
-    build_disco_info_iq, build_disco_items_iq, build_extension_route_items_iq,
-    discover_extension_command_service, discovery, future_to_promise, jid_domain, js_error,
-    parse_extension_route_items_result, parse_extension_routes_from_info, send_iq_command,
-    to_js_value, wasm_bindgen, Jid, JsValue, Promise, WaddleClient, WaddleExtensionRoute,
-    EXTENSION_ROUTE_ITEM_LIMIT,
+    future_to_promise, js_error, send_iq_command, to_js_value, wasm_bindgen, JsValue, Promise,
+    WaddleClient,
 };
+use jid::{BareJid, Jid};
+use waddle_xmpp_client_community::extension_route_types::WaddleExtensionRoute;
+use waddle_xmpp_client_community::extension_routes::{self, RouteError};
+
+fn route_error(error: RouteError<JsValue>) -> JsValue {
+    match error {
+        RouteError::Transport(e) => e,
+        RouteError::Invalid => js_error("invalid extension route"),
+        RouteError::Malformed => js_error("unexpected extension route response or node"),
+        RouteError::Untrusted => js_error("unexpected extension service sender"),
+    }
+}
 
 #[wasm_bindgen]
 impl WaddleClient {
-    /// Discover extension routes for `user_jid`, defaulting to the configured account,
-    /// and resolve to route objects.
+    /// Discover the channel extension routes advertised for this account.
     pub fn discover_extension_routes(&self, user_jid: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let requested_jid = user_jid.unwrap_or_else(|| inner.borrow().config.jid.clone());
-            let jid: Jid = requested_jid
+            let id: Jid = user_jid
+                .unwrap_or_else(|| inner.borrow().config.jid.clone())
                 .parse()
-                .map_err(|err| js_error(format!("invalid JID: {err}")))?;
-            let domain = jid_domain(&jid.to_string());
-            let service_jid = discover_extension_command_service(inner.clone(), &domain).await;
-            let mut routes = Vec::new();
-
-            let items_result =
-                send_iq_command(inner.clone(), build_disco_items_iq(&service_jid, None)).await?;
-            let items = discovery::parse_disco_items_result(&items_result)
-                .ok_or_else(|| js_error("could not parse extension route disco#items result"))?;
-            for item in items {
-                let Some(node) = item.node.as_deref() else {
-                    continue;
-                };
-                let item_service_jid = item.jid.as_str();
-                let info_result = send_iq_command(
-                    inner.clone(),
-                    build_disco_info_iq(item_service_jid, Some(node)),
-                )
-                .await?;
-                if let Some(info) =
-                    discovery::parse_disco_info_result(&info_result, item_service_jid)
-                {
-                    routes.extend(parse_extension_routes_from_info(&info, item_service_jid));
-                }
-            }
-
-            if routes.is_empty() {
-                let info_result =
-                    send_iq_command(inner.clone(), build_disco_info_iq(&service_jid, None)).await?;
-                if let Some(info) = discovery::parse_disco_info_result(&info_result, &service_jid) {
-                    routes.extend(parse_extension_routes_from_info(&info, &service_jid));
-                }
-            }
-
+                .map_err(|e: jid::Error| js_error(e.to_string()))?;
+            let routes = extension_routes::discover(
+                |iq| send_iq_command(inner.clone(), iq),
+                id.domain().as_str(),
+            )
+            .await
+            .map_err(route_error)?;
             to_js_value(&routes)
         })
     }
 
-    /// Fetch at most 100 items from a route's state node after substituting `room_jid`
-    /// for `{room}`.
+    /// Read up to 100 items from the selected channel's route node.
     pub fn fetch_extension_route_items(&self, route: JsValue, room_jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let route: WaddleExtensionRoute = serde_wasm_bindgen::from_value(route)
-                .map_err(|err| js_error(format!("invalid extension route: {err}")))?;
-            let node = route.state_node.replace("{room}", &room_jid);
-            let iq = build_extension_route_items_iq(
-                &route.service_jid,
-                &node,
-                Some(EXTENSION_ROUTE_ITEM_LIMIT),
-            );
-            let result = send_iq_command(inner, iq).await?;
-            let items = parse_extension_route_items_result(&result);
+            let route: WaddleExtensionRoute =
+                serde_wasm_bindgen::from_value(route).map_err(|e| js_error(e.to_string()))?;
+            let room: BareJid = room_jid
+                .parse()
+                .map_err(|e: jid::Error| js_error(e.to_string()))?;
+            let items =
+                extension_routes::items(|iq| send_iq_command(inner.clone(), iq), &route, &room)
+                    .await
+                    .map_err(route_error)?;
             to_js_value(&items)
         })
     }

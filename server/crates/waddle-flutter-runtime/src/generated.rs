@@ -15,18 +15,19 @@ use waddle_xmpp_client_ffi::{
     WaddleBookmarkItem, WaddleCalendarEdit, WaddleCalendarItemInput,
     WaddleCallSessionTerminateOutcome, WaddleChatState, WaddleClient, WaddleDmBookmarkItem,
     WaddleExtensionCommand, WaddleExtensionCommandResult, WaddleExtensionFormField,
-    WaddleExternalService, WaddleFeedEntry, WaddleFeedEntryInput, WaddleFetchThreadsOptions,
-    WaddleGroupDmHistoryAccess, WaddleInCallPresenceFlags, WaddleInboxMessageContent,
-    WaddleInboxReadFilter, WaddleInboxResult, WaddleJidParts, WaddleJingleReason,
-    WaddleLinkPreviewLookup, WaddleMamPage, WaddleMdsDisplayedEntry, WaddleMessageAudience,
-    WaddleMucAffiliation, WaddleNotifyMode, WaddlePepProfile, WaddlePinEntry, WaddlePlanningItem,
-    WaddlePushDeviceCredentials, WaddlePushEnvironment, WaddlePushVapidLookup,
-    WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomConfig, WaddleRoomConfigPatch,
-    WaddleRoomMemberEntry, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome, WaddleSpaceRole,
-    WaddleStatusPreference, WaddleStickerPack, WaddleStory, WaddleStoryInput, WaddleStoryReactions,
-    WaddleStoryReads, WaddleStoryReadsInput, WaddleThreadsPage, WaddleTopology, WaddleTune,
-    WaddleUploadSlot, WaddleUserSearchEntry, WaddleVCard4, WaddleVEvent, WaddleVEventInput,
+    WaddleExtensionRoute, WaddleExtensionRouteItem, WaddleExternalService, WaddleFeedEntry,
+    WaddleFeedEntryInput, WaddleFetchThreadsOptions, WaddleGroupDmHistoryAccess,
+    WaddleInCallPresenceFlags, WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleInboxResult,
+    WaddleJidParts, WaddleJingleReason, WaddleLinkPreviewLookup, WaddleMamPage,
+    WaddleMdsDisplayedEntry, WaddleMessageAudience, WaddleMucAffiliation, WaddleNotifyMode,
+    WaddlePepProfile, WaddlePinEntry, WaddlePlanningItem, WaddlePushDeviceCredentials,
+    WaddlePushEnvironment, WaddlePushVapidLookup, WaddleRegisterDeviceResult, WaddleRoomBot,
+    WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry, WaddleSendMessageOutcome,
+    WaddleSendOptions, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
+    WaddleSpaceRole, WaddleStatusPreference, WaddleStickerPack, WaddleStory, WaddleStoryInput,
+    WaddleStoryReactions, WaddleStoryReads, WaddleStoryReadsInput, WaddleThreadsPage,
+    WaddleTopology, WaddleTune, WaddleUploadSlot, WaddleUserSearchEntry, WaddleVCard4,
+    WaddleVEvent, WaddleVEventInput,
 };
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "args", rename_all = "snake_case")]
@@ -116,6 +117,9 @@ pub(crate) enum Operation {
         node: Option<String>,
     },
     DiscoverExtensionCommands {},
+    DiscoverExtensionRoutes {
+        user_jid: Option<jid::Jid>,
+    },
     DiscoverTopology {},
     DiscoverUploadService {},
     EditCalendarEvent {
@@ -161,6 +165,10 @@ pub(crate) enum Operation {
         thread_id: String,
         max_messages: u32,
         before_id: Option<String>,
+    },
+    FetchExtensionRouteItems {
+        route: WaddleExtensionRoute,
+        room_jid: jid::Jid,
     },
     FetchExternalServices {},
     FetchInbox {
@@ -575,6 +583,7 @@ pub(crate) enum Output {
     DisablePushDevice(bool),
     DisablePushNotifications(bool),
     DiscoverExtensionCommands(Vec<WaddleExtensionCommand>),
+    DiscoverExtensionRoutes(Vec<WaddleExtensionRoute>),
     DiscoverTopology(WaddleTopology),
     DiscoverUploadService(Option<String>),
     EnablePushNotifications(bool),
@@ -586,6 +595,7 @@ pub(crate) enum Output {
     FetchDmBookmarks(Vec<WaddleDmBookmarkItem>),
     FetchDmHistory(WaddleMamPage),
     FetchDmThreadHistory(WaddleMamPage),
+    FetchExtensionRouteItems(Vec<WaddleExtensionRouteItem>),
     FetchExternalServices(Vec<WaddleExternalService>),
     FetchInbox(WaddleInboxResult),
     FetchMdsDisplayed(Vec<WaddleMdsDisplayedEntry>),
@@ -848,6 +858,12 @@ impl Operation {
                     .await
                     .map_err(RuntimeError::from)?,
             )),
+            Self::DiscoverExtensionRoutes { user_jid } => Ok(Output::DiscoverExtensionRoutes(
+                client
+                    .discover_extension_routes(user_jid.map(|value| value.to_string()))
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
             Self::DiscoverTopology {} => {
                 Ok(Output::DiscoverTopology(client.discover_topology().await))
             }
@@ -944,6 +960,14 @@ impl Operation {
                     .await
                     .map_err(RuntimeError::from)?,
             )),
+            Self::FetchExtensionRouteItems { route, room_jid } => {
+                Ok(Output::FetchExtensionRouteItems(
+                    client
+                        .fetch_extension_route_items(route, room_jid.to_string())
+                        .await
+                        .map_err(RuntimeError::from)?,
+                ))
+            }
             Self::FetchExternalServices {} => Ok(Output::FetchExternalServices(
                 client
                     .fetch_external_services()

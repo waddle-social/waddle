@@ -98,7 +98,7 @@ packages:
     source: hosted
     version: "7.3.1"
   connectivity_plus_platform_interface:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: connectivity_plus_platform_interface
       sha256: "3c09627c536d22fd24691a905cdd8b14520de69da52c7a97499c8be5284a32ed"
@@ -154,7 +154,7 @@ packages:
     source: hosted
     version: "3.4.1"
   dart_webrtc:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: dart_webrtc
       sha256: "078e3c431500147e5cc52b3c6ea41ed538f30c7720cc2467d2186c9251e62716"
@@ -162,7 +162,7 @@ packages:
     source: hosted
     version: "1.8.2"
   dbus:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: dbus
       sha256: a48d5da28e89bd02196e80d81ed8d7954923d00a0f4a68cc20b575038f023383

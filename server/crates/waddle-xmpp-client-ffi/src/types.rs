@@ -1392,6 +1392,7 @@ pub struct WaddleExtensionFieldOption {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommandFormField {
     /// The `var` attribute; empty only for `fixed` fields.
+    #[cfg_attr(feature = "serde", serde(rename = "name", alias = "var"))]
     pub var: String,
     pub label: Option<String>,
     pub field_type: WaddleExtensionFieldType,
@@ -1448,6 +1449,7 @@ pub struct WaddleExtensionCommandResult {
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionFormField {
+    #[cfg_attr(feature = "serde", serde(rename = "name", alias = "var"))]
     pub var: String,
     pub values: Vec<String>,
 }

@@ -36,6 +36,8 @@ GIFs/stickers, profiles/status, room/group administration and voice/video calls.
 Dart orchestrates these features through typed Rust operations; Rust remains the
 protocol authority. LiveKit's Flutter SDK owns media rendering and capture.
 
+The [feature coverage matrix](FEATURE_PARITY.md) describes the shared workflows and their platform verification.
+
 ## Runtime boundaries
 
 `lib/transport` provides the same asynchronous RPC/event interface on native and
@@ -58,11 +60,19 @@ Unicode mention offsets. Encrypted transfers validate HTTPS slots, allowed
 headers, AES-GCM authentication and hashes before exposing bytes to a viewer.
 
 Notifications use independent push identities. Android supports UnifiedPush and
-an optional foreground connection; the browser uses a separate Web Push worker.
+an optional foreground connection. The browser uses a separate Web Push worker.
 A process owner coordinates plugin-created background engines with the visible
 application before restoring credentials or opening a connection. Inline replies
-use the same durable conversation send path. A new Firebase application has not
-been configured for this separate package; Google Play push is not advertised.
+use the same durable conversation send path.
+
+To build with Google Play push, provision a Firebase Android app for
+`social.waddle.flutter` and supply all four Gradle properties or environment
+variables: `WADDLE_FIREBASE_PROJECT_ID`, `WADDLE_FIREBASE_APP_ID`,
+`WADDLE_FIREBASE_API_KEY`, and `WADDLE_FIREBASE_SENDER_ID`. Configure the
+matching FCM application at the XMPP push service. A configured Android build
+defaults to FCM and offers UnifiedPush in Settings. With the four values unset,
+the APK contains no Firebase SDK. Incoming FCM data messages carry the RFC 8291
+ciphertext of the notification envelope.
 
 ## Development
 
@@ -91,8 +101,15 @@ GDK_BACKEND=wayland flutter run -d linux
 
 To build an optimized desktop bundle, run `flutter build linux --release`
 from the Flutter app directory. On x86_64 the executable is
-`build/linux/x64/release/bundle/waddle_flutter`. Keep its `lib` and `data`
-directories beside it. The CI bundle uses the repository's Nix dependencies.
+`build/linux/x64/release/bundle/waddle_flutter`. Keep `lib`, `libexec` and `data`
+beside it. The CI bundle uses the repository's Nix dependencies. The bundled
+FFmpeg records video stories with H.264 and PulseAudio. Wayland screen sharing
+uses the session's ScreenCast portal and PipeWire. To test actual frames and
+consent cleanup on a disposable compositor, run this from the repository root.
+
+```sh
+nix develop .#flutter --command bash scripts/flutter-wayland-capture-smoke.sh
+```
 
 For an independent Android APK, run these commands from the repository root.
 Gradle builds the Rust libraries for arm64 and x86_64 as part of the app build.

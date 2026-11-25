@@ -127,6 +127,18 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
+# The story recorder pipes camera frames and microphone audio into FFmpeg.
+if(DEFINED ENV{WADDLE_FFMPEG})
+  set(FFMPEG_EXECUTABLE "$ENV{WADDLE_FFMPEG}")
+else()
+  find_program(FFMPEG_EXECUTABLE NAMES ffmpeg)
+endif()
+if(NOT FFMPEG_EXECUTABLE)
+  message(FATAL_ERROR "FFmpeg with libx264 and PulseAudio is required for recording stories")
+endif()
+install(PROGRAMS "${FFMPEG_EXECUTABLE}" DESTINATION "${CMAKE_INSTALL_PREFIX}/libexec"
+  RENAME ffmpeg COMPONENT Runtime)
+
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 

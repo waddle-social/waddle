@@ -144,12 +144,27 @@ class NotificationService {
   int _epoch = 0;
   Stream<Map<String, dynamic>> get events => _events.stream;
   Future<void> get idle => _tail;
+  FcmNotifications? get _fcm =>
+      _backend is FcmNotifications ? _backend as FcmNotifications : null;
+  bool get _useFcm {
+    if (_fcm?.fcmAvailable != true) return false;
+    final selected = _state['transport'];
+    if (selected != null) return selected == 'fcm';
+    // An installed distributor with a registered endpoint remains the account's choice.
+    return runtimeMap(_state['endpoint'])['endpoint'] == null;
+  }
+
+  Future<void> _unsubscribe(String instance) async {
+    if (_fcm?.fcmAvailable == true) await _fcm!.retireFcm(instance);
+    await _backend.unsubscribe(instance);
+  }
 
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
     _visible = initiallyVisible;
     await _backend.initialize((event) => _schedule(handleOwnerEvent(event)));
+    await _fcm?.initializeFcm(handleOwnerEvent);
     onAccountChanged();
     _snapshot();
   }
@@ -191,13 +206,13 @@ class NotificationService {
     'pushEnabled':
         _backend.supported && _state['enabled'] == true && _permissionGranted,
     'localDeliveryOnly': _backend.localDeliveryOnly,
-    'fcmAvailable': false,
+    'fcmAvailable': _fcm?.fcmAvailable == true,
     'stayConnectedSupported': _backend.supportsBackground,
     'stayConnected': _background,
     'distributorLabel': _backend.localDeliveryOnly
         ? 'Desktop notifications'
         : _backend.supported
-        ? 'Web Push'
+        ? (_useFcm ? 'Google Play push' : 'Web Push')
         : 'Push unavailable on this platform',
     'status':
         status ??
@@ -238,7 +253,7 @@ class NotificationService {
     _schedule(_backend.account(null, null, enabled: false, visible: _visible));
     _schedule(_backend.clear());
     if (oldInstance != null && _owner == null) {
-      _schedule(_backend.unsubscribe(oldInstance));
+      _schedule(_unsubscribe(oldInstance));
     }
     final owner = _owner, epoch = _epoch;
     if (owner != null) {
@@ -426,40 +441,20 @@ class NotificationService {
         await _backend.settings();
         return null;
       case 'push.fcm':
-        throw UnsupportedError(
-          'Google Play push is not configured for the independent Flutter app.',
-        );
+        return _selectPushTransport(fcm: true);
       case 'push.callForeground':
         return _setCallForeground(args);
       case 'push.callState':
         return _updateCallState(args);
       case 'push.choose':
-        _permissionGranted = await _backend.requestPermission();
-        if (!_permissionGranted) {
-          throw StateError('Allow notifications in your device settings.');
-        }
-        final options = await _backend.distributors();
-        if (options.isEmpty) {
-          throw UnsupportedError(
-            'Install a UnifiedPush distributor to receive background messages.',
-          );
-        }
-        final selected = options.length == 1
-            ? options.single
-            : await selectDistributor?.call(options);
-        if (selected == null) return options;
-        if (!options.contains(selected)) {
-          throw ArgumentError('Unknown push distributor.');
-        }
-        await _backend.selectDistributor(selected);
-        return _serial(() => _reconcile(userInitiated: true));
+        return _selectPushTransport(fcm: false);
       case 'push.retire':
         final owner = _owner, instance = _instance, epoch = _epoch;
         return _serial(() async {
           if (owner == null || !_current(epoch, owner)) return;
           await _retireDevice();
           if (!_current(epoch, owner)) return;
-          if (instance != null) await _backend.unsubscribe(instance);
+          if (instance != null) await _unsubscribe(instance);
           if (_current(epoch, owner)) await _backend.clear();
         });
       case 'push.reconcile':
@@ -467,6 +462,57 @@ class NotificationService {
       default:
         throw UnsupportedError('Unknown notification command: $method');
     }
+  }
+
+  Future<dynamic> _selectPushTransport({required bool fcm}) async {
+    final owner = _owner, epoch = _epoch, instance = _instance;
+    if (owner == null || instance == null) throw StateError('Sign in first.');
+    if (fcm && _fcm?.fcmAvailable != true) {
+      throw UnsupportedError('Google Play push is unavailable.');
+    }
+    final permission = await _backend.requestPermission();
+    if (!_current(epoch, owner)) return null;
+    _permissionGranted = permission;
+    if (!permission) {
+      throw StateError('Allow notifications in your device settings.');
+    }
+    String? selected;
+    if (!fcm) {
+      final options = await _backend.distributors();
+      if (!_current(epoch, owner)) return null;
+      if (options.isEmpty) {
+        throw UnsupportedError(
+          'Install a UnifiedPush distributor to receive background messages.',
+        );
+      }
+      selected = options.length == 1
+          ? options.single
+          : await selectDistributor?.call(options);
+      if (!_current(epoch, owner)) return null;
+      if (selected == null) return options;
+      if (!options.contains(selected)) {
+        throw ArgumentError('Unknown push distributor.');
+      }
+    }
+    return _serial(() async {
+      if (!_current(epoch, owner)) return;
+      if (selected != null) await _backend.selectDistributor(selected);
+      if (!_current(epoch, owner)) return;
+      if (_useFcm != fcm) {
+        await _retireDevice();
+        if (!_current(epoch, owner)) return;
+        if (_useFcm) {
+          await _fcm!.retireFcm(instance);
+        } else {
+          await _backend.unsubscribe(instance);
+        }
+        if (!_current(epoch, owner)) return;
+        _state.remove('endpoint');
+      }
+      _state['transport'] = fcm ? 'fcm' : 'unifiedpush';
+      await context.persist();
+      if (_current(epoch, owner)) await _reconcile(userInitiated: true);
+    });
   }
 
   Future<void> _ensurePermission() async {
@@ -584,6 +630,10 @@ class NotificationService {
       return;
     }
     final action = event['action'];
+    if (action == 'open' || action == 'answer') {
+      await _present(event);
+      if (!_current(epoch, owner) || _callState['sid'] != sid) return;
+    }
     // Opening/full-screen display never implicitly accepts a call.
     if (action != 'answer' && action != 'decline' || callAction == null) return;
     _callActionsInFlight.add(sid);
@@ -642,7 +692,7 @@ class NotificationService {
     if (!_current(epoch, owner)) return;
     if (context.preferences['notificationsEnabled'] == false) {
       await _retireDevice();
-      if (_current(epoch, owner)) await _backend.unsubscribe(instance);
+      if (_current(epoch, owner)) await _unsubscribe(instance);
       _resolved = true;
       _snapshot('Notifications disabled');
       return;
@@ -660,6 +710,27 @@ class NotificationService {
           runtimeRows(_state['pendingDisables']).isNotEmpty) {
         return;
       }
+    }
+    if (_useFcm) {
+      _state['service'] = service;
+      late final Map<String, dynamic> credentials;
+      try {
+        credentials = await _fcm!.subscribeFcm(instance);
+      } catch (_) {
+        if (_current(epoch, owner)) {
+          _resolved = true;
+          _snapshot('Google Play push is unavailable on this device');
+        }
+        return;
+      }
+      if (!_current(epoch, owner)) return;
+      await _handle({
+        'type': 'endpoint',
+        'instance': instance,
+        'transport': 'fcm',
+        'endpoint': credentials,
+      });
+      return;
     }
     final rawLookup = await context.rpc('fetch_push_vapid_public_key', {
       'push_service_jid': service,
@@ -771,6 +842,19 @@ class NotificationService {
       return;
     }
     final epoch = _epoch, owner = _owner!;
+    if (event['type'] == 'fcmTokenChanged') {
+      if (_useFcm && event['instance'] == _instance && _connected) {
+        await _reconcile();
+      }
+      return;
+    }
+    if ((event['type'] == 'push' ||
+            event['type'] == 'endpoint' ||
+            event['type'] == 'unregistered' ||
+            event['type'] == 'registrationFailed') &&
+        ((event['transport'] == 'fcm') != _useFcm)) {
+      return;
+    }
     if (event['type'] == 'endpoint') {
       if (event['instance'] != _instance ||
           !_connected ||
@@ -779,9 +863,11 @@ class NotificationService {
       }
       final endpoint = runtimeMap(event['endpoint']);
       final uri = Uri.tryParse('${endpoint['endpoint'] ?? ''}');
-      if (uri == null ||
-          uri.scheme != 'https' ||
-          uri.host.isEmpty ||
+      final token = endpoint['registration_token'];
+      final valid = _useFcm
+          ? token is String && token.isNotEmpty && token.length <= 4096
+          : uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
+      if (!valid ||
           endpoint['p256dh'] is! String ||
           endpoint['auth'] is! String) {
         return;
@@ -804,7 +890,10 @@ class NotificationService {
                 'push_service_jid': service,
                 'app_id': 'social.waddle.flutter',
                 'environment': 'production',
-                'credentials': {'type': 'web_push', ...endpoint},
+                'credentials': {
+                  'type': _useFcm ? 'fcm' : 'web_push',
+                  ...endpoint,
+                },
               }),
             );
       if (!_current(epoch, owner)) return;
@@ -933,7 +1022,22 @@ class NotificationService {
           if (_pending.length < 32) _pending.add(event);
           return;
         }
+        if (event['action'] == 'markRead') {
+          await context.rpc('mark_inbox_read', {
+            'partner_jid': envelope.conversation,
+            'thread_id': envelope.thread,
+          });
+          if (!_current(epoch, owner)) return;
+          await _backend.cancel(_noticeId(envelope.conversation));
+          if (_current(epoch, owner)) await context.refreshHome();
+          return;
+        }
+        if (event['action'] == 'open' || event['action'] == 'compose') {
+          await _present(event);
+          if (!_current(epoch, owner)) return;
+        }
         _emit('navigate', {
+          if (event['action'] == 'compose') 'compose': true,
           'jid': envelope.conversation,
           'title': envelope.conversation,
           'group': envelope.group,
@@ -946,6 +1050,16 @@ class NotificationService {
         _resolved = true;
         _snapshot('Push distributor temporarily unavailable');
       }
+    }
+  }
+
+  Future<void> _present(Map<String, dynamic> event) async {
+    final backend = _backend;
+    if (backend is DesktopNotificationPresentation) {
+      final token = event['activationToken'];
+      await (backend as DesktopNotificationPresentation).present(
+        token is String ? token : null,
+      );
     }
   }
 

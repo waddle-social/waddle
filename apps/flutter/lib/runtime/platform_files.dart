@@ -154,6 +154,29 @@ class PlatformFileService {
 
   Future<dynamic> invoke(String method, Map<String, dynamic> args) async {
     switch (method) {
+      case 'file.pickFeedPicture':
+        final generation = context.generation;
+        final picture = await _pick(type: FileType.image);
+        requireGeneration(context, generation);
+        if (picture == null) return null;
+        if (!'${picture['media_type']}'.startsWith('image/')) {
+          throw const FormatException('Choose a picture for your post.');
+        }
+        return upload(picture, encrypt: false);
+      case 'file.uploadStoryCapture':
+        final bytes = _asBytes(args['bytes']);
+        final type = args['media_type'];
+        if (bytes.isEmpty ||
+            bytes.length > maxUploadBytes ||
+            !{
+              'image/png',
+              'image/jpeg',
+              'video/mp4',
+              'video/webm',
+            }.contains(type)) {
+          throw ArgumentError('Choose a photo or video up to 10 MiB.');
+        }
+        return upload({...args, 'bytes': bytes}, encrypt: false);
       case 'file.pickStoryMedia':
         final generation = context.generation;
         final picked = await _pick(type: FileType.media);

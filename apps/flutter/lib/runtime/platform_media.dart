@@ -5,6 +5,8 @@ import 'package:livekit_client/livekit_client.dart' as lk;
 
 import '../features/call_stage.dart';
 import 'call_screen_share.dart';
+import 'call_connectivity_stub.dart'
+    if (dart.library.io) 'call_connectivity_io.dart';
 import 'context.dart';
 
 abstract class CallMedia extends ChangeNotifier {
@@ -180,6 +182,8 @@ class LiveKitCallMedia extends CallMedia {
           })
           .whereType<lk.RTCIceServer>()
           .toList();
+      await prepareCallConnectivity();
+      if (epoch != _epoch || _room != next) return;
       await next.connect(
         join['url'] as String,
         join['token'] as String,

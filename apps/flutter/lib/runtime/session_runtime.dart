@@ -695,8 +695,6 @@ class SessionRuntime implements RuntimeContext {
                 'nick': _session['xmppLocalpart'],
               });
               _requireEventOwner(captured, source, epoch);
-              if (!_blockedRoomJoins.contains(bareJid(room)))
-                _joined.add(bareJid(room));
             }),
           );
         }

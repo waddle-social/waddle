@@ -4,9 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-/// A projection service belongs to the room that received Android's consent.
+/// The room owns its capture track, platform consent and teardown.
 class CallScreenShare {
   static const _service = MethodChannel('social.waddle.flutter/screen_capture');
+  static int _nextToken = 0;
   lk.Room? _serviceOwner;
   String? _serviceTrackId;
   lk.Room? _waitingOwner;
@@ -20,13 +21,13 @@ class CallScreenShare {
       (lk.lkPlatformIs(lk.PlatformType.web) && !lk.lkPlatformIsWebMobile());
 
   Future<void> release(lk.Room room, {String? trackId}) async {
-    if (identical(_waitingOwner, room) &&
-        _waitingForFrame?.isCompleted == false) {
-      _waitingForFrame!.complete(false);
-    }
     if (!identical(_serviceOwner, room) ||
         (trackId != null && trackId != _serviceTrackId)) {
       return;
+    }
+    if (identical(_waitingOwner, room) &&
+        _waitingForFrame?.isCompleted == false) {
+      _waitingForFrame!.complete(false);
     }
     _serviceTrackId = null;
     _serviceOwner = null;
@@ -73,18 +74,44 @@ class CallScreenShare {
       if (earlyStops.contains(trackId)) await onRevoked?.call();
       return track;
     }
-    final track = await lk.LocalVideoTrack.createScreenShareTrack();
-    if (!lk.lkPlatformIs(lk.PlatformType.linux)) return track;
+    if (!lk.lkPlatformIs(lk.PlatformType.linux)) {
+      return lk.LocalVideoTrack.createScreenShareTrack();
+    }
 
-    // On Wayland getDisplayMedia returns before the portal grants capture.
-    // Keep the unpublished track local until a frame actually arrives.
+    // WebRTC returns a track before the Wayland picker grants capture.
+    // Publish only after the chosen source actually delivers video.
+    await _stopping;
+    if (!current()) return null;
     final firstFrame = Completer<bool>();
     final renderer = rtc.RTCVideoRenderer();
+    final token = ++_nextToken;
     _waitingForFrame = firstFrame;
     _waitingOwner = room;
+    _serviceOwner = room;
+    _serviceTrackId = null;
+    _service.setMethodCallHandler((call) async {
+      if (call.method == 'revoked' && call.arguments == token) {
+        if (!firstFrame.isCompleted) firstFrame.complete(false);
+        await onRevoked?.call();
+      }
+    });
+    lk.LocalVideoTrack? track;
     var ready = false;
     try {
-      if (!current()) return null;
+      final enumerate = await _service.invokeMethod<bool>('prepare', token);
+      if (enumerate == true) {
+        await rtc.desktopCapturer.getSources(types: [rtc.SourceType.Screen]);
+        final prepared = await _service
+            .invokeMethod<bool>('capture')
+            .timeout(const Duration(seconds: 10), onTimeout: () => false);
+        if (prepared != true) {
+          throw StateError('The desktop capture portal is unavailable.');
+        }
+      }
+      if (!current() || firstFrame.isCompleted) return null;
+      track = await lk.LocalVideoTrack.createScreenShareTrack();
+      _serviceTrackId = track.mediaStreamTrack.id;
+      if (!current() || firstFrame.isCompleted) return null;
       await renderer.initialize();
       renderer.onFirstFrameRendered = () {
         if (!firstFrame.isCompleted) firstFrame.complete(true);
@@ -104,9 +131,10 @@ class CallScreenShare {
       } finally {
         if (!ready) {
           try {
-            await track.stop();
+            await track?.stop();
           } finally {
-            await track.dispose();
+            await track?.dispose();
+            await release(room);
           }
         }
       }

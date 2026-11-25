@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../bridge.dart';
 import 'story_viewer.dart';
 import 'calendar_editor.dart';
+import 'story_composer.dart';
 import 'event_calendar.dart';
 
 enum CommunitySection {
@@ -84,13 +85,17 @@ class _CommunityScreenState extends State<CommunityScreen> {
   }
 
   Future<void> _compose() async {
+    final owner = widget.bridge.generation;
     final input = await showDialog<Map<String, dynamic>>(
       context: context,
+      useRootNavigator: false,
       builder: (_) => widget.section == CommunitySection.events
           ? const CalendarEditor()
-          : _CommunityComposer(section: widget.section),
+          : widget.section == CommunitySection.stories
+          ? StoryComposer(bridge: widget.bridge)
+          : const _FeedComposer(),
     );
-    if (!mounted || input == null) return;
+    if (!mounted || widget.bridge.generation != owner || input == null) return;
     final command = switch (widget.section) {
       CommunitySection.feed => 'community.post',
       CommunitySection.stories => 'community.publishStory',
@@ -184,6 +189,21 @@ class _CommunityScreenState extends State<CommunityScreen> {
               if (sources[row['source']] case final String source)
                 Text(source, style: Theme.of(context).textTheme.labelSmall),
               SelectableText('${row['body'] ?? ''}'),
+              if (link != null &&
+                  link.scheme == 'https' &&
+                  link.host.isNotEmpty &&
+                  link.userInfo.isEmpty &&
+                  RegExp(
+                    r'\.(png|jpe?g|gif|webp|avif)$',
+                    caseSensitive: false,
+                  ).hasMatch(link.path))
+                Image.network(
+                  link.toString(),
+                  height: 160,
+                  fit: BoxFit.contain,
+                  cacheWidth: 640,
+                  errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                ),
               if (link != null &&
                   {'https', 'http'}.contains(link.scheme) &&
                   link.host.isNotEmpty &&
@@ -313,39 +333,34 @@ class _CommunityScreenState extends State<CommunityScreen> {
   );
 }
 
-class _CommunityComposer extends StatefulWidget {
-  const _CommunityComposer({required this.section});
-  final CommunitySection section;
+class _FeedComposer extends StatefulWidget {
+  const _FeedComposer();
 
   @override
-  State<_CommunityComposer> createState() => _CommunityComposerState();
+  State<_FeedComposer> createState() => _FeedComposerState();
 }
 
-class _CommunityComposerState extends State<_CommunityComposer> {
+class _FeedComposerState extends State<_FeedComposer> {
   String _text = '', _link = '';
   @override
   Widget build(BuildContext context) {
-    final story = widget.section == CommunitySection.stories;
     return AlertDialog(
-      title: Text(widget.section.compose),
+      title: Text(CommunitySection.feed.compose),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           TextField(
             autofocus: true,
             maxLines: 3,
-            decoration: InputDecoration(
-              labelText: story ? 'Caption (optional)' : 'Post',
-            ),
+            decoration: const InputDecoration(labelText: 'Post'),
             onChanged: (value) => setState(() => _text = value.trim()),
           ),
-          if (!story)
-            TextField(
-              key: const ValueKey('post-link'),
-              decoration: const InputDecoration(labelText: 'Link (optional)'),
-              keyboardType: TextInputType.url,
-              onChanged: (value) => _link = value.trim(),
-            ),
+          TextField(
+            key: const ValueKey('post-link'),
+            decoration: const InputDecoration(labelText: 'Link (optional)'),
+            keyboardType: TextInputType.url,
+            onChanged: (value) => setState(() => _link = value.trim()),
+          ),
         ],
       ),
       actions: [
@@ -353,14 +368,21 @@ class _CommunityComposerState extends State<_CommunityComposer> {
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
+        TextButton.icon(
+          icon: const Icon(Icons.add_photo_alternate_outlined),
+          label: const Text('Post a picture'),
+          onPressed: _link.isNotEmpty
+              ? null
+              : () => Navigator.pop(context, {'picture': true, 'body': _text}),
+        ),
         FilledButton(
-          onPressed: !story && _text.isEmpty
+          onPressed: _text.isEmpty
               ? null
               : () => Navigator.pop(context, {
                   'body': _text,
                   if (_link.isNotEmpty) 'link': _link,
                 }),
-          child: Text(story ? 'Choose story media' : 'Publish'),
+          child: const Text('Publish'),
         ),
       ],
     );
