@@ -5,7 +5,7 @@ import 'storage.dart';
 
 /// This application's credential store. It never opens the Kotlin app's files,
 /// preference names, keychain groups or account database.
-class SecureRuntimeStorage implements RuntimeStorage {
+class SecureRuntimeStorage implements AccountKeyStorage {
   const SecureRuntimeStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
@@ -14,6 +14,14 @@ class SecureRuntimeStorage implements RuntimeStorage {
   // Each browser JS runtime gets a fresh resource. localStorage/sessionStorage
   // can be shared or cloned by another tab and must not select its XMPP resource.
   static String? _tabResource;
+
+  @override
+  Future<Iterable<String>> keysWithPrefix(String prefix) async {
+    final values = await _storage.readAll();
+    return values.keys
+        .where((key) => key.startsWith('$_prefix$prefix'))
+        .map((key) => key.substring(_prefix.length));
+  }
 
   @override
   Future<String?> read(String key) {

@@ -541,6 +541,17 @@ class SettingsScreen extends StatelessWidget {
                   onTap: () =>
                       Navigator.of(context).restorablePushNamed('admin'),
                 ),
+              if (bridge.session['canSwitchAccounts'] == true)
+                ListTile(
+                  leading: const Icon(Icons.switch_account_outlined),
+                  title: const Text('Switch or add account'),
+                  onTap: () async {
+                    await _command(context, bridge, 'session.park');
+                    if (context.mounted) {
+                      Navigator.of(context).popUntil((route) => route.isFirst);
+                    }
+                  },
+                ),
               ListTile(
                 leading: Icon(
                   Icons.logout_rounded,
@@ -1750,6 +1761,63 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
   late final Timer _timer;
   DateTime? _activeSince;
   WaddleBridge get bridge => widget.bridge;
+  Future<void> _pickDevice(String sid) async {
+    final available = await _command(context, widget.bridge, 'call.devices', {
+      'expectedSid': sid,
+    });
+    if (!mounted || available == null || widget.bridge.call['sid'] != sid) {
+      return;
+    }
+    final devices = _rows(available);
+    final choice = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            if (devices.isEmpty)
+              const ListTile(title: Text('No media devices available')),
+            for (final group in const {
+              'audioinput': 'Microphone',
+              'audiooutput': 'Audio output',
+              'videoinput': 'Camera',
+            }.entries)
+              if (devices.any((device) => device['kind'] == group.key)) ...[
+                ListTile(
+                  title: Text(
+                    group.value,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                for (final device
+                    in devices
+                        .where((device) => device['kind'] == group.key)
+                        .indexed)
+                  ListTile(
+                    title: Text(
+                      _text(device.$2['label']).isEmpty
+                          ? '${group.value} ${device.$1 + 1}'
+                          : _text(device.$2['label']),
+                    ),
+                    trailing: device.$2['selected'] == true
+                        ? const Icon(Icons.check)
+                        : null,
+                    onTap: () => Navigator.pop(context, device.$2),
+                  ),
+              ],
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    await _command(context, widget.bridge, 'call.selectDevice', {
+      'expectedSid': sid,
+      'kind': choice['kind'],
+      'id': choice['id'],
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1808,12 +1876,19 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
         _ => 'Connecting…',
       };
       final colors = Theme.of(context).colorScheme;
-      final showVideo = video && !incoming && !ended;
+      final showVideo =
+          (video ||
+              call['screenShareEnabled'] == true ||
+              call['remoteScreenShare'] == true) &&
+          !incoming &&
+          !ended;
       Widget control(
         String label,
         IconData icon,
         String command, {
         bool selected = false,
+        VoidCallback? action,
+        bool enabled = true,
       }) => SizedBox(
         width: 84,
         child: Column(
@@ -1831,9 +1906,12 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                 ),
               ),
               isSelected: selected,
-              onPressed: () => _command(context, bridge, 'call.$command', {
-                'expectedSid': sid,
-              }),
+              onPressed: !enabled
+                  ? null
+                  : action ??
+                        () => _command(context, bridge, 'call.$command', {
+                          'expectedSid': sid,
+                        }),
               icon: Icon(icon),
               tooltip: label,
               iconSize: 25,
@@ -2100,12 +2178,13 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                                 'microphone',
                                 selected: call['microphoneEnabled'] == false,
                               ),
-                              control(
-                                'Speaker',
-                                Icons.volume_up_rounded,
-                                'speaker',
-                                selected: call['speakerEnabled'] == true,
-                              ),
+                              if (call['speakerSupported'] != false)
+                                control(
+                                  'Speaker',
+                                  Icons.volume_up_rounded,
+                                  'speaker',
+                                  selected: call['speakerEnabled'] == true,
+                                ),
                               if (video)
                                 control(
                                   'Camera',
@@ -2121,6 +2200,25 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                                   Icons.cameraswitch_rounded,
                                   'flipCamera',
                                 ),
+                              if (state == 'active') ...[
+                                control(
+                                  'Devices',
+                                  Icons.tune,
+                                  'devices',
+                                  action: () => _pickDevice(sid),
+                                ),
+                                if (call['screenShareSupported'] == true)
+                                  control(
+                                    call['screenShareEnabled'] == true
+                                        ? 'Stop sharing'
+                                        : 'Share screen',
+                                    Icons.screen_share_outlined,
+                                    'screenShare',
+                                    selected:
+                                        call['screenShareEnabled'] == true,
+                                    enabled: call['screenShareBusy'] != true,
+                                  ),
+                              ],
                               if (call['group'] == true)
                                 control(
                                   call['handRaised'] == true

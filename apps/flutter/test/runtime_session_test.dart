@@ -24,6 +24,12 @@ class _Storage implements RuntimeStorage {
   }
 }
 
+class _AccountStorage extends _DelayedStorage implements AccountKeyStorage {
+  @override
+  Future<Iterable<String>> keysWithPrefix(String prefix) async =>
+      values.keys.where((key) => key.startsWith(prefix));
+}
+
 class _DelayedStorage extends _Storage {
   Completer<void>? accountWrite;
   @override
@@ -192,6 +198,77 @@ Future<void> _until(bool Function() condition, String operation) async {
 }
 
 void main() {
+  test(
+    'parking drains private state and restores the selected account after restart',
+    () async {
+      final store = _AccountStorage()..values['session'] = 'private-id';
+      final auth = _Auth();
+      SessionRuntime create() => SessionRuntime(
+        storage: store,
+        auth: auth,
+        authForServer: (_) => throw StateError('unexpected issuer'),
+        transportFactory: () async => _Transport(),
+        platformInvoker: (_, _) async => null,
+      );
+      final first = create();
+      await first.start();
+      first.persistent['unsent'] = 'draft';
+      store.accountWrite = Completer<void>();
+      final writing = first.persist();
+      await _flush();
+      final parking = first.invoke('session.park', {});
+      await _flush();
+      store.accountWrite!.complete();
+      await Future.wait([writing, parking]);
+      expect(store.values['session'], isNull);
+      expect(auth.revoked, isEmpty);
+      await first.dispose();
+
+      final app = create();
+      addTearDown(app.dispose);
+      await app.start();
+      expect(app.session['state'], 'signedOut');
+      expect(auth.sessionReads, 1);
+      final events = <Map<String, dynamic>>[];
+      final sub = app.events.listen(events.add);
+      addTearDown(sub.cancel);
+      await app.invoke('session.accounts', {});
+      await _flush();
+      final accounts =
+          events.lastWhere(
+                (event) => event['topic'] == 'accounts',
+              )['data']['saved']
+              as List;
+      expect(accounts.single, {
+        'origin': HttpAuthGateway.defaultBaseUri.origin,
+        'jid': 'me@example.org',
+      });
+      expect(events.toString(), isNot(contains('private-id')));
+      auth.readSession = (_) async => throw const AuthFailure(transient: true);
+      await expectLater(
+        app.invoke(
+          'session.resume',
+          Map<String, dynamic>.from(accounts.single as Map),
+        ),
+        throwsA(isA<AuthFailure>()),
+      );
+      auth.readSession = null;
+      await app.invoke(
+        'session.resume',
+        Map<String, dynamic>.from(accounts.single as Map),
+      );
+      expect(app.jid, 'me@example.org');
+      expect(app.persistent['unsent'], 'draft');
+      await app.invoke('session.logout', {});
+      expect(auth.revoked, ['private-id']);
+      expect(
+        store.values.keys.where((key) => key.startsWith('saved-account:')),
+        isEmpty,
+      );
+      expect(store.values['account:me@example.org'], isNull);
+    },
+  );
+
   test(
     'restoring a custom server never sends the default server its session',
     () async {

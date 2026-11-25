@@ -191,8 +191,9 @@ Future<void> bootWaddle({
     runtime.attachPlatformEvents(platformEvents.stream);
     bridge = WaddleBridge(
       commandInvoker: (method, args) async {
-        if (method == 'session.logout') {
-          // Endpoint retirement is best effort; local sign-out always completes.
+        if (method == 'session.logout' || method == 'session.park') {
+          final captured = runtime.generation;
+          // Retire the old endpoint before the transport releases its account.
           try {
             await notifications
                 .invoke('push.retire', const {})
@@ -200,6 +201,7 @@ Future<void> bootWaddle({
           } catch (_) {
             // Account generation invalidation also rejects any late callback.
           }
+          requireGeneration(runtime, captured);
         }
         final result = await runtime.invoke(method, args);
         if (method == 'preferences.set' &&

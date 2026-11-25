@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 
 import 'context.dart';
+import 'session_auth.dart';
 import 'notification_backend.dart';
 import 'notification_backend_stub.dart'
     if (dart.library.io) 'notification_backend_io.dart'
@@ -243,10 +244,9 @@ class NotificationService {
     if (owner != null) {
       _schedule(
         _serial(() async {
-          final digest = await Sha256().hash(utf8.encode(owner));
+          final instance = await _accountInstance(owner);
           if (!_current(epoch, owner)) return;
-          _instance =
-              'waddle-flutter-${digest.bytes.take(8).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
+          _instance = instance;
           for (final item
               in context.persistent['pushAnnouncedItems'] as List? ??
                   const []) {
@@ -454,10 +454,13 @@ class NotificationService {
         await _backend.selectDistributor(selected);
         return _serial(() => _reconcile(userInitiated: true));
       case 'push.retire':
+        final owner = _owner, instance = _instance, epoch = _epoch;
         return _serial(() async {
+          if (owner == null || !_current(epoch, owner)) return;
           await _retireDevice();
-          if (_instance != null) await _backend.unsubscribe(_instance!);
-          await _backend.clear();
+          if (!_current(epoch, owner)) return;
+          if (instance != null) await _backend.unsubscribe(instance);
+          if (_current(epoch, owner)) await _backend.clear();
         });
       case 'push.reconcile':
         return _serial(() => _reconcile(userInitiated: true));
@@ -483,7 +486,13 @@ class NotificationService {
   }
 
   Future<String> _accountInstance(String owner) async {
-    final digest = await Sha256().hash(utf8.encode(owner));
+    final origin = context.session['serverOrigin'];
+    // Keep the default deployment's existing registrations on upgrade.
+    final identity =
+        origin == null || origin == HttpAuthGateway.defaultBaseUri.origin
+        ? owner
+        : '$origin\n$owner';
+    final digest = await Sha256().hash(utf8.encode(identity));
     return 'waddle-flutter-${digest.bytes.take(8).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
   }
 

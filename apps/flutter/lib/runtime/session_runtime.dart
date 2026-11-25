@@ -9,6 +9,8 @@ import 'session_auth.dart';
 import 'storage.dart';
 import 'surfaces_runtime.dart';
 
+part 'session_accounts.dart';
+
 typedef PlatformInvoker =
     Future<dynamic> Function(String method, Map<String, dynamic> args);
 
@@ -430,8 +432,11 @@ class SessionRuntime implements RuntimeContext {
       'xmppLocalpart': credentials['xmpp_localpart'] ?? owner.split('@').first,
       'resource': _resource,
       'fullJid': '${bareJid(owner)}/$_resource',
-      if (auth is HttpAuthGateway)
-        'serverOrigin': (auth as HttpAuthGateway).baseUri.origin,
+      if (authForServer != null || auth is HttpAuthGateway)
+        'serverOrigin': authForServer != null
+            ? _server.origin
+            : (auth as HttpAuthGateway).baseUri.origin,
+      if (storage is AccountKeyStorage) 'canSwitchAccounts': true,
     };
     _clearAccountProjections();
     conversations.onAccountChanged();
@@ -1163,11 +1168,13 @@ class SessionRuntime implements RuntimeContext {
     }
   }
 
-  Future<void>? _serverChange;
+  Future<void>? _serverChange, _accountTransition;
 
   Future<void> _changeServer(String address) async {
     final create = authForServer;
-    if (create == null || session['state'] != 'signedOut') {
+    if (create == null ||
+        session['state'] != 'signedOut' ||
+        _accountTransition != null) {
       throw StateError('Sign out before changing servers.');
     }
     final selected = HttpAuthGateway.serverOrigin(address);
@@ -1339,7 +1346,21 @@ class SessionRuntime implements RuntimeContext {
     if (_disposed || _closing) {
       throw StateError('This application runtime is closed.');
     }
+    if (_accountTransition != null &&
+        (method.startsWith('login.') ||
+            method == 'session.logout' ||
+            method == 'session.retry')) {
+      return null;
+    }
     switch (method) {
+      case 'session.accounts':
+        final saved = await _savedAccounts();
+        if (session['state'] == 'signedOut') emit('accounts', {'saved': saved});
+        return null;
+      case 'session.park':
+        return _changeAccount(() => _parkAccount());
+      case 'session.resume':
+        return _changeAccount(() => _resumeAccount(args));
       case 'ready':
         for (final entry in _snapshots.entries.toList()) {
           emit(entry.key, entry.value);
@@ -1504,7 +1525,7 @@ class SessionRuntime implements RuntimeContext {
     return operation;
   }
 
-  Future<void> _signOut({bool revoke = true}) async {
+  Future<void> _signOut({bool revoke = true, bool park = false}) async {
     final credentials = _credentials;
     final owner = jid;
     final captured = generation;
@@ -1516,6 +1537,10 @@ class SessionRuntime implements RuntimeContext {
       }
       requireGeneration(this, captured);
     }
+    final activeKey = _serverKey('session');
+    final dataKey = _serverKey('account:$owner');
+    final savedKey = owner == null ? null : _savedAccountKey(_server, owner);
+    final snapshot = park ? jsonEncode(_persistent) : null;
     _generation++;
     _loginTicket++;
     _credentials = null;
@@ -1523,6 +1548,7 @@ class SessionRuntime implements RuntimeContext {
     _session = {
       'state': 'signedOut',
       if (authForServer != null) 'serverOrigin': _server.origin,
+      if (storage is AccountKeyStorage) 'canSwitchAccounts': true,
     };
     _clearAccountProjections();
     conversations.onAccountChanged();
@@ -1537,10 +1563,14 @@ class SessionRuntime implements RuntimeContext {
         await _retire();
       } finally {
         await _storageTail.catchError((Object _) {});
-        await storage.write(_serverKey('session'), null);
-        if (owner != null) {
-          await storage.write(_serverKey('account:$owner'), null);
+        if (savedKey != null && storage is AccountKeyStorage) {
+          await storage.write(
+            savedKey,
+            park ? credentials!['session_id'] as String : null,
+          );
         }
+        if (owner != null) await storage.write(dataKey, snapshot);
+        await storage.write(activeKey, null);
       }
     });
     _lifecycleTail = operation;

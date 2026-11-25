@@ -193,6 +193,35 @@ ready({
 
 void main() {
   test(
+    'a notification action from another issuer cannot reply as the same JID',
+    () async {
+      final replies = <String>[];
+      final (service, context, backend) = await ready(
+        reply: ({required jid, required group, threadId, required body}) async {
+          replies.add(body);
+        },
+      );
+      addTearDown(service.dispose);
+      final oldInstance = backend.lastInstance;
+      expect(oldInstance, isNotNull);
+      context.session['serverOrigin'] = 'https://second.example.org';
+      context.generation++;
+      service.onAccountChanged();
+      service.onEvent({'type': 'connected'});
+      await service.idle;
+      await service.idle;
+      expect(backend.lastInstance, isNot(oldInstance));
+      await service.handleOwnerEvent({
+        'type': 'action',
+        'action': 'reply',
+        'input': 'private',
+        'payload': {...payload, 'owner': context.jid, 'instance': oldInstance},
+      });
+      expect(replies, isEmpty);
+    },
+  );
+
+  test(
     'desktop messages use the active session without registering for push',
     () async {
       final context = FakeNotificationContext();

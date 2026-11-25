@@ -94,6 +94,11 @@ class _LoginState extends State<_Login> {
   @override
   void initState() {
     super.initState();
+    if (widget.bridge.session['canSwitchAccounts'] == true) {
+      unawaited(
+        widget.bridge.invoke('session.accounts').catchError((Object _) => null),
+      );
+    }
     unawaited(
       widget.bridge.invoke('login.providers').catchError((Object _) => null),
     );
@@ -116,6 +121,18 @@ class _LoginState extends State<_Login> {
             'Your community is one sign-in away.',
             style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
           ),
+          for (final account in records(
+            widget.bridge.topic('accounts')['saved'],
+          ))
+            ListTile(
+              leading: const Icon(Icons.account_circle_outlined),
+              title: Text('${account['jid']}'),
+              subtitle: Text('${account['origin']}'),
+              onTap: () => perform(
+                context,
+                () => widget.bridge.invoke('session.resume', account),
+              ),
+            ),
           if (widget.bridge.session['serverOrigin'] case final String origin)
             TextButton.icon(
               icon: const Icon(Icons.dns_outlined),
