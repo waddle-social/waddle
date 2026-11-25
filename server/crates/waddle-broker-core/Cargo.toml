@@ -9,15 +9,20 @@ description = "Pure-Rust tenant isolation domain types, storage/authz/admission 
 
 [dependencies]
 async-trait = "0.1"
+hex = { workspace = true }
+ring = "0.17"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 uuid = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = "3.27"
-tokio = { workspace = true }
 turso = { version = "0.8.4", default-features = false, features = ["fts"] }
 
 [lints]
