@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:waddle_flutter/bridge.dart';
 import 'package:waddle_flutter/features/story_camera.dart';
 import 'package:waddle_flutter/features/story_composer.dart';
 import 'package:waddle_flutter/runtime/story_recording.dart';
@@ -40,8 +41,9 @@ class _Clip implements StoryRecording {
 Future<void> composer(
   WidgetTester tester,
   Future<StoryCamera> Function(bool) open,
-  void Function(dynamic) result,
-) async {
+  void Function(dynamic) result, {
+  WaddleBridge? bridge,
+}) async {
   await tester.pumpWidget(
     MaterialApp(
       home: Builder(
@@ -51,7 +53,7 @@ Future<void> composer(
               result(
                 await showDialog<dynamic>(
                   context: context,
-                  builder: (_) => StoryComposer(open: open),
+                  builder: (_) => StoryComposer(open: open, bridge: bridge),
                 ),
               );
             },
@@ -104,6 +106,44 @@ void main() {
       expect(find.text('Publish story'), findsNothing);
     },
   );
+  for (final event in [
+    {
+      'topic': 'session',
+      'generation': 2,
+      'data': {'state': 'connected'},
+    },
+    {
+      'topic': 'call',
+      'generation': 1,
+      'data': {'state': 'incoming'},
+    },
+  ]) {
+    testWidgets('a ${event['topic']} change cancels an active recording', (
+      tester,
+    ) async {
+      final camera = _Camera();
+      final bridge =
+          WaddleBridge(
+            commandInvoker: (_, _) async {},
+            events: const Stream.empty(),
+          )..acceptEvent({
+            'topic': 'session',
+            'generation': 1,
+            'data': {'state': 'connected'},
+          });
+      addTearDown(bridge.dispose);
+      await composer(tester, (_) async => camera, (_) {}, bridge: bridge);
+      await tester.tap(find.text('Record video'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Record up to 10 seconds'));
+      await tester.pumpAndSettle();
+      bridge.acceptEvent(event);
+      await tester.pumpAndSettle();
+      expect(camera.closes, 1);
+      expect(camera.clip.cancelled, isTrue);
+      expect(find.text('Publish story'), findsNothing);
+    });
+  }
   testWidgets(
     'a denied camera falls back to the picker and keeps the caption',
     (tester) async {

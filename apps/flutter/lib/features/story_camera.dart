@@ -98,26 +98,31 @@ class _StoryCameraDialogState extends State<StoryCameraDialog>
   bool _working = false, _closing = false;
   Future<void> _operation = Future.value();
 
+  late final int? _owner;
+  late final bool _openedDuringCall;
+
   bool get _inCall => [
     'incoming',
     'outgoing',
     'connecting',
     'active',
   ].contains(widget.bridge?.call['state']);
-  void _callChanged() {
-    if (!_inCall || !mounted || _closing) return;
-    final route = ModalRoute.of(context);
-    if (route == null || !route.isActive) return;
-    _closing = true;
-    Navigator.of(context).removeRoute(route);
+  void _sessionChanged() {
+    if (widget.bridge?.generation != _owner ||
+        widget.bridge?.session['state'] == 'signedOut' ||
+        (!_openedDuringCall && _inCall)) {
+      _cancel();
+    }
   }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    widget.bridge?.addListener(_callChanged);
-    if (_inCall) {
+    _owner = widget.bridge?.generation;
+    _openedDuringCall = _inCall;
+    widget.bridge?.addListener(_sessionChanged);
+    if (_openedDuringCall) {
       _error = 'The camera is in use by a call. Choose existing media.';
     } else {
       _operation = _open();
@@ -153,14 +158,16 @@ class _StoryCameraDialogState extends State<StoryCameraDialog>
 
   void _cancel() {
     if (!mounted || _closing) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
     _closing = true;
-    Navigator.pop(context);
+    Navigator.of(context).removeRoute(route);
   }
 
   @override
   void dispose() {
     _closing = true;
-    widget.bridge?.removeListener(_callChanged);
+    widget.bridge?.removeListener(_sessionChanged);
     WidgetsBinding.instance.removeObserver(this);
     _limit?.cancel();
     unawaited(

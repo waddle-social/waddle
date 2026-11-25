@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:path_provider/path_provider.dart';
 
@@ -52,6 +52,20 @@ Future<StoryRecording> startVideo(
   final file = File('${temp.path}/story.mp4');
   try {
     if (Platform.isLinux) return await _linuxRecording(stream, temp, file);
+    if (Platform.isAndroid) {
+      const channel = MethodChannel('social.waddle.flutter/story_video');
+      final id = temp.path.split(Platform.pathSeparator).last;
+      await channel.invokeMethod<void>('start', {
+        'id': id,
+        'trackId': stream.getVideoTracks().first.id,
+        'portrait': renderer.videoHeight > renderer.videoWidth,
+      });
+      return _Recording(
+        temp,
+        file,
+        () => channel.invokeMethod<void>('stop', {'id': id}),
+      );
+    }
     final recorder = rtc.MediaRecorder(albumName: null);
     await recorder.start(
       file.path,

@@ -103,6 +103,8 @@ configurations.configureEach {
 }
 
 dependencies {
+    // The story recorder draws the active flutter_webrtc track onto an Android recording surface.
+    compileOnly("io.github.webrtc-sdk:android:150.7871.04")
     if (firebaseConfigured) {
         androidTestImplementation("androidx.test.ext:junit:1.3.0")
         androidTestImplementation("androidx.test:runner:1.7.0")
