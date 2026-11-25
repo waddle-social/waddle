@@ -19,33 +19,25 @@ pub(super) fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
     let mut disposition: Option<String> = None;
 
     for child in reference_el.children() {
-        match child.name() {
-            "url-data" => {
-                url = child.attr("target").map(String::from);
+        // XEP-0103 `<url-data/>` and XEP-0446 `<file/>` are matched by
+        // namespace as well as name; foreign-namespace look-alikes are ignored.
+        if child.is("url-data", NS_URL_DATA) {
+            url = child.attr("target").map(String::from);
+        } else if child.is("file", NS_FILE_METADATA) {
+            name = child.get_child("name", NS_FILE_METADATA).map(|e| e.text());
+            media_type = child
+                .get_child("media-type", NS_FILE_METADATA)
+                .map(|e| e.text());
+            size = child
+                .get_child("size", NS_FILE_METADATA)
+                .and_then(|e| e.text().parse().ok());
+            if let Some(thumb) = child.get_child("thumbnail", NS_FILE_METADATA) {
+                width = thumb.attr("width").and_then(|v| v.parse().ok());
+                height = thumb.attr("height").and_then(|v| v.parse().ok());
             }
-            "file" => {
-                name = child
-                    .get_child("name", child.ns().as_str())
-                    .map(|e| e.text());
-                media_type = child
-                    .get_child("media-type", child.ns().as_str())
-                    .map(|e| e.text());
-                size = child
-                    .get_child("size", child.ns().as_str())
-                    .and_then(|e| e.text().parse().ok());
-                if let Some(thumb) = child.get_child("thumbnail", child.ns().as_str()) {
-                    width = thumb.attr("width").and_then(|v| v.parse().ok());
-                    height = thumb.attr("height").and_then(|v| v.parse().ok());
-                }
-                if let Some(disp) = child.get_child("disposition", child.ns().as_str()) {
-                    disposition = Some(disp.text());
-                }
+            if let Some(disp) = child.get_child("disposition", NS_FILE_METADATA) {
+                disposition = Some(disp.text());
             }
-            // Simple <url> child fallback
-            "url" => {
-                url = Some(child.text());
-            }
-            _ => {}
         }
     }
 

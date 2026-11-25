@@ -24,7 +24,8 @@ pub(crate) const NS_HINTS: &str = "urn:xmpp:hints";
 /// Protocol token `urn:waddle:in-call:0`.
 pub const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 pub(crate) const NS_HATS: &str = "urn:xmpp:hats:0";
-pub(crate) const NS_SIMS: &str = "urn:xmpp:sims:1";
+/// `jabber:x:oob` — XEP-0066 Out of Band Data.
+pub(crate) const NS_OOB: &str = "jabber:x:oob";
 pub(crate) const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub(crate) const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";

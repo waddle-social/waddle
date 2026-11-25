@@ -20,12 +20,11 @@ use super::{DateTime, Utc};
 use super::{
     InCallSignal, InboundMessage, LinkPreviewData, LinkPreviewImageData, LinkPreviewPlayer,
     LinkPreviewVideoData, MdsDisplayedEntry, MessagingEvent, ReferenceData, SharedFile,
-    SharedFileDisposition,
 };
 use super::{
     NS_CLIENT, NS_DELAY, NS_MARKUP, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC_USER,
     NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_OPENGRAPH_VIDEO, NS_ORIGIN_ID, NS_RDF_SYNTAX,
-    NS_REFERENCES, NS_SFS, NS_SIMS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
+    NS_REFERENCES, NS_SFS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
 };
 use crate::stickers::parse_sticker_marker_pack;
 
@@ -245,35 +244,6 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         .as_deref()
         .map(|body| super::body_without_reply_fallback(el, body));
     let link_previews = super::parse_link_previews(el, link_preview_body.as_deref());
-
-    // XEP-0447 / XEP-0363: also check <sims> children for file sharing
-    for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
-        for source_el in sims_el.children() {
-            for url_data_el in source_el.children() {
-                let url = url_data_el.attr("url").map(String::from);
-                if let Some(url) = url {
-                    shared_files.push(SharedFile {
-                        url,
-                        name: sims_el
-                            .get_child("name", sims_el.ns().as_str())
-                            .map(|e| e.text()),
-                        media_type: sims_el
-                            .get_child("media-type", sims_el.ns().as_str())
-                            .map(|e| e.text()),
-                        size: sims_el
-                            .get_child("size", sims_el.ns().as_str())
-                            .and_then(|e| e.text().parse().ok()),
-                        width: None,
-                        height: None,
-                        desc: None,
-                        hashes: Vec::new(),
-                        disposition: SharedFileDisposition::Attachment,
-                        encrypted: None,
-                    });
-                }
-            }
-        }
-    }
 
     // XEP-0201 thread + nested thread parent
     let thread_ref = xep_thread::parse_thread(el);

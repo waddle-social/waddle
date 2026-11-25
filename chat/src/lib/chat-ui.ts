@@ -2,7 +2,7 @@ import { shallowRef } from "vue";
 import type { PinPermission } from "@/lib/chat-types";
 import type { SafetyScores } from "@/lib/safety-scores/types";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
-import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
+import type { EncryptedFileHash, WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
 import {
   renderRichMessageHtml,
   type MarkupSpan,
@@ -40,6 +40,7 @@ export interface TimelineSharedFile {
   desc?: string;
   url: string;
   disposition: "inline" | "attachment";
+  hashes?: EncryptedFileHash[];
   encrypted?: WaddleEncryptedFile;
 }
 
