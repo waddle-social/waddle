@@ -454,6 +454,19 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         }
     }
 
+    /// Unmutes the camera we have, or makes one. Every camera this
+    /// controller ever sends from is one `publishCamera` made.
+    private func turnCameraOn(in room: Room) async {
+        for publication in publications(of: .video, in: room) where publication.isMuted {
+            try? await publication.unmute()
+        }
+        // None to unmute, or it went away while we were at it, as a muted
+        // track does in a full reconnect: a new one, made our way.
+        if self.room === room, !publications(of: .video, in: room).contains(where: { !$0.isMuted }) {
+            await publishCamera(in: room)
+        }
+    }
+
     /// Makes and publishes a camera of our own making. The SDK's own way
     /// makes the track without a processor and sends frames before one can
     /// be attached; ours has it from before the first frame.
@@ -878,12 +891,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if kind == .audio {
             _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? audioCaptureOptions : nil)
         } else {
-            // A camera not published yet is made here, with its background processor on it from the start.
-            if enabled, publications(of: .video, in: room).isEmpty {
-                await publishCamera(in: room)
-            } else {
-                _ = try? await room.localParticipant.setCamera(enabled: enabled)
-            }
+            // The SDK's own `setCamera` is never asked to turn a camera on:
+            // it looks for the publication again inside its own queue and,
+            // finding none, as during a reconnect, makes a camera with no
+            // background processor, whose frames go out as they are. A
+            // camera of ours is unmuted here, and one that is not there is
+            // made by `publishCamera`, with its processor on it from the start.
+            if enabled { await turnCameraOn(in: room) }
         }
         // The SDK toggles one publication per device. Off means all of them.
         if !enabled {
