@@ -4,6 +4,10 @@
 //! Callers poll owned JSON buffers and release each exactly once with `waddle_flutter_free_json`.
 
 mod abi;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod camera_abi;
+#[cfg(target_os = "android")]
+mod camera_android;
 mod error;
 mod events;
 mod generated;

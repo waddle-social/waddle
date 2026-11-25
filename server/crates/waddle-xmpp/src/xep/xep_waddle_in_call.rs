@@ -102,6 +102,7 @@ pub fn build_in_call_reaction_message(
     emoji: &InCallReactionEmoji,
     message_type: MessageType,
 ) -> Message {
+    let directed_to_resource = to.resource().is_some();
     let mut message = Message::new(Some(to));
     message.from = Some(from);
     message.type_ = message_type;
@@ -110,7 +111,9 @@ pub fn build_in_call_reaction_message(
         .payloads
         .push(build_in_call_reaction_element(sid, emoji));
     add_hint(&mut message, Hint::NoStore);
-    add_hint(&mut message, Hint::NoCopy);
+    if directed_to_resource {
+        add_hint(&mut message, Hint::NoCopy);
+    }
     message
 }
 

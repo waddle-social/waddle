@@ -752,6 +752,15 @@
     },
     "result": "WaddleSendMessageOutcome"
   },
+  "send_in_call_reaction": {
+    "args": {
+      "to": "String",
+      "msg_type": "String",
+      "sid": "String",
+      "emoji": "String"
+    },
+    "result": "Result<bool, WaddleError>"
+  },
   "send_moderation": {
     "args": {
       "room_jid": "String",

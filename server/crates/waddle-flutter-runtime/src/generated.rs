@@ -446,6 +446,12 @@ pub(crate) enum Operation {
         body: String,
         options: Option<WaddleSendOptions>,
     },
+    SendInCallReaction {
+        to: String,
+        msg_type: String,
+        sid: String,
+        emoji: String,
+    },
     SendModeration {
         room_jid: jid::Jid,
         target_stanza_id: String,
@@ -651,6 +657,7 @@ pub(crate) enum Output {
     SendCorrection(WaddleSendMessageOutcome),
     SendDisplayed(bool),
     SendGroupchatMessage(WaddleSendMessageOutcome),
+    SendInCallReaction(bool),
     SendModeration(bool),
     SendReaction(bool),
     SendRetraction(bool),
@@ -1525,6 +1532,17 @@ impl Operation {
                 client
                     .send_groupchat_message(room_jid.to_string(), body, options)
                     .await,
+            )),
+            Self::SendInCallReaction {
+                to,
+                msg_type,
+                sid,
+                emoji,
+            } => Ok(Output::SendInCallReaction(
+                client
+                    .send_in_call_reaction(to, msg_type, sid, emoji)
+                    .await
+                    .map_err(RuntimeError::from)?,
             )),
             Self::SendModeration {
                 room_jid,

@@ -197,7 +197,18 @@ impl ClientRuntime {
                     if !owner.is_current(generation) {
                         return;
                     }
-                    client.connect().await;
+                    let observer = Arc::downgrade(&owner);
+                    client
+                        .connect_observing_messages(move |message| {
+                            if let Some(reaction) =
+                                crate::events::CallReaction::from_message(message)
+                            {
+                                if let Some(runtime) = observer.upgrade() {
+                                    runtime.event(generation, Outbound::CallReaction(reaction));
+                                }
+                            }
+                        })
+                        .await;
                     if owner.is_current(generation) {
                         owner.complete(generation, request_id, Ok(Output::Unit));
                     } else {

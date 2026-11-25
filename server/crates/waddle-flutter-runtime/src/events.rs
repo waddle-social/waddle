@@ -13,8 +13,36 @@ pub(crate) enum Outbound {
     },
     Event(Box<WaddleClientEvent>),
     SessionLifecycle,
+    CallReaction(CallReaction),
     MdsDisplayed(Vec<waddle_xmpp_client_ffi::WaddleMdsDisplayedEntry>),
     Overflow,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CallReaction {
+    from: String,
+    message_type: String,
+    sid: String,
+    emoji: String,
+}
+
+impl CallReaction {
+    pub(crate) fn from_message(message: &waddle_xmpp_client::InboundMessage) -> Option<Self> {
+        let waddle_xmpp_client::messaging::InCallSignal::Reaction(reaction) =
+            message.in_call.as_ref()?
+        else {
+            return None;
+        };
+        if message.carbon.is_some() || message.muc_pm {
+            return None;
+        }
+        Some(Self {
+            from: message.from.clone()?,
+            message_type: message.message_type.clone(),
+            sid: reaction.sid.as_str().to_owned(),
+            emoji: reaction.emoji.as_str().to_owned(),
+        })
+    }
 }
 
 pub(crate) struct Envelope {
@@ -60,6 +88,7 @@ fn event_view(event: &Outbound) -> Result<EventView, serde_json::Error> {
     let (kind, data) = match event {
         Outbound::Event(event) => client_event_view(event)?,
         Outbound::SessionLifecycle => ("sessionLifecycle", serde_json::json!({"mode": "fresh"})),
+        Outbound::CallReaction(reaction) => ("callReaction", serde_json::to_value(reaction)?),
         Outbound::MdsDisplayed(entries) => ("mdsDisplayed", serde_json::to_value(entries)?),
         Outbound::Overflow => ("error", serde_json::to_value(RuntimeError::overflow())?),
         Outbound::Result { .. } => (

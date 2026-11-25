@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 use url::Url;
 
 #[cfg(feature = "serde")]
+mod flutter_call_reactions;
+#[cfg(feature = "serde")]
 mod flutter_lifecycle;
 #[cfg(feature = "serde")]
 mod flutter_threads;
@@ -164,6 +166,17 @@ impl WaddleClient {
     }
 
     pub async fn connect(&self) {
+        self.connect_observing_messages(|_| {}).await;
+    }
+}
+
+impl WaddleClient {
+    /// Deliver typed live messages before conversion to the Swift/Kotlin records.
+    /// Archive pages and transport lifecycle events use the usual listener.
+    pub async fn connect_observing_messages<F>(&self, observe: F)
+    where
+        F: Fn(&waddle_xmpp_client::InboundMessage) + Send + Sync + 'static,
+    {
         let jid: BareJid = match self.config.jid.parse() {
             Ok(j) => j,
             Err(e) => {
@@ -258,6 +271,12 @@ impl WaddleClient {
                         // Stop at the session's end so `Disconnected` is
                         // reported once, whichever side closed.
                         let ended = ends_session(&event);
+                        if let waddle_xmpp_client::ClientEvent::Messaging(
+                            waddle_xmpp_client::MessagingEvent::Message(ref message),
+                        ) = event
+                        {
+                            observe(message);
+                        }
                         dispatch_event(event, &account_bare_jid, &**listener);
                         if ended {
                             break;
@@ -274,7 +293,10 @@ impl WaddleClient {
 
         *self.handle.lock().await = Some(client_handle);
     }
+}
 
+#[uniffi::export(async_runtime = "tokio")]
+impl WaddleClient {
     pub async fn disconnect(&self) {
         let handle = self.handle.lock().await.take();
         if let Some(h) = handle {

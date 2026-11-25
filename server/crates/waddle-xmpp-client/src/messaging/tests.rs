@@ -2576,6 +2576,10 @@ fn build_in_call_reaction_message_has_transient_carrier_shape() {
     assert!(stanza.get_child("no-store", NS_HINTS).is_some());
     assert!(stanza.get_child("no-copy", NS_HINTS).is_some());
     assert!(stanza.get_child("store", NS_HINTS).is_none());
+    let room = InCallReactionRecipient::Room("channel@rooms.example".parse().expect("bare jid"));
+    let group = build_in_call_reaction_message(&room, &sid, &emoji);
+    assert!(group.get_child("no-store", NS_HINTS).is_some());
+    assert!(group.get_child("no-copy", NS_HINTS).is_none());
 }
 
 #[test]

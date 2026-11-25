@@ -1,0 +1,15 @@
+[package]
+name = "waddle-camera-effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Local segmentation and I420 composition for outgoing camera tracks"
+
+[dependencies]
+rten = { version = "=0.28.0", default-features = false, features = ["onnx_format"] }
+rten-tensor = "=0.28.0"
+
+[lints]
+workspace = true

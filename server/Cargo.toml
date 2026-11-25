@@ -12,6 +12,7 @@ members = [
     "crates/waddle-xmpp-client-community",
     "crates/waddle-xmpp-client-ffi",
     "crates/waddle-flutter-runtime",
+    "crates/waddle-camera-effects",
     "crates/waddle-flutter-timeline",
     "crates/waddle-xmpp-client-wasm",
     "crates/waddle-client-session",
@@ -172,6 +173,25 @@ opt-level = 0
 # line-tables-only keeps usable backtraces while cutting test-binary size
 # roughly 5-10x; full debuginfo repeatedly exhausted local dev disks.
 debug = "line-tables-only"
+
+# Camera capture must meet its frame budget even when the UI is running in debug mode.
+[profile.dev.package.waddle-camera-effects]
+opt-level = 3
+
+[profile.dev.package.rten]
+opt-level = 3
+
+[profile.dev.package.rten-gemm]
+opt-level = 3
+
+[profile.dev.package.rten-tensor]
+opt-level = 3
+
+[profile.dev.package.rten-vecmath]
+opt-level = 3
+
+[profile.dev.package.rten-simd]
+opt-level = 3
 
 [patch.crates-io]
 kameo = { path = "vendor/kameo" }

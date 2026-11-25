@@ -170,6 +170,21 @@ async fn server_socket(stream: TcpStream) {
         .bodies
         .insert(Lang(String::new()), "hello Flutter".into());
     element(&mut socket, incoming.into()).await;
+    use waddle_xmpp_client::messaging::{
+        build_in_call_reaction_message, InCallReactionEmoji, InCallReactionRecipient,
+        InCallSessionId,
+    };
+    let mut reaction = build_in_call_reaction_message(
+        &InCallReactionRecipient::Direct("alice@example.test/flutter".parse().expect("full JID")),
+        &InCallSessionId::try_new("active-call").expect("call SID"),
+        &InCallReactionEmoji::try_new("👏").expect("emoji"),
+    );
+    reaction.set_attr(
+        minidom::rxml::Namespace::NONE,
+        minidom::rxml::xml_ncname!("from").to_owned(),
+        "bob@example.test/phone",
+    );
+    element(&mut socket, reaction).await;
     loop {
         match receive(&mut socket).await {
             TransportMessage::Element(stanza) if stanza.is("message", NS_CLIENT) => {
@@ -277,6 +292,14 @@ async fn c_abi_connects_binds_delivers_messages_acknowledges_and_retires() {
     assert_eq!(incoming["event"]["data"]["body"], "hello Flutter");
     assert_eq!(incoming["event"]["data"]["from"], "bob@example.test/phone");
     assert_eq!(incoming["event"]["data"]["id"], "incoming-1");
+    client
+        .wait(|frame| {
+            frame["event"]["type"] == "callReaction"
+                && frame["event"]["data"]["sid"] == "active-call"
+                && frame["event"]["data"]["emoji"] == "👏"
+                && frame["event"]["data"]["from"] == "bob@example.test/phone"
+        })
+        .await;
     client.wait(|frame| frame["request_id"] == connect).await;
     let options = waddle_xmpp_client_ffi::WaddleSendOptions {
         stanza_id: Some("outgoing-1".into()),
