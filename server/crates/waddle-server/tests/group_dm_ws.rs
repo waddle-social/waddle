@@ -1154,8 +1154,8 @@ async fn group_dm_member_renames_room_with_status_104_config_broadcast() {
         "full room JID command target should be rejected: {full_jid_response}"
     );
     assert!(
-        full_jid_response.contains("service-unavailable"),
-        "full room JID command target should be unavailable, not routed: {full_jid_response}"
+        full_jid_response.contains("item-not-found"),
+        "full room JID command target should be not-found, not routed: {full_jid_response}"
     );
 
     let full_jid_disco = disco_info_node(
@@ -1263,7 +1263,7 @@ async fn group_dm_rename_is_unavailable_on_standard_muc_rooms() {
     .await;
     assert!(is_error(&response), "expected error, got: {response}");
     assert!(
-        response.contains("service-unavailable"),
+        response.contains("item-not-found"),
         "standard MUC rooms must not expose group-DM rename: {response}"
     );
     let items = disco_items_node(
@@ -1310,7 +1310,7 @@ async fn group_dm_rename_is_unavailable_on_standard_muc_rooms() {
         "expected error, got: {dormant_response}"
     );
     assert!(
-        dormant_response.contains("service-unavailable"),
+        dormant_response.contains("item-not-found"),
         "dormant standard MUC rooms must not expose group-DM rename: {dormant_response}"
     );
     let dormant_items = disco_items_node(
@@ -1349,7 +1349,7 @@ async fn group_dm_rename_missing_room_is_item_not_found() {
     .await;
     assert!(is_error(&response), "expected error, got: {response}");
     assert!(
-        response.contains("service-unavailable"),
+        response.contains("item-not-found"),
         "missing group-DM room target must not expose command availability: {response}"
     );
     assert!(
@@ -1536,7 +1536,7 @@ async fn group_dm_rename_rejects_non_member() {
         "expected unavailable error, got: {response}"
     );
     assert!(
-        response.contains("service-unavailable"),
+        response.contains("item-not-found"),
         "non-member rename should not reveal room command availability: {response}"
     );
 }

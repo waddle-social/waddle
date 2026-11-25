@@ -13,7 +13,8 @@ use tracing::debug;
 use uuid::Uuid;
 use xmpp_parsers::iq::Iq;
 
-use crate::xep::xep0004::DataForm;
+use crate::error::StanzaErrorType;
+use crate::xep::xep0004::{DataForm, FormType};
 use crate::xep::xep0050::{Action, AdHocCommandCondition, Command, Note};
 use crate::XmppError;
 
@@ -119,6 +120,8 @@ pub struct CommandSession {
     pub from: Jid,
     /// Custom session state (opaque to the registry)
     pub state: HashMap<String, String>,
+    /// Actions advertised by the responder at the current stage.
+    pub allowed_actions: Option<AllowedActions>,
 }
 
 impl CommandSession {
@@ -131,6 +134,7 @@ impl CommandSession {
             node,
             from,
             state: HashMap::new(),
+            allowed_actions: None,
         }
     }
 
@@ -246,23 +250,41 @@ impl CommandRegistry {
             }
         };
 
-        // Handle session creation/retrieval
-        let action = ctx.command.action.unwrap_or_else(|| {
-            if ctx.command.session_id.is_some() {
-                Action::Next
-            } else {
-                Action::Execute
+        // XEP-0050 §2.4: an absent `action` is `execute`. On a continuing
+        // session `execute` is equivalent to the `execute` attribute of the
+        // `<actions/>` the responder last advertised (default `next`).
+        let mut action = ctx.command.action.unwrap_or(Action::Execute);
+        if action == Action::Execute {
+            if let Some(ref session_id) = ctx.command.session_id {
+                let session = self.sessions.read().await.get(session_id).cloned();
+                if !session_matches_request(session.as_ref(), node, from) {
+                    return CommandResult::Error(
+                        self.session_id_error(session_id, node, from).await,
+                    );
+                }
+                let allowed = session.and_then(|session| session.allowed_actions);
+                action = match &allowed {
+                    Some(actions) => actions.execute_default,
+                    None => Action::Next,
+                };
+                if allowed.is_some_and(|actions| !actions.permits(action)) {
+                    return CommandResult::Error(XmppError::ad_hoc_command(
+                        AdHocCommandCondition::BadAction,
+                        Some("The default execute action is not allowed at this stage".into()),
+                    ));
+                }
+                ctx.command.action = Some(action);
             }
-        });
+        }
         let mut created_session_id = None;
         match action {
             Action::Execute => {
+                // `execute` carrying a sessionid was resolved above, so
+                // this is a new command session.
                 if ctx.command.session_id.is_some() {
-                    // §4.4 bad-action: the responder cannot accept an
-                    // `execute` that carries an existing sessionid.
                     return CommandResult::Error(XmppError::ad_hoc_command(
                         AdHocCommandCondition::BadAction,
-                        Some("execute must not include an existing sessionid".to_string()),
+                        Some("execute resolved to execute on an existing session".into()),
                     ));
                 }
                 // Create a new session
@@ -337,6 +359,15 @@ impl CommandRegistry {
         }
 
         let active_session_id = ctx.command.session_id.clone();
+        let continuing_session = created_session_id.is_none();
+
+        // XEP-0050 §2.4: "Responders SHOULD consider any <x type='cancel'/>
+        // to be <x type='submit'/>."
+        if let Some(form) = ctx.command.form.as_mut() {
+            if form.form_type == FormType::Cancel {
+                form.form_type = FormType::Submit;
+            }
+        }
 
         // Call the handler
         let result = match (created_session_id, handler(ctx).await) {
@@ -380,7 +411,17 @@ impl CommandRegistry {
         };
 
         match &result {
-            CommandResult::Executing { .. } => {}
+            CommandResult::Executing { actions, .. } => {
+                if let Some(session_id) = active_session_id {
+                    if let Some(session) = self.sessions.write().await.get_mut(&session_id) {
+                        session.allowed_actions = actions.clone();
+                    }
+                }
+            }
+            // XEP-0050 §2.4: the session ends on completion or cancel. A
+            // correctable (`modify`) error on a continuing session leaves it
+            // open so the requester can resubmit with the same sessionid.
+            CommandResult::Error(error) if continuing_session && is_correctable(error) => {}
             CommandResult::Completed { .. }
             | CommandResult::CompletedPage { .. }
             | CommandResult::Canceled { .. }
@@ -478,6 +519,17 @@ impl CommandRegistry {
                 Some("Session not found or owned by another requester".to_string()),
             )
         }
+    }
+}
+
+/// Whether the requester can fix the request and retry within the session.
+fn is_correctable(error: &XmppError) -> bool {
+    match error {
+        XmppError::Stanza { error_type, .. } => *error_type == StanzaErrorType::Modify,
+        XmppError::AdHocCommand { condition, .. } => {
+            condition.stanza_error().0 == StanzaErrorType::Modify
+        }
+        _ => false,
     }
 }
 

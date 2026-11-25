@@ -8,6 +8,9 @@ use super::{
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::xep::RsmResponse;
 
+/// Language of all responder-authored command text (XEP-0050 §2.4).
+const RESPONSE_LANG: &str = "en";
+
 pub(super) struct CommandTargets<'a> {
     pub(super) domain: &'a str,
     pub(super) muc_domain: &'a str,
@@ -76,9 +79,10 @@ pub(super) async fn handle_command_iq(
     if !target_allowed {
         return vec![build_xmpp_error_response(
             request_iq,
-            XmppError::service_unavailable(Some(
-                "Command is not available on this service".to_string(),
-            )),
+            // XEP-0050 §4.4: the responding JID cannot find the requested
+            // command node. This also hides whether a room exists or the
+            // requester may use it.
+            XmppError::item_not_found(Some("Command node not found on this service".to_string())),
         )];
     }
     let session_id = command.session_id.clone();
@@ -97,7 +101,7 @@ pub(super) async fn handle_command_iq(
             notes,
             actions,
         } => {
-            let mut command = Command::new(node.clone());
+            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
             command.status = Some(CommandStatus::Executing);
             command.session_id = Some(session_id);
             command.form = Some(form);
@@ -110,7 +114,7 @@ pub(super) async fn handle_command_iq(
             form,
             notes,
         } => {
-            let mut command = Command::new(node.clone());
+            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
             command.status = Some(CommandStatus::Completed);
             command.session_id = response_session_id.or(session_id);
             command.form = form;
@@ -135,7 +139,7 @@ pub(super) async fn handle_command_iq(
             session_id: response_session_id,
             notes,
         } => {
-            let mut command = Command::new(node.clone());
+            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
             command.status = Some(CommandStatus::Canceled);
             command.session_id = response_session_id.or(session_id);
             command.notes = notes;

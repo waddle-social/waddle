@@ -257,3 +257,309 @@ fn xep0050_paged_result_carries_the_cursor_as_a_result_set_beside_the_form() {
         Some("juliet")
     );
 }
+
+// ── §2.4 request parsing, execute resolution, sessions, lang ────────
+
+mod session_flow {
+    use std::sync::{Arc, Mutex};
+
+    use minidom::Element;
+    use waddle_xmpp::commands::{CommandContext, CommandRegistry, CommandResult};
+    use waddle_xmpp::xep::xep0004::{DataForm, FormType, ToElement};
+    use waddle_xmpp::xep::xep0050::{
+        Action, AdHocCommandCondition, AllowedActions, Command, NS_COMMANDS,
+    };
+    use waddle_xmpp::XmppError;
+    use xmpp_parsers::iq::Iq;
+
+    const NODE: &str = "test:wizard";
+
+    fn context(command: Command) -> CommandContext {
+        CommandContext {
+            from: "user@localhost".parse().expect("jid"),
+            authenticated_user_id: Some("user".to_string()),
+            iq: Iq::Set {
+                from: None,
+                to: None,
+                id: "iq".to_string(),
+                payload: Element::builder("query", "urn:test").build(),
+            },
+            command,
+        }
+    }
+
+    fn request(xml: &str) -> Command {
+        let iq = Iq::Set {
+            from: None,
+            to: None,
+            id: "iq".into(),
+            payload: xml.parse().expect("xml"),
+        };
+        waddle_xmpp::xep::xep0050::parse_command_from_iq(&iq).expect("request parses")
+    }
+
+    /// Two-stage wizard: stage 1 advertises `execute='complete'`; stage 2
+    /// records the action and form type the handler saw, then completes
+    /// unless the form is empty (then a correctable bad-payload).
+    async fn wizard() -> (CommandRegistry, Arc<Mutex<Vec<(Option<Action>, FormType)>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = CommandRegistry::new();
+        let log = Arc::clone(&seen);
+        registry
+            .register(NODE, "Wizard", move |ctx: CommandContext| {
+                let log = Arc::clone(&log);
+                async move {
+                    let Some(form) = ctx.command.form.as_ref() else {
+                        return CommandResult::Executing {
+                            form: DataForm::new(FormType::Form),
+                            session_id: ctx.command.session_id.unwrap_or_default(),
+                            notes: vec![],
+                            actions: Some(AllowedActions::new(Action::Complete).with_complete()),
+                        };
+                    };
+                    log.lock()
+                        .expect("lock")
+                        .push((ctx.command.action, form.form_type));
+                    if form.fields.is_empty() {
+                        return CommandResult::Error(XmppError::ad_hoc_command(
+                            AdHocCommandCondition::BadPayload,
+                            None,
+                        ));
+                    }
+                    CommandResult::Completed {
+                        session_id: None,
+                        form: None,
+                        notes: vec![],
+                    }
+                }
+            })
+            .await;
+        (registry, seen)
+    }
+
+    async fn start(registry: &CommandRegistry) -> String {
+        match registry
+            .dispatch(context(Command::new(NODE).with_action(Action::Execute)))
+            .await
+        {
+            CommandResult::Executing { session_id, .. } => session_id,
+            _ => panic!("expected executing"),
+        }
+    }
+
+    /// Dispatch a continuing-session command carrying a filled form.
+    async fn continue_with(
+        registry: &CommandRegistry,
+        session: &str,
+        action: Option<Action>,
+        form: DataForm,
+    ) -> CommandResult {
+        let mut cmd = Command::new(NODE).with_session_id(session);
+        cmd.action = action;
+        cmd.form = Some(form);
+        registry.dispatch(context(cmd)).await
+    }
+
+    /// Dispatch a continuing-session command without a form.
+    async fn continue_bare(
+        registry: &CommandRegistry,
+        session: &str,
+        action: Action,
+    ) -> CommandResult {
+        let cmd = Command::new(NODE)
+            .with_action(action)
+            .with_session_id(session);
+        registry.dispatch(context(cmd)).await
+    }
+
+    fn filled(form_type: FormType) -> DataForm {
+        DataForm::new(form_type).add_field(waddle_xmpp::xep::xep0004::Field::text_single("a", "b"))
+    }
+
+    #[tokio::test]
+    async fn execute_on_continuing_session_resolves_to_advertised_execute_action() {
+        // §2.4: action 'execute' is equivalent to the `execute` attribute of
+        // the advertised <actions/> ('complete' here).
+        let (registry, seen) = wizard().await;
+        let session = start(&registry).await;
+        let result = continue_with(
+            &registry,
+            &session,
+            Some(Action::Execute),
+            filled(FormType::Submit),
+        )
+        .await;
+        assert!(matches!(result, CommandResult::Completed { .. }));
+        assert_eq!(seen.lock().expect("lock")[0].0, Some(Action::Complete));
+        assert!(registry.get_session(&session).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn absent_action_on_continuing_session_means_execute() {
+        let (registry, seen) = wizard().await;
+        let session = start(&registry).await;
+        let result = continue_with(&registry, &session, None, filled(FormType::Submit)).await;
+        assert!(matches!(result, CommandResult::Completed { .. }));
+        assert_eq!(seen.lock().expect("lock")[0].0, Some(Action::Complete));
+    }
+
+    #[tokio::test]
+    async fn execute_without_advertised_actions_defaults_to_next() {
+        let registry = CommandRegistry::new();
+        let seen = Arc::new(Mutex::new(None));
+        let log = Arc::clone(&seen);
+        registry
+            .register(NODE, "Plain", move |ctx: CommandContext| {
+                let log = Arc::clone(&log);
+                async move {
+                    if ctx.command.session_id.is_some()
+                        && ctx.command.action != Some(Action::Execute)
+                    {
+                        *log.lock().expect("lock") = ctx.command.action;
+                    }
+                    CommandResult::Executing {
+                        form: DataForm::new(FormType::Form),
+                        session_id: ctx.command.session_id.unwrap_or_default(),
+                        notes: vec![],
+                        actions: None,
+                    }
+                }
+            })
+            .await;
+        let session = start(&registry).await;
+        continue_bare(&registry, &session, Action::Execute).await;
+        assert_eq!(*seen.lock().expect("lock"), Some(Action::Next));
+    }
+
+    #[tokio::test]
+    async fn execute_resolving_to_a_disallowed_action_is_bad_action() {
+        let registry = CommandRegistry::new();
+        registry
+            .register(NODE, "Odd", |ctx: CommandContext| async move {
+                CommandResult::Executing {
+                    form: DataForm::new(FormType::Form),
+                    session_id: ctx.command.session_id.unwrap_or_default(),
+                    notes: vec![],
+                    // default `complete` but `complete` is not offered
+                    actions: Some(AllowedActions::new(Action::Complete).with_next()),
+                }
+            })
+            .await;
+        let session = start(&registry).await;
+        let result = continue_bare(&registry, &session, Action::Execute).await;
+        match result {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::BadAction)
+            }
+            _ => panic!("expected bad-action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn correctable_error_keeps_session_for_resubmission() {
+        // §2.4: a session ends on completion or cancel; a bad-payload is
+        // correctable with the same sessionid.
+        let (registry, _) = wizard().await;
+        let session = start(&registry).await;
+        let bad = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            DataForm::new(FormType::Submit),
+        )
+        .await;
+        match bad {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::BadPayload)
+            }
+            _ => panic!("expected bad-payload"),
+        }
+        assert!(registry.get_session(&session).await.is_some());
+
+        let good = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            filled(FormType::Submit),
+        )
+        .await;
+        assert!(matches!(good, CommandResult::Completed { .. }));
+        assert!(registry.get_session(&session).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_correctable_error_ends_session() {
+        let registry = CommandRegistry::new();
+        registry
+            .register(NODE, "Deny", |ctx: CommandContext| async move {
+                if ctx.command.action == Some(Action::Execute) {
+                    CommandResult::Executing {
+                        form: DataForm::new(FormType::Form),
+                        session_id: ctx.command.session_id.unwrap_or_default(),
+                        notes: vec![],
+                        actions: Some(AllowedActions::new(Action::Complete).with_complete()),
+                    }
+                } else {
+                    CommandResult::Error(XmppError::forbidden(None))
+                }
+            })
+            .await;
+        let session = start(&registry).await;
+        let result = continue_bare(&registry, &session, Action::Complete).await;
+        assert!(matches!(result, CommandResult::Error(_)));
+        assert!(registry.get_session(&session).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_form_is_treated_as_submit() {
+        // §2.4: "Responders SHOULD consider any <x type='cancel'/> to be
+        // <x type='submit'/>."
+        let (registry, seen) = wizard().await;
+        let session = start(&registry).await;
+        let result = continue_with(
+            &registry,
+            &session,
+            Some(Action::Complete),
+            filled(FormType::Cancel),
+        )
+        .await;
+        assert!(matches!(result, CommandResult::Completed { .. }));
+        assert_eq!(seen.lock().expect("lock")[0].1, FormType::Submit);
+    }
+
+    #[test]
+    fn request_parser_ignores_requester_status_actions_and_notes() {
+        // §2.4: "If specified by the requester, the responder MUST ignore it."
+        for status in ["execute", "bogus", "completed"] {
+            let cmd = request(&format!(
+                "<command xmlns='{NS_COMMANDS}' node='n' status='{status}'>\
+                 <actions execute='bogus'><next/></actions><note type='nonsense'>x</note>\
+                 </command>"
+            ));
+            assert_eq!(cmd.node, "n");
+            assert_eq!(cmd.status, None);
+            assert!(cmd.actions.is_none());
+            assert!(cmd.notes.is_empty());
+        }
+    }
+
+    #[test]
+    fn response_parser_stays_strict_about_status() {
+        let elem: Element = format!("<command xmlns='{NS_COMMANDS}' node='n' status='bogus'/>")
+            .parse()
+            .expect("xml");
+        assert!(<Command as waddle_xmpp::xep::xep0004::FromElement>::from_element(&elem).is_err());
+    }
+
+    #[test]
+    fn command_lang_round_trips_as_xml_lang() {
+        // §2.4: "The responder SHOULD specify the language/locale with the
+        // every command session's response."
+        let elem = Command::new("n").with_lang("en").to_element();
+        assert_eq!(
+            elem.attr_ns(&minidom::rxml::Namespace::XML, "lang"),
+            Some("en")
+        );
+        assert_eq!(request(&String::from(&elem)).lang.as_deref(), Some("en"));
+    }
+}
