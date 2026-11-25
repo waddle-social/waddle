@@ -3,12 +3,10 @@ import WaddleKit
 
 /// Decides how a XEP-0372 reference is highlighted for the signed-in
 /// account: the same rule the coordinator uses for mention alerts.
+/// Room-wide `@everyone` / `@here` are XEP-0513 spans, not references.
 enum MentionHighlight {
     static func kind(of reference: Reference, account: AccountIdentity, in conversation: ConversationID) -> RichMentionKind? {
         guard reference.kind == .mention else { return nil }
-        if reference.uri == MentionTarget.everyone.uri || reference.uri == MentionTarget.here.uri {
-            return .me
-        }
         guard let jid = reference.mentionedJID else { return .someone }
         if jid.bare == account.jid {
             return .me
@@ -29,6 +27,7 @@ enum MentionHighlight {
             isEdited: item.isEdited,
             spans: item.message.markupSpans,
             references: item.message.references,
+            broadcastSpans: item.message.broadcastSpans,
             ownNick: account.nick,
             mentionKind: { kind(of: $0, account: account, in: item.conversation) },
             hiddenPrefix: hiddenPrefix

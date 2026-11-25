@@ -8,10 +8,10 @@ use super::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_in_call_reaction_message, build_moderation_message, build_muc_join_presence,
     build_outbound_message, build_pinned_message, build_reaction_message, build_retraction_message,
-    build_unpinned_message, is_muc_join_presence, parse, InCallReactionEmoji,
-    InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken, MarkupSpanData,
-    MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent, MucAffiliation, MucRole,
-    ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
+    build_unpinned_message, is_muc_join_presence, parse, BroadcastMention, BroadcastSpan,
+    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken,
+    MarkupSpanData, MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent,
+    MucAffiliation, MucRole, ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
 };
 use crate::error::ClientError;
 use crate::request::StanzaId;
@@ -1370,6 +1370,21 @@ fn build_outbound_message_resolves_typed_mentions_to_references_and_channel_ment
         vec!["xmpp:rawkode@waddle.social".to_string()]
     );
     assert_eq!(msg.broadcast_mention.as_deref(), Some("everyone"));
+    assert_eq!(
+        msg.broadcast_spans,
+        vec![
+            BroadcastSpan {
+                kind: BroadcastMention::Everyone,
+                begin: 13,
+                end: 22
+            },
+            BroadcastSpan {
+                kind: BroadcastMention::Here,
+                begin: 42,
+                end: 47
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1408,6 +1423,8 @@ fn build_outbound_message_here_alone_is_an_active_channel_mention() {
         panic!("expected message");
     };
     assert_eq!(msg.broadcast_mention.as_deref(), Some("here"));
+    assert_eq!(msg.broadcast_spans.len(), 1);
+    assert_eq!(msg.broadcast_spans[0].kind, BroadcastMention::Here);
     assert!(msg.mention_uris.is_empty());
 }
 

@@ -21,20 +21,13 @@ import Foundation
 // nest (`***x***` renders bold with literal inner asterisks); the receiving
 // renderer resolves one style per offset anyway.
 
-/// Who a mention addresses (XEP-0372 URI shapes shared with web/Android).
+/// Who a mention addresses. A user is sent as a XEP-0372 `xmpp:<barejid>`
+/// reference; `@everyone` / `@here` are XEP-0513 `#channel` mentions the
+/// Rust send builder derives from the typed token, so they have no URI.
 public enum MentionTarget: Hashable, Sendable {
     case user(BareJID)
     case everyone
     case here
-
-    /// `xmpp:<barejid>`, or the literal broadcast URIs `xmpp:@everyone` / `xmpp:@here`.
-    public var uri: String {
-        switch self {
-        case let .user(jid): return "xmpp:\(jid)"
-        case .everyone: return "xmpp:@everyone"
-        case .here: return "xmpp:@here"
-        }
-    }
 }
 
 /// A mention the composer inserted: its target and its range over the raw

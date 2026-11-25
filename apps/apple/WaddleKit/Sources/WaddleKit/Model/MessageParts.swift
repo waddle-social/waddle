@@ -117,6 +117,25 @@ public struct MarkupSpan: Hashable, Sendable, Codable {
     }
 }
 
+/// XEP-0513 `#channel` mention over the body: `@everyone`, or `@here` for an
+/// `active='true'` mention. Offsets count Unicode scalars over the wire body.
+public struct BroadcastSpan: Hashable, Sendable, Codable {
+    public enum Kind: Hashable, Sendable, Codable {
+        case everyone
+        case here
+    }
+
+    public let kind: Kind
+    public let start: Int
+    public let end: Int
+
+    public init(kind: Kind, start: Int, end: Int) {
+        self.kind = kind
+        self.start = start
+        self.end = end
+    }
+}
+
 /// XEP-0372 reference. Offsets count Unicode scalars over the wire body.
 public struct Reference: Hashable, Sendable, Codable {
     public enum Kind: Hashable, Sendable, Codable {

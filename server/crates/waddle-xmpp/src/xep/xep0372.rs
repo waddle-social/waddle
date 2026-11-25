@@ -153,7 +153,7 @@ impl Reference {
     ///   `xmpp:room@muc?join` or `xmpp:room@muc?message;subject=foo`);
     /// - a fragment component introduced by `#` (RFC 3986 §3.5).
     ///
-    /// The XEP-0372 §"Reference type 'mention'" semantics target the
+    /// The XEP-0372 §3.2 (Mentions) semantics target the
     /// user's bare JID, so strip the resource component and any
     /// trailing query (`?`) or fragment (`#`) before returning.
     /// `;` does NOT delimit the start of the query — it separates

@@ -17,7 +17,7 @@ use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 use waddle_xmpp_core::{CoreError, DirectVideoMediaType, PreviewImageMediaType};
 
-use super::mentions::MentionDirectory;
+use super::mentions::{BroadcastSpan, MentionDirectory};
 use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -387,6 +387,8 @@ pub struct InboundMessage {
     /// Room-wide mention carried by an XEP-0513 `#channel` mention:
     /// `everyone`, or `here` when the mention is `active='true'`.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of every XEP-0513 `#channel` mention, in wire order.
+    pub broadcast_spans: Vec<BroadcastSpan>,
     /// URIs identifying the targets of explicit mentions.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references attached to this message. Populated for *every*

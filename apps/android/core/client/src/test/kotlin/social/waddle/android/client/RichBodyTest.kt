@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.client.ffi.WaddleBroadcastKind
+import social.waddle.client.ffi.WaddleBroadcastSpan
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMarkupSpanType
 import social.waddle.client.ffi.WaddleReference
@@ -36,10 +38,37 @@ class RichBodyTest {
         references: List<WaddleReference> = emptyList(),
         fallbackStart: UInt? = null,
         fallbackEnd: UInt? = null,
-    ) = richBlocksOf(body, markup, references, fallbackStart, fallbackEnd)
+        broadcasts: List<WaddleBroadcastSpan> = emptyList(),
+    ) = richBlocksOf(body, markup, references, fallbackStart, fallbackEnd, broadcasts)
 
     private fun paragraphText(block: RichBlock): String =
         (block as RichBlock.Paragraph).runs.joinToString("") { it.text }
+
+    @Test
+    fun `xep0513 broadcast spans highlight everyone and here`() {
+        val result = blocks(
+            "hi @everyone and @here ok",
+            broadcasts = listOf(
+                WaddleBroadcastSpan(WaddleBroadcastKind.EVERYONE, 3u, 12u),
+                WaddleBroadcastSpan(WaddleBroadcastKind.HERE, 17u, 22u),
+            ),
+        )
+        val runs = (result[0] as RichBlock.Paragraph).runs
+        assertEquals(
+            listOf("hi ", "@everyone", " and ", "@here", " ok"),
+            runs.map { it.text },
+        )
+        assertEquals(listOf(null, "everyone", null, "here", null), runs.map { it.mentionUri })
+    }
+
+    @Test
+    fun `out of range broadcast span is dropped`() {
+        val result = blocks(
+            "@here",
+            broadcasts = listOf(WaddleBroadcastSpan(WaddleBroadcastKind.HERE, 0u, 90u)),
+        )
+        assertEquals(listOf(RichInlineRun("@here")), (result[0] as RichBlock.Paragraph).runs)
+    }
 
     @Test
     fun `plain body is a single unstyled paragraph`() {

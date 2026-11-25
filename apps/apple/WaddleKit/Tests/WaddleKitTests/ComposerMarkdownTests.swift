@@ -179,12 +179,6 @@ struct ComposerMarkdownTests {
         #expect(result.mentions.isEmpty)
     }
 
-    @Test func broadcastTargetsRenderLiteralURIs() {
-        #expect(MentionTarget.everyone.uri == "xmpp:@everyone")
-        #expect(MentionTarget.here.uri == "xmpp:@here")
-        #expect(MentionTarget.user(BareJID(parsing: "Alice@W.S")!).uri == "xmpp:alice@w.s")
-    }
-
     // MARK: - Regex-parity edges
 
     @Test func lazyStrikeStopsAtFirstCloser() {

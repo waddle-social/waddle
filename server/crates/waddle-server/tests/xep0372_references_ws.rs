@@ -250,7 +250,7 @@ async fn wait_for_inbox_unread(
     unread
 }
 
-/// XEP-0372 §"Reference type 'mention'": a mention reference to a user
+/// XEP-0372 §3.2 (Mentions): a mention reference to a user
 /// who is not in the open room still reaches them — the server projects
 /// an inbox row (and notification candidate) for the mentioned offline
 /// non-member.

@@ -1,5 +1,7 @@
 package social.waddle.android.client
 
+import social.waddle.client.ffi.WaddleBroadcastKind
+import social.waddle.client.ffi.WaddleBroadcastSpan
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMarkupSpanType
 import social.waddle.client.ffi.WaddleReference
@@ -37,7 +39,7 @@ data class RichInlineRun(
     val code: Boolean = false,
     /** Scheme-gated hyperlink target ([safeUri]-approved). */
     val linkUri: String? = null,
-    /** XEP-0372 mention URI covering this run. */
+    /** XEP-0372 mention URI covering this run, or `everyone` / `here` for a XEP-0513 broadcast. */
     val mentionUri: String? = null,
 )
 
@@ -75,9 +77,10 @@ fun richBlocksOf(
     references: List<WaddleReference>,
     fallbackStart: UInt?,
     fallbackEnd: UInt?,
+    broadcastSpans: List<WaddleBroadcastSpan> = emptyList(),
 ): List<RichBlock> {
     if (body.isEmpty()) return emptyList()
-    val context = RichParseContext.of(body, markupSpans, references, fallbackStart, fallbackEnd)
+    val context = RichParseContext.of(body, markupSpans, references, broadcastSpans, fallbackStart, fallbackEnd)
     return context.blocksFromRange(0L, context.totalCodePoints)
 }
 
@@ -100,6 +103,7 @@ private class RichParseContext(
             body: String,
             markupSpans: List<WaddleMarkupSpan>,
             references: List<WaddleReference>,
+            broadcastSpans: List<WaddleBroadcastSpan>,
             fallbackStart: UInt?,
             fallbackEnd: UInt?,
         ): RichParseContext {
@@ -115,7 +119,8 @@ private class RichParseContext(
                 inlineSpans = spans.filter { !it.type.isBlock() },
                 blockSpans = spans.filter { it.type.isBlock() },
                 linkRanges = links,
-                mentionRanges = mentionRangesOf(references, strip, totalCodePoints),
+                mentionRanges = mentionRangesOf(references, strip, totalCodePoints) +
+                    broadcastRangesOf(broadcastSpans, strip, totalCodePoints),
             )
         }
     }
@@ -387,6 +392,33 @@ private fun mentionRangesOf(
 ): List<UriRange> = references.mapNotNull { reference ->
     if (reference.refType != WaddleReferenceType.Mention) return@mapNotNull null
     reference.rebasedUriRange(reference.uri, strip, totalCodePoints)
+}
+
+/** XEP-0513 `#channel` mentions as highlight ranges labelled `everyone` / `here`. */
+private fun broadcastRangesOf(
+    spans: List<WaddleBroadcastSpan>,
+    strip: LongRange?,
+    totalCodePoints: Long,
+): List<UriRange> = spans.mapNotNull { span ->
+    val label = when (span.kind) {
+        WaddleBroadcastKind.EVERYONE -> BROADCAST_EVERYONE
+        WaddleBroadcastKind.HERE -> BROADCAST_HERE
+    }
+    rebasedRange(span.start.toLong(), span.end.toLong(), strip, totalCodePoints)
+        ?.let { (start, end) -> UriRange(start = start, end = end, uri = label) }
+}
+
+private fun rebasedRange(
+    start: Long,
+    finish: Long,
+    strip: LongRange?,
+    totalCodePoints: Long,
+): Pair<Long, Long>? {
+    if (finish <= start) return null
+    val displayBegin = strip?.let { rebaseAfterRemoval(start, it) } ?: start
+    val displayEnd = strip?.let { rebaseAfterRemoval(finish, it) } ?: finish
+    if (displayEnd <= displayBegin || displayEnd > totalCodePoints) return null
+    return displayBegin to displayEnd
 }
 
 private fun WaddleReference.rebasedUriRange(

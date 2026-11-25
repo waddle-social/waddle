@@ -119,6 +119,7 @@ public struct CorrectedContent: Hashable, Sendable {
     public let body: String
     public let markupSpans: [MarkupSpan]
     public let references: [Reference]
+    public let broadcastSpans: [BroadcastSpan]
     /// The correction's reply fallback range, which the offsets above
     /// include.
     public let replyFallback: Range<Int>?
@@ -126,10 +127,11 @@ public struct CorrectedContent: Hashable, Sendable {
     /// Room-assigned stanza-id of this accepted body revision, if present.
     public let sourceRevisionID: String?
 
-    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], replyFallback: Range<Int>?, sharedFiles: [SharedFile], sourceRevisionID: String? = nil) {
+    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], broadcastSpans: [BroadcastSpan] = [], replyFallback: Range<Int>?, sharedFiles: [SharedFile], sourceRevisionID: String? = nil) {
         self.body = body
         self.markupSpans = markupSpans
         self.references = references
+        self.broadcastSpans = broadcastSpans
         self.replyFallback = replyFallback
         self.sharedFiles = sharedFiles
         self.sourceRevisionID = sourceRevisionID
@@ -141,6 +143,7 @@ public struct CorrectedContent: Hashable, Sendable {
             body: ReplyFallback.strip(wireBody, range: message.reply?.fallback),
             markupSpans: message.markupSpans,
             references: message.references,
+            broadcastSpans: message.broadcastSpans,
             replyFallback: message.reply?.fallback,
             sharedFiles: message.sharedFiles,
             sourceRevisionID: message.from.flatMap { message.identity.stanzaID(assignedBy: $0.bare) }

@@ -8337,6 +8337,11 @@ data class WaddleArchivedMessage (
     var `broadcastMention`: kotlin.String?
     ,
     /**
+     * Body ranges of the inner message's XEP-0513 `#channel` mentions.
+     */
+    var `broadcastSpans`: List<WaddleBroadcastSpan>
+    ,
+    /**
      * XEP-0372 mention URIs, flattened from `references`.
      */
     var `mentionUris`: List<kotlin.String>
@@ -8450,6 +8455,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalUInt.read(buf),
             FfiConverterSequenceTypeWaddleMarkupSpan.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeWaddleBroadcastSpan.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceTypeWaddleReference.read(buf),
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
@@ -8498,6 +8504,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalUInt.allocationSize(value.`replyFallbackEnd`) +
             FfiConverterSequenceTypeWaddleMarkupSpan.allocationSize(value.`markupSpans`) +
             FfiConverterOptionalString.allocationSize(value.`broadcastMention`) +
+            FfiConverterSequenceTypeWaddleBroadcastSpan.allocationSize(value.`broadcastSpans`) +
             FfiConverterSequenceString.allocationSize(value.`mentionUris`) +
             FfiConverterSequenceTypeWaddleReference.allocationSize(value.`references`) +
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
@@ -8545,6 +8552,7 @@ public object FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer<Wadd
             FfiConverterOptionalUInt.write(value.`replyFallbackEnd`, buf)
             FfiConverterSequenceTypeWaddleMarkupSpan.write(value.`markupSpans`, buf)
             FfiConverterOptionalString.write(value.`broadcastMention`, buf)
+            FfiConverterSequenceTypeWaddleBroadcastSpan.write(value.`broadcastSpans`, buf)
             FfiConverterSequenceString.write(value.`mentionUris`, buf)
             FfiConverterSequenceTypeWaddleReference.write(value.`references`, buf)
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
@@ -8746,6 +8754,53 @@ public object FfiConverterTypeWaddleBookmarkItem: FfiConverterRustBuffer<WaddleB
             FfiConverterBoolean.write(value.`autojoin`, buf)
             FfiConverterOptionalTypeWaddleNotifyMode.write(value.`notifyMode`, buf)
             FfiConverterBoolean.write(value.`richPayloadOptIn`, buf)
+    }
+}
+
+
+
+/**
+ * XEP-0513 `#channel` mention over the message body. Offsets count
+ * Unicode scalar values; `end` is exclusive.
+ */
+data class WaddleBroadcastSpan (
+    var `kind`: WaddleBroadcastKind
+    ,
+    var `start`: kotlin.UInt
+    ,
+    var `end`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleBroadcastSpan: FfiConverterRustBuffer<WaddleBroadcastSpan> {
+    override fun read(buf: ByteBuffer): WaddleBroadcastSpan {
+        return WaddleBroadcastSpan(
+            FfiConverterTypeWaddleBroadcastKind.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleBroadcastSpan) = (
+            FfiConverterTypeWaddleBroadcastKind.allocationSize(value.`kind`) +
+            FfiConverterUInt.allocationSize(value.`start`) +
+            FfiConverterUInt.allocationSize(value.`end`)
+    )
+
+    override fun write(value: WaddleBroadcastSpan, buf: ByteBuffer) {
+            FfiConverterTypeWaddleBroadcastKind.write(value.`kind`, buf)
+            FfiConverterUInt.write(value.`start`, buf)
+            FfiConverterUInt.write(value.`end`, buf)
     }
 }
 
@@ -11290,6 +11345,12 @@ data class WaddleMessage (
     var `broadcastMention`: kotlin.String?
     ,
     /**
+     * Body ranges of the XEP-0513 `#channel` mentions, for highlighting
+     * the `@everyone` / `@here` tokens in place.
+     */
+    var `broadcastSpans`: List<WaddleBroadcastSpan>
+    ,
+    /**
      * XEP-0372 mention URIs, flattened from `references`.
      */
     var `mentionUris`: List<kotlin.String>
@@ -11439,6 +11500,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeWaddleMarkupSpan.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeWaddleBroadcastSpan.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceTypeWaddleReference.read(buf),
             FfiConverterOptionalTypeWaddleForumPostKind.read(buf),
@@ -11491,6 +11553,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.allocationSize(value.`parentThreadId`) +
             FfiConverterSequenceTypeWaddleMarkupSpan.allocationSize(value.`markupSpans`) +
             FfiConverterOptionalString.allocationSize(value.`broadcastMention`) +
+            FfiConverterSequenceTypeWaddleBroadcastSpan.allocationSize(value.`broadcastSpans`) +
             FfiConverterSequenceString.allocationSize(value.`mentionUris`) +
             FfiConverterSequenceTypeWaddleReference.allocationSize(value.`references`) +
             FfiConverterOptionalTypeWaddleForumPostKind.allocationSize(value.`forumPostKind`) +
@@ -11542,6 +11605,7 @@ public object FfiConverterTypeWaddleMessage: FfiConverterRustBuffer<WaddleMessag
             FfiConverterOptionalString.write(value.`parentThreadId`, buf)
             FfiConverterSequenceTypeWaddleMarkupSpan.write(value.`markupSpans`, buf)
             FfiConverterOptionalString.write(value.`broadcastMention`, buf)
+            FfiConverterSequenceTypeWaddleBroadcastSpan.write(value.`broadcastSpans`, buf)
             FfiConverterSequenceString.write(value.`mentionUris`, buf)
             FfiConverterSequenceTypeWaddleReference.write(value.`references`, buf)
             FfiConverterOptionalTypeWaddleForumPostKind.write(value.`forumPostKind`, buf)
@@ -14265,6 +14329,49 @@ public object FfiConverterTypeWaddleAttendanceStatus: FfiConverterRustBuffer<Wad
     override fun allocationSize(value: WaddleAttendanceStatus) = 4UL
 
     override fun write(value: WaddleAttendanceStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Which room members a XEP-0513 `#channel` mention addresses.
+ */
+
+enum class WaddleBroadcastKind {
+
+    /**
+     * `@everyone`: every occupant.
+     */
+    EVERYONE,
+    /**
+     * `@here`: occupants who are currently active (`active='true'`).
+     */
+    HERE;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleBroadcastKind: FfiConverterRustBuffer<WaddleBroadcastKind> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleBroadcastKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleBroadcastKind) = 4UL
+
+    override fun write(value: WaddleBroadcastKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -17083,7 +17190,7 @@ public object FfiConverterTypeWaddleRecurrenceFrequency: FfiConverterRustBuffer<
 
 
 /**
- * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+ * XEP-0372 §3.1 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
  * instead of being silently dropped or smuggled through a bare String.
  */
@@ -20093,6 +20200,34 @@ public object FfiConverterSequenceTypeWaddleBookmarkItem: FfiConverterRustBuffer
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleBookmarkItem.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleBroadcastSpan: FfiConverterRustBuffer<List<WaddleBroadcastSpan>> {
+    override fun read(buf: ByteBuffer): List<WaddleBroadcastSpan> {
+        val len = buf.getInt()
+        return List<WaddleBroadcastSpan>(len) {
+            FfiConverterTypeWaddleBroadcastSpan.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleBroadcastSpan>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleBroadcastSpan.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleBroadcastSpan>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleBroadcastSpan.write(it, buf)
         }
     }
 }

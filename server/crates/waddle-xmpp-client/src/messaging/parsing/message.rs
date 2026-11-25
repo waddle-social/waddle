@@ -7,7 +7,7 @@ use super::StableStanzaId;
 use super::Url;
 use super::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use super::{first_eligible_https_url_text, PreviewImageMediaType};
-use super::{parse_broadcast_mention, parse_markup_spans};
+use super::{parse_broadcast_mention, parse_broadcast_spans, parse_markup_spans};
 use super::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
     parse_extension_envelope, parse_in_call_reaction_payload, parse_markable_marker_payload,
@@ -158,6 +158,10 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
     let broadcast_mention = el
         .get_child("markup", NS_MARKUP)
         .and_then(parse_broadcast_mention);
+    let broadcast_spans = el
+        .get_child("markup", NS_MARKUP)
+        .map(parse_broadcast_spans)
+        .unwrap_or_default();
 
     let chat_state = parse_chat_state_payload(el).map(|payload| payload.state);
     let displayed_marker_requested = parse_markable_marker_payload(el, id.as_deref()).is_some();
@@ -294,6 +298,7 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         shared_files,
         link_previews,
         broadcast_mention,
+        broadcast_spans,
         mention_uris,
         references,
         forum_post_kind,

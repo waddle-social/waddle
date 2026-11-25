@@ -4,7 +4,7 @@ use minidom::Element;
 
 use waddle_xmpp_core::mention_markup::{mentions_from_markup, MENTION_TYPE_CHANNEL};
 
-use super::super::mentions::BroadcastMention;
+use super::super::mentions::{BroadcastMention, BroadcastSpan};
 use super::super::namespaces::{NS_MARKUP, NS_WADDLE_MARKUP};
 use super::super::types::{MarkupSpan, MarkupSpanType};
 
@@ -21,6 +21,24 @@ pub(super) fn parse_broadcast_mention(markups_el: &Element) -> Option<String> {
             BroadcastMention::Here => 1,
         })
         .map(|kind| kind.label().to_string())
+}
+
+/// Body ranges of the XEP-0513 `#channel` mentions in `markups_el`. A
+/// mention without a usable `start`/`end` has no range to highlight and is
+/// left out (it still counts toward `parse_broadcast_mention`).
+pub(super) fn parse_broadcast_spans(markups_el: &Element) -> Vec<BroadcastSpan> {
+    mentions_from_markup(markups_el)
+        .into_iter()
+        .filter(|mention| mention.mentions.as_deref() == Some(MENTION_TYPE_CHANNEL))
+        .filter_map(|mention| {
+            let (begin, end) = (mention.begin?, mention.end?);
+            (begin < end).then_some(BroadcastSpan {
+                kind: BroadcastMention::from_channel_mention(mention.active),
+                begin,
+                end,
+            })
+        })
+        .collect()
 }
 
 fn range(el: &Element) -> Option<(usize, usize)> {

@@ -80,7 +80,7 @@ fn is_mention_target(mention: &ExplicitMention) -> bool {
 
 /// Returns `true` when an XEP-0372 `<reference/>` carries a real
 /// mention TARGET — `type='mention'` AND a parseable XMPP bare JID
-/// in the `uri`. Per XEP-0372 §"Reference type 'mention'" the URI
+/// in the `uri`. Per XEP-0372 §3.2 (Mentions) the URI
 /// MUST be the XMPP URI of the mentioned entity; counting
 /// `<reference type='mention' uri=''/>` or
 /// `<reference type='mention' uri='https://attacker.example/'/>`
@@ -519,7 +519,7 @@ mod count_tests {
         assert!(!mentions_exceed_threshold(&[], &msg, 0));
     }
 
-    /// XEP-0513 §3 + XEP-0372 §"Reference type 'mention'": a mention
+    /// XEP-0513 §3 + XEP-0372 §3.2 (Mentions): a mention
     /// reference whose `uri` doesn't resolve to an XMPP bare JID
     /// targets nobody and MUST NOT contribute to the §304 count.
     /// Closes the symmetric padding attack on the XEP-0372 fallback

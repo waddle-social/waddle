@@ -98,6 +98,9 @@ pub struct WaddleMessage {
     /// XEP-0513 room-wide mention: `everyone`, or `here` for an
     /// `active='true'` `#channel` mention.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of the XEP-0513 `#channel` mentions, for highlighting
+    /// the `@everyone` / `@here` tokens in place.
+    pub broadcast_spans: Vec<WaddleBroadcastSpan>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references attached to this message — every
@@ -305,7 +308,25 @@ pub struct WaddleMarkupSpan {
     pub uri: Option<String>,
 }
 
-/// XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+/// Which room members a XEP-0513 `#channel` mention addresses.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleBroadcastKind {
+    /// `@everyone`: every occupant.
+    Everyone,
+    /// `@here`: occupants who are currently active (`active='true'`).
+    Here,
+}
+
+/// XEP-0513 `#channel` mention over the message body. Offsets count
+/// Unicode scalar values; `end` is exclusive.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleBroadcastSpan {
+    pub kind: WaddleBroadcastKind,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// XEP-0372 §3.1 reference `type`. `Other` preserves unrecognised wire
 /// values explicitly so extension references survive the boundary
 /// instead of being silently dropped or smuggled through a bare String.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
@@ -576,6 +597,8 @@ pub struct WaddleArchivedMessage {
     pub markup_spans: Vec<WaddleMarkupSpan>,
     /// XEP-0513 room-wide mention (`everyone` or `here`), when present.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of the inner message's XEP-0513 `#channel` mentions.
+    pub broadcast_spans: Vec<WaddleBroadcastSpan>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references of the inner message.
