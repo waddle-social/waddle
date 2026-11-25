@@ -146,10 +146,7 @@ schema.#Project & {
 			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
-			when: {
-				pullRequest: true
-				manual:      true
-			}
+			when: manual: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
 			"tasks": [tasks.checkCiDrift, tasks.telemetryContract, tasks.ciGradleContract]

@@ -3,42 +3,7 @@
 
 name: waddle-linux-pullRequest
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-linux-default.yml
-    - .github/workflows/waddle-linux-default.yml/**
-    - .github/workflows/waddle-linux-pullrequest.yml
-    - .github/workflows/waddle-linux-pullrequest.yml/**
-    - .github/workflows/waddle-linux-queuechecks.yml
-    - .github/workflows/waddle-linux-queuechecks.yml/**
-    - apps/*.cue
-    - apps/linux/*.cue
-    - apps/linux/Cargo.lock
-    - apps/linux/Cargo.lock/**
-    - apps/linux/Cargo.toml
-    - apps/linux/Cargo.toml/**
-    - apps/linux/data/**
-    - apps/linux/env.cue
-    - apps/linux/env.cue/**
-    - apps/linux/rust-toolchain.toml
-    - apps/linux/rust-toolchain.toml/**
-    - apps/linux/src/**
-    - ci/*.cue
-    - ci/cache/nix-shell-hook.sh
-    - ci/cache/nix-shell-hook.sh/**
-    - ci/contributors/*.cue
-    - cue.mod/**
-    - flake.lock
-    - flake.lock/**
-    - flake.nix
-    - flake.nix/**
-    - server/Cargo.toml
-    - server/Cargo.toml/**
-    - server/crates/waddle-client-session/**
-    - server/crates/waddle-xmpp-client-ffi/**
-    - server/crates/waddle-xmpp-client/**
-    - server/crates/waddle-xmpp-core/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -48,7 +13,6 @@ jobs:
       checks: write
       contents: read
       id-token: write
-      pull-requests: write
     name: waddle-linux-pullRequest
     runs-on: ubuntu-24.04
     steps:

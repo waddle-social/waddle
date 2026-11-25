@@ -1,10 +1,8 @@
 # Merge candidate verification
 
 `waddle-integration` runs on every merge-group `checks_requested` event and
-explicit workflow dispatch. Ordinary PR updates run the fast project workflows.
-The queue adds the affected server builds, default-feature Rust tests, XMPP
-compliance, Android Gradle tasks, Apple simulator and Swift builds, web client
-builds, and Linux and operator Rust checks. The PostgreSQL all-features shards
+explicit workflow dispatch. Ordinary PR updates run one unfiltered `PR smoke` job on GitHub-hosted Ubuntu. It checks the candidate diff, parses changed sources and runs dependency-free contracts for the affected projects. The same check runs on the combined merge-group revision.
+The queue adds affected server builds, XMPP compliance, Android Gradle tasks, web client builds, and Linux and operator Rust checks. Affected main pushes run the Apple Swift, XCFramework and simulator tests. The server publication workflow runs the default-feature Rust suite. The queue also runs it when the change includes inputs outside the publisher, including native Cargo fixtures. The PostgreSQL all-features shards
 remain a main publish gate. **Its same-repository `integration`
 aggregate is candidate-controlled and is not eligible as the required trusted
 gate.** A candidate can edit the workflow, generator, adapter, tests or task
@@ -17,15 +15,11 @@ activation, not for the pre-production merge stack. Under the
 this CI-changing PR may merge only after exact-head review, successful hosted CI,
 and the existing merge queue. The later
 [CI review-gate override](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6542325475)
-removed the separate human-review prerequisite. No repository rules or runner
-settings are changed by this addition.
+removed the separate human-review prerequisite. The [repository queue policy](../infrastructure/github/README.md) can require the fast `PR smoke` check so GitHub requests merge-group CI. Heavy integration results report independently and may still be running when main advances.
 
 ## Coverage and candidate identity
 
-The generator discovers every checked-in workflow with a `pull_request` trigger,
-and explicitly lists deferred workflows in `queueScopes` in
-`scripts/integration-ci.ts`. Main and PR project trigger paths select queue-only
-checks. The planner copies only verification jobs from the listed sources. It
+The planner derives queue paths from transitive CUE task inputs in `ci/rust-tests/queue-paths.cue` and the main workflow path filters listed in `scripts/integration-ci.ts`. The dispatch-only project workflows provide reusable verification jobs. Chat and operator each share one runner setup for their affected checks. The PR smoke job checks native telemetry changes and the macOS lane repeats that contract on main. The planner copies only verification jobs from the listed sources. It
 preserves commands, runner sizes,
 dependencies, and internal failure checks. Generated verification jobs are capped
 at `contents: read` (or no permissions for a pure result check). They omit
@@ -56,8 +50,7 @@ candidate-controlled workflow or its task definitions authoritative.
 
 The planner compares the event's full base SHA with the exact candidate SHA.
 Missing objects, invalid event identity, non-ancestor bases, and empty diffs fail.
-An unrecognized surface selects every lane. Planner or generator changes also
-select every lane. The aggregate requires planner success, every applicable job
+An unrecognized surface selects every candidate lane. For merge groups targeting main, the planner then checks whether the main workflow will run the same Apple or default-feature server job. It reads the main push filters and keeps the queue job for uncovered inputs, changed workflow definitions, unfamiliar filter syntax and diffs over 300 paths. Changes to the planner or generator exercise every lane. Manual validation keeps the complete candidate inventory. A newer matching Apple push can supersede unfinished Apple validation. The server publisher waits for the default-feature suite on each revision it publishes. The aggregate requires planner success, every applicable job
 success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
 reuse of prior PR results.
@@ -148,15 +141,14 @@ A poisoned-ambient regression checks this per invocation. The separate real-even
 fixture explicitly supplies its own merge-group identity. This test isolation
 does not override the real workflow execution context.
 
-The existing server `checkCiDrift` and the integration planner check graph parity.
-Adding or changing a source PR lane without regenerating fails those checks.
-Fast PR workflows run directly on pull requests. The queue graph runs the
-affected fast and expensive checks once for the combined candidate. The main
-ruleset has no required status check, so the queue does not wait for it. The planner's own contracts (`integration-ci.test.ts`,
-`test_integration_ci_project.py`, `test_cuenv_bootstrap.py`) also run in the
-server `checkCiDrift` task, which pull requests run. Omitting
-FlakeHub cache can increase compile and download time; no verification commands,
-runner resources, or assertions are removed. The original cuenv reporter only uses
+On a PR that edits the workflow graph, the smoke job checks generated workflow
+parity and runs the planner contracts. The merge-group planner also checks the
+cuenv adapter and bootstrap contracts. Server `checkCiDrift` runs as part of
+the deeper project verification. With the repository queue policy applied, the
+queue waits for `PR smoke`. The combined candidate's integration results
+report separately. Several expensive jobs can overlap after their smoke checks
+finish. Integration runners omit the FlakeHub OIDC cache setup, which can
+increase compile and download time. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
 warnings in `crates/ci/src/executor/reporting.rs` of cuenv (CLI 0.81.1). Generated
 integration jobs rely on Actions job results rather than those notifications.

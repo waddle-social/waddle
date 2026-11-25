@@ -44,7 +44,7 @@ class BootstrapContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.steps = generated_bootstraps()
-        cls.script = next(step["run"] for step in cls.steps if step["file"] == "waddle-chat-pullrequest.yml")
+        cls.script = next(step["run"] for step in cls.steps if step["file"] == "waddle-chat-queuechecks.yml")
 
     def test_all_release_bootstraps_are_exact_and_pinned(self):
         self.assertGreater(len(self.steps), 20)

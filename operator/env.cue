@@ -76,22 +76,10 @@ schema.#Project & {
 				tasks.ciCheckCrdDrift,
 			]
 		}
-		pullRequest: {
-			when: {
-				pullRequest: true
-			}
-			provider: github: permissions: {contents: "read", "id-token": "write"}
-			"tasks": [
-				tasks.checkCiDrift,
-				tasks.fmt,
-				tasks.structure,
-				tasks.ciCheckCrdDrift,
-			]
-		}
 		queueChecks: {
 			when: manual: true
 			provider: github: permissions: {contents: "read", "id-token": "write"}
-			"tasks": [tasks.clippy, tasks.test, tasks.doctest]
+			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.structure, tasks.ciCheckCrdDrift, tasks.clippy, tasks.test, tasks.doctest]
 		}
 	}
 
@@ -100,7 +88,7 @@ schema.#Project & {
 			hermetic: false
 			command:  "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-operator-default.yml", ".github/workflows/waddle-operator-pullrequest.yml", ".github/workflows/waddle-operator-queuechecks.yml"]}]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-operator-default.yml", ".github/workflows/waddle-operator-queuechecks.yml"]}]
 		}
 
 		fmt: schema.#Task & {

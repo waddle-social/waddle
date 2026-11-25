@@ -3,21 +3,7 @@
 
 name: waddle-cloud-pullRequest
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-cloud-pullrequest.yml
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - cue.mod/**
-    - infrastructure/*.cue
-    - infrastructure/waddle.cloud/*.cue
-    - infrastructure/waddle.cloud/dashboards/**
-    - infrastructure/waddle.cloud/env.cue
-    - infrastructure/waddle.cloud/env.cue/**
-    - infrastructure/waddle.cloud/rules/**
-    - infrastructure/waddle.cloud/scripts/validate-dashboards.sh
-    - infrastructure/waddle.cloud/scripts/validate-dashboards.sh/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -27,7 +13,6 @@ jobs:
       checks: write
       contents: read
       id-token: write
-      pull-requests: write
     name: waddle-cloud-pullRequest
     runs-on: ubuntu-24.04
     steps:

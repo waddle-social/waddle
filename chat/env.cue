@@ -101,25 +101,11 @@ schema.#Project & {
 			}
 			"tasks": [tasks.nativeTelemetryContract, tasks.deploy]
 		}
-		pullRequest: {
-			when: {
-				pullRequest: true
-			}
-			// Keep the shared Namespace pool available for Rust compilation
-			// and Android jobs that require the larger runner profiles.
-			provider: github: runner: "ubuntu-24.04"
-			provider: github: permissions: {
-				contents:   "read"
-				"id-token": "write"
-				packages:   "none"
-			}
-			"tasks": [tasks.wasmBuildContract, tasks.tokensCheck, tasks.tokensTest]
-		}
 		queueChecks: {
 			when: manual: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
-			"tasks": [tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build]
+			"tasks": [tasks.wasmBuildContract, tasks.tokensCheck, tasks.tokensTest, tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build]
 		}
 	}
 
