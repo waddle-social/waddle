@@ -14,6 +14,35 @@ pub fn hex(identifier: &str) -> String {
     generate_color_with_params(identifier, SATURATION, LIGHTNESS).to_hex()
 }
 
+/// Pango markup for `text`, a person's name: in their color when
+/// `colorize`, else in the theme's own. XEP-0392 (Security and
+/// Accessibility): "Implementations SHOULD allow the user to turn off any
+/// colorization completely", so the choice is the Preferences setting.
+pub fn markup_with(identifier: &str, text: &str, bold: bool, colorize: bool) -> String {
+    let text = gtk::glib::markup_escape_text(text);
+    let weight = if bold { " weight=\"bold\"" } else { "" };
+    if colorize {
+        format!(
+            "<span foreground=\"{}\"{weight}>{text}</span>",
+            hex(identifier)
+        )
+    } else if bold {
+        format!("<span{weight}>{text}</span>")
+    } else {
+        text.to_string()
+    }
+}
+
+/// [`markup_with`] under the user's `colorize_names` preference.
+pub fn markup(identifier: &str, text: &str, bold: bool) -> String {
+    markup_with(
+        identifier,
+        text,
+        bold,
+        crate::settings::get().colorize_names,
+    )
+}
+
 /// What a person's color is taken from: a room participant's nick (a nick
 /// is the identity there), otherwise their bare JID when it is known.
 pub fn identifier<'a>(in_room: bool, nick: &'a str, jid: Option<&'a str>) -> &'a str {
@@ -38,6 +67,24 @@ mod tests {
             "#dd00af"
         );
         assert_eq!(hex("Romeo").len(), 7);
+    }
+
+    #[test]
+    fn markup_is_colored_only_when_colorizing() {
+        let on = markup_with("Romeo", "R&J", true, true);
+        assert_eq!(
+            on,
+            format!(
+                "<span foreground=\"{}\" weight=\"bold\">R&amp;J</span>",
+                hex("Romeo")
+            )
+        );
+        assert_eq!(
+            markup_with("Romeo", "R&J", true, false),
+            "<span weight=\"bold\">R&amp;J</span>"
+        );
+        assert_eq!(markup_with("Romeo", "R&J", false, false), "R&amp;J");
+        assert!(!markup_with("Romeo", "x", false, false).contains("foreground"));
     }
 
     #[test]

@@ -86,6 +86,8 @@ pub struct Activity {
     /// to preserve extensibility without allowing arbitrary payloads.
     pub specific: Option<SpecificActivity>,
     pub text: Option<String>,
+    /// BCP 47 language of `text` (`xml:lang` on `<text/>`, or inherited from `<activity/>`).
+    pub lang: Option<String>,
 }
 
 /// A specific activity is a well-known element name under the general
@@ -118,6 +120,7 @@ impl Activity {
             general,
             specific: None,
             text: None,
+            lang: None,
         }
     }
 
@@ -128,6 +131,12 @@ impl Activity {
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
+        self
+    }
+
+    /// Set the BCP 47 language of the `<text/>` element (`xml:lang`).
+    pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = Some(lang.into());
         self
     }
 }
@@ -141,11 +150,17 @@ pub fn build_activity_element(activity: &Activity) -> Element {
     }
     let mut builder = Element::builder("activity", NS_ACTIVITY).append(general_builder.build());
     if let Some(text) = &activity.text {
-        builder = builder.append(
-            Element::builder("text", NS_ACTIVITY)
-                .append(text.as_str())
-                .build(),
-        );
+        // XEP-0108 Internationalization Considerations: the sender SHOULD
+        // ensure that `<text/>` or `<activity/>` possesses an 'xml:lang'.
+        let mut text_builder = Element::builder("text", NS_ACTIVITY);
+        if let Some(lang) = activity.lang.as_deref().filter(|lang| !lang.is_empty()) {
+            text_builder = text_builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang,
+            );
+        }
+        builder = builder.append(text_builder.append(text.as_str()).build());
     }
     builder.build()
 }
@@ -164,6 +179,7 @@ pub fn parse_activity_element(elem: &Element) -> Result<Option<Activity>, Activi
     let mut general: Option<GeneralActivity> = None;
     let mut specific: Option<SpecificActivity> = None;
     let mut text: Option<String> = None;
+    let mut lang: Option<String> = None;
     let mut has_any = false;
     for child in elem.children() {
         if child.ns() != NS_ACTIVITY {
@@ -173,6 +189,9 @@ pub fn parse_activity_element(elem: &Element) -> Result<Option<Activity>, Activi
         let name = child.name();
         if name == "text" {
             text = Some(child.text());
+            lang = child
+                .attr_ns(&minidom::rxml::Namespace::XML, "lang")
+                .map(str::to_string);
             continue;
         }
         if general.is_some() {
@@ -197,10 +216,15 @@ pub fn parse_activity_element(elem: &Element) -> Result<Option<Activity>, Activi
         return Ok(None);
     }
     let general = general.ok_or(ActivityError::MissingGeneral)?;
+    let lang = lang.or_else(|| {
+        elem.attr_ns(&minidom::rxml::Namespace::XML, "lang")
+            .map(str::to_string)
+    });
     Ok(Some(Activity {
         general,
         specific,
         text,
+        lang,
     }))
 }
 

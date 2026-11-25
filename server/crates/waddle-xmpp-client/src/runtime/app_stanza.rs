@@ -128,9 +128,6 @@ impl XmppRuntime {
                 pep::parse_activity_notification(element, self.account_bare_jid())
             {
                 events.push(ClientEvent::ActivityChanged { jid, activity });
-            }
-            if let Some(pep_item) = pep::parse(element) {
-                events.push(ClientEvent::PepEvent(pep_item));
                 return events;
             }
         }
@@ -203,7 +200,9 @@ impl XmppRuntime {
         vec![ClientEvent::MessageRejected(Box::new(rejection))]
     }
 
-    fn account_bare_jid(&self) -> &jid::BareJid {
+    /// Bare JID of the authenticated account this runtime serves.
+    #[must_use]
+    pub fn account_bare_jid(&self) -> &jid::BareJid {
         match &self.config.auth {
             AuthenticationConfig::OAuthBearer(config) => &config.account,
         }

@@ -20,18 +20,18 @@ use waddle_xmpp_client::{
 use crate::profile_verbs::activity_from_core;
 use crate::safety_scores::safety_scores_fastening_to_ffi;
 use crate::{
-    WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
-    WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
-    WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleForumPostKind, WaddleInboxEntry, WaddleJingleReason, WaddleLinkPreview,
-    WaddleLinkPreviewImage, WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview,
-    WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo,
-    WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry,
-    WaddleMentionDirectory, WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence,
-    WaddlePackSticker, WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview,
-    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
-    WaddleStickerPack,
+    WaddleArchivedMessage, WaddleBroadcastKind, WaddleBroadcastSpan, WaddleCallEvent,
+    WaddleCallEventKind, WaddleCallMedia, WaddleCallThreadAnchor, WaddleCallThreadEnded,
+    WaddleCarbonDirection, WaddleChatState, WaddleClientEvent, WaddleEncryptedFile,
+    WaddleEncryptedFileHash, WaddleEventListener, WaddleForumPostKind, WaddleInboxEntry,
+    WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage, WaddleLinkPreviewLookup,
+    WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer,
+    WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType,
+    WaddleMdsDisplayedEntry, WaddleMentionDirectory, WaddleMessage, WaddleMucAffiliation,
+    WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction, WaddlePinEntry,
+    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference,
+    WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
+    WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -562,6 +562,20 @@ fn markup_spans_to_ffi(spans: Vec<MarkupSpan>) -> Vec<WaddleMarkupSpan> {
     spans.into_iter().filter_map(markup_span_to_ffi).collect()
 }
 
+fn broadcast_spans_to_ffi(spans: &[messaging::BroadcastSpan]) -> Vec<WaddleBroadcastSpan> {
+    spans
+        .iter()
+        .map(|span| WaddleBroadcastSpan {
+            kind: match span.kind {
+                messaging::BroadcastMention::Everyone => WaddleBroadcastKind::Everyone,
+                messaging::BroadcastMention::Here => WaddleBroadcastKind::Here,
+            },
+            start: span.begin,
+            end: span.end,
+        })
+        .collect()
+}
+
 fn reference_to_ffi(reference: ReferenceData) -> WaddleReference {
     WaddleReference {
         ref_type: reference_type_to_ffi(reference.ref_type),
@@ -896,6 +910,7 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         parent_thread_id: msg.parent_thread_id,
         markup_spans: markup_spans_to_ffi(msg.markup_spans),
         broadcast_mention: msg.broadcast_mention,
+        broadcast_spans: broadcast_spans_to_ffi(&msg.broadcast_spans),
         mention_uris: msg.mention_uris,
         references: references_to_ffi(msg.references),
         forum_post_kind: msg
@@ -1021,6 +1036,9 @@ pub(crate) fn archived_to_ffi(
             .map(|m| markup_spans_to_ffi(m.markup_spans.clone()))
             .unwrap_or_default(),
         broadcast_mention: parsed.and_then(|m| m.broadcast_mention.clone()),
+        broadcast_spans: parsed
+            .map(|m| broadcast_spans_to_ffi(&m.broadcast_spans))
+            .unwrap_or_default(),
         mention_uris: parsed.map(|m| m.mention_uris.clone()).unwrap_or_default(),
         references: parsed
             .map(|m| references_to_ffi(m.references.clone()))
@@ -1788,6 +1806,14 @@ mod tests {
         ));
         assert_eq!(ffi.mention_uris, vec!["xmpp:bob@waddle.test".to_string()]);
         assert_eq!(ffi.broadcast_mention.as_deref(), Some("everyone"));
+        assert_eq!(
+            ffi.broadcast_spans,
+            vec![WaddleBroadcastSpan {
+                kind: WaddleBroadcastKind::Everyone,
+                start: 12,
+                end: 21
+            }]
+        );
         assert_eq!(ffi.references.len(), 2);
         assert_eq!(ffi.references[0].ref_type, WaddleReferenceType::Mention);
         assert_eq!(ffi.references[0].uri, "xmpp:bob@waddle.test");

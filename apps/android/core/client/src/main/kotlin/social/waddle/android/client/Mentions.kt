@@ -164,7 +164,7 @@ internal fun SessionStores.roomMentionDirectory(roomJid: String): WaddleMentionD
 /**
  * One accepted composer mention: [begin] inclusive / [end] exclusive,
  * Unicode CODE POINTS over the trimmed send body BEFORE any reply
- * fallback prefix (XEP-0372 §3 counts code points; `preparedSend`
+ * fallback prefix (XEP-0372 §3.1 counts code points; `preparedSend`
  * rebases onto the final wire body). Serializable so queued offline
  * sends replay with their mention references intact.
  */

@@ -37,6 +37,17 @@ extension FFIInbound {
         }
     }
 
+    /// XEP-0513 `#channel` mention range; a reversed range is dropped.
+    static func broadcastSpan(_ span: WaddleBroadcastSpan) -> BroadcastSpan? {
+        guard span.end >= span.start else { return nil }
+        let kind: BroadcastSpan.Kind
+        switch span.kind {
+        case .everyone: kind = .everyone
+        case .here: kind = .here
+        }
+        return BroadcastSpan(kind: kind, start: Int(span.start), end: Int(span.end))
+    }
+
     static func reference(_ reference: WaddleReference) -> Reference {
         Reference(
             kind: referenceKind(reference.refType),

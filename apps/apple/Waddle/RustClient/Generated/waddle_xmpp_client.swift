@@ -1270,9 +1270,10 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
-    func publishActivity(general: String, specific: String?, text: String?) async throws
+    func publishActivity(general: String, specific: String?, text: String?, lang: String?) async throws
 
     /**
      * XEP-0084 §3: publish `data` as the account's avatar — the
@@ -3771,15 +3772,16 @@ open func fetchVcard4(jid: String)async throws  -> WaddleVCard4?  {
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
-open func publishActivity(general: String, specific: String?, text: String?)async throws   {
+open func publishActivity(general: String, specific: String?, text: String?, lang: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(general),FfiConverterOptionString.lower(specific),FfiConverterOptionString.lower(text)
+                    FfiConverterString.lower(general),FfiConverterOptionString.lower(specific),FfiConverterOptionString.lower(text),FfiConverterOptionString.lower(lang)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
@@ -6432,6 +6434,10 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
      */
     public var broadcastMention: String?
     /**
+     * Body ranges of the inner message's XEP-0513 `#channel` mentions.
+     */
+    public var broadcastSpans: [WaddleBroadcastSpan]
+    /**
      * XEP-0372 mention URIs, flattened from `references`.
      */
     public var mentionUris: [String]
@@ -6528,6 +6534,9 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
          * XEP-0513 room-wide mention (`everyone` or `here`), when present.
          */broadcastMention: String?,
         /**
+         * Body ranges of the inner message's XEP-0513 `#channel` mentions.
+         */broadcastSpans: [WaddleBroadcastSpan],
+        /**
          * XEP-0372 mention URIs, flattened from `references`.
          */mentionUris: [String],
         /**
@@ -6598,6 +6607,7 @@ public struct WaddleArchivedMessage: Equatable, Hashable {
         self.replyFallbackEnd = replyFallbackEnd
         self.markupSpans = markupSpans
         self.broadcastMention = broadcastMention
+        self.broadcastSpans = broadcastSpans
         self.mentionUris = mentionUris
         self.references = references
         self.forumPostKind = forumPostKind
@@ -6660,6 +6670,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
                 markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
                 broadcastMention: FfiConverterOptionString.read(from: &buf),
+                broadcastSpans: FfiConverterSequenceTypeWaddleBroadcastSpan.read(from: &buf),
                 mentionUris: FfiConverterSequenceString.read(from: &buf),
                 references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
                 forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
@@ -6708,6 +6719,7 @@ public struct FfiConverterTypeWaddleArchivedMessage: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.replyFallbackEnd, into: &buf)
         FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
         FfiConverterOptionString.write(value.broadcastMention, into: &buf)
+        FfiConverterSequenceTypeWaddleBroadcastSpan.write(value.broadcastSpans, into: &buf)
         FfiConverterSequenceString.write(value.mentionUris, into: &buf)
         FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
         FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
@@ -6998,6 +7010,68 @@ public func FfiConverterTypeWaddleBookmarkItem_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeWaddleBookmarkItem_lower(_ value: WaddleBookmarkItem) -> RustBuffer {
     return FfiConverterTypeWaddleBookmarkItem.lower(value)
+}
+
+
+/**
+ * XEP-0513 `#channel` mention over the message body. Offsets count
+ * Unicode scalar values; `end` is exclusive.
+ */
+public struct WaddleBroadcastSpan: Equatable, Hashable {
+    public var kind: WaddleBroadcastKind
+    public var start: UInt32
+    public var end: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: WaddleBroadcastKind, start: UInt32, end: UInt32) {
+        self.kind = kind
+        self.start = start
+        self.end = end
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleBroadcastSpan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleBroadcastSpan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleBroadcastSpan {
+        return
+            try WaddleBroadcastSpan(
+                kind: FfiConverterTypeWaddleBroadcastKind.read(from: &buf),
+                start: FfiConverterUInt32.read(from: &buf),
+                end: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleBroadcastSpan, into buf: inout [UInt8]) {
+        FfiConverterTypeWaddleBroadcastKind.write(value.kind, into: &buf)
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.end, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBroadcastSpan_lift(_ buf: RustBuffer) throws -> WaddleBroadcastSpan {
+    return try FfiConverterTypeWaddleBroadcastSpan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBroadcastSpan_lower(_ value: WaddleBroadcastSpan) -> RustBuffer {
+    return FfiConverterTypeWaddleBroadcastSpan.lower(value)
 }
 
 
@@ -10247,6 +10321,11 @@ public struct WaddleMessage: Equatable, Hashable {
      */
     public var broadcastMention: String?
     /**
+     * Body ranges of the XEP-0513 `#channel` mentions, for highlighting
+     * the `@everyone` / `@here` tokens in place.
+     */
+    public var broadcastSpans: [WaddleBroadcastSpan]
+    /**
      * XEP-0372 mention URIs, flattened from `references`.
      */
     public var mentionUris: [String]
@@ -10395,6 +10474,10 @@ public struct WaddleMessage: Equatable, Hashable {
          * `active='true'` `#channel` mention.
          */broadcastMention: String?,
         /**
+         * Body ranges of the XEP-0513 `#channel` mentions, for highlighting
+         * the `@everyone` / `@here` tokens in place.
+         */broadcastSpans: [WaddleBroadcastSpan],
+        /**
          * XEP-0372 mention URIs, flattened from `references`.
          */mentionUris: [String],
         /**
@@ -10493,6 +10576,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.parentThreadId = parentThreadId
         self.markupSpans = markupSpans
         self.broadcastMention = broadcastMention
+        self.broadcastSpans = broadcastSpans
         self.mentionUris = mentionUris
         self.references = references
         self.forumPostKind = forumPostKind
@@ -10559,6 +10643,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 parentThreadId: FfiConverterOptionString.read(from: &buf),
                 markupSpans: FfiConverterSequenceTypeWaddleMarkupSpan.read(from: &buf),
                 broadcastMention: FfiConverterOptionString.read(from: &buf),
+                broadcastSpans: FfiConverterSequenceTypeWaddleBroadcastSpan.read(from: &buf),
                 mentionUris: FfiConverterSequenceString.read(from: &buf),
                 references: FfiConverterSequenceTypeWaddleReference.read(from: &buf),
                 forumPostKind: FfiConverterOptionTypeWaddleForumPostKind.read(from: &buf),
@@ -10611,6 +10696,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.parentThreadId, into: &buf)
         FfiConverterSequenceTypeWaddleMarkupSpan.write(value.markupSpans, into: &buf)
         FfiConverterOptionString.write(value.broadcastMention, into: &buf)
+        FfiConverterSequenceTypeWaddleBroadcastSpan.write(value.broadcastSpans, into: &buf)
         FfiConverterSequenceString.write(value.mentionUris, into: &buf)
         FfiConverterSequenceTypeWaddleReference.write(value.references, into: &buf)
         FfiConverterOptionTypeWaddleForumPostKind.write(value.forumPostKind, into: &buf)
@@ -14285,6 +14371,82 @@ public func FfiConverterTypeWaddleAttendanceStatus_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeWaddleAttendanceStatus_lower(_ value: WaddleAttendanceStatus) -> RustBuffer {
     return FfiConverterTypeWaddleAttendanceStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Which room members a XEP-0513 `#channel` mention addresses.
+ */
+
+public enum WaddleBroadcastKind: Equatable, Hashable {
+
+    /**
+     * `@everyone`: every occupant.
+     */
+    case everyone
+    /**
+     * `@here`: occupants who are currently active (`active='true'`).
+     */
+    case here
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleBroadcastKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleBroadcastKind: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleBroadcastKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleBroadcastKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .everyone
+
+        case 2: return .here
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleBroadcastKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .everyone:
+            writeInt(&buf, Int32(1))
+
+
+        case .here:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBroadcastKind_lift(_ buf: RustBuffer) throws -> WaddleBroadcastKind {
+    return try FfiConverterTypeWaddleBroadcastKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBroadcastKind_lower(_ value: WaddleBroadcastKind) -> RustBuffer {
+    return FfiConverterTypeWaddleBroadcastKind.lower(value)
 }
 
 
@@ -18222,7 +18384,7 @@ public func FfiConverterTypeWaddleRecurrenceFrequency_lower(_ value: WaddleRecur
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
- * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+ * XEP-0372 §3.1 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
  * instead of being silently dropped or smuggled through a bare String.
  */
@@ -21086,6 +21248,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleBookmarkItem: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeWaddleBroadcastSpan: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleBroadcastSpan]
+
+    public static func write(_ value: [WaddleBroadcastSpan], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleBroadcastSpan.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleBroadcastSpan] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleBroadcastSpan]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleBroadcastSpan.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWaddleChannel: FfiConverterRustBuffer {
     typealias SwiftType = [WaddleChannel]
 
@@ -22668,7 +22855,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 7083) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {

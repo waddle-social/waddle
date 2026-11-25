@@ -110,11 +110,13 @@ pub fn parse_status_preference_event(
     if event.node != PEP_NODE_WADDLE_STATUS_PREFERENCE {
         return None;
     }
-    // XEP-0163 §4.3: PEP notifications come from the owner's bare JID.
+    // XEP-0223 Security Considerations: "clients MUST verify that the 'from'
+    // attribute on incoming event messages is either absent or equal to their
+    // own account JID" (XEP-0163 notifications come from the owner's bare JID).
     if !event
         .from
         .as_ref()
-        .is_some_and(|from| is_own_bare(from, account))
+        .is_none_or(|from| is_own_bare(from, account))
     {
         return None;
     }
@@ -148,6 +150,10 @@ mod tests {
     }
 
     fn event_message(from: &str, item: Element) -> Element {
+        event_message_from(Some(from), item)
+    }
+
+    fn event_message_from(from: Option<&str>, item: Element) -> Element {
         let items = Element::builder("items", crate::pep::NS_PUBSUB_EVENT)
             .attr(
                 minidom::rxml::xml_ncname!("node").to_owned(),
@@ -158,8 +164,11 @@ mod tests {
         let event = Element::builder("event", crate::pep::NS_PUBSUB_EVENT)
             .append(items)
             .build();
-        Element::builder("message", NS_CLIENT)
-            .attr(minidom::rxml::xml_ncname!("from").to_owned(), from)
+        let mut message = Element::builder("message", NS_CLIENT);
+        if let Some(from) = from {
+            message = message.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
+        }
+        message
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "headline")
             .append(event)
             .build()
@@ -208,6 +217,16 @@ mod tests {
         assert_eq!(parse_event(&reset), Some(StatusPreference::Automatic));
         let retract = event_message("alice@example.com", retracted());
         assert_eq!(parse_event(&retract), Some(StatusPreference::Automatic));
+    }
+
+    #[test]
+    fn event_with_absent_from_is_accepted() {
+        let message =
+            event_message_from(None, published(StatusPreference::Manual(ManualStatus::Dnd)));
+        assert_eq!(
+            parse_event(&message),
+            Some(StatusPreference::Manual(ManualStatus::Dnd))
+        );
     }
 
     #[test]

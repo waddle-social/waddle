@@ -8,10 +8,10 @@ use super::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_in_call_reaction_message, build_moderation_message, build_muc_join_presence,
     build_outbound_message, build_pinned_message, build_reaction_message, build_retraction_message,
-    build_unpinned_message, is_muc_join_presence, parse, InCallReactionEmoji,
-    InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken, MarkupSpanData,
-    MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent, MucAffiliation, MucRole,
-    ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
+    build_unpinned_message, is_muc_join_presence, parse, BroadcastMention, BroadcastSpan,
+    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken,
+    MarkupSpanData, MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent,
+    MucAffiliation, MucRole, ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
 };
 use crate::error::ClientError;
 use crate::request::StanzaId;
@@ -1370,6 +1370,21 @@ fn build_outbound_message_resolves_typed_mentions_to_references_and_channel_ment
         vec!["xmpp:rawkode@waddle.social".to_string()]
     );
     assert_eq!(msg.broadcast_mention.as_deref(), Some("everyone"));
+    assert_eq!(
+        msg.broadcast_spans,
+        vec![
+            BroadcastSpan {
+                kind: BroadcastMention::Everyone,
+                begin: 13,
+                end: 22
+            },
+            BroadcastSpan {
+                kind: BroadcastMention::Here,
+                begin: 42,
+                end: 47
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1408,6 +1423,8 @@ fn build_outbound_message_here_alone_is_an_active_channel_mention() {
         panic!("expected message");
     };
     assert_eq!(msg.broadcast_mention.as_deref(), Some("here"));
+    assert_eq!(msg.broadcast_spans.len(), 1);
+    assert_eq!(msg.broadcast_spans[0].kind, BroadcastMention::Here);
     assert!(msg.mention_uris.is_empty());
 }
 
@@ -2845,6 +2862,21 @@ fn build_in_call_reaction_message_has_transient_carrier_shape() {
     assert!(stanza.get_child("no-store", NS_HINTS).is_some());
     assert!(stanza.get_child("no-copy", NS_HINTS).is_some());
     assert!(stanza.get_child("store", NS_HINTS).is_none());
+}
+
+#[test]
+fn build_in_call_reaction_message_to_room_omits_no_copy_hint() {
+    // XEP-0334: "This hint MUST only be included on messages addressed to
+    // full JIDs"; a groupchat reaction targets the room's bare JID.
+    let recipient =
+        InCallReactionRecipient::Room("room@muc.example.com".parse().expect("bare jid"));
+    let sid = InCallSessionId::try_new("call-1").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
+    let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
+    assert_eq!(stanza.attr("to"), Some("room@muc.example.com"));
+    assert_eq!(stanza.attr("type"), Some("groupchat"));
+    assert!(stanza.get_child("no-store", NS_HINTS).is_some());
+    assert!(stanza.get_child("no-copy", NS_HINTS).is_none());
 }
 
 #[test]

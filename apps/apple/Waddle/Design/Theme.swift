@@ -115,20 +115,6 @@ enum Theme {
 }
 
 extension Color {
-    /// XEP-0392 consistent color for `identifier`, from the shared Rust
-    /// implementation (SHA-1 hue through HSLuv `hsluvToRgb`) so every
-    /// Waddle client renders the same color: HSLuv saturation 100,
-    /// lightness 45.
-    static func consistent(for identifier: String) -> Color {
-        let hex = consistentColorHex(input: identifier, saturation: 100, lightness: 45)
-        let rgb = UInt32(hex.dropFirst(), radix: 16) ?? 0
-        return Color(
-            red: Double((rgb >> 16) & 0xFF) / 255,
-            green: Double((rgb >> 8) & 0xFF) / 255,
-            blue: Double(rgb & 0xFF) / 255
-        )
-    }
-
     /// The page ground.
     static var primaryBackground: Color { Theme.Colors.bg }
 

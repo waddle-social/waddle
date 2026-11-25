@@ -18,8 +18,11 @@
 //! subscription stanza changes the account's half of the subscription only
 //! once the route took it. Once accepted, an eligible message is copied to
 //! the sender's other Carbons-enabled resources as a `<sent/>` carbon
-//! (XEP-0280 §6.1, §7); see `sent_carbon_copy`. With S2S off nothing here
-//! reads a roster or a blocking list: the route refuses first.
+//! (XEP-0280 §6.1, §7); see `sent_carbon_copy`. A message the route refuses
+//! earns its sender an error that is eligible in turn, so the other
+//! resources receive the message as a `<sent/>` carbon and the error as a
+//! `<received/>` carbon (`copy_refusal`). With S2S off nothing here reads a
+//! roster or a blocking list: the route refuses first.
 
 use jid::{FullJid, Jid};
 use tracing::debug;
@@ -78,7 +81,11 @@ pub(crate) async fn route_unserved_message(
     state: &WebSocketState,
 ) -> Vec<String> {
     message.from = Some(Jid::from(sender.clone()));
-    if let Some(reply) = blocked_reply(
+    let carbon = match &destination {
+        UnservedDestination::Remote(remote) => sent_carbon_copy(&message, remote),
+        UnservedDestination::Invalid(_) => None,
+    };
+    if let Some((reply, bounce)) = blocked_reply(
         &Stanza::Message(message.clone()),
         &destination,
         sender,
@@ -86,19 +93,42 @@ pub(crate) async fn route_unserved_message(
     )
     .await
     {
+        copy_refusal(carbon, bounce, sender, state).await;
         return reply;
     }
-    let carbon = match &destination {
-        UnservedDestination::Remote(remote) => sent_carbon_copy(&message, remote),
-        UnservedDestination::Invalid(_) => None,
-    };
     let offered = offer(Stanza::Message(message), destination, sender, state).await;
     if offered.accepted {
         if let Some(carbon) = carbon {
-            send_sent_carbons(carbon, sender, state).await;
+            send_carbons(carbon, CarbonKind::Sent, sender, state).await;
         }
+    } else {
+        copy_refusal(carbon, offered.reply, sender, state).await;
     }
     offered.replies
+}
+
+/// XEP-0280 §6.1: an error "sent in response to a MESSAGE that was eligible
+/// for carbons delivery" is itself eligible. A message refused here earned
+/// its sender an error, so the sender's other Carbons-enabled resources
+/// receive the message as a `<sent/>` carbon and the error as a
+/// `<received/>` carbon, and none is left believing it was delivered. The
+/// resource that sent the message receives the error itself and is excluded.
+/// `sent` is `None` when the message was not eligible, which also withholds
+/// the error's copy.
+async fn copy_refusal(
+    sent: Option<Message>,
+    error: Option<Stanza>,
+    sender: &FullJid,
+    state: &WebSocketState,
+) {
+    let (Some(sent), Some(Stanza::Message(error))) = (sent, error) else {
+        return;
+    };
+    if error.type_ != xmpp_parsers::message::MessageType::Error {
+        return;
+    }
+    send_carbons(sent, CarbonKind::Sent, sender, state).await;
+    send_carbons(error, CarbonKind::Received, sender, state).await;
 }
 
 /// The message a `<sent/>` carbon forwards when `message`, addressed to
@@ -124,15 +154,15 @@ fn sent_carbon_copy(message: &Message, remote: &RemoteDestination) -> Option<Mes
     Some(copy)
 }
 
-/// Copy `carbon`, a message `sender` sent that the remote route accepted,
-/// to the sender's other Carbons-enabled resources, live or detached.
+/// Copy `carbon`, a message `sender` sent or the error it earned, to the
+/// sender's other Carbons-enabled resources, live or detached.
 /// The interpreter applies each resource's current Carbons setting.
-async fn send_sent_carbons(carbon: Message, sender: &FullJid, state: &WebSocketState) {
+async fn send_carbons(carbon: Message, kind: CarbonKind, sender: &FullJid, state: &WebSocketState) {
     let deps = build_interpret_deps(state, None);
     let event = OutboundEvent::SendCarbons {
         owner: sender.to_bare(),
         message: Box::new(carbon),
-        kind: CarbonKind::Sent,
+        kind,
         exclude: vec![sender.clone()],
     };
     let outcome = crate::server::routes::interpret::interpret(vec![event], &deps).await;
@@ -165,7 +195,7 @@ pub(crate) async fn route_unserved_presence(
     // an address the account blocks or with S2S off (gate G18). With S2S
     // on, the subscription path forgets it as it decides what to route.
     let denial = presence.type_ == Type::Unsubscribed;
-    if let Some(reply) = blocked_reply(
+    if let Some((reply, _)) = blocked_reply(
         &Stanza::Presence(presence.clone()),
         &destination,
         sender,
@@ -220,7 +250,7 @@ async fn blocked_reply(
     destination: &UnservedDestination,
     sender: &FullJid,
     state: &WebSocketState,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, Option<Stanza>)> {
     let UnservedDestination::Remote(remote) = destination else {
         return None;
     };
@@ -228,12 +258,8 @@ async fn blocked_reply(
         return None;
     }
     debug!("Refusing a stanza to a remote address on the sender's blocking list");
-    Some(
-        super::presence::outgoing_block_reply(stanza, sender)
-            .map(|reply| stanza_to_xml(&reply))
-            .into_iter()
-            .collect(),
-    )
+    let reply = super::presence::outgoing_block_reply(stanza, sender);
+    Some((reply.iter().map(stanza_to_xml).collect(), reply))
 }
 
 /// What became of a stanza offered to the remote route.
@@ -242,6 +268,8 @@ struct Offered {
     accepted: bool,
     /// The frames for the sender: the error answering a refused stanza.
     replies: Vec<String>,
+    /// That error, as the stanza the sender receives.
+    reply: Option<Stanza>,
 }
 
 async fn offer(
@@ -278,9 +306,7 @@ async fn offer(
     };
     Offered {
         accepted,
-        replies: reply
-            .map(|reply| stanza_to_xml(&reply))
-            .into_iter()
-            .collect(),
+        replies: reply.iter().map(stanza_to_xml).collect(),
+        reply,
     }
 }

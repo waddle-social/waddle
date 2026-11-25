@@ -2,6 +2,7 @@ package social.waddle.android.client
 
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleAvatar
+import social.waddle.client.ffi.WaddleBroadcastSpan
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleCallEventKind
 import social.waddle.client.ffi.WaddleCallMedia
@@ -92,6 +93,7 @@ fun testMessage(
     replyFallbackStart: UInt? = null,
     replyFallbackEnd: UInt? = null,
     broadcastMention: String? = null,
+    broadcastSpans: List<WaddleBroadcastSpan> = emptyList(),
     mentionUris: List<String> = emptyList(),
     references: List<WaddleReference> = emptyList(),
     markupSpans: List<WaddleMarkupSpan> = emptyList(),
@@ -131,6 +133,7 @@ fun testMessage(
     parentThreadId = null,
     markupSpans = markupSpans,
     broadcastMention = broadcastMention,
+    broadcastSpans = broadcastSpans,
     mentionUris = mentionUris,
     references = references,
     forumPostKind = null,
@@ -206,6 +209,7 @@ fun testArchivedMessage(
     replyFallbackEnd = null,
     markupSpans = emptyList(),
     broadcastMention = null,
+    broadcastSpans = emptyList(),
     mentionUris = emptyList(),
     references = emptyList(),
     forumPostKind = null,

@@ -32,6 +32,7 @@ protocol FFIMessageFields {
     var replyFallbackEnd: UInt32? { get }
     var markupSpans: [WaddleMarkupSpan] { get }
     var broadcastMention: String? { get }
+    var broadcastSpans: [WaddleBroadcastSpan] { get }
     var references: [WaddleReference] { get }
     var forumPostKind: WaddleForumPostKind? { get }
     var forumTitle: String? { get }
@@ -113,6 +114,7 @@ extension FFIInbound {
             markupSpans: fields.markupSpans.compactMap(markupSpan),
             references: fields.references.map(reference),
             broadcastMention: fields.broadcastMention,
+            broadcastSpans: fields.broadcastSpans.compactMap(broadcastSpan),
             forumPostKind: fields.forumPostKind.map(forumPostKind),
             forumTitle: fields.forumTitle,
             isSticker: fields.isSticker,

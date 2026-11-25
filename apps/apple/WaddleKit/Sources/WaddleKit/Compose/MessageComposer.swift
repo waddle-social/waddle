@@ -76,8 +76,8 @@ public enum MessageComposer {
             // Rust send builder turns the typed token into an XEP-0513
             // `#channel` mention through the room's mention directory.
             references: markdown.mentions.compactMap { mention in
-                guard case .user = mention.target else { return nil }
-                return Reference(kind: .mention, uri: mention.target.uri, begin: mention.range.lowerBound + offset, end: mention.range.upperBound + offset)
+                guard case let .user(jid) = mention.target else { return nil }
+                return Reference(kind: .mention, uri: "xmpp:\(jid)", begin: mention.range.lowerBound + offset, end: mention.range.upperBound + offset)
             },
             sharedFiles: draft.attachments,
             requestDisplayedMarker: true

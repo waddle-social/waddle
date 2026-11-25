@@ -244,22 +244,53 @@ async fn a_message_to_a_remote_contact_is_copied_as_a_sent_carbon() {
     assert_eq!(copy.to, Some(jid(BOB)));
 }
 
+/// A message the router refuses, which the sender answers with an error.
+fn refused(to: &str, id: &str) -> Message {
+    let mut pin = outgoing(to, id);
+    pin.payloads.push(
+        Element::builder("pinned", waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0).build(),
+    );
+    pin
+}
+
+/// XEP-0280 section 6.1: "it is of type 'error' and it was sent in response
+/// to a MESSAGE that was eligible for carbons delivery". The refused
+/// message reaches the other resource as a `<sent/>` carbon and the error
+/// as a `<received/>` carbon, in that order.
 #[tokio::test]
-async fn a_message_the_route_refuses_is_not_copied() {
+async fn an_error_for_a_message_the_route_refuses_is_copied() {
     let pki = Pki::new();
     let federated = federated(&pki).await;
     let (mut phone, mut laptop) = alice(&federated).await;
 
-    let mut pin = outgoing(BOB, "out2");
-    pin.payloads.push(
-        Element::builder("pinned", waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0).build(),
-    );
-    send(&mut phone, pin).await;
+    send(&mut phone, refused(BOB, "out2")).await;
     receive(&mut phone, "message", "out2").await;
-    send(&mut phone, outgoing(BOB, "out2-sentinel")).await;
+
+    let sent = first_carbon(&mut laptop, "sent").await;
+    assert_eq!(id_of(&sent), Some("out2"));
+    assert_eq!(sent.type_, MessageType::Chat);
+    let error = first_carbon(&mut laptop, "received").await;
+    assert_eq!(id_of(&error), Some("out2"));
+    assert_eq!(error.type_, MessageType::Error);
+    assert_eq!(error.to, Some(Jid::from(full_jid(&phone))));
+}
+
+#[tokio::test]
+async fn an_error_for_a_private_message_the_route_refuses_is_not_copied() {
+    let pki = Pki::new();
+    let federated = federated(&pki).await;
+    let (mut phone, mut laptop) = alice(&federated).await;
+
+    let mut private = refused(BOB, "out3");
+    private
+        .payloads
+        .push(Element::builder("private", CARBONS_NS).build());
+    send(&mut phone, private).await;
+    receive(&mut phone, "message", "out3").await;
+    send(&mut phone, outgoing(BOB, "out3-sentinel")).await;
 
     let copy = first_carbon(&mut laptop, "sent").await;
-    assert_eq!(id_of(&copy), Some("out2-sentinel"));
+    assert_eq!(id_of(&copy), Some("out3-sentinel"));
 }
 
 #[tokio::test]

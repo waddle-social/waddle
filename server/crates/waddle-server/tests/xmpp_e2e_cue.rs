@@ -377,10 +377,6 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
         reason: "MUC token invite payload helper is not wired into server room invite behavior yet.",
     },
     XepCoverageExemption {
-        xep: "XEP-0500",
-        reason: "Slow-mode config/rate-limit helper is not wired into MUC send authorization yet.",
-    },
-    XepCoverageExemption {
         xep: "XEP-0502",
         reason: "MUC activity payload helper is not advertised or emitted by the server yet.",
     },

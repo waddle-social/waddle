@@ -92,61 +92,6 @@ pub struct UserTune {
     pub uri: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Supported user mood, activity, and tune publications or retractions.
-#[non_exhaustive]
-pub enum PepItem {
-    /// A published XEP-0107 user mood.
-    Mood(UserMood),
-    /// A published XEP-0108 user activity.
-    Activity(UserActivity),
-    /// A published XEP-0118 tune.
-    Tune(UserTune),
-    /// The user retracted their published mood.
-    MoodCleared,
-    /// The user retracted their published activity.
-    ActivityCleared,
-    /// The user retracted their published tune.
-    TuneCleared,
-}
-
-/// Parse a PEP event from an incoming `<message>` stanza.
-#[must_use]
-pub fn parse(element: &Element) -> Option<PepItem> {
-    if element.name() != "message" {
-        return None;
-    }
-
-    let event = element.get_child("event", NS_PUBSUB_EVENT)?;
-    let items = event.get_child("items", NS_PUBSUB_EVENT)?;
-    let node = items.attr("node")?;
-
-    match node {
-        NS_MOOD => parse_mood_event(items),
-        NS_ACTIVITY => parse_activity_event(items),
-        NS_TUNE => parse_tune_event(items),
-        _ => None,
-    }
-}
-
-fn parse_mood_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let mood = item.get_child("mood", NS_MOOD)?;
-    match parse_mood_payload(mood) {
-        Some(payload) => Some(PepItem::Mood(payload)),
-        None => Some(PepItem::MoodCleared),
-    }
-}
-
-fn parse_activity_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let activity = item.get_child("activity", NS_ACTIVITY)?;
-    match parse_activity_payload(activity) {
-        Some(payload) => Some(PepItem::Activity(payload)),
-        None => Some(PepItem::ActivityCleared),
-    }
-}
-
 /// The activity a peer's PEP service says the account has now: `Some(None)`
 /// when it has none, `None` when the stanza is not an activity notification
 /// this client may believe.
@@ -199,15 +144,6 @@ fn published_by(item: &Element, owner: &BareJid) -> bool {
             .parse::<jid::Jid>()
             .is_ok_and(|publisher| publisher.to_bare() == *owner)
     })
-}
-
-fn parse_tune_event(items: &Element) -> Option<PepItem> {
-    let item = items.get_child("item", NS_PUBSUB_EVENT)?;
-    let tune = item.get_child("tune", NS_TUNE)?;
-    match parse_tune_payload(tune) {
-        Some(payload) => Some(PepItem::Tune(payload)),
-        None => Some(PepItem::TuneCleared),
-    }
 }
 
 fn parse_mood_payload(element: &Element) -> Option<UserMood> {
@@ -292,17 +228,26 @@ pub fn build_mood_clear_element() -> Element {
 }
 
 /// Build an XEP-0108 activity element from a broad activity token and optional text.
+///
+/// `lang` is the BCP 47 language of `text`, emitted as `xml:lang` on `<text/>`.
 #[must_use]
-pub fn build_activity_element(activity: &str, text: Option<&str>) -> Element {
-    build_activity_element_with_specific(activity, None, text)
+pub fn build_activity_element(activity: &str, text: Option<&str>, lang: Option<&str>) -> Element {
+    build_activity_element_with_specific(activity, None, text, lang)
 }
 
 /// Build an XEP-0108 broad activity with an optional specific subactivity and explanatory text.
+///
+/// XEP-0108 Internationalization Considerations: "if a <text/> element is
+/// included the sending application SHOULD also ensure that the <text/>
+/// element or the parent <activity/> element possesses an 'xml:lang'
+/// attribute". `lang` is the BCP 47 tag of `text` and is set on `<text/>`;
+/// an empty tag is treated as absent.
 #[must_use]
 pub fn build_activity_element_with_specific(
     general: &str,
     specific: Option<&str>,
     text: Option<&str>,
+    lang: Option<&str>,
 ) -> Element {
     let mut general_builder = Element::builder(general, NS_ACTIVITY);
     if let Some(specific) = specific {
@@ -310,7 +255,15 @@ pub fn build_activity_element_with_specific(
     }
     let mut builder = Element::builder("activity", NS_ACTIVITY).append(general_builder.build());
     if let Some(text) = text {
-        builder = builder.append(Element::builder("text", NS_ACTIVITY).append(text).build());
+        let mut text_builder = Element::builder("text", NS_ACTIVITY);
+        if let Some(lang) = lang.filter(|lang| !lang.is_empty()) {
+            text_builder = text_builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang,
+            );
+        }
+        builder = builder.append(text_builder.append(text).build());
     }
     builder.build()
 }
@@ -434,11 +387,12 @@ pub fn build_publish_activity_iq(
     general: &str,
     specific: Option<&str>,
     text: Option<&str>,
+    lang: Option<&str>,
 ) -> Element {
     build_pep_publish_iq(
         id,
         NS_ACTIVITY,
-        build_activity_element_with_specific(general, specific, text),
+        build_activity_element_with_specific(general, specific, text, lang),
     )
 }
 
@@ -534,7 +488,7 @@ pub trait PepExt {
     ///
     /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn clear_mood(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
-    /// Queue a PEP activity publication with optional explanatory text.
+    /// Queue a PEP activity publication with optional explanatory text and its `xml:lang`.
     ///
     /// # Errors
     ///
@@ -543,6 +497,7 @@ pub trait PepExt {
         &'a self,
         activity: &'a str,
         text: Option<&'a str>,
+        lang: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
     /// Queue an empty PEP activity publication to clear the current activity.
     ///
@@ -588,12 +543,17 @@ impl PepExt for ClientHandle {
         self.send_stanza(build_pep_clear_iq(&id, NS_MOOD)).await
     }
 
-    async fn publish_activity(&self, activity: &str, text: Option<&str>) -> ClientResult<()> {
+    async fn publish_activity(
+        &self,
+        activity: &str,
+        text: Option<&str>,
+        lang: Option<&str>,
+    ) -> ClientResult<()> {
         let id = Uuid::new_v4().to_string();
         self.send_stanza(build_pep_publish_iq(
             &id,
             NS_ACTIVITY,
-            build_activity_element(activity, text),
+            build_activity_element(activity, text, lang),
         ))
         .await
     }

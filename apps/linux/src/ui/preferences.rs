@@ -1,4 +1,4 @@
-//! The preferences dialog: appearance, message order, notifications,
+//! The preferences dialog: appearance, message order, name colors, notifications,
 //! accounts and about.
 //!
 //! What is chosen lives in `crate::settings` (a small file in the config
@@ -56,6 +56,7 @@ impl WaddleWindow {
 
         page.add(&self.appearance_group(&dialog, &current));
         page.add(&self.order_group(&dialog, &current));
+        page.add(&self.names_group(&dialog, &current));
         page.add(&self.notifications_group(&dialog, &current));
         page.add(&self.accounts_group(&dialog));
         page.add(&self.about_group());
@@ -128,6 +129,30 @@ impl WaddleWindow {
             save(&dialog, |settings| settings.message_order = *order);
             if let Some(window) = window.upgrade() {
                 window.apply_message_order();
+            }
+        });
+        group.add(&row);
+        group
+    }
+
+    fn names_group(
+        &self,
+        dialog: &adw::PreferencesDialog,
+        current: &Settings,
+    ) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder().title("Names").build();
+        let row = adw::SwitchRow::builder()
+            .title("Colorize Names")
+            .subtitle("Give each person a consistent color (XEP-0392). Off uses the theme color.")
+            .active(current.colorize_names)
+            .build();
+        let dialog = dialog.downgrade();
+        let window = self.downgrade();
+        row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            save(&dialog, |settings| settings.colorize_names = on);
+            if let Some(window) = window.upgrade() {
+                window.rebuild_rows();
             }
         });
         group.add(&row);

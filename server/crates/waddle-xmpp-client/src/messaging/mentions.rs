@@ -52,12 +52,17 @@ impl BroadcastMention {
     }
 }
 
-/// A resolved `@everyone` / `@here` token and its body range.
+/// An `@everyone` / `@here` token and its body range: sent as an XEP-0513
+/// `#channel` mention, and reported on inbound messages so renderers can
+/// highlight the token. Offsets are Unicode scalar values, `end` exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BroadcastSpan {
-    pub(crate) kind: BroadcastMention,
-    pub(crate) begin: u32,
-    pub(crate) end: u32,
+pub struct BroadcastSpan {
+    /// Whether the token addresses everyone or only active occupants.
+    pub kind: BroadcastMention,
+    /// First body offset (the `@`).
+    pub begin: u32,
+    /// One past the last body offset.
+    pub end: u32,
 }
 
 /// What typed `@label` tokens resolved to.

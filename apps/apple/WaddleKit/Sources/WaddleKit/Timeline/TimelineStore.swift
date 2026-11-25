@@ -478,6 +478,7 @@ public final class TimelineStore {
             item.isEdited = true
             item.message.markupSpans = correction.markupSpans
             item.message.references = correction.references
+            item.message.broadcastSpans = correction.broadcastSpans
             // Offsets now follow the correction's wire body, whose fallback
             // (if any) replaces the original's.
             item.message.reply = item.message.reply.map {

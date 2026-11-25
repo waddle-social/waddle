@@ -41,6 +41,34 @@ fn xep0108_general_specific_text_round_trip() {
 }
 
 #[test]
+fn xep0108_text_carries_xml_lang_when_a_language_is_set() {
+    // XEP-0108 Internationalization Considerations: the sender SHOULD ensure
+    // that `<text/>` or `<activity/>` possesses an 'xml:lang' attribute.
+    let a = Activity::new(GeneralActivity::Working)
+        .with_text("Hacking on Waddle")
+        .with_lang("en");
+    let elem = build_activity_element(&a);
+    let text = elem
+        .get_child("text", "http://jabber.org/protocol/activity")
+        .expect("text child");
+    assert_eq!(
+        text.attr_ns(&minidom::rxml::Namespace::XML, "lang"),
+        Some("en")
+    );
+    assert_eq!(parse_activity_element(&elem).unwrap().unwrap(), a);
+}
+
+#[test]
+fn xep0108_text_without_language_has_no_xml_lang() {
+    let a = Activity::new(GeneralActivity::Working).with_text("Hacking on Waddle");
+    let elem = build_activity_element(&a);
+    let text = elem
+        .get_child("text", "http://jabber.org/protocol/activity")
+        .expect("text child");
+    assert_eq!(text.attr_ns(&minidom::rxml::Namespace::XML, "lang"), None);
+}
+
+#[test]
 fn xep0108_empty_element_is_retraction() {
     let elem = build_activity_retraction();
     assert!(is_activity_element(&elem));
