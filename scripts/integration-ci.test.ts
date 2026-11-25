@@ -134,6 +134,7 @@ describe("graph parity", () => {
   test("Apple sources stay classified while main runs the Swift, simulator and XCFramework checks", () => {
     const lanes = readLanes();
     const apple = lanes.find(lane => lane.file === "waddle-apple-default.yml")!;
+    expect(apple.workflow.concurrency["cancel-in-progress"]).toBe(false);
     const changed = ["apps/apple/WaddleKit/Sources/New.swift"];
     const otherAffected = lanes.filter(lane => lane !== apple && applicable(lane, changed));
     expect(selectLanes(lanes, changed, true)).toEqual(otherAffected);
