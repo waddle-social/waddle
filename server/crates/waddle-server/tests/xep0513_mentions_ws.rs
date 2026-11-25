@@ -312,13 +312,10 @@ fn client_built_group_message(room: &str, body: &str) -> (String, String) {
     use waddle_xmpp_client::messaging::{
         build_outbound_message, MentionDirectory, SendMessageOptions,
     };
-    let options = SendMessageOptions {
-        mention_directory: Some(MentionDirectory {
-            targets: Vec::new(),
-            broadcasts: true,
-        }),
-        ..SendMessageOptions::default()
-    };
+    let options = SendMessageOptions::with_mention_directory(MentionDirectory {
+        targets: Vec::new(),
+        broadcasts: true,
+    });
     let (id, message) =
         build_outbound_message(room, "groupchat", body, &options).expect("build message");
     (id.to_string(), mention_element_to_xml(&message))

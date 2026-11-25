@@ -1176,6 +1176,17 @@ impl fmt::Display for InvalidLinkPreviewToken {
 
 impl std::error::Error for InvalidLinkPreviewToken {}
 
+impl SendMessageOptions {
+    /// Options that resolve typed `@label` tokens through `directory`.
+    #[must_use]
+    pub fn with_mention_directory(directory: MentionDirectory) -> Self {
+        Self {
+            mention_directory: Some(directory),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Formatting kind and Unicode-character range parsed from a rich message payload.
 pub struct MarkupSpanData {
