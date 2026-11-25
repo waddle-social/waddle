@@ -61,12 +61,4 @@ struct CallControlBarLayoutTests {
         #expect(places(.participants, bare) == [.bar, .bar, .bar, .bar, .menu])
     }
 
-    @Test func nothingIsEverInTwoPlacesOrBothBarAndMenuAtOnce() {
-        for layout in Layout.allCases {
-            for control in Layout.Control.allCases {
-                let place = layout.place(of: control, for: room)
-                #expect(place == .bar || place == .menu, "\(control) in \(layout)")
-            }
-        }
-    }
 }

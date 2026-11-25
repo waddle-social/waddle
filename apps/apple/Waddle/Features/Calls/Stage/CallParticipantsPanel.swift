@@ -9,9 +9,7 @@ import WaddleKit
 struct CallParticipantsPanel: View {
     let rows: [CallParticipantRow]
     var canResetVolumes = false
-    let setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void
-    let resetVolumes: @MainActor () -> Void
-    let close: @MainActor () -> Void
+    let perform: @MainActor (CallStageAction) -> Void
 
     static let width: CGFloat = 320
 
@@ -22,14 +20,14 @@ struct CallParticipantsPanel: View {
             ScrollView {
                 VStack(spacing: Theme.Spacing.xxs) {
                     ForEach(rows) { row in
-                        CallParticipantRowView(row: row) { setVolume(row.id, $0) }
+                        CallParticipantRowView(row: row) { perform(.setVolume(identity: row.id, gain: $0)) }
                     }
                 }
                 .padding(WaddleTokens.Spacing.s1Half)
             }
             Theme.Colors.borderSoft.frame(height: WaddleTokens.BorderWidth.hair)
             HStack {
-                Button("Reset all", action: resetVolumes)
+                Button("Reset all", action: { perform(.resetVolumes) })
                     .buttonStyle(.huddle(size: .small))
                     .disabled(!canResetVolumes)
                     .help("Play everyone at their own volume")
@@ -61,7 +59,7 @@ struct CallParticipantsPanel: View {
                 .background(Capsule().fill(Theme.Colors.surface2))
                 .accessibilityLabel(Text(rows.count == 1 ? "1 person" : "\(rows.count) people"))
             Spacer()
-            Button(action: close) {
+            Button(action: { perform(.toggleParticipants) }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.Colors.fgMuted)

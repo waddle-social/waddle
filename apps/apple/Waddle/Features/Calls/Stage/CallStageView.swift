@@ -41,21 +41,11 @@ struct CallStageView: View {
     let tileSource: CallTileSource
     /// Off in a snapshot, which has nobody to speak to.
     var announcesChanges = true
-    let actions: CallStageActions
+    let perform: @MainActor (CallStageAction) -> Void
 
     /// The letter keys that do something on this stage as it is.
     private var shortcuts: [CallShortcut] {
         CallShortcut.available(for: controls)
-    }
-
-    private func perform(_ shortcut: CallShortcut) {
-        switch shortcut {
-        case .microphone: actions.toggleMicrophone()
-        case .camera: actions.toggleCamera()
-        case .screenShare: actions.toggleScreenShare()
-        case .hand: actions.toggleHand()
-        case .stepUp: actions.setSize(controls.size.steppedUp)
-        }
     }
 
     var body: some View {
@@ -65,8 +55,7 @@ struct CallStageView: View {
             )
             if !issues.isEmpty {
                 CallMediaNotice(
-                    issues: issues, checking: checkingIssues, retry: actions.retryMediaIssue,
-                    openSettings: actions.openSystemSettings, dismiss: actions.dismissMediaIssue
+                    issues: issues, checking: checkingIssues, perform: perform
                 )
                 .padding(.horizontal, Theme.Spacing.l)
                 .padding(.bottom, Theme.Spacing.s)
@@ -80,7 +69,7 @@ struct CallStageView: View {
                 if participants == nil || !participantsCoverTiles {
                     CallTileArea(
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
-                        toggleParticipants: actions.toggleParticipants
+                        toggleParticipants: { perform(.toggleParticipants) }
                     )
                     .overlay {
                         if let reactions { CallReactionsOverlay(reactions: reactions, ownNick: ownNick) }
@@ -88,8 +77,7 @@ struct CallStageView: View {
                 }
                 if let participants {
                     CallParticipantsPanel(
-                        rows: participants, canResetVolumes: canResetVolumes, setVolume: actions.setVolume, resetVolumes: actions.resetVolumes,
-                        close: actions.toggleParticipants
+                        rows: participants, canResetVolumes: canResetVolumes, perform: perform
                     )
                     .frame(width: participantsCoverTiles ? nil : CallParticipantsPanel.width)
                     .transition(.opacity)
@@ -99,13 +87,13 @@ struct CallStageView: View {
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, WaddleTokens.Spacing.s1Half)
             .padding(.bottom, Theme.Spacing.m)
-            CallControlBar(controls: controls, actions: actions)
+            CallControlBar(controls: controls, perform: perform)
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)
             .padding(.bottom, Theme.Spacing.l)
         }
         .background(Theme.Colors.seaDeep)
-        .background(CallShortcutKeys(shortcuts: shortcuts, perform: perform))
+        .background(CallShortcutKeys(shortcuts: shortcuts) { perform($0.action(size: controls.size)) })
         .environment(\.huddleGround, Theme.Colors.seaDeep)
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)

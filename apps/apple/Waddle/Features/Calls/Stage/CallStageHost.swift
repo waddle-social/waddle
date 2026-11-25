@@ -11,13 +11,10 @@ struct CallStageHost: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
-    /// What can be shared, while the person is picking.
-    @State private var screenPicker: CallScreenSources?
-    @State private var showsSettings = false
-    /// The devices being checked again, so their notice's button says so.
-    @State private var checkingIssues: Set<CallMediaIssue.Kind> = []
+    @State private var prompts = CallStagePrompts()
 
     var body: some View {
+        @Bindable var prompts = prompts
         let state = session.calls.state
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         Group {
@@ -28,19 +25,18 @@ struct CallStageHost: View {
         .onChange(of: GroupCallRoster.speakers(speakers), initial: true) { _, accounts in
             speaking.update(accounts)
         }
-        .callSettings(isPresented: $showsSettings)
+        .callSettings(isPresented: $prompts.showsSettings)
         // A list made for one call is not offered to the next.
         .onChange(of: state.sid) {
-            screenPicker = nil
-            showsSettings = false
+            prompts.reset()
         }
-        .sheet(isPresented: Binding(get: { screenPicker != nil }, set: { if !$0 { screenPicker = nil } })) {
-            if let sources = screenPicker {
+        .sheet(isPresented: Binding(get: { prompts.screenPicker != nil }, set: { if !$0 { prompts.screenPicker = nil } })) {
+            if let sources = prompts.screenPicker {
                 CallScreenPicker(sources: sources) { source in
-                    screenPicker = nil
+                    prompts.screenPicker = nil
                     Task { [media] in await media?.shareScreen(source) }
                 } cancel: {
-                    screenPicker = nil
+                    prompts.screenPicker = nil
                 }
             }
         }
@@ -72,7 +68,11 @@ struct CallStageHost: View {
         let memory = model.stage(of: call.sid)
         // A full-screen call hides the pane the chat opens in: whatever the
         // inspector is set to, nobody is looking at it.
-        let chat = Chat(of: call.kind, session: session, navigation: navigation, isHidden: memory.size == .immersive)
+        let chat = CallStageChat(isRoom: call.isRoom, session: session, navigation: navigation, isHidden: memory.size == .immersive)
+        let commands = CallStageCommands(
+            sid: call.sid, session: session, media: media, stage: model,
+            navigation: navigation, prompts: prompts, chat: chat
+        )
         let rows = memory.showsParticipants ? CallParticipantRows.make(
             tiles: tiles,
             audio: (media?.participants ?? []).map {
@@ -106,7 +106,7 @@ struct CallStageHost: View {
             canResetVolumes: media?.hasChangedVolumes ?? false,
             participantsCoverTiles: (layout?.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
             issues: media.map { CallMediaIssues.shown(for: $0.mediaReport, dismissed: memory.dismissedMediaIssues) } ?? [],
-            checkingIssues: checkingIssues,
+            checkingIssues: prompts.checking,
             connection: media?.connectionQuality,
             reactions: session.calls.reactions,
             ownNick: ownNick,
@@ -114,7 +114,7 @@ struct CallStageHost: View {
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
             tileSource: model.tileSource,
-            actions: actions(for: call.sid, chat: chat)
+            perform: commands.perform
         )
         // What is in front of the person while the chat is open has been seen.
         .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
@@ -146,104 +146,6 @@ struct CallStageHost: View {
     /// Our nick in the room whose call the slot holds.
     private var ownNick: String? {
         if case .inGroup(let call) = session.calls.state { call.nick } else { nil }
-    }
-
-    /// The chat of a room's call: the thread its announcement heads, with
-    /// the messages of it that are loaded. A call of two has none here yet.
-    private struct Chat {
-        let conversation: ConversationID
-        let thread: String
-        let replies: [TimelineItem]
-        /// The thread is the one open beside the conversation.
-        let isOpen: Bool
-
-        @MainActor
-        init?(of kind: Call.Kind, session: SessionCoordinator, navigation: NavigationModel, isHidden: Bool) {
-            guard case .room = kind, case .inGroup(let call) = session.calls.state else { return nil }
-            let conversation = ConversationID.room(call.room)
-            let timeline = session.timelines.timeline(for: conversation)
-            guard let thread = CallChat.thread(in: timeline.items) else { return nil }
-            self.conversation = conversation
-            self.thread = thread
-            replies = timeline.threadReplies(threadID: thread)
-            isOpen = !isHidden && navigation.selection == conversation && navigation.inspector == .thread(rootID: thread)
-        }
-    }
-
-    private func actions(for sid: String, chat: Chat?) -> CallStageActions {
-        let commands = CallCommands(calls: session.calls, media: media)
-        return CallStageActions(
-            toggleMicrophone: commands.toggleMicrophone,
-            toggleCamera: commands.toggleCamera,
-            toggleHand: commands.toggleHand,
-            setViewMode: { [model] mode in model.update(sid) { $0.presentation.viewMode = mode } },
-            toggleSelfView: { [model] in model.update(sid) { $0.presentation.isSelfViewHidden.toggle() } },
-            setSize: { [model] size in model.update(sid) { $0.size = size } },
-            toggleParticipants: { [model] in model.update(sid) { $0.toggleParticipants() } },
-            setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
-            resetVolumes: { [media] in media?.resetVolumes() },
-            openSettings: { showsSettings = true },
-            sendReaction: { [session] emoji in
-                // For the call the stage was drawn for, while it is still that call.
-                guard session.calls.state.sid == sid else { return }
-                Task { await session.calls.sendReaction(emoji) }
-            },
-            toggleChat: { [model, navigation] in
-                guard let chat else { return }
-                if chat.isOpen {
-                    navigation.inspector = nil
-                    return
-                }
-                model.update(sid) {
-                    // The chat opens beside the pane the stage is in; only a
-                    // full-screen call, which hides everything else, is in its way.
-                    $0.size = $0.size.afterFullscreenExit
-                    $0.sawChat(upTo: chat.replies.last?.id)
-                }
-                navigation.openThread(chat.thread, in: chat.conversation, usesInspector: true)
-            },
-            retryMediaIssue: { [media, session] kind in
-                // For the call the notice is about, while it is still a call.
-                guard let media, !checkingIssues.contains(kind), session.calls.state.sid == sid,
-                      session.calls.state.isEstablished else { return }
-                // Before the task: two taps in a row are one check.
-                checkingIssues.insert(kind)
-                Task {
-                    defer { checkingIssues.remove(kind) }
-                    switch kind {
-                    case .microphone: await media.setMicrophone(true)
-                    case .camera: await media.setCamera(true)
-                    case .background: await media.restartBackground()
-                    case .screen:
-                        let sources = await media.screenSources()
-                        if session.calls.state.sid == sid { screenPicker = sources }
-                    }
-                    // The system answers a refusal at once: the button would
-                    // flicker and look as if nothing had been asked.
-                    try? await Task.sleep(for: .milliseconds(600))
-                }
-            },
-            // Put away until its device is refused once more, whichever surface asks (`CallMediaIssues.Dismissals`).
-            dismissMediaIssue: { [model, media] kind in
-                guard let report = media?.mediaReport else { return }
-                model.update(sid) { $0.dismissedMediaIssues.dismiss(kind, in: report) }
-            },
-            openSystemSettings: { kind in CallSystemSettings.open(for: kind) },
-            toggleScreenShare: { [media, session] in
-                guard let media else { return }
-                Task {
-                    if media.isSharingOrStartingScreen {
-                        await media.stopScreenShare()
-                    } else {
-                        // Refused: the stage's notice says so and there is nothing to pick.
-                        let sources = await media.screenSources()
-                        // The list is for the call it was asked from.
-                        if session.calls.state.sid == sid { screenPicker = sources }
-                    }
-                }
-            },
-            hangUp: commands.hangUp
-        )
     }
 
     /// What the pin is reconciled against.
