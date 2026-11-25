@@ -180,9 +180,12 @@ async fn prepare(
     let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await?
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-    if let Some(expected) =
-        crate::ingress::invitation_authority::recorded_message(&envelope, &recorded, &receipt)?
-    {
+    if let Some(expected) = crate::ingress::invitation_authority::recorded_message(
+        &envelope,
+        &recorded,
+        &receipt,
+        uow.occupant_id_secret(),
+    )? {
         if !crate::ingress::append_authority::same_message_content(&expected, &route.message) {
             return Err(IngressUowError::EffectIntentConflict.into());
         }

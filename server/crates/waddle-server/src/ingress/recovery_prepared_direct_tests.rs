@@ -317,7 +317,8 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 crate::ingress::append_authority::check_canonical_obligation(
                     &fixture.db,
                     &forged,
-                    &relayed
+                    &relayed,
+                    None
                 )
                 .await
                 .is_err()

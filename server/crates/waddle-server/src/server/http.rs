@@ -1935,6 +1935,11 @@ async fn create_websocket_state(
         .ingress
         .bind_recovery_environment(Arc::downgrade(&websocket_state)
             as std::sync::Weak<dyn crate::ingress::RecoveryEnvironment>);
+    websocket_state
+        .deps
+        .protocol
+        .ingress
+        .bind_occupant_id_secret(server_config.occupant_id_secret.clone());
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
     // The revocation fence drives this replica's sweep of the rooms it
     // hosts: a seated occupant the grants no longer admit is removed.

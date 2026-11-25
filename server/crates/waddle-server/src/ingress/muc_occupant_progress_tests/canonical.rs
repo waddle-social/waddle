@@ -628,6 +628,7 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             host_owned_resources: vec![],
             departed_occupants: vec![],
             blocked_recipients: &[],
+            occupant_id_secret: None,
         })
         .expect("rebuild observer");
         for restored in [&replay, &recovered.decision] {

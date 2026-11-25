@@ -547,6 +547,7 @@ pub(super) async fn handle_muc_mediated_invite(
         &inviter_bare,
         &invitee,
         &inbound_invite,
+        &state.deps.occupant_id_secret,
     );
 
     let scoped_sink = ScopedInviteSink {
@@ -974,6 +975,7 @@ pub(crate) fn mediated_invite_message(
     inviter: &jid::BareJid,
     invitee: &jid::BareJid,
     inbound_invite: &minidom::Element,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
 ) -> Message {
     let mut message = Message::new(Some(invitee.clone().into()));
     message.id = incoming.id.clone();
@@ -982,6 +984,13 @@ pub(crate) fn mediated_invite_message(
     message
         .payloads
         .push(build_mediated_invite_payload(inviter, inbound_invite));
+    // XEP-0421 §Business Rules: "The <occupant-id> element MUST be attached
+    // to every message ... sent by a MUC." The invitation is sent by the room
+    // itself, so it carries the room's own id, as room system messages do.
+    waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+        &mut message,
+        &waddle_xmpp::xep::xep0421::generate_room_occupant_id(room, occupant_id_secret),
+    );
     message
 }
 

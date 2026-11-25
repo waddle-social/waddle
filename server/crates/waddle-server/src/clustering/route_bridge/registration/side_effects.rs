@@ -332,6 +332,7 @@ impl OrderedRelayDeliveryBridge {
                                 delivery.ingress_append_context =
                                     Some((*obligation).into_deferred_context(
                                         state.deps.app_state.db_pool.global().clone(),
+                                        state.deps.occupant_id_secret.clone(),
                                     ));
                             }
                         }

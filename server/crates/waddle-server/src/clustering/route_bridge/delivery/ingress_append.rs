@@ -24,7 +24,7 @@ pub(super) fn authorize_ingress_append(
 ) -> Option<SmIngressAppendContext> {
     let obligation = obligation?;
     match check_authority(services, validated_sender, stanza, obligation) {
-        Ok(db) => Some(obligation.clone().into_deferred_context(db)),
+        Ok((db, secret)) => Some(obligation.clone().into_deferred_context(db, secret)),
         Err(reason) => {
             record_authorization_failure(&reason, &obligation.sender_bare);
             None
@@ -41,7 +41,7 @@ fn check_authority(
     validated_sender: &Entity,
     stanza: &Stanza,
     obligation: &IngressAppendObligationRef,
-) -> Result<Database, AppendAuthorityRejection> {
+) -> Result<(Database, waddle_xmpp::xep::xep0421::OccupantIdSecret), AppendAuthorityRejection> {
     if obligation.sender_bare.as_str() != validated_sender.id {
         return Err(AppendAuthorityRejection::SenderClaimMismatch);
     }
@@ -54,5 +54,8 @@ fn check_authority(
         &obligation.sender_bare,
         obligation.receipt.kind.to_storage(),
     )?;
-    Ok(state.deps.app_state.db_pool.global().clone())
+    Ok((
+        state.deps.app_state.db_pool.global().clone(),
+        state.deps.occupant_id_secret.clone(),
+    ))
 }

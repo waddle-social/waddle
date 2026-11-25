@@ -105,12 +105,22 @@ async fn generated_frame(
         },
     ];
     let message = match kind {
-        GeneratedKind::Invite => {
-            muc_invite::mediated_invite_message(incoming, &room, &source, &recipient, &inbound)
-        }
-        GeneratedKind::Decline => {
-            muc_direct::mediated_decline_message(incoming, &room, &source, &recipient, &inbound)
-        }
+        GeneratedKind::Invite => muc_invite::mediated_invite_message(
+            incoming,
+            &room,
+            &source,
+            &recipient,
+            &inbound,
+            &crate::ingress::test_support::fixture_occupant_id_secret(),
+        ),
+        GeneratedKind::Decline => muc_direct::mediated_decline_message(
+            incoming,
+            &room,
+            &source,
+            &recipient,
+            &inbound,
+            &crate::ingress::test_support::fixture_occupant_id_secret(),
+        ),
         GeneratedKind::GroupFull | GeneratedKind::GroupFromJoin => {
             let grant = GroupDmMembershipGrant {
                 room: room.clone(),

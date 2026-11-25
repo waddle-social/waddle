@@ -584,6 +584,7 @@ async fn handle_muc_mediated_decline(
         &bound_jid.to_bare(),
         &invite.inviter,
         inbound_decline,
+        &state.deps.occupant_id_secret,
     );
     let delivery_sink = ScopedInviteSink {
         inner: deps.effects,
@@ -641,6 +642,7 @@ pub(crate) fn restore_recorded_muc_decline(
     pending: &[IngressEffectIntent],
     envelope: &MessageEnvelope,
     received_at: chrono::DateTime<chrono::Utc>,
+    occupant_id_secret: Option<&waddle_xmpp::xep::xep0421::OccupantIdSecret>,
 ) -> Result<bool, IngressUowError> {
     use crate::server::routes::interpret::effects::invite::MucUserRoute;
     use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
@@ -696,12 +698,15 @@ pub(crate) fn restore_recorded_muc_decline(
             return Err(IngressUowError::EffectIntentMessageMissing);
         };
         // A completed fallback is reconciled into the route receipt before this hook.
+        let occupant_id_secret =
+            occupant_id_secret.ok_or(IngressUowError::OccupantIdSecretUnbound)?;
         let message = mediated_decline_message(
             incoming,
             &invite.room,
             &invite.invitee,
             &invite.inviter,
             decline,
+            occupant_id_secret,
         );
         let route = MucUserRoute {
             route_identity: Some(route_identity.clone()),
@@ -769,6 +774,7 @@ pub(crate) fn mediated_decline_message(
     decliner: &jid::BareJid,
     inviter: &jid::BareJid,
     inbound_decline: &minidom::Element,
+    occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
 ) -> Message {
     let mut message = Message::new(Some(inviter.clone().into()));
     message.id = incoming.id.clone();
@@ -777,6 +783,13 @@ pub(crate) fn mediated_decline_message(
     message
         .payloads
         .push(build_mediated_decline_payload(decliner, inbound_decline));
+    // XEP-0421 §Business Rules: "The <occupant-id> element MUST be attached
+    // to every message ... sent by a MUC." The relayed decline is sent by the
+    // room itself, so it carries the room's own id.
+    waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+        &mut message,
+        &waddle_xmpp::xep::xep0421::generate_room_occupant_id(room, occupant_id_secret),
+    );
     message
 }
 
