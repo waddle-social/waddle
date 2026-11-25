@@ -99,13 +99,18 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     // MARK: - Devices
 
-    private(set) var devices = CallDevices()
-    /// What the person chose, kept on this device (web keeps it in local storage).
-    @ObservationIgnored private var devicePreferences: CallDevicePreferences
+    @ObservationIgnored private lazy var deviceCatalog = CallDeviceCatalog(defaults: defaults) { [weak self] in
+        await self?.applyCameraChoice()
+    }
+    var devices: CallDevices { deviceCatalog.devices }
     @ObservationIgnored private let defaults: UserDefaults
     /// Consent, cameras and screens: all the controller has of the hardware.
     @ObservationIgnored private let capture: any CallCaptureSources
+<<<<<<< HEAD
     private static let devicePreferencesKey = "callDevicePreferences"
+=======
+    private static let audioProcessingKey = "callAudioProcessing"
+>>>>>>> 283b72606 (refactor(apple): give a call's devices a catalog of their own)
     private static let backgroundKey = "callBackground"
     private(set) var background = CallBackground.off
     private(set) var isBackgroundFailing = false
@@ -129,9 +134,12 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     init(defaults: UserDefaults = .standard, capture: any CallCaptureSources = SystemCaptureSources()) {
         self.defaults = defaults
         self.capture = capture
+<<<<<<< HEAD
         devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
 <<<<<<< HEAD
         remoteVolumes = CallRemoteVolumes(roomAccess: roomAccess)
+=======
+>>>>>>> 283b72606 (refactor(apple): give a call's devices a catalog of their own)
         audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
 =======
         microphoneProcessing = CallMicrophoneProcessing(roomAccess: roomAccess, defaults: defaults)
@@ -140,56 +148,16 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         videoMeter = CallVideoMeter(roomAccess: roomAccess)
         roomAccess.tracksChanged = { [weak self] in self?.refreshTracks() }
         roomAccess.recordRefusal = { [weak self] kind in self?.mediaRefusals[kind, default: 0] += 1 }
-        #if os(macOS)
-        // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
-        AudioManager.shared.onDeviceUpdate = { [weak self] _ in
-            Task { @MainActor in await self?.refreshDevices() }
-        }
-        #endif
-        // A camera plugged in or pulled out: the list follows, and so does a camera that is on.
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
-            deviceObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    await self?.refreshDevices()
-                    await self?.applyCameraChoice()
-                }
-            })
-        }
-    }
-
-    @ObservationIgnored private nonisolated(unsafe) var deviceObservers: [any NSObjectProtocol] = []
-
-    deinit {
-        deviceObservers.forEach(NotificationCenter.default.removeObserver)
+        // Install the device observers as soon as the controller is created.
+        _ = deviceCatalog
     }
 
     func refreshDevices() async {
-        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).filter(Self.isOffered).map {
-            CallDevice(id: $0.uniqueID, name: $0.localizedName)
-        }
-        var found = CallDevices(cameras: CallDeviceList(devices: cameras, preferred: devicePreferences[.camera]))
-        #if os(macOS)
-        // The system's own choice is our "System default" row, not a device of its own.
-        func listed(_ all: [AudioDevice]) -> [CallDevice] {
-            all.filter { !$0.isDefault }.map { CallDevice(id: $0.deviceId, name: $0.name) }
-        }
-        let audio = AudioManager.shared
-        found.microphones = CallDeviceList(devices: listed(audio.inputDevices), preferred: devicePreferences[.microphone])
-        found.speakers = CallDeviceList(devices: listed(audio.outputDevices), preferred: devicePreferences[.speaker])
-        // A chosen device that is gone gives way to the system's, and takes over again when it is back.
-        let input = audio.inputDevices.first { $0.deviceId == found.microphones.chosen?.id } ?? audio.defaultInputDevice
-        if audio.inputDevice.deviceId != input.deviceId { audio.inputDevice = input }
-        let output = audio.outputDevices.first { $0.deviceId == found.speakers.chosen?.id } ?? audio.defaultOutputDevice
-        if audio.outputDevice.deviceId != output.deviceId { audio.outputDevice = output }
-        #endif
-        if devices != found { devices = found }
+        await deviceCatalog.refreshDevices()
     }
 
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async {
-        devicePreferences[kind] = id
-        defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
-        await refreshDevices()
-        if kind == .camera { await applyCameraChoice() }
+        await deviceCatalog.chooseDevice(kind, id: id)
     }
 
     // MARK: - Diagnostics
@@ -441,16 +409,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             }
         }
         if roomAccess.holds(room) { refreshTracks() }
-    }
-
-    /// On iPhone and iPad the system lists every lens, and the combinations
-    /// of them, as cameras of their own: one front and one back is the choice a person has.
-    private static func isOffered(_ camera: AVCaptureDevice) -> Bool {
-        #if os(iOS)
-        camera.deviceType == .builtInWideAngleCamera || camera.deviceType == .external
-        #else
-        true
-        #endif
     }
 
     /// The camera the person chose, while it is connected; `nil` leaves the choice to the system.
