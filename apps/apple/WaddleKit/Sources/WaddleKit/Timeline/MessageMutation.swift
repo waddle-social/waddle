@@ -74,8 +74,9 @@ public enum MessageMutation: Hashable, Sendable {
             return .safetyScores(targetID: fastening.targetStanzaID, from: from, fastening: fastening)
         }
         // A room says when its own call ended. A call of two has no such
-        // message, and a peer's claim of one is ignored outright.
-        if let ended = message.callThreadEnded, isGroupchat {
+        // message, and a peer's claim of one is ignored outright. An
+        // occupant's is not a mutation at all: their message stays a message.
+        if let ended = message.callThreadEnded, isGroupchat, from.resource == nil {
             return .callEnded(targetID: ended.anchorID, from: from, ended: ended)
         }
         if let retractsID = message.retractsID {

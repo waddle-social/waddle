@@ -46,6 +46,11 @@ final class CallAnchorCardSnapshotTests: XCTestCase {
         ))
     }
 
+    /// The longest title with the longest button, where they cannot share a line.
+    func testBusyWithAVideoCallInANarrowConversation() {
+        assertCard(live(["Ada", "Linus"], video: true, busy: true, canJoin: false), width: 300)
+    }
+
     func testALiveCallInANarrowConversation() {
         assertCard(live(["Ada", "Linus", "Grace", "Margaret", "Alan"]), width: 320)
     }

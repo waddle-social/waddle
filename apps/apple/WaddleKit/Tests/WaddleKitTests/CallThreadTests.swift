@@ -86,6 +86,28 @@ import Testing
         #expect(items(store).first { $0.identity.originID == "o1" }?.callEnded == nil, "an occupant's fastening ends nothing")
     }
 
+    /// The server's unread count leaves the announcement out; so must every count made here.
+    @Test func anAnnouncementIsNoUnreadMessage() {
+        let store = store()
+        store.ingest(roomMessage("before", from: "bob", stanzaID: "b1"))
+        store.ingest(anchor())
+        store.ingest(roomMessage("after", from: "bob", stanzaID: "b2"))
+        let rows = items(store)
+        #expect(rows.map(\.countsAsUnread) == [true, false, true])
+        // Two unread: the divider goes above the first of them, not on the card between.
+        #expect(TimelineUnreadAnchor.firstUnreadID(in: rows, unreadCount: 2) == rows[0].presentationID)
+        #expect(TimelineUnreadAnchor.arrivals(after: rows[0].presentationID, in: rows) == 1)
+    }
+
+    /// An occupant who fastens an "ended" to a message of their own has written a message.
+    @Test func anOccupantsMessageDressedAsAnEndIsStillAMessage() {
+        let store = store()
+        var message = roomMessage("hello", from: "mallory", stanzaID: "m1")
+        message.callThreadEnded = CallThreadEnded(anchorID: "o1", duration: 5)
+        #expect(store.ingest(message) != .mutation)
+        #expect(items(store).map(\.body) == ["hello"])
+    }
+
     @Test func aPeerCannotAnnounceACallInAConversationOfTwo() {
         let store = store()
         let peer = jid("ada@waddle.test/web")

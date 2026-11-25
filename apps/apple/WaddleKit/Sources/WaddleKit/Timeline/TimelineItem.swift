@@ -130,6 +130,14 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return identity.all.contains(thread) || callAnchor != nil
     }
 
+    /// Whether the row is one of the messages an unread count counts:
+    /// someone else's, still there, and a message. A room's announcement of
+    /// a call is a row and not a message: the server's count leaves it out,
+    /// and every place that counts rows must agree with it and with each other.
+    public var countsAsUnread: Bool {
+        !isMine && tombstone == nil && callAnchor == nil
+    }
+
     /// The call this row announces, when the room itself posted it: the
     /// server writes the announcement from the room's bare JID, and an
     /// occupant who marks a message of their own as one is not believed.

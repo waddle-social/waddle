@@ -16,41 +16,16 @@ struct CallAnchorCardView: View {
     @ScaledMetric(relativeTo: .body) private var glyphBox: CGFloat = 32
 
     var body: some View {
-        HStack(alignment: .center, spacing: Theme.Spacing.m) {
-            Image(systemName: card.hasVideo ? "video.fill" : "phone.fill")
-                .font(.system(size: glyph, weight: .semibold))
-                .foregroundStyle(card.isLive ? Theme.Colors.liveText : Theme.Colors.fgSoft)
-                .frame(width: glyphBox, height: glyphBox)
-                .background(Circle().fill(card.isLive ? Theme.Colors.liveSubtle : Theme.Colors.surface2))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s0Half) {
-                HStack(spacing: WaddleTokens.Spacing.s1Half) {
-                    if card.isLive {
-                        Circle()
-                            .fill(Theme.Colors.live)
-                            .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
-                    }
-                    Text(card.title)
-                        .huddleText(Theme.Typography.label)
-                        .foregroundStyle(card.isLive ? Theme.Colors.fg : Theme.Colors.fgMuted)
-                    if let time {
-                        Text(time)
-                            .huddleText(Theme.Typography.caption)
-                            .foregroundStyle(Theme.Colors.fgSoft)
-                    }
-                }
-                Text(card.summary)
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.fgMuted)
-                    .lineLimit(2)
+        // Beside the words where there is room; under them in a narrow pane or at a large text size.
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: Theme.Spacing.m) {
+                words
+                Spacer(minLength: Theme.Spacing.s)
+                actionButton
             }
-            Spacer(minLength: Theme.Spacing.s)
-            if let action = card.action {
-                Button(action: join) {
-                    Label(action.title, systemImage: action == .join ? "phone.fill" : "phone.down.fill")
-                }
-                .buttonStyle(.huddle(.live, size: .small))
-                .disabled(action != .join)
+            VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+                words
+                actionButton
             }
         }
         .padding(.horizontal, Theme.Spacing.m)
@@ -62,8 +37,57 @@ struct CallAnchorCardView: View {
             style: StrokeStyle(lineWidth: WaddleTokens.BorderWidth.hair, dash: card.isLive ? [] : Metrics.dash)
         ))
         .opacity(card.isLive ? 1 : Metrics.endedOpacity)
-        .accessibilityElement(children: .contain)
+        // One thing to VoiceOver, as a message row is: the card in a sentence, and joining as its action.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(card.spoken))
+        .accessibilityAddTraits(card.action == .join ? .isButton : [])
+        .accessibilityAction { if card.action == .join { join() } }
+    }
+
+    private var words: some View {
+        HStack(alignment: .center, spacing: Theme.Spacing.m) {
+            Image(systemName: card.hasVideo ? "video.fill" : "phone.fill")
+                .font(.system(size: glyph, weight: .semibold))
+                .foregroundStyle(card.isLive ? Theme.Colors.liveText : Theme.Colors.fgSoft)
+                .frame(width: glyphBox, height: glyphBox)
+                .background(Circle().fill(card.isLive ? Theme.Colors.liveSubtle : Theme.Colors.surface2))
+            VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s0Half) {
+                HStack(spacing: WaddleTokens.Spacing.s1Half) {
+                    if card.isLive {
+                        Circle()
+                            .fill(Theme.Colors.live)
+                            .frame(width: Theme.Size.liveDot, height: Theme.Size.liveDot)
+                    }
+                    Text(card.title)
+                        .huddleText(Theme.Typography.label)
+                        .foregroundStyle(card.isLive ? Theme.Colors.fg : Theme.Colors.fgMuted)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    if let time {
+                        Text(time)
+                            .huddleText(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.fgSoft)
+                            .lineLimit(1)
+                    }
+                }
+                Text(card.summary)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        if let action = card.action {
+            Button(action: join) {
+                Label(action.title, systemImage: action == .join ? "phone.fill" : "phone.down.fill")
+            }
+            .buttonStyle(.huddle(.live, size: .small))
+            .disabled(action != .join)
+            .fixedSize()
+        }
     }
 
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Metrics.corner, style: .continuous) }
@@ -81,6 +105,7 @@ struct CallAnchorCardView: View {
 /// of the session for `CallAnchorCardView`, and joins it.
 struct CallAnchorRow: View {
     @Environment(SessionCoordinator.self) private var session
+    @Environment(AppState.self) private var app
     let item: TimelineItem
     let anchor: CallThreadAnchor
 
@@ -92,24 +117,33 @@ struct CallAnchorRow: View {
             // As the room's banner joins: with the microphone, and the camera for the person to turn on.
             Task { await session.joinGroupCall(in: item.conversation.jid, video: false) }
         }
-        .padding(.leading, Theme.Spacing.l)
-        .padding(.trailing, Theme.Spacing.l)
+        // In the column the messages' words are in, past the avatars (`MessageRowContent`).
+        .padding(.leading, avatarColumn)
+        .padding(.horizontal, Theme.Spacing.l + Theme.Spacing.s)
         .padding(.vertical, Theme.Spacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var avatarColumn: CGFloat {
+        let isCompact = app.preferences.compactMessages
+        return (isCompact ? Theme.Size.rowAvatar : Theme.Size.avatar) + (isCompact ? Theme.Spacing.s : Theme.Spacing.m)
     }
 
     /// The call going on in the room now, as the banner and "Live now" read it.
     private var live: CallAnchorCard.Live? {
         let room = item.conversation.jid
         let calls = session.calls
-        guard calls.groupPresence.hasCall(in: room) else { return nil }
+        // The call we are in is going on, whatever a room we are still
+        // coming back into has had time to tell us of it.
+        let isOurs = calls.state.isInGroupCall(in: room)
+        guard isOurs || calls.groupPresence.hasCall(in: room) else { return nil }
         let rows = GroupCallRoster.rows(
             presence: calls.groupPresence.participants[room] ?? [], live: [], speaking: [], own: session.account.jid
         )
         return CallAnchorCard.Live(
-            people: rows.map { $0.isSelf ? "You" : $0.nick },
+            people: rows.isEmpty && isOurs ? ["You"] : rows.map { $0.isSelf ? "You" : $0.nick },
             hasVideo: calls.groupPresence.media[room]?.video ?? anchor.hasVideo,
-            isOurs: calls.state.isInGroupCall(in: room),
+            isOurs: isOurs,
             isBusy: calls.state.isLive,
             canJoin: session.canJoinGroupCall(in: room)
         )
