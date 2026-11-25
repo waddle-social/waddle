@@ -111,7 +111,12 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
     trace1.emit_tenant_write("cell-b", "t-expiry", &holder_b, lease_b.generation);
 
     let jsonl1 = trace1.to_jsonl();
-    verify_jsonl_trace(&jsonl1).expect("Scenario 1 trace must pass PlacementLeaseMonitor");
+    let summary1 =
+        verify_jsonl_trace(&jsonl1).expect("Scenario 1 trace must pass PlacementLeaseMonitor");
+    assert!(
+        summary1.records_processed >= 4 && summary1.tenant_writes_observed >= 2,
+        "Scenario 1 trace must be non-vacuous: {summary1:?}"
+    );
     let proof_hex = hex::encode(holder_a.tls_exporter_proof.as_bytes());
     assert_secret_free(
         &jsonl1,
@@ -242,7 +247,11 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
         tenant_store.verify_write_fence(&part_scope_a).await,
         Err(TenantStoreError::StalePlacementGeneration { .. })
     ));
-    verify_jsonl_trace(&trace4.to_jsonl()).expect("Scenario 4 trace valid");
+    let summary4 = verify_jsonl_trace(&trace4.to_jsonl()).expect("Scenario 4 trace valid");
+    assert!(
+        summary4.records_processed >= 3 && summary4.tenant_writes_observed >= 1,
+        "Scenario 4 trace must be non-vacuous: {summary4:?}"
+    );
 
     // -----------------------------------------------------------------------
     // Scenario 5: Duplicate claim race (N = 8 concurrent contenders)
@@ -518,7 +527,15 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
     assert!(tenant_store.verify_write_fence(&h_scope_a).await.is_err());
 
     let jsonl7 = trace7.to_jsonl();
-    verify_jsonl_trace(&jsonl7).expect("Scenario 7 trace valid");
+    let summary7 = verify_jsonl_trace(&jsonl7).expect("Scenario 7 trace valid");
+    assert!(
+        summary7.records_processed >= 4 && summary7.tenant_writes_observed >= 2,
+        "Scenario 7 trace must be non-vacuous: {summary7:?}"
+    );
+    assert!(
+        summary1.records_processed + summary4.records_processed + summary7.records_processed >= 10,
+        "combined placement traces must process >= 10 records"
+    );
     assert_secret_free(&jsonl7, &["sk-live-secret", &proof_hex]).expect("secret-free");
 }
 

@@ -85,47 +85,53 @@ impl TursoPlacementLeaseStore {
         holder: &HolderInstance,
         expected_generation: FenceGeneration,
     ) -> Result<(), LeaseError> {
+        let gen_i64 = i64::try_from(expected_generation.get())
+            .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
         let conn = self.conn.lock().await;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
-        let gen_i64 = i64::try_from(expected_generation.get())
-            .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
-        let affected = conn
-            .execute(
-                "UPDATE placement_leases
-                 SET transfer_state = 'draining',
-                     updated_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-                 WHERE tenant_id = ?1
-                   AND holder_spiffe_id = ?2
-                   AND holder_incarnation_pubkey = ?3
-                   AND generation = ?4
-                   AND transfer_state IN ('active', 'draining')
-                   AND expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)",
-                (
-                    tenant.as_str(),
-                    holder.spiffe_id.as_str(),
-                    holder.incarnation_pubkey.as_bytes().to_vec(),
-                    gen_i64,
-                ),
-            )
-            .await;
-        match affected {
-            Ok(1) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LeaseError::Backend(format!("COMMIT: {err}")))?;
+
+        let result: Result<(), LeaseError> = async {
+            let affected = conn
+                .execute(
+                    "UPDATE placement_leases
+                     SET transfer_state = 'draining',
+                         updated_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+                     WHERE tenant_id = ?1
+                       AND holder_spiffe_id = ?2
+                       AND holder_incarnation_pubkey = ?3
+                       AND generation = ?4
+                       AND transfer_state IN ('active', 'draining')
+                       AND expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+                    (
+                        tenant.as_str(),
+                        holder.spiffe_id.as_str(),
+                        holder.incarnation_pubkey.as_bytes().to_vec(),
+                        gen_i64,
+                    ),
+                )
+                .await
+                .map_err(|err| LeaseError::Backend(format!("mark_draining update: {err}")))?;
+            if affected == 1 {
                 Ok(())
+            } else {
+                Err(Self::classify_cas_failure(&conn, tenant, holder, expected_generation).await)
             }
-            Ok(_) => {
-                let err =
-                    Self::classify_cas_failure(&conn, tenant, holder, expected_generation).await;
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!("COMMIT: {err}")));
+                }
+                Ok(())
             }
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LeaseError::Backend(format!("mark_draining update: {err}")))
+                Err(err)
             }
         }
     }
@@ -140,50 +146,58 @@ impl TursoPlacementLeaseStore {
     ) -> Result<(), LeaseError> {
         let target_json = serde_json::to_string(target)
             .map_err(|err| LeaseError::Backend(format!("serialize transfer target: {err}")))?;
+        let gen_i64 = i64::try_from(expected_generation.get())
+            .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
         let conn = self.conn.lock().await;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
-        let gen_i64 = i64::try_from(expected_generation.get())
-            .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
-        let affected = conn
-            .execute(
-                "UPDATE placement_leases
-                 SET transfer_state = 'transferring',
-                     transfer_target_json = ?5,
-                     updated_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-                 WHERE tenant_id = ?1
-                   AND holder_spiffe_id = ?2
-                   AND holder_incarnation_pubkey = ?3
-                   AND generation = ?4
-                   AND transfer_state IN ('active', 'draining', 'transferring')
-                   AND expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)",
-                (
-                    tenant.as_str(),
-                    from_holder.spiffe_id.as_str(),
-                    from_holder.incarnation_pubkey.as_bytes().to_vec(),
-                    gen_i64,
-                    target_json,
-                ),
-            )
-            .await;
-        match affected {
-            Ok(1) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LeaseError::Backend(format!("COMMIT: {err}")))?;
+
+        let result: Result<(), LeaseError> = async {
+            let affected = conn
+                .execute(
+                    "UPDATE placement_leases
+                     SET transfer_state = 'transferring',
+                         transfer_target_json = ?5,
+                         updated_at_ms = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+                     WHERE tenant_id = ?1
+                       AND holder_spiffe_id = ?2
+                       AND holder_incarnation_pubkey = ?3
+                       AND generation = ?4
+                       AND transfer_state IN ('active', 'draining', 'transferring')
+                       AND expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+                    (
+                        tenant.as_str(),
+                        from_holder.spiffe_id.as_str(),
+                        from_holder.incarnation_pubkey.as_bytes().to_vec(),
+                        gen_i64,
+                        target_json,
+                    ),
+                )
+                .await
+                .map_err(|err| LeaseError::Backend(format!("begin_transfer update: {err}")))?;
+            if affected == 1 {
                 Ok(())
-            }
-            Ok(_) => {
-                let err =
+            } else {
+                Err(
                     Self::classify_cas_failure(&conn, tenant, from_holder, expected_generation)
-                        .await;
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
+                        .await,
+                )
+            }
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!("COMMIT: {err}")));
+                }
+                Ok(())
             }
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LeaseError::Backend(format!("begin_transfer update: {err}")))
+                Err(err)
             }
         }
     }
@@ -380,27 +394,14 @@ impl PlacementLeaseStore for TursoPlacementLeaseStore {
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
 
-        let now_ms = match Self::db_now_ms(&conn).await {
-            Ok(ms) => ms,
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
-            }
-        };
-        let expires_at_ms = now_ms.saturating_add(ttl_i64);
+        let result: Result<PlacementLease, LeaseError> = async {
+            let now_ms = Self::db_now_ms(&conn).await?;
+            let expires_at_ms = now_ms.saturating_add(ttl_i64);
+            let existing = Self::read_raw_row(&conn, tenant).await?;
 
-        let existing = match Self::read_raw_row(&conn, tenant).await {
-            Ok(row) => row,
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
-            }
-        };
-
-        let new_gen = match existing {
-            None => {
-                let res = conn
-                    .execute(
+            let new_gen = match existing {
+                None => {
+                    conn.execute(
                         "INSERT INTO placement_leases
                          (tenant_id, cell_role, placement_mode, holder_spiffe_id,
                           holder_incarnation_pubkey, holder_tls_exporter_proof,
@@ -417,87 +418,93 @@ impl PlacementLeaseStore for TursoPlacementLeaseStore {
                             now_ms,
                         ),
                     )
-                    .await;
-                if let Err(err) = res {
-                    let _ = conn.execute("ROLLBACK", ()).await;
-                    return Err(LeaseError::Backend(format!("claim insert failed: {err}")));
+                    .await
+                    .map_err(|err| LeaseError::Backend(format!("claim insert failed: {err}")))?;
+                    FenceGeneration::new(1)
                 }
-                FenceGeneration::new(1)
-            }
-            Some(row) => {
-                let current_gen = FenceGeneration::new(u64::try_from(row.generation).unwrap_or(0));
-                if row.transfer_state != "released" && row.expires_at_ms > now_ms {
-                    let _ = conn.execute("ROLLBACK", ()).await;
-                    return Err(LeaseError::AlreadyHeld {
-                        tenant_id: tenant.clone(),
-                        current_generation: current_gen,
-                    });
-                }
-                let next_gen = current_gen
-                    .checked_next()
-                    .ok_or_else(|| LeaseError::Backend("generation overflow".to_owned()))?;
-                let next_gen_i64 = i64::try_from(next_gen.get())
-                    .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
-                let affected = conn
-                    .execute(
-                        "UPDATE placement_leases
-                         SET cell_role = ?2,
-                             placement_mode = ?3,
-                             holder_spiffe_id = ?4,
-                             holder_incarnation_pubkey = ?5,
-                             holder_tls_exporter_proof = ?6,
-                             generation = ?7,
-                             expires_at_ms = ?8,
-                             transfer_state = 'active',
-                             transfer_target_json = NULL,
-                             updated_at_ms = ?9
-                         WHERE tenant_id = ?1
-                           AND generation = ?10
-                           AND (transfer_state = 'released' OR expires_at_ms <= ?9)",
-                        (
-                            tenant.as_str(),
-                            role.as_str(),
-                            mode_to_str(mode),
-                            holder.spiffe_id.as_str(),
-                            holder.incarnation_pubkey.as_bytes().to_vec(),
-                            holder.tls_exporter_proof.as_bytes().to_vec(),
-                            next_gen_i64,
-                            expires_at_ms,
-                            now_ms,
-                            row.generation,
-                        ),
-                    )
-                    .await;
-                match affected {
-                    Ok(1) => next_gen,
-                    Ok(_) => {
-                        let _ = conn.execute("ROLLBACK", ()).await;
+                Some(row) => {
+                    let current_gen =
+                        FenceGeneration::new(u64::try_from(row.generation).unwrap_or(0));
+                    if row.transfer_state != "released" && row.expires_at_ms > now_ms {
                         return Err(LeaseError::AlreadyHeld {
                             tenant_id: tenant.clone(),
                             current_generation: current_gen,
                         });
                     }
-                    Err(err) => {
-                        let _ = conn.execute("ROLLBACK", ()).await;
-                        return Err(LeaseError::Backend(format!("claim update failed: {err}")));
+                    let next_gen = current_gen
+                        .checked_next()
+                        .ok_or_else(|| LeaseError::Backend("generation overflow".to_owned()))?;
+                    let next_gen_i64 = i64::try_from(next_gen.get())
+                        .map_err(|_| LeaseError::Backend("generation overflow".to_owned()))?;
+                    let affected = conn
+                        .execute(
+                            "UPDATE placement_leases
+                             SET cell_role = ?2,
+                                 placement_mode = ?3,
+                                 holder_spiffe_id = ?4,
+                                 holder_incarnation_pubkey = ?5,
+                                 holder_tls_exporter_proof = ?6,
+                                 generation = ?7,
+                                 expires_at_ms = ?8,
+                                 transfer_state = 'active',
+                                 transfer_target_json = NULL,
+                                 updated_at_ms = ?9
+                             WHERE tenant_id = ?1
+                               AND generation = ?10
+                               AND (transfer_state = 'released' OR expires_at_ms <= ?9)",
+                            (
+                                tenant.as_str(),
+                                role.as_str(),
+                                mode_to_str(mode),
+                                holder.spiffe_id.as_str(),
+                                holder.incarnation_pubkey.as_bytes().to_vec(),
+                                holder.tls_exporter_proof.as_bytes().to_vec(),
+                                next_gen_i64,
+                                expires_at_ms,
+                                now_ms,
+                                row.generation,
+                            ),
+                        )
+                        .await
+                        .map_err(|err| {
+                            LeaseError::Backend(format!("claim update failed: {err}"))
+                        })?;
+                    if affected == 1 {
+                        next_gen
+                    } else {
+                        return Err(LeaseError::AlreadyHeld {
+                            tenant_id: tenant.clone(),
+                            current_generation: current_gen,
+                        });
                     }
                 }
+            };
+
+            Ok(PlacementLease {
+                tenant_id: tenant.clone(),
+                cell_role: role.clone(),
+                mode,
+                holder: holder.clone(),
+                generation: new_gen,
+                expires_at_ms,
+                transfer_state: TransferState::Active,
+            })
+        }
+        .await;
+
+        match result {
+            Ok(lease) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!("claim COMMIT failed: {err}")));
+                }
+                Ok(lease)
             }
-        };
-
-        conn.execute("COMMIT", ())
-            .await
-            .map_err(|err| LeaseError::Backend(format!("claim COMMIT failed: {err}")))?;
-
-        Ok(PlacementLease {
-            tenant_id: tenant.clone(),
-            cell_role: role.clone(),
-            mode,
-            holder: holder.clone(),
-            generation: new_gen,
-            expires_at_ms,
-            transfer_state: TransferState::Active,
-        })
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn renew(
@@ -515,57 +522,56 @@ impl PlacementLeaseStore for TursoPlacementLeaseStore {
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
 
-        let now_ms = match Self::db_now_ms(&conn).await {
-            Ok(ms) => ms,
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
-            }
-        };
-        let new_expires = now_ms.saturating_add(ttl_i64);
+        let result: Result<RawLeaseRow, LeaseError> = async {
+            let now_ms = Self::db_now_ms(&conn).await?;
+            let new_expires = now_ms.saturating_add(ttl_i64);
 
-        let affected = conn
-            .execute(
-                "UPDATE placement_leases
-                 SET expires_at_ms = ?1,
-                     holder_tls_exporter_proof = ?2,
-                     updated_at_ms = ?3
-                 WHERE tenant_id = ?4
-                   AND holder_spiffe_id = ?5
-                   AND holder_incarnation_pubkey = ?6
-                   AND generation = ?7
-                   AND transfer_state IN ('active', 'draining', 'transferring')
-                   AND expires_at_ms > ?3",
-                (
-                    new_expires,
-                    holder.tls_exporter_proof.as_bytes().to_vec(),
-                    now_ms,
-                    tenant.as_str(),
-                    holder.spiffe_id.as_str(),
-                    holder.incarnation_pubkey.as_bytes().to_vec(),
-                    gen_i64,
-                ),
-            )
-            .await;
+            let affected = conn
+                .execute(
+                    "UPDATE placement_leases
+                     SET expires_at_ms = ?1,
+                         holder_tls_exporter_proof = ?2,
+                         updated_at_ms = ?3
+                     WHERE tenant_id = ?4
+                       AND holder_spiffe_id = ?5
+                       AND holder_incarnation_pubkey = ?6
+                       AND generation = ?7
+                       AND transfer_state IN ('active', 'draining', 'transferring')
+                       AND expires_at_ms > ?3",
+                    (
+                        new_expires,
+                        holder.tls_exporter_proof.as_bytes().to_vec(),
+                        now_ms,
+                        tenant.as_str(),
+                        holder.spiffe_id.as_str(),
+                        holder.incarnation_pubkey.as_bytes().to_vec(),
+                        gen_i64,
+                    ),
+                )
+                .await
+                .map_err(|err| LeaseError::Backend(format!("renew update failed: {err}")))?;
 
-        match affected {
-            Ok(1) => {
-                let raw = Self::read_raw_row(&conn, tenant)
+            if affected == 1 {
+                Self::read_raw_row(&conn, tenant)
                     .await?
-                    .ok_or_else(|| LeaseError::Backend("renewed row disappeared".to_owned()))?;
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LeaseError::Backend(format!("renew COMMIT failed: {err}")))?;
+                    .ok_or_else(|| LeaseError::Backend("renewed row disappeared".to_owned()))
+            } else {
+                Err(Self::classify_cas_failure(&conn, tenant, holder, generation).await)
+            }
+        }
+        .await;
+
+        match result {
+            Ok(raw) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!("renew COMMIT failed: {err}")));
+                }
                 raw.into_lease(tenant)
             }
-            Ok(_) => {
-                let err = Self::classify_cas_failure(&conn, tenant, holder, generation).await;
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
-            }
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LeaseError::Backend(format!("renew update failed: {err}")))
+                Err(err)
             }
         }
     }
@@ -586,98 +592,88 @@ impl PlacementLeaseStore for TursoPlacementLeaseStore {
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
 
-        let existing = match Self::read_raw_row(&conn, tenant).await {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(LeaseError::NotFound(tenant.clone()));
-            }
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
-            }
-        };
+        let result: Result<RawLeaseRow, LeaseError> = async {
+            let existing = Self::read_raw_row(&conn, tenant)
+                .await?
+                .ok_or_else(|| LeaseError::NotFound(tenant.clone()))?;
 
-        // Enforce DedicatedCell / SharedPool role policy on the target holder.
-        let role = CellRole::parse(&existing.cell_role)
-            .map_err(|e| LeaseError::Backend(format!("stored cell_role invalid: {e}")))?;
-        let mode = match existing.placement_mode.as_str() {
-            "shared_pool" => PlacementMode::SharedPool,
-            "dedicated_cell" => PlacementMode::DedicatedCell,
-            other => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(LeaseError::Backend(format!(
-                    "unknown placement_mode: {other}"
-                )));
+            // Enforce DedicatedCell / SharedPool role policy on the target holder.
+            let role = CellRole::parse(&existing.cell_role)
+                .map_err(|e| LeaseError::Backend(format!("stored cell_role invalid: {e}")))?;
+            let mode = match existing.placement_mode.as_str() {
+                "shared_pool" => PlacementMode::SharedPool,
+                "dedicated_cell" => PlacementMode::DedicatedCell,
+                other => {
+                    return Err(LeaseError::Backend(format!(
+                        "unknown placement_mode: {other}"
+                    )));
+                }
+            };
+            if !spiffe_matches_cell_role(&to_holder.spiffe_id, &role, mode) {
+                return Err(LeaseError::HolderMismatch(tenant.clone()));
             }
-        };
-        if !spiffe_matches_cell_role(&to_holder.spiffe_id, &role, mode) {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(LeaseError::HolderMismatch(tenant.clone()));
-        }
 
-        let now_ms = match Self::db_now_ms(&conn).await {
-            Ok(ms) => ms,
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
-            }
-        };
-        let new_expires = now_ms.saturating_add(ttl_i64);
+            let now_ms = Self::db_now_ms(&conn).await?;
+            let new_expires = now_ms.saturating_add(ttl_i64);
 
-        let affected = conn
-            .execute(
-                "UPDATE placement_leases
-                 SET holder_spiffe_id = ?1,
-                     holder_incarnation_pubkey = ?2,
-                     holder_tls_exporter_proof = ?3,
-                     generation = generation + 1,
-                     expires_at_ms = ?4,
-                     transfer_state = 'active',
-                     transfer_target_json = NULL,
-                     updated_at_ms = ?5
-                 WHERE tenant_id = ?6
-                   AND holder_spiffe_id = ?7
-                   AND holder_incarnation_pubkey = ?8
-                   AND generation = ?9
-                   AND transfer_state != 'released'
-                   AND expires_at_ms > ?5",
-                (
-                    to_holder.spiffe_id.as_str(),
-                    to_holder.incarnation_pubkey.as_bytes().to_vec(),
-                    to_holder.tls_exporter_proof.as_bytes().to_vec(),
-                    new_expires,
-                    now_ms,
-                    tenant.as_str(),
-                    from_holder.spiffe_id.as_str(),
-                    from_holder.incarnation_pubkey.as_bytes().to_vec(),
-                    gen_i64,
-                ),
-            )
-            .await;
+            let affected = conn
+                .execute(
+                    "UPDATE placement_leases
+                     SET holder_spiffe_id = ?1,
+                         holder_incarnation_pubkey = ?2,
+                         holder_tls_exporter_proof = ?3,
+                         generation = generation + 1,
+                         expires_at_ms = ?4,
+                         transfer_state = 'active',
+                         transfer_target_json = NULL,
+                         updated_at_ms = ?5
+                     WHERE tenant_id = ?6
+                       AND holder_spiffe_id = ?7
+                       AND holder_incarnation_pubkey = ?8
+                       AND generation = ?9
+                       AND transfer_state != 'released'
+                       AND expires_at_ms > ?5",
+                    (
+                        to_holder.spiffe_id.as_str(),
+                        to_holder.incarnation_pubkey.as_bytes().to_vec(),
+                        to_holder.tls_exporter_proof.as_bytes().to_vec(),
+                        new_expires,
+                        now_ms,
+                        tenant.as_str(),
+                        from_holder.spiffe_id.as_str(),
+                        from_holder.incarnation_pubkey.as_bytes().to_vec(),
+                        gen_i64,
+                    ),
+                )
+                .await
+                .map_err(|err| LeaseError::Backend(format!("transfer update failed: {err}")))?;
 
-        match affected {
-            Ok(1) => {
-                let raw = Self::read_raw_row(&conn, tenant)
+            if affected == 1 {
+                Self::read_raw_row(&conn, tenant)
                     .await?
-                    .ok_or_else(|| LeaseError::Backend("transferred row disappeared".to_owned()))?;
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LeaseError::Backend(format!("transfer COMMIT failed: {err}")))?;
+                    .ok_or_else(|| LeaseError::Backend("transferred row disappeared".to_owned()))
+            } else {
+                Err(
+                    Self::classify_cas_failure(&conn, tenant, from_holder, expected_generation)
+                        .await,
+                )
+            }
+        }
+        .await;
+
+        match result {
+            Ok(raw) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!(
+                        "transfer COMMIT failed: {err}"
+                    )));
+                }
                 raw.into_lease(tenant)
             }
-            Ok(_) => {
-                let err =
-                    Self::classify_cas_failure(&conn, tenant, from_holder, expected_generation)
-                        .await;
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
-            }
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LeaseError::Backend(format!(
-                    "transfer update failed: {err}"
-                )))
+                Err(err)
             }
         }
     }
@@ -695,53 +691,52 @@ impl PlacementLeaseStore for TursoPlacementLeaseStore {
             .await
             .map_err(|err| LeaseError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
 
-        let now_ms = match Self::db_now_ms(&conn).await {
-            Ok(ms) => ms,
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err);
+        let result: Result<(), LeaseError> = async {
+            let now_ms = Self::db_now_ms(&conn).await?;
+
+            // Never delete the row: preserve monotonic `generation` across releases.
+            let affected = conn
+                .execute(
+                    "UPDATE placement_leases
+                     SET transfer_state = 'released',
+                         expires_at_ms = 0,
+                         transfer_target_json = NULL,
+                         updated_at_ms = ?1
+                     WHERE tenant_id = ?2
+                       AND holder_spiffe_id = ?3
+                       AND holder_incarnation_pubkey = ?4
+                       AND generation = ?5
+                       AND transfer_state != 'released'",
+                    (
+                        now_ms,
+                        tenant.as_str(),
+                        holder.spiffe_id.as_str(),
+                        holder.incarnation_pubkey.as_bytes().to_vec(),
+                        gen_i64,
+                    ),
+                )
+                .await
+                .map_err(|err| LeaseError::Backend(format!("release update failed: {err}")))?;
+
+            if affected == 1 {
+                Ok(())
+            } else {
+                Err(Self::classify_cas_failure(&conn, tenant, holder, expected_generation).await)
             }
-        };
+        }
+        .await;
 
-        // Never delete the row: preserve monotonic `generation` across releases.
-        let affected = conn
-            .execute(
-                "UPDATE placement_leases
-                 SET transfer_state = 'released',
-                     expires_at_ms = 0,
-                     transfer_target_json = NULL,
-                     updated_at_ms = ?1
-                 WHERE tenant_id = ?2
-                   AND holder_spiffe_id = ?3
-                   AND holder_incarnation_pubkey = ?4
-                   AND generation = ?5
-                   AND transfer_state != 'released'",
-                (
-                    now_ms,
-                    tenant.as_str(),
-                    holder.spiffe_id.as_str(),
-                    holder.incarnation_pubkey.as_bytes().to_vec(),
-                    gen_i64,
-                ),
-            )
-            .await;
-
-        match affected {
-            Ok(1) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LeaseError::Backend(format!("release COMMIT failed: {err}")))?;
+        match result {
+            Ok(()) => {
+                if let Err(err) = conn.execute("COMMIT", ()).await {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(LeaseError::Backend(format!("release COMMIT failed: {err}")));
+                }
                 Ok(())
             }
-            Ok(_) => {
-                let err =
-                    Self::classify_cas_failure(&conn, tenant, holder, expected_generation).await;
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err)
-            }
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LeaseError::Backend(format!("release update failed: {err}")))
+                Err(err)
             }
         }
     }
