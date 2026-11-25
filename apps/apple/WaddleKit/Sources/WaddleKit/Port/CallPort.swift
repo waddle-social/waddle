@@ -13,6 +13,10 @@ public protocol CallPort: AnyObject, Sendable {
     func sendGroupCallSessionInitiate(in room: BareJID, initiator: JID, sid: String, video: Bool) async -> Bool
     func sendGroupCallSessionTerminate(in room: BareJID, sid: String) async -> Bool
 
+    /// `urn:waddle:in-call:0`: to the device we are in a call of two with,
+    /// or to a room for everyone in its call.
+    func sendInCallReaction(_ emoji: String, to destination: CallReactionLedger.Destination) async -> Bool
+
     func sendCallPropose(to peer: BareJID, sid: String, media: CallMedia) async -> Bool
     /// XEP-0353 §3.2: addressed to the proposer's full JID.
     func sendCallRinging(to peer: JID, sid: String) async -> Bool

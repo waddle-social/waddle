@@ -1,0 +1,150 @@
+import Foundation
+import Observation
+
+/// `urn:waddle:in-call:0`: an emoji someone in a call sends for everyone
+/// in it to see for a moment. Never stored, never archived.
+public struct InCallReaction: Hashable, Sendable {
+    public var sid: String
+    public var emoji: String
+
+    public init(sid: String, emoji: String) {
+        self.sid = sid
+        self.emoji = emoji
+    }
+}
+
+/// One reaction on the stage, rising and fading.
+public struct CallReactionBurst: Identifiable, Equatable, Sendable {
+    public let id: Int
+    public let emoji: String
+    /// Whose it is, as the call's surfaces name people; `nil` for our own.
+    public let from: JID?
+    /// Where across the stage it rises, 0 to 1: its own place, so two at once do not sit on each other.
+    public let lane: Double
+    public let expires: Date
+
+    /// "ada reacted 👍", "You reacted 👍": a screen reader says the emoji's own name.
+    public func spoken(inRoom: Bool) -> String {
+        guard let from else { return "You reacted \(emoji)" }
+        // In a room the sender is an occupant, named by their nick.
+        let name = inRoom ? from.resource : from.bare.localpart
+        return "\(name ?? "Someone") reacted \(emoji)"
+    }
+}
+
+/// The reactions showing on a call's stage (web `in-call-reactions.ts`).
+public struct CallReactionLedger: Equatable, Sendable {
+    /// How long one shows (web: 2400 ms).
+    public static let lifetime: TimeInterval = 2.4
+    /// Shown at once; an older one makes way.
+    public static let limit = 8
+    /// The six the picker offers, as on the web.
+    public static let offered = ["👍", "❤️", "😂", "🔥", "👏", "🎉"]
+
+    public private(set) var bursts: [CallReactionBurst] = []
+    private var sequence = 0
+
+    public init() { /* nothing showing */ }
+
+    /// Adds one. Anything that is not a single emoji is not shown: the
+    /// wire carries whatever the sender typed.
+    public mutating func received(_ emoji: String, from: JID?, at now: Date) {
+        guard Self.isOneEmoji(emoji) else { return }
+        expire(at: now)
+        sequence += 1
+        bursts.append(CallReactionBurst(
+            id: sequence, emoji: emoji, from: from, lane: Self.lane(of: sequence),
+            expires: now.addingTimeInterval(Self.lifetime)
+        ))
+        if bursts.count > Self.limit { bursts.removeFirst(bursts.count - Self.limit) }
+    }
+
+    public mutating func expire(at now: Date) {
+        bursts.removeAll { $0.expires <= now }
+    }
+
+    public mutating func clear() {
+        bursts = []
+    }
+
+    /// When the next one is due to go, for whoever is waiting to take it away.
+    public var nextExpiry: Date? { bursts.map(\.expires).min() }
+
+    /// Spread by the golden ratio, so neighbours in time are apart in place.
+    static func lane(of sequence: Int) -> Double {
+        (Double(sequence) * 0.618_033_988_75).truncatingRemainder(dividingBy: 1)
+    }
+
+    /// One character that is an emoji, with whatever joiners and variation
+    /// selectors it is made of.
+    public static func isOneEmoji(_ text: String) -> Bool {
+        guard text.count == 1, let first = text.unicodeScalars.first else { return false }
+        // A digit or "#" is an emoji base only when the text presents it as one.
+        if first.properties.isEmojiPresentation { return true }
+        return first.properties.isEmoji && text.unicodeScalars.contains { $0.value == 0xFE0F }
+    }
+
+    /// Whether a reaction that arrived belongs to the call in the slot.
+    ///
+    /// A call of two shares one session id, and the reaction comes from the
+    /// device we are in the call with. A room's call has no id the room
+    /// shares, each device making its own, so there it is the room it came
+    /// through that says which call it is for.
+    public static func belongs(_ reaction: InCallReaction, from: JID, isGroupchat: Bool, to state: CallState) -> Bool {
+        switch state {
+        case .active(let call):
+            !isGroupchat && from == call.peer && reaction.sid == call.sid
+        case .inGroup(let call):
+            isGroupchat && from.bare == call.room && from.resource != nil
+        case .idle, .incoming, .outgoing, .joiningGroup, .ended:
+            false
+        }
+    }
+
+    /// Where a reaction to the call in the slot is sent.
+    public enum Destination: Hashable, Sendable {
+        /// The device we are in a call of two with.
+        case device(JID, sid: String)
+        case room(BareJID, sid: String)
+    }
+
+    public static func destination(in state: CallState) -> Destination? {
+        switch state {
+        case .active(let call): .device(call.peer, sid: call.sid)
+        case .inGroup(let call): .room(call.room, sid: call.sid)
+        case .idle, .incoming, .outgoing, .joiningGroup, .ended: nil
+        }
+    }
+}
+
+/// The reactions on the stage of the session's call, for whoever draws them.
+@MainActor @Observable public final class CallReactions {
+    public private(set) var bursts: [CallReactionBurst] = []
+    @ObservationIgnored private var ledger = CallReactionLedger()
+    @ObservationIgnored private var sweep: Task<Void, Never>?
+
+    public init() { /* nothing showing */ }
+
+    func received(_ emoji: String, from: JID?, at now: Date = Date()) {
+        ledger.received(emoji, from: from, at: now)
+        publish()
+    }
+
+    func clear() {
+        ledger.clear()
+        publish()
+    }
+
+    /// Takes each away when its time is up, without a clock ticking while none shows.
+    private func publish() {
+        if bursts != ledger.bursts { bursts = ledger.bursts }
+        sweep?.cancel()
+        guard let due = ledger.nextExpiry else { return }
+        sweep = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, due.timeIntervalSinceNow)))
+            guard !Task.isCancelled, let self else { return }
+            self.ledger.expire(at: Date())
+            self.publish()
+        }
+    }
+}

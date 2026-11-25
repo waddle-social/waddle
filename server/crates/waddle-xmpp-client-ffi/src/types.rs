@@ -152,6 +152,15 @@ pub struct WaddleMessage {
     /// when it is — including `Some(vec![])` for an MDS event with
     /// zero items (rare but distinct from "not an MDS event").
     pub mds_displayed: Option<Vec<WaddleMdsDisplayedEntry>>,
+    /// A `urn:waddle:in-call:0` reaction, delivered live and never archived.
+    #[uniffi(default = None)]
+    pub in_call_reaction: Option<WaddleInCallReaction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WaddleInCallReaction {
+    pub sid: String,
+    pub emoji: String,
 }
 
 #[derive(uniffi::Record, Clone)]

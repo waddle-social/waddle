@@ -703,6 +703,11 @@ public final class SessionCoordinator {
             cursors.forEach(applyDisplayedCursor)
             return
         }
+        if let reaction = message.inCallReaction {
+            // For the call's stage and nowhere else: never a row, an unread or an alert.
+            calls.receiveReaction(reaction, from: message.from, isGroupchat: message.isGroupchat)
+            return
+        }
         guard let route = account.route(message) else { return }
         if let pin = message.pinEvent {
             if route.conversation.isRoom {

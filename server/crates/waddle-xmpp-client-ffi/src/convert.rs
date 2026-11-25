@@ -3,9 +3,10 @@ use jid::Jid;
 use waddle_xmpp_client::inbox::{InboxStreamEntry, InboxStreamEntrySource};
 use waddle_xmpp_client::mds::MdsCatchupEntry;
 use waddle_xmpp_client::messaging::{
-    self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
-    JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan, MarkupSpanData,
-    MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
+    self, CallEventKind, CallMedia, CarbonDirection, InCallSignal, InboundCallEvent,
+    InboundPresence, JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan,
+    MarkupSpanData, MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData,
+    SendMessageOptions,
 };
 use waddle_xmpp_client::pin::{PinEntry, PinEvent, PinEventAction, PinPreview};
 use waddle_xmpp_client::request::StanzaId;
@@ -23,14 +24,14 @@ use crate::{
     WaddleArchivedMessage, WaddleBroadcastKind, WaddleBroadcastSpan, WaddleCallEvent,
     WaddleCallEventKind, WaddleCallMedia, WaddleCallThreadAnchor, WaddleCallThreadEnded,
     WaddleCarbonDirection, WaddleChatState, WaddleClientEvent, WaddleEncryptedFile,
-    WaddleEncryptedFileHash, WaddleEventListener, WaddleForumPostKind, WaddleInboxEntry,
-    WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage, WaddleLinkPreviewLookup,
-    WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer,
-    WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType,
-    WaddleMdsDisplayedEntry, WaddleMentionDirectory, WaddleMessage, WaddleMucAffiliation,
-    WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction, WaddlePinEntry,
-    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddleReference,
-    WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
+    WaddleEncryptedFileHash, WaddleEventListener, WaddleForumPostKind, WaddleInCallReaction,
+    WaddleInboxEntry, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus,
+    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
+    WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMentionDirectory, WaddleMessage,
+    WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction,
+    WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat,
+    WaddleReference, WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
     WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
 };
 
@@ -938,6 +939,13 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         mds_displayed: msg
             .mds_displayed
             .map(|entries| entries.into_iter().map(mds_entry_to_ffi).collect()),
+        in_call_reaction: match msg.in_call {
+            Some(InCallSignal::Reaction(payload)) => Some(WaddleInCallReaction {
+                sid: payload.sid.as_str().to_string(),
+                emoji: payload.emoji.as_str().to_string(),
+            }),
+            _ => None,
+        },
     }
 }
 
@@ -2269,6 +2277,32 @@ mod tests {
         assert_eq!(unpin.action, WaddlePinAction::Unpinned);
         assert_eq!(unpin.reason.as_deref(), Some("retracted"));
         assert!(unpin.preview.is_none());
+    }
+
+    #[test]
+    fn in_call_reaction_survives_inbound_to_ffi() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='caller@waddle.test/phone'>\
+               <in-call xmlns='urn:waddle:in-call:0' sid='c1'><reaction emoji='👍'/></in-call>\
+             </message>",
+        ));
+        assert_eq!(
+            ffi.in_call_reaction,
+            Some(WaddleInCallReaction {
+                sid: "c1".into(),
+                emoji: "👍".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn inbound_message_without_in_call_reaction_has_no_reaction_field() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='caller@waddle.test/phone'>\
+               <body>Hello</body>\
+             </message>",
+        ));
+        assert_eq!(ffi.in_call_reaction, None);
     }
 
     #[test]

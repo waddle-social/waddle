@@ -9,22 +9,25 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
 use jid::{BareJid, FullJid, Jid};
+use minidom::rxml::{xml_ncname, Namespace};
 use minidom::Element;
+use uuid::Uuid;
 use waddle_xmpp_client::messaging::{
-    build_finish_with_reason, build_propose, build_ringing, CallMedia, JingleReason, SessionId,
+    build_finish_with_reason, build_propose, build_ringing, CallMedia, InCallReactionEmoji,
+    InCallReactionRecipient, InCallSessionId, JingleReason, SessionId,
 };
 use waddle_xmpp_client::xep::xep0215::{parse_external_services, NS_EXT_DISCO};
 use waddle_xmpp_client::{ClientError, StanzaError, StanzaErrorType};
 
 use crate::calls::{
     classify_terminate_result, extdisco_reply_from_own_server, external_service_to_ffi,
-    is_orphaned_dm_call_terminate, session_terminate_iq,
+    in_call_reaction_stanza, is_orphaned_dm_call_terminate, session_terminate_iq,
 };
 use crate::stanza::message_with_jmi;
 use crate::{
     WaddleCallSessionTerminateOutcome, WaddleClient, WaddleClientEvent, WaddleConfig,
     WaddleEventListener, WaddleExternalServiceTransport, WaddleExternalServiceType,
-    WaddleJingleReason,
+    WaddleJingleReason, WaddleMessageAudience,
 };
 
 const NS_JINGLE: &str = "urn:xmpp:jingle:1";
@@ -222,6 +225,108 @@ mod xep0353 {
                 .await
         );
         assert!(listener.errors().iter().any(|e| e.contains("session id")));
+    }
+}
+
+mod in_call_reactions {
+    use super::*;
+
+    #[test]
+    fn reaction_stanzas_match_direct_and_room_wire_shapes() {
+        let cases = [
+            (
+                InCallReactionRecipient::Direct(full("caller@waddle.test/phone")),
+                "<message xmlns='jabber:client' to='caller@waddle.test/phone' type='chat'>\
+                   <in-call xmlns='urn:waddle:in-call:0' sid='c1'><reaction emoji='👍'/></in-call>\
+                   <no-store xmlns='urn:xmpp:hints'/><no-copy xmlns='urn:xmpp:hints'/>\
+                 </message>",
+            ),
+            (
+                InCallReactionRecipient::Room(bare("room@muc.waddle.test")),
+                "<message xmlns='jabber:client' to='room@muc.waddle.test' type='groupchat'>\
+                   <in-call xmlns='urn:waddle:in-call:0' sid='c1'><reaction emoji='👍'/></in-call>\
+                   <no-store xmlns='urn:xmpp:hints'/>\
+                 </message>",
+            ),
+        ];
+        let sid = InCallSessionId::try_new("c1").expect("valid session id");
+        let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
+        for (recipient, xml) in cases {
+            let stanza = in_call_reaction_stanza(&recipient, &sid, &emoji);
+            let id = stanza.attr("id").expect("message id present");
+            Uuid::parse_str(id).expect("message id is a UUID");
+            let mut expected: Element = xml.parse().expect("expected stanza parses");
+            expected.set_attr(Namespace::NONE, xml_ncname!("id").to_owned(), id);
+            assert_eq!(stanza, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn send_in_call_reaction_returns_false_when_not_connected() {
+        let listener = RecordingListener::default();
+        let client = test_client(listener.clone());
+        assert!(
+            !client
+                .send_in_call_reaction(
+                    "caller@waddle.test/phone".into(),
+                    WaddleMessageAudience::Direct,
+                    "c1".into(),
+                    "👍".into(),
+                )
+                .await
+        );
+        assert!(listener
+            .errors()
+            .iter()
+            .any(|e| e.contains("Not connected")));
+    }
+
+    #[tokio::test]
+    async fn send_in_call_reaction_rejects_invalid_inputs() {
+        let cases = [
+            (
+                "caller@waddle.test",
+                WaddleMessageAudience::Direct,
+                "c1",
+                "👍",
+                "invalid full JID",
+            ),
+            (
+                "room@muc.waddle.test/occupant",
+                WaddleMessageAudience::Muc,
+                "c1",
+                "👍",
+                "invalid bare JID",
+            ),
+            (
+                "caller@waddle.test/phone",
+                WaddleMessageAudience::Direct,
+                "   ",
+                "👍",
+                "session id",
+            ),
+            (
+                "room@muc.waddle.test",
+                WaddleMessageAudience::Muc,
+                "c1",
+                "   ",
+                "reaction emoji",
+            ),
+        ];
+        for (to, audience, sid, emoji, expected_error) in cases {
+            let listener = RecordingListener::default();
+            let client = test_client(listener.clone());
+            assert!(
+                !client
+                    .send_in_call_reaction(to.into(), audience, sid.into(), emoji.into())
+                    .await
+            );
+            let errors = listener.errors();
+            assert!(
+                errors.iter().any(|error| error.contains(expected_error)),
+                "expected {expected_error:?}, got {errors:?}"
+            );
+        }
     }
 }
 

@@ -194,12 +194,20 @@ struct CallStageHost: View {
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
             chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
             showsChat: chat?.isOpen ?? false,
+            reactions: session.calls.reactions.bursts,
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
             tileSource: model.tileSource,
             actions: actions(for: call.sid, chat: chat)
         )
+        // Each reaction is said as it arrives, when nothing more pressing is being said.
+        .onChange(of: session.calls.reactions.bursts.last) { _, newest in
+            guard let newest else { return }
+            var text = AttributedString(newest.spoken(inRoom: call.isRoom))
+            text.accessibilitySpeechAnnouncementPriority = .low
+            AccessibilityNotification.Announcement(text).post()
+        }
         // What is in front of the person while the chat is open has been seen.
         .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
             model.update(call.sid) { $0.sawChat(upTo: newest) }
@@ -267,6 +275,11 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
+            sendReaction: { [session] emoji in
+                // For the call the stage was drawn for, while it is still that call.
+                guard session.calls.state.sid == sid else { return }
+                Task { await session.calls.sendReaction(emoji) }
+            },
             toggleChat: { [model, navigation] in
                 guard let chat else { return }
                 if chat.isOpen {

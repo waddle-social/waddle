@@ -770,6 +770,12 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, reason: WaddleJingleReason?) async  -> WaddleCallSessionTerminateOutcome
 
     /**
+     * Send an ephemeral emoji reaction for a call session. Direct reactions
+     * target the peer's full JID, and MUC reactions target the room's bare JID.
+     */
+    func sendInCallReaction(to: String, audience: WaddleMessageAudience, sid: String, emoji: String) async  -> Bool
+
+    /**
      * `urn:waddle:admin:channels:affiliations:0`.
      */
     func adminChannelsAffiliations(args: WaddleAdminChannelsAffiliationsArgs) async throws  -> WaddleAdminChannelsAffiliationsPage
@@ -2130,6 +2136,28 @@ open func sendCallSessionTerminateWithOutcome(peerFullJid: String, sid: String, 
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeWaddleCallSessionTerminateOutcome_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Send an ephemeral emoji reaction for a call session. Direct reactions
+     * target the peer's full JID, and MUC reactions target the room's bare JID.
+     */
+open func sendInCallReaction(to: String, audience: WaddleMessageAudience, sid: String, emoji: String)async  -> Bool  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_in_call_reaction(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(to),FfiConverterTypeWaddleMessageAudience_lower(audience),FfiConverterString.lower(sid),FfiConverterString.lower(emoji)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
         )
@@ -9103,6 +9131,60 @@ public func FfiConverterTypeWaddleInCallPresenceFlags_lower(_ value: WaddleInCal
 }
 
 
+public struct WaddleInCallReaction: Equatable, Hashable {
+    public var sid: String
+    public var emoji: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sid: String, emoji: String) {
+        self.sid = sid
+        self.emoji = emoji
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInCallReaction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInCallReaction: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInCallReaction {
+        return
+            try WaddleInCallReaction(
+                sid: FfiConverterString.read(from: &buf),
+                emoji: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleInCallReaction, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sid, into: &buf)
+        FfiConverterString.write(value.emoji, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInCallReaction_lift(_ buf: RustBuffer) throws -> WaddleInCallReaction {
+    return try FfiConverterTypeWaddleInCallReaction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInCallReaction_lower(_ value: WaddleInCallReaction) -> RustBuffer {
+    return FfiConverterTypeWaddleInCallReaction.lower(value)
+}
+
+
 /**
  * One XEP-0430 inbox conversation: the `urn:xmpp:inbox:1` `<entry/>`
  * merged with its Waddle `urn:waddle:inbox:0` `<metadata/>`. Surfaced
@@ -10412,6 +10494,10 @@ public struct WaddleMessage: Equatable, Hashable {
      * zero items (rare but distinct from "not an MDS event").
      */
     public var mdsDisplayed: [WaddleMdsDisplayedEntry]?
+    /**
+     * A `urn:waddle:in-call:0` reaction, delivered live and never archived.
+     */
+    public var inCallReaction: WaddleInCallReaction?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10545,7 +10631,10 @@ public struct WaddleMessage: Equatable, Hashable {
          * `None` when the message is not an MDS event; `Some(entries)`
          * when it is — including `Some(vec![])` for an MDS event with
          * zero items (rare but distinct from "not an MDS event").
-         */mdsDisplayed: [WaddleMdsDisplayedEntry]?) {
+         */mdsDisplayed: [WaddleMdsDisplayedEntry]?,
+        /**
+         * A `urn:waddle:in-call:0` reaction, delivered live and never archived.
+         */inCallReaction: WaddleInCallReaction? = nil) {
         self.id = id
         self.from = from
         self.to = to
@@ -10595,6 +10684,7 @@ public struct WaddleMessage: Equatable, Hashable {
         self.callThread = callThread
         self.sharedFiles = sharedFiles
         self.mdsDisplayed = mdsDisplayed
+        self.inCallReaction = inCallReaction
     }
 
 
@@ -10661,7 +10751,8 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
                 replyFallbackEnd: FfiConverterOptionUInt32.read(from: &buf),
                 callThread: FfiConverterOptionTypeWaddleCallThreadAnchor.read(from: &buf),
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
-                mdsDisplayed: FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry.read(from: &buf)
+                mdsDisplayed: FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry.read(from: &buf),
+                inCallReaction: FfiConverterOptionTypeWaddleInCallReaction.read(from: &buf)
         )
     }
 
@@ -10715,6 +10806,7 @@ public struct FfiConverterTypeWaddleMessage: FfiConverterRustBuffer {
         FfiConverterOptionTypeWaddleCallThreadAnchor.write(value.callThread, into: &buf)
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry.write(value.mdsDisplayed, into: &buf)
+        FfiConverterOptionTypeWaddleInCallReaction.write(value.inCallReaction, into: &buf)
     }
 }
 
@@ -20085,6 +20177,30 @@ fileprivate struct FfiConverterOptionTypeWaddleFallbackRange: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleInCallReaction: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleInCallReaction?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleInCallReaction.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleInCallReaction.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleJidParts: FfiConverterRustBuffer {
     typealias SwiftType = WaddleJidParts?
 
@@ -22631,6 +22747,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_call_session_terminate_with_outcome() != 22694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_in_call_reaction() != 18622) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_admin_channels_affiliations() != 45635) {

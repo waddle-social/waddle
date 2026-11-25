@@ -13,6 +13,8 @@ struct CallStageActions {
     var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
+    /// Sends an emoji for everyone in the call to see for a moment.
+    var sendReaction: @MainActor (String) -> Void = { _ in /* a call with nobody to show it to */ }
     /// Opens the call's chat beside the conversation, or puts it away.
     var toggleChat: @MainActor () -> Void = { /* a call with no chat */ }
     /// Tries a device the call could not use again, or puts its notice away for this call.
@@ -47,6 +49,8 @@ struct CallControlBar: View {
     /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
     var chatUnread: Int?
     var showsChat = false
+    /// Media has connected: there is a call to react in.
+    var canReact = false
     let actions: CallStageActions
 
     var body: some View {
@@ -119,6 +123,7 @@ struct CallControlBar: View {
             }
             .accessibilityAddTraits(showsChat ? .isSelected : [])
         }
+        if canReact, !extrasInMenu { reactMenu }
         if !extrasInMenu {
             CallControlButton(
                 title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
@@ -192,6 +197,29 @@ struct CallControlBar: View {
 
     // MARK: - More
 
+    // MARK: - Reactions
+
+    /// The six emoji the web's picker offers, one click each.
+    private var reactMenu: some View {
+        Menu {
+            reactionChoices
+        } label: {
+            CallControlButton.face(symbol: "face.smiling", tone: .plain)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(Text("React"))
+        .help("React")
+    }
+
+    private var reactionChoices: some View {
+        ForEach(CallReactionLedger.offered, id: \.self) { emoji in
+            Button(emoji) { actions.sendReaction(emoji) }
+        }
+    }
+
     private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
         Menu {
             if withExtras {
@@ -199,6 +227,9 @@ struct CallControlBar: View {
                     Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
                 }
                 Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+                if canReact {
+                    Menu("React") { reactionChoices }
+                }
                 if let chatUnread, chatUnread == 0, !showsChat {
                     Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
                 }

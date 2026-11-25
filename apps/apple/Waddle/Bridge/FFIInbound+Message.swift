@@ -65,6 +65,7 @@ extension FFIInbound {
         wire.displayedMarkerRequested = message.displayedMarkerRequested
         wire.displayedMarkerID = message.displayedMarkerId
         wire.pinEvent = message.pinEvent.map(pinEvent)
+        wire.inCallReaction = message.inCallReaction.map { InCallReaction(sid: $0.sid, emoji: $0.emoji) }
         wire.displayedCursors = message.mdsDisplayed.map { $0.compactMap(displayedCursor) }
         return wire
     }
