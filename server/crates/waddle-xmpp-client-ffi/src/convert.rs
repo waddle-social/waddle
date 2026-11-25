@@ -2123,27 +2123,21 @@ mod tests {
         let stamp = chrono::DateTime::parse_from_rfc3339("2026-07-27T08:00:00Z")
             .expect("test time parses")
             .with_timezone(&chrono::Utc);
-        for direction in [CarbonDirection::Sent, CarbonDirection::Received] {
-            let mut carbon = parse_message(
-                "<message xmlns='jabber:client' type='chat' id='c1' \
-                          from='alice@waddle.test/phone' to='bob@waddle.test'>\
-                   <body>copied</body>\
+        let stamped = |carbon: Option<CarbonDirection>| {
+            let mut message = parse_message(
+                "<message xmlns='jabber:client' type='chat' id='t1' from='bob@waddle.test/desktop'>\
+                   <body>hello</body>\
                  </message>",
             );
-            carbon.carbon = Some(direction);
-            carbon.timestamp = Some(stamp);
-            assert_eq!(inbound_to_ffi(carbon).timestamp, None);
-        }
+            message.carbon = carbon;
+            message.timestamp = Some(stamp);
+            inbound_to_ffi(message).timestamp
+        };
 
-        let mut held = parse_message(
-            "<message xmlns='jabber:client' type='chat' id='c2' \
-                      from='bob@waddle.test/desktop' to='alice@waddle.test/phone'>\
-               <body>held while away</body>\
-             </message>",
-        );
-        held.timestamp = Some(stamp);
+        assert_eq!(stamped(Some(CarbonDirection::Sent)), None);
+        assert_eq!(stamped(Some(CarbonDirection::Received)), None);
         assert_eq!(
-            inbound_to_ffi(held).timestamp.as_deref(),
+            stamped(None).as_deref(),
             Some("2026-07-27T08:00:00+00:00"),
             "a message the server really held keeps its time"
         );

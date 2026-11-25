@@ -63,23 +63,13 @@ function carbonsEnables(sendRawIq: { mock: { calls: unknown[][] } }): number {
 }
 
 describe("XEP-0280 carbons enable is the shared core's (#754)", () => {
-  test("a fresh connect sends no carbons enable from the web layer", async () => {
+  // A fresh session and a XEP-0198 resume, as the WASM core names them.
+  test.each(["fresh", "resumed"])("a %s session sends no carbons enable from the web layer", async (lifecycle) => {
     const { callbacks, enableCarbons, sendRawIq } = makeWiredClient();
 
     // Real connect order: transport up first, then session-ready.
     callbacks.onConnected?.();
-    callbacks.onSessionLifecycle?.("fresh");
-    await flushAsync();
-
-    expect(enableCarbons.mock.calls).toHaveLength(0);
-    expect(carbonsEnables(sendRawIq)).toBe(0);
-  });
-
-  test("a XEP-0198 resume sends none either", async () => {
-    const { callbacks, enableCarbons, sendRawIq } = makeWiredClient();
-
-    callbacks.onConnected?.();
-    callbacks.onSessionLifecycle?.("resumed");
+    callbacks.onSessionLifecycle?.(lifecycle);
     await flushAsync();
 
     expect(enableCarbons.mock.calls).toHaveLength(0);
