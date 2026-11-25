@@ -1,0 +1,12 @@
+name: isolated queue event observer
+on:
+  merge_group:
+    branches: ['ci-canary/headgreen-20261125-1453-queueonly']
+    types: [checks_requested]
+permissions: {}
+jobs:
+  observe:
+    name: Observe disposable non-main queue event
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Received merge_group on the disposable queue"
