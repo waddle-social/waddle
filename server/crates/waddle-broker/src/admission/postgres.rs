@@ -509,26 +509,32 @@ impl AdmissionLedgerStore for PostgresAdmissionLedgerStore {
         .map_err(|e| AdmissionError::Backend(e.to_string()))?;
 
         let run_row = sqlx::query(
-            "SELECT max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = $1 FOR UPDATE",
+            "SELECT tenant_id, max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = $1 FOR UPDATE",
         )
         .bind(&run_id_str)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let cap_s: String = run_row
+        let row_tenant_id: String = run_row
             .try_get(0)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let spent_s: String = run_row
+        if row_tenant_id != req.tenant_id.as_str() {
+            return Err(AdmissionError::HolderUnauthorized);
+        }
+        let cap_s: String = run_row
             .try_get(1)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let res_s: String = run_row
+        let spent_s: String = run_row
             .try_get(2)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let max_steps: i32 = run_row
+        let res_s: String = run_row
             .try_get(3)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let steps_used: i32 = run_row
+        let max_steps: i32 = run_row
             .try_get(4)
+            .map_err(|e| AdmissionError::Backend(e.to_string()))?;
+        let steps_used: i32 = run_row
+            .try_get(5)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
 
         if steps_used >= max_steps {
@@ -1257,26 +1263,32 @@ impl AdmissionLedgerStore for SqliteCompatAdmissionLedgerStore {
         .map_err(|e| AdmissionError::Backend(e.to_string()))?;
 
         let run_row = sqlx::query(
-            "SELECT max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = ?",
+            "SELECT tenant_id, max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = ?",
         )
         .bind(&run_id_str)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let cap_s: String = run_row
+        let row_tenant_id: String = run_row
             .try_get(0)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let spent_s: String = run_row
+        if row_tenant_id != req.tenant_id.as_str() {
+            return Err(AdmissionError::HolderUnauthorized);
+        }
+        let cap_s: String = run_row
             .try_get(1)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let res_s: String = run_row
+        let spent_s: String = run_row
             .try_get(2)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let max_steps: i64 = run_row
+        let res_s: String = run_row
             .try_get(3)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
-        let steps_used: i64 = run_row
+        let max_steps: i64 = run_row
             .try_get(4)
+            .map_err(|e| AdmissionError::Backend(e.to_string()))?;
+        let steps_used: i64 = run_row
+            .try_get(5)
             .map_err(|e| AdmissionError::Backend(e.to_string()))?;
 
         if steps_used >= max_steps {

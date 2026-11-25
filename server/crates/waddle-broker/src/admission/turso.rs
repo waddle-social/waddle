@@ -548,7 +548,7 @@ impl AdmissionLedgerStore for TursoAdmissionLedgerStore {
                 let mut rows = guard
                     .conn
                     .query(
-                        "SELECT max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = ?1",
+                        "SELECT tenant_id, max_spend_microcents, spent_microcents, reserved_microcents, max_steps, steps_used FROM admission_runs WHERE run_id = ?1",
                         [run_id_str.as_str()],
                     )
                     .await
@@ -558,11 +558,15 @@ impl AdmissionLedgerStore for TursoAdmissionLedgerStore {
                     .await
                     .map_err(|err| AdmissionError::Backend(format!("run row failed: {err}")))?
                 {
-                    let cap_s: String = row.get(0).map_err(|e| AdmissionError::Backend(e.to_string()))?;
-                    let spent_s: String = row.get(1).map_err(|e| AdmissionError::Backend(e.to_string()))?;
-                    let res_s: String = row.get(2).map_err(|e| AdmissionError::Backend(e.to_string()))?;
-                    let max_s: i64 = row.get(3).map_err(|e| AdmissionError::Backend(e.to_string()))?;
-                    let used_s: i64 = row.get(4).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    let row_tenant_id: String = row.get(0).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    if row_tenant_id != req.tenant_id.as_str() {
+                        return Err(AdmissionError::HolderUnauthorized);
+                    }
+                    let cap_s: String = row.get(1).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    let spent_s: String = row.get(2).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    let res_s: String = row.get(3).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    let max_s: i64 = row.get(4).map_err(|e| AdmissionError::Backend(e.to_string()))?;
+                    let used_s: i64 = row.get(5).map_err(|e| AdmissionError::Backend(e.to_string()))?;
                     (
                         BudgetState {
                             signed_cap: decode_u64(&cap_s)?,
