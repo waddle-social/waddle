@@ -37,6 +37,7 @@ extension SessionCoordinator {
         if conversation.isRoom, directory.hasLeft(conversation.jid) { return nil }
         noteActivity()
         var options = composed.options
+        options.chatStateActive = sendsChatStates
         // A sticker's text is its pack's description, not something the
         // sender typed, so nothing in it is taken as a mention.
         if options.sticker == nil {

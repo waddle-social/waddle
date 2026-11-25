@@ -14,6 +14,7 @@ import {
 } from "@/lib/chat-ui";
 import { findMessageById } from "@/lib/message-ids";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
+import { useChatStatePreference } from "@/preferences/chat-states";
 import { dmThreadRefFromMessage, dmThreadRefFromOverride, type DmThreadRef } from "@/dms/threading";
 
 // Derived from the wasm client's return shape; see useMucSend for rationale.
@@ -41,6 +42,9 @@ type UseChatSendDeps = {
 };
 
 export function useChatSend(deps: UseChatSendDeps) {
+  // XEP-0085 §5.1: content messages carry <active/> while the user allows
+  // chat state notifications.
+  const { sendChatStates } = useChatStatePreference();
   const {
     session,
     xmppClient,
@@ -124,6 +128,7 @@ export function useChatSend(deps: UseChatSendDeps) {
         markup,
         references,
         files: attachments,
+        chatStateActive: sendChatStates.value,
         ...(freshLinkPreview ? { linkPreviewToken: freshLinkPreview.token } : {}),
         ...(freshLinkPreview ? { linkPreviewExpiresAt: freshLinkPreview.expiresAt } : {}),
         ...(wireReplyTo ? { replyTo: wireReplyTo } : {}),

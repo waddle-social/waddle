@@ -1171,6 +1171,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         })
         .collect();
     outbound_options.request_displayed_marker = opts.request_displayed_marker;
+    outbound_options.chat_state_active = opts.chat_state_active;
     outbound_options.muc_pm = opts.muc_pm;
     outbound_options.link_preview_token = opts
         .link_preview_token

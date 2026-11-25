@@ -12639,6 +12639,10 @@ public struct WaddleSendOptions: Equatable, Hashable {
     public var linkPreviewToken: String?
     public var requestDisplayedMarker: Bool
     /**
+     * XEP-0085 §5.1: attach `<active/>` to the content message.
+     */
+    public var chatStateActive: Bool
+    /**
      * XEP-0045 §7.5: mark the message as a MUC private message so
      * the sender's other clients can classify the sent-carbon copy
      * without knowing the room.
@@ -12668,6 +12672,9 @@ public struct WaddleSendOptions: Equatable, Hashable {
          * XEP-0372 references (mentions) attached to the send.
          */references: [WaddleReference], sharedFiles: [WaddleSharedFile], linkPreviewToken: String?, requestDisplayedMarker: Bool,
         /**
+         * XEP-0085 §5.1: attach `<active/>` to the content message.
+         */chatStateActive: Bool,
+        /**
          * XEP-0045 §7.5: mark the message as a MUC private message so
          * the sender's other clients can classify the sent-carbon copy
          * without knowing the room.
@@ -12690,6 +12697,7 @@ public struct WaddleSendOptions: Equatable, Hashable {
         self.sharedFiles = sharedFiles
         self.linkPreviewToken = linkPreviewToken
         self.requestDisplayedMarker = requestDisplayedMarker
+        self.chatStateActive = chatStateActive
         self.mucPm = mucPm
         self.sticker = sticker
         self.mentionDirectory = mentionDirectory
@@ -12721,6 +12729,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
                 sharedFiles: FfiConverterSequenceTypeWaddleSharedFile.read(from: &buf),
                 linkPreviewToken: FfiConverterOptionString.read(from: &buf),
                 requestDisplayedMarker: FfiConverterBool.read(from: &buf),
+                chatStateActive: FfiConverterBool.read(from: &buf),
                 mucPm: FfiConverterBool.read(from: &buf),
                 sticker: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf),
                 mentionDirectory: FfiConverterOptionTypeWaddleMentionDirectory.read(from: &buf)
@@ -12738,6 +12747,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterSequenceTypeWaddleSharedFile.write(value.sharedFiles, into: &buf)
         FfiConverterOptionString.write(value.linkPreviewToken, into: &buf)
         FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
+        FfiConverterBool.write(value.chatStateActive, into: &buf)
         FfiConverterBool.write(value.mucPm, into: &buf)
         FfiConverterOptionTypeWaddleStickerRef.write(value.sticker, into: &buf)
         FfiConverterOptionTypeWaddleMentionDirectory.write(value.mentionDirectory, into: &buf)
