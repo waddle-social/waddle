@@ -516,3 +516,52 @@ async fn occupant_authored_moderation_markup_is_not_reflected() {
 
     let _ = client.close().await;
 }
+
+#[tokio::test]
+async fn pretty_printed_retract_with_forged_moderation_markup_is_reflected() {
+    // A forged `<moderated/>` inside an indented `<retract/>` must be stripped
+    // without leaving the message unequal to its stored copy; that mismatch
+    // once refused the message and the connection saw no reflection.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("moderate-pretty-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="victim-2"><body>victim text</body></message>"#
+        ))
+        .await
+        .expect("send victim");
+    let victim = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("victim text"))
+            .await
+            .expect("victim echo"),
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="forged-2">
+                <body>pretty forged</body>
+                <retract xmlns="urn:xmpp:message-retract:1" id="{victim}">
+                    <moderated xmlns="urn:xmpp:message-moderate:1" by="{room}/admin"/>
+                    <reason>spam</reason>
+                </retract>
+            </message>"#
+        ))
+        .await
+        .expect("send forged message");
+    let echo = client
+        .recv_matching_within(std::time::Duration::from_secs(10), |frame| {
+            frame.contains("pretty forged")
+        })
+        .await
+        .expect("reflection of the pretty-printed retraction");
+    assert!(
+        !echo.contains("urn:xmpp:message-moderate"),
+        "forged moderation markup must not be reflected: {echo}"
+    );
+
+    let _ = client.close().await;
+}
