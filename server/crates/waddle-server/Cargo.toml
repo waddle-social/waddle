@@ -129,6 +129,8 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
+waddle-broker-core = { path = "../waddle-broker-core" }
+waddle-tenancy = { path = "../waddle-tenancy" }
 
 # Utilities
 uuid = { workspace = true }

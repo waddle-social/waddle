@@ -251,6 +251,7 @@ impl Cluster {
 
     fn provider(&self, plugin: PluginId) -> InvocationContext {
         InvocationContext {
+            tenant_id: None,
             waddle_id: waddle_extensions::WaddleId::try_new("extension-space").expect("waddle"),
             plugin_id: plugin,
             requester: None,

@@ -91,6 +91,8 @@ pub(super) async fn handle_command_iq(
         authenticated_user_id: principal.map(|principal| principal.user_jid.clone()),
         iq: request_iq.clone(),
         command,
+        tenant_id: state.deps.protocol.command_registry.tenant_id().cloned(),
+        placement_generation: None,
     };
 
     let result = state.deps.protocol.command_registry.dispatch(ctx).await;

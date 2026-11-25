@@ -90,23 +90,36 @@ struct TakenUp {
 }
 
 /// The retired accounts whose requests this replica has taken up within
-/// the window, keyed by canonical bare JID. Each test state holds its own,
-/// so several servers in one process keep apart.
+/// the window, keyed by `(TenantId, BareJid)` so retiring an account in one
+/// tenant never affects a sibling tenant.
 #[derive(Debug, Default)]
 pub struct RetiredAccounts {
-    accounts: DashMap<BareJid, TakenUp>,
+    accounts: DashMap<waddle_broker_core::tenant_cache::TenantKey<BareJid>, TakenUp>,
+}
+
+fn tenant_for_account(jid: &BareJid) -> waddle_broker_core::identity::TenantId {
+    let lower = jid.domain().as_str().to_ascii_lowercase();
+    waddle_broker_core::identity::TenantId::parse(&lower).unwrap_or_else(|_| {
+        waddle_broker_core::identity::TenantId::parse("localhost")
+            .expect("static fallback tenant id")
+    })
 }
 
 impl RetiredAccounts {
-    /// Hold `account`, named in canonical form by a request recorded at
-    /// `requested_at_ms`.
-    pub(crate) fn insert(&self, account: BareJid, requested_at_ms: i64) {
+    /// Hold `account` within an explicit `tenant_id`.
+    pub fn insert_for_tenant(
+        &self,
+        tenant_id: waddle_broker_core::identity::TenantId,
+        account: BareJid,
+        requested_at_ms: i64,
+    ) {
         let taken_up = TakenUp {
             requested_at_ms,
             at: Instant::now(),
         };
+        let key = waddle_broker_core::tenant_cache::TenantKey::new(tenant_id, account);
         self.accounts
-            .entry(account)
+            .entry(key)
             .and_modify(|held| {
                 if held.requested_at_ms < requested_at_ms {
                     *held = taken_up;
@@ -115,13 +128,43 @@ impl RetiredAccounts {
             .or_insert(taken_up);
     }
 
-    /// Whether `jid` names an account this replica holds as retired.
-    pub(crate) fn holds(&self, jid: &BareJid) -> bool {
+    /// Hold `account`, named in canonical form by a request recorded at
+    /// `requested_at_ms`.
+    pub(crate) fn insert(&self, account: BareJid, requested_at_ms: i64) {
+        let tenant_id = tenant_for_account(&account);
+        self.insert_for_tenant(tenant_id, account, requested_at_ms);
+    }
+
+    /// Whether `jid` is held as retired within `tenant_id`.
+    pub fn holds_for_tenant(
+        &self,
+        tenant_id: &waddle_broker_core::identity::TenantId,
+        jid: &BareJid,
+    ) -> bool {
         if self.accounts.is_empty() {
             return false;
         }
-        self.accounts.contains_key(jid)
-            || account_key(jid).is_some_and(|key| self.accounts.contains_key(&key))
+        let direct =
+            waddle_broker_core::tenant_cache::TenantKey::new(tenant_id.clone(), jid.clone());
+        self.accounts.contains_key(&direct)
+            || account_key(jid).is_some_and(|key| {
+                self.accounts
+                    .contains_key(&waddle_broker_core::tenant_cache::TenantKey::new(
+                        tenant_id.clone(),
+                        key,
+                    ))
+            })
+    }
+
+    /// Whether `jid` names an account this replica holds as retired.
+    pub(crate) fn holds(&self, jid: &BareJid) -> bool {
+        let tenant_id = tenant_for_account(jid);
+        self.holds_for_tenant(&tenant_id, jid)
+    }
+
+    /// Evict all retired-account entries belonging strictly to `tenant_id`.
+    pub fn clear_tenant(&self, tenant_id: &waddle_broker_core::identity::TenantId) {
+        self.accounts.retain(|k, _| &k.tenant_id != tenant_id);
     }
 
     /// Forget the accounts whose newest request was recorded before
@@ -136,7 +179,7 @@ impl RetiredAccounts {
         self.accounts
             .iter()
             .filter(|held| held.at.elapsed() < within)
-            .map(|held| held.key().clone())
+            .map(|held| held.key().key.clone())
             .collect()
     }
 }

@@ -200,7 +200,8 @@ mod tests {
         );
         tx.commit().await.expect("start commit");
         let context = InvocationContext {
-            waddle_id: WaddleId::try_new("room-observation").expect("context"),
+            tenant_id: None,
+            waddle_id: WaddleId::try_new("test-observation").expect("context"),
             plugin_id: subscription.plugin,
             requester: None,
             source_room: Some(subscription.room),

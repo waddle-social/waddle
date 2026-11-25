@@ -1,5 +1,6 @@
 //! Durable per-lifecycle FIFO outbox for MUC mutation effects.
 pub mod drain;
+pub use drain::check_room_effect_lease_fence;
 pub mod render;
 mod runtime_attach;
 mod schema;

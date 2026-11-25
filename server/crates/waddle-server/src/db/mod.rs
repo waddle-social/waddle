@@ -14,6 +14,7 @@ pub mod lineage;
 pub mod local_space_subscriptions;
 mod migrations;
 pub mod physical_attestation;
+pub mod placement_fence;
 mod pool;
 pub(crate) mod private_xml;
 pub(crate) mod read_only_timeout;

@@ -1069,6 +1069,7 @@ async fn an_extension_archive_read_before_a_revoke_is_not_returned_after_it() {
     let server = &deployment.replicas[0];
     let host = ExtensionHostAdapter::new(Arc::clone(&server.state));
     let context = InvocationContext {
+        tenant_id: None,
         waddle_id: WaddleId::try_new("revocation").expect("waddle"),
         plugin_id: PluginId::try_new("board").expect("plugin"),
         requester: Some(bare(PEER)),

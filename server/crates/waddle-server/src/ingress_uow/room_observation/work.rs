@@ -61,6 +61,31 @@ fn decode_work(
     })
 }
 
+/// Placement-fenced room-observation claim: enforces local `BootInstant` lease
+/// validity and transactional `tenant_placement_leases` (`FOR SHARE` on Postgres)
+/// whenever a `TenantQueryScope` / `LocalLeaseGuard` is supplied.
+#[allow(dead_code)]
+pub(crate) async fn claim_fenced(
+    tx: &mut IngressUowTransaction<'_>,
+    subscription: &RoomObservationSubscription,
+    now_ms: i64,
+    scope: Option<&waddle_broker_core::store::TenantQueryScope>,
+    local_guard: Option<&waddle_tenancy::quiesce::LocalLeaseGuard>,
+) -> Result<Option<ObservationWork>, ObservationError> {
+    if let Some(guard) = local_guard {
+        if !guard.is_valid() {
+            return Ok(None);
+        }
+    }
+    if crate::db::placement_fence::check_optional_placement_fence(tx.transaction_mut(), scope)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+    claim(tx, subscription, now_ms).await
+}
+
 pub(super) async fn claim(
     tx: &mut IngressUowTransaction<'_>,
     subscription: &RoomObservationSubscription,

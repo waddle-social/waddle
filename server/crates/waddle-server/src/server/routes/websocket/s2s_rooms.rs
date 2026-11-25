@@ -131,21 +131,26 @@ struct ArchiveAllowance {
     refilled: Instant,
 }
 
-/// The archive allowances of remote accounts on this replica, which is the
-/// one that writes what they send to its rooms' archives.
+/// The archive allowances of remote accounts on this replica, keyed by
+/// `(TenantId, BareJid)` so spending an allowance in one tenant never throttles
+/// the same remote account in a sibling tenant.
 #[derive(Default)]
-struct ArchiveAllowances(Mutex<HashMap<BareJid, ArchiveAllowance>>);
+struct ArchiveAllowances(
+    Mutex<HashMap<waddle_broker_core::tenant_cache::TenantKey<BareJid>, ArchiveAllowance>>,
+);
 
 impl ArchiveAllowances {
-    /// Take one archived message of `account`'s allowance: `false` when it
-    /// is spent, or when the table holds no place for the account.
-    fn take(&self, account: &BareJid) -> bool {
+    /// Take one archived message of `account`'s allowance within `tenant_id`:
+    /// `false` when it is spent, or when the table holds no place for the key.
+    fn take(&self, tenant_id: &waddle_broker_core::identity::TenantId, account: &BareJid) -> bool {
+        let key =
+            waddle_broker_core::tenant_cache::TenantKey::new(tenant_id.clone(), account.clone());
         let now = Instant::now();
         let mut allowances = self
             .0
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if allowances.len() >= ARCHIVE_WRITERS && !allowances.contains_key(account) {
+        if allowances.len() >= ARCHIVE_WRITERS && !allowances.contains_key(&key) {
             // An account whose allowance has refilled needs no entry.
             allowances.retain(|_, allowance| {
                 now.duration_since(allowance.refilled).as_secs_f64() * ARCHIVE_WRITE_RATE
@@ -155,12 +160,10 @@ impl ArchiveAllowances {
                 return false;
             }
         }
-        let allowance = allowances
-            .entry(account.clone())
-            .or_insert(ArchiveAllowance {
-                tokens: ARCHIVE_WRITE_BURST,
-                refilled: now,
-            });
+        let allowance = allowances.entry(key).or_insert(ArchiveAllowance {
+            tokens: ARCHIVE_WRITE_BURST,
+            refilled: now,
+        });
         let refill = now.duration_since(allowance.refilled).as_secs_f64() * ARCHIVE_WRITE_RATE;
         allowance.tokens = (allowance.tokens + refill).min(ARCHIVE_WRITE_BURST);
         allowance.refilled = now;
@@ -1292,7 +1295,17 @@ impl Asked<'_> {
         // bounded for each of its accounts as well as for the domain. A
         // message of a kind the room archives is counted when it is put to
         // the room, whether or not the room then accepts it.
-        if is_archivable(&message) && !self.archive_writes.take(&self.account) {
+        let room_tenant = {
+            let lower = room.domain().as_str().to_ascii_lowercase();
+            let candidate = lower.strip_prefix("muc.").unwrap_or(&lower);
+            waddle_broker_core::identity::TenantId::parse(candidate)
+                .or_else(|_| waddle_broker_core::identity::TenantId::parse(&lower))
+                .unwrap_or_else(|_| {
+                    waddle_broker_core::identity::TenantId::parse("localhost")
+                        .expect("static fallback tenant id")
+                })
+        };
+        if is_archivable(&message) && !self.archive_writes.take(&room_tenant, &self.account) {
             archive_write_limited();
             return self.refuse(error(
                 ErrorType::Wait,

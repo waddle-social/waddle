@@ -184,9 +184,12 @@ impl LocalAccounts for WebSocketLocalAccounts {
     }
 }
 
-/// The per-account locks of this replica, by account. An entry lives while
+type AccountLockMap = HashMap<waddle_broker_core::tenant_cache::TenantKey<BareJid>, Arc<Mutex<()>>>;
+
+/// The per-account locks of this replica, keyed by `(TenantId, BareJid)` so
+/// identical federated JIDs across tenants never contend. An entry lives while
 /// a lock or a waiter holds it.
-static ACCOUNT_LOCKS: LazyLock<StdMutex<HashMap<BareJid, Arc<Mutex<()>>>>> =
+static ACCOUNT_LOCKS: LazyLock<StdMutex<AccountLockMap>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// The lock of one account's roster items for remote contacts on this
@@ -194,11 +197,11 @@ static ACCOUNT_LOCKS: LazyLock<StdMutex<HashMap<BareJid, Arc<Mutex<()>>>>> =
 /// by inbound and outbound subscription handling alike. Replicas do not
 /// share it.
 pub(crate) struct AccountLock {
-    account: BareJid,
+    key: waddle_broker_core::tenant_cache::TenantKey<BareJid>,
     guard: Option<OwnedMutexGuard<()>>,
 }
 
-fn account_locks() -> std::sync::MutexGuard<'static, HashMap<BareJid, Arc<Mutex<()>>>> {
+fn account_locks() -> std::sync::MutexGuard<'static, AccountLockMap> {
     // Nothing that holds the table can fail: it only looks up, inserts and
     // removes entries. A poisoned table could still hand two holders the
     // same account's roster at once, so the process stops instead.
@@ -207,18 +210,36 @@ fn account_locks() -> std::sync::MutexGuard<'static, HashMap<BareJid, Arc<Mutex<
         .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
-/// Take `account`'s lock, waiting for the holder.
-pub(crate) async fn lock_account(account: &BareJid) -> AccountLock {
+fn tenant_id_for_bare_jid(account: &BareJid) -> waddle_broker_core::identity::TenantId {
+    let lower = account.domain().as_str().to_ascii_lowercase();
+    waddle_broker_core::identity::TenantId::parse(&lower).unwrap_or_else(|_| {
+        waddle_broker_core::identity::TenantId::parse("localhost")
+            .expect("static fallback tenant id")
+    })
+}
+
+/// Take `account`'s lock scoped to an explicit `tenant_id`, waiting for the holder.
+pub(crate) async fn lock_account_for_tenant(
+    tenant_id: &waddle_broker_core::identity::TenantId,
+    account: &BareJid,
+) -> AccountLock {
+    let key = waddle_broker_core::tenant_cache::TenantKey::new(tenant_id.clone(), account.clone());
     let mutex = Arc::clone(
         account_locks()
-            .entry(account.clone())
+            .entry(key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(()))),
     );
     let guard = mutex.lock_owned().await;
     AccountLock {
-        account: account.clone(),
+        key,
         guard: Some(guard),
     }
+}
+
+/// Take `account`'s lock, waiting for the holder.
+pub(crate) async fn lock_account(account: &BareJid) -> AccountLock {
+    let tenant_id = tenant_id_for_bare_jid(account);
+    lock_account_for_tenant(&tenant_id, account).await
 }
 
 impl Drop for AccountLock {
@@ -227,10 +248,10 @@ impl Drop for AccountLock {
         let mut locks = account_locks();
         // Only the map holds it: no holder and no waiter is left.
         if locks
-            .get(&self.account)
+            .get(&self.key)
             .is_some_and(|mutex| Arc::strong_count(mutex) == 1)
         {
-            locks.remove(&self.account);
+            locks.remove(&self.key);
         }
     }
 }

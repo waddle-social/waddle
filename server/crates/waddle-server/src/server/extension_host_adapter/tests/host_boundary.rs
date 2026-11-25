@@ -10,6 +10,7 @@ use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
 fn context() -> host::InvocationContext {
     host::InvocationContext {
+        tenant_id: None,
         waddle_id: WaddleId::try_new("host-boundary").expect("waddle"),
         plugin_id: plugin(),
         requester: Some("romeo@example.com".parse().expect("requester")),
