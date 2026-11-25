@@ -44,7 +44,7 @@ use waddle_server::ServerConfig;
 
 /// SHA-256 of the built-in schema text of [`AUTHZ_SCHEMA_VERSION`].
 const BUILTIN_SCHEMA_SHA256: &str =
-    "172ba6f744eb8163b8b6ed52ace7bf5d3cb6b30ecd2475eff4a4f9a4d63c77db";
+    "795274f44626c40c522ced175b0fa479b43d36e8a29b51bd00a51b96aa14cadc";
 
 /// SHA-256 of the built-in schema text of version 1, as the release that
 /// introduced schema versioning pinned it.
@@ -119,20 +119,52 @@ fn schema_of_later_release(version: u32) -> String {
 }
 
 /// The built-in schema of version 1: this build's schema without the
-/// host-grant projection marker definition, which version 2 added, and with
-/// the version 1 marker relation.
+/// version 3 inference definitions and without the host-grant projection
+/// marker definition (added in version 2), and with the version 1 marker relation.
 fn schema_of_version_1() -> String {
+    let inference_block = concat!(
+        "definition extension {}\n\n",
+        "definition tenant_credential {\n",
+        "  relation tenant_admin: user\n",
+        "  relation allowed_extension: extension\n",
+        "  relation revoked: user\n\n",
+        "  permission use = (allowed_extension + tenant_admin) - revoked\n",
+        "  permission manage = tenant_admin\n",
+        "}\n\n",
+        "definition user_credential {\n",
+        "  relation owner: user\n",
+        "  relation consented_extension: extension\n\n",
+        "  permission use = owner\n",
+        "  permission invoke_with_consent = owner + consented_extension\n",
+        "  permission manage = owner\n",
+        "}\n\n",
+        "definition installed_extension {\n",
+        "  relation space: space\n",
+        "  relation installer: user\n\n",
+        "  permission invoke = space->member + installer\n",
+        "}\n\n",
+        "definition room_inference_policy {\n",
+        "  relation channel: channel\n",
+        "  relation tenant_funded_allowed: user\n",
+        "  relation member_funded_allowed: user\n",
+        "  relation disabled: user\n\n",
+        "  permission allow_tenant_funded = (tenant_funded_allowed + channel->read) - disabled - channel->outcast\n",
+        "  permission allow_member_funded = (member_funded_allowed + channel->send_message) - disabled - channel->outcast\n",
+        "}\n\n",
+    );
     let projection = format!(
         "definition {HOST_GRANT_PROJECTION_DEFINITION} {{\n  relation \
          {HOST_GRANT_PROJECTION_MARKER_RELATION}: {HOST_GRANT_PROJECTION_DEFINITION}\n}}\n\n"
     );
     let schema = builtin_authz_schema();
+    assert_eq!(schema.matches(inference_block).count(), 1);
     assert_eq!(schema.matches(&projection).count(), 1);
     assert_eq!(
         schema.matches(&declaration(AUTHZ_SCHEMA_VERSION)).count(),
         1
     );
     schema
+        .replacen(inference_block, "", 1)
         .replacen(&projection, "", 1)
         .replace(&declaration(AUTHZ_SCHEMA_VERSION), &declaration(1))
 }
@@ -152,12 +184,12 @@ fn marker_records_the_version_in_its_relation() {
     assert_eq!(AUTHZ_SCHEMA_MARKER_DEFINITION, "waddle_authz_schema");
     assert_eq!(AUTHZ_SCHEMA_MARKER_ID, "installed");
     assert_eq!(AUTHZ_SCHEMA_VERSION_RELATION_PREFIX, "version_");
-    assert_eq!(AUTHZ_SCHEMA_VERSION, 2);
+    assert_eq!(AUTHZ_SCHEMA_VERSION, 3);
     assert_eq!(authz_schema_version_relation(1), "version_1");
     assert_eq!(authz_schema_version_relation(12), "version_12");
     assert_eq!(
         SchemaMarkerRow::for_version(AUTHZ_SCHEMA_VERSION),
-        row(AUTHZ_SCHEMA_MARKER_ID, "version_2", AUTHZ_SCHEMA_MARKER_ID)
+        row(AUTHZ_SCHEMA_MARKER_ID, "version_3", AUTHZ_SCHEMA_MARKER_ID)
     );
 }
 
@@ -283,7 +315,7 @@ fn builtin_schema_text_is_pinned_to_its_version() {
     let digest = hex::encode(Sha256::digest(builtin_authz_schema().as_bytes()));
     assert_eq!(
         (AUTHZ_SCHEMA_VERSION, digest.as_str()),
-        (2, BUILTIN_SCHEMA_SHA256),
+        (3, BUILTIN_SCHEMA_SHA256),
         "the built-in schema changed without a new schema version"
     );
 }

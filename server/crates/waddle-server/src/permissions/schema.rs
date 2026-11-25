@@ -261,6 +261,43 @@ definition role {
   permission manage = manager + parent->admin
 }
 
+definition extension {}
+
+definition tenant_credential {
+  relation tenant_admin: user
+  relation allowed_extension: extension
+  relation revoked: user
+
+  permission use = (allowed_extension + tenant_admin) - revoked
+  permission manage = tenant_admin
+}
+
+definition user_credential {
+  relation owner: user
+  relation consented_extension: extension
+
+  permission use = owner
+  permission invoke_with_consent = owner + consented_extension
+  permission manage = owner
+}
+
+definition installed_extension {
+  relation space: space
+  relation installer: user
+
+  permission invoke = space->member + installer
+}
+
+definition room_inference_policy {
+  relation channel: channel
+  relation tenant_funded_allowed: user
+  relation member_funded_allowed: user
+  relation disabled: user
+
+  permission allow_tenant_funded = (tenant_funded_allowed + channel->read) - disabled - channel->outcast
+  permission allow_member_funded = (member_funded_allowed + channel->send_message) - disabled - channel->outcast
+}
+
 definition waddle_grant_projection {
   relation marker: waddle_grant_projection
 }
@@ -270,7 +307,7 @@ definition waddle_authz_codec {
 }
 
 definition waddle_authz_schema {
-  relation version_2: waddle_authz_schema
+  relation version_3: waddle_authz_schema
 }
 "#;
 
