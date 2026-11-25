@@ -200,9 +200,9 @@ pub use super::xep0401::{AccountInvite, InviteRedeemError, InviteStore, COMMAND_
 
 pub use super::xep0421::{
     build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,
-    generate_occupant_id, is_occupant_id_element, set_occupant_id_on_message,
-    set_occupant_id_on_presence, strip_occupant_id_from_message, strip_occupant_id_from_presence,
-    OccupantId, OccupantIdCarrier, NS_OCCUPANT_ID,
+    generate_occupant_id, generate_room_occupant_id, is_occupant_id_element,
+    set_occupant_id_on_message, set_occupant_id_on_presence, strip_occupant_id_from_message,
+    strip_occupant_id_from_presence, OccupantId, OccupantIdCarrier, NS_OCCUPANT_ID,
 };
 
 pub use super::xep0424::{

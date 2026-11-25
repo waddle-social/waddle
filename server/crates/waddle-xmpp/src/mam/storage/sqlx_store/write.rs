@@ -589,8 +589,19 @@ pub(super) async fn replace_with_tombstone_postgres_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone.clone())?;
     let relation = super::postgres_relation(schema, "mam_messages");
+    let mut current =
+        QueryBuilder::<Postgres>::new(format!("SELECT rich_payload FROM {relation} WHERE id = "));
+    current.push_bind(archive_id);
+    let current_rich_payload = current
+        .build_query_scalar::<Option<String>>()
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    let encoded = encode_tombstone_payload(
+        tombstone.clone(),
+        occupant_id_of(current_rich_payload.as_deref())?,
+    )?;
     let mut builder = QueryBuilder::<Postgres>::new(format!(
         "UPDATE {relation} SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = "
     ));
@@ -611,7 +622,18 @@ pub(super) async fn replace_with_tombstone_sqlite_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<bool, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone.clone())?;
+    let mut current =
+        QueryBuilder::<Sqlite>::new("SELECT rich_payload FROM main.mam_messages WHERE id = ");
+    current.push_bind(archive_id);
+    let current_rich_payload = current
+        .build_query_scalar::<Option<String>>()
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    let encoded = encode_tombstone_payload(
+        tombstone.clone(),
+        occupant_id_of(current_rich_payload.as_deref())?,
+    )?;
     let mut builder = QueryBuilder::<Sqlite>::new(
         "UPDATE main.mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
     );
@@ -633,7 +655,6 @@ pub(super) async fn replace_with_terminal_tombstone_postgres_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone.clone())?;
     let relation = super::postgres_relation(schema, "mam_messages");
     loop {
         let mut query = QueryBuilder::<Postgres>::new(format!(
@@ -654,6 +675,12 @@ pub(super) async fn replace_with_terminal_tombstone_postgres_connection(
         {
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
+        let encoded = encode_tombstone_payload(
+            tombstone.clone(),
+            current_rich
+                .as_ref()
+                .and_then(|rich| rich.occupant_id.clone()),
+        )?;
 
         let mut update = QueryBuilder::<Postgres>::new(format!(
             "UPDATE {relation} SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = "
@@ -677,7 +704,6 @@ pub(super) async fn replace_with_terminal_tombstone_sqlite_connection(
     archive_id: &str,
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
 ) -> Result<TerminalTombstoneOutcome, MamStorageError> {
-    let encoded = encode_tombstone_payload(tombstone.clone())?;
     loop {
         let mut query =
             QueryBuilder::<Sqlite>::new("SELECT rich_payload FROM main.mam_messages WHERE id = ");
@@ -696,6 +722,12 @@ pub(super) async fn replace_with_terminal_tombstone_sqlite_connection(
         {
             return Ok(TerminalTombstoneOutcome::AlreadyTombstoned);
         }
+        let encoded = encode_tombstone_payload(
+            tombstone.clone(),
+            current_rich
+                .as_ref()
+                .and_then(|rich| rich.occupant_id.clone()),
+        )?;
 
         let mut update = QueryBuilder::<Sqlite>::new(
             "UPDATE main.mam_messages SET body = NULL, stanza_xml = NULL, thread_id = NULL, parent_thread_id = NULL, reply_to_id = NULL, reply_to_jid = NULL, rich_payload = ",
@@ -785,7 +817,14 @@ fn correction_updates(
             tombstone,
         )
         .into_iter()
-        .map(|(id, replacement)| Ok((id, encode_tombstone_payload(replacement)?)))
+        .map(|(id, replacement)| {
+            let occupant_id = decoded
+                .iter()
+                .find(|(candidate, _, _)| *candidate == id)
+                .and_then(|(_, _, rich)| rich.as_ref())
+                .and_then(|rich| rich.occupant_id.clone());
+            Ok((id, encode_tombstone_payload(replacement, occupant_id)?))
+        })
         .collect()
 }
 
@@ -856,8 +895,17 @@ async fn tombstone_corrections_sqlite(
     Ok(())
 }
 
+/// The XEP-0421 occupant-id of an archived row's rich payload, kept on its
+/// tombstone.
+fn occupant_id_of(
+    rich_payload: Option<&str>,
+) -> Result<Option<waddle_xmpp_core::mam::ArchivedOccupantId>, MamStorageError> {
+    Ok(decode_rich_payload(rich_payload)?.and_then(|rich| rich.occupant_id))
+}
+
 fn encode_tombstone_payload(
     tombstone: waddle_xmpp_core::mam::ArchivedTombstone,
+    occupant_id: Option<waddle_xmpp_core::mam::ArchivedOccupantId>,
 ) -> Result<String, MamStorageError> {
     let payload = ArchivedRichMessage {
         payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
@@ -865,10 +913,13 @@ fn encode_tombstone_payload(
         references: Vec::new(),
         mentions: Vec::new(),
         subjects: Default::default(),
-        // XEP-0424 §Tombstones: the occupant-id and real-JID item
-        // identify the original sender and MUST NOT survive the
-        // tombstone replacement.
-        occupant_id: None,
+        // XEP-0421 §Business Rules: the occupant-id MUST be attached to
+        // every groupchat message the MUC sends, including archived ones,
+        // and the XEP-0425 tombstone example keeps it. XEP-0424
+        // §Tombstones only replaces the body and leak-prone elements.
+        occupant_id,
+        // The real-JID item identifies the original sender and does not
+        // survive the tombstone replacement.
         muc_sender: None,
     };
     serde_json::to_string(&payload)

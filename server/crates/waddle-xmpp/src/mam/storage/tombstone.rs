@@ -22,16 +22,22 @@ pub(super) fn apply_tombstone(
     message.stanza_xml = None;
     message.thread = None;
     message.reply = None;
+    // XEP-0421 §Business Rules: the occupant-id MUST be attached to every
+    // groupchat message the MUC sends, including archived ones; the
+    // tombstone keeps the original author's id (XEP-0425 tombstone example).
+    let occupant_id = message
+        .rich
+        .as_ref()
+        .and_then(|rich| rich.occupant_id.clone());
     message.rich = Some(ArchivedRichMessage {
         payload: Some(ArchivedRichPayload::Tombstone(tombstone)),
         reply: None,
         references: Vec::new(),
         mentions: Vec::new(),
         subjects: Default::default(),
-        // XEP-0424 §Tombstones: the occupant-id and real-JID item
-        // identify the original sender and MUST NOT survive the
-        // tombstone replacement.
-        occupant_id: None,
+        occupant_id,
+        // XEP-0424 §Tombstones: the real-JID item identifies the original
+        // sender and does not survive the tombstone replacement.
         muc_sender: None,
     });
 }

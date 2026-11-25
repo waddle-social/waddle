@@ -140,6 +140,25 @@ pub(super) async fn broadcast_room_system_message_with_identity(
         &mut message,
         &StanzaId::new(stanza_id.clone(), Jid::from(room.clone())),
     );
+    // XEP-0421 §Business Rules: "The <occupant-id> element MUST be attached
+    // to every message ... sent by a MUC." A room-authored message has no
+    // occupant, so it carries the room's own id; the archive row keeps it
+    // for MAM replay.
+    match deps.web_socket_state {
+        Some(state) => {
+            waddle_xmpp::xep::xep0421::set_occupant_id_on_message(
+                &mut message,
+                &waddle_xmpp::xep::xep0421::generate_room_occupant_id(
+                    &room,
+                    &state.deps.occupant_id_secret,
+                ),
+            );
+        }
+        None => warn!(
+            room = %room,
+            "BroadcastRoomSystemMessage: no websocket state in Deps; room occupant-id not stamped"
+        ),
+    }
 
     // Archive in MAM. We use `0` for `sender_nickname_generation` —
     // the field is a XEP-0308 LMC-correction window guard for

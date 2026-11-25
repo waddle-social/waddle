@@ -436,6 +436,16 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
             return GroupchatRetractionTombstoneOutcome::Failed;
         }
     };
+    // XEP-0424 §Business rules: a retraction naming a correction retracts the
+    // original message and all of its corrections.
+    let Ok(original) =
+        super::correction_target::resolve_correction_original(storage, room, original).await
+    else {
+        deps.effects
+            .fail_plan(super::effects::PlanFailure::RetractionTargetRead);
+        return GroupchatRetractionTombstoneOutcome::Failed;
+    };
+    let target = original.id.as_str();
     let existing = original
         .rich
         .as_ref()
@@ -458,7 +468,12 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
                     stamp: chrono::Utc::now(),
                     moderation: None,
                     reason: retraction_reason(message),
-                    replaces_id: None,
+                    // XEP-0425 §Tombstones: keep the <replace/> of a retracted correction.
+                    replaces_id: original
+                        .rich
+                        .as_ref()
+                        .and_then(|rich| rich.correction_replaces_id())
+                        .cloned(),
                     sender_scope: original
                         .rich
                         .as_ref()
@@ -609,10 +624,6 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
     // agree. The scrub target mirrors this: cached reflections match
     // ONLY on `<stanza-id by=room id=target/>`, never on the
     // client-chosen wire id (which any occupant could mint to collide).
-    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-        stanza_id: target_message_id.to_string(),
-        room: room.clone(),
-    };
     let original = match mam_storage.get_message(target_message_id).await {
         Ok(Some(row)) if row.to.to_bare() == *room => row,
         Ok(_) => {
@@ -632,6 +643,28 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
             );
             return GroupchatRetractionTombstoneOutcome::Failed;
         }
+    };
+    // XEP-0424 §Business rules: a retraction naming a correction retracts the
+    // original message and all of its corrections.
+    let original =
+        match super::correction_target::resolve_correction_original(mam_storage, room, original)
+            .await
+        {
+            Ok(original) => original,
+            Err(error) => {
+                warn!(
+                    archive = %room,
+                    target = target_message_id,
+                    %error,
+                    "ApplyGroupchatRetractionTombstone: original lookup failed; skipping"
+                );
+                return GroupchatRetractionTombstoneOutcome::Failed;
+            }
+        };
+    let target_message_id = original.id.as_str();
+    let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
+        stanza_id: target_message_id.to_string(),
+        room: room.clone(),
     };
     // Tombstones are terminal. A heal-retry of an XEP-0424 author
     // retraction must never downgrade the attribution or reason on an
@@ -677,7 +710,12 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         stamp: chrono::Utc::now(),
         moderation: None,
         reason: retraction_reason(retraction_message),
-        replaces_id: None,
+        // XEP-0425 §Tombstones: keep the <replace/> of a retracted correction.
+        replaces_id: original
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.correction_replaces_id())
+            .cloned(),
         // Retain the original sender's identity for the internal
         // tombstone-retry match only; never emitted to the wire.
         sender_scope: original

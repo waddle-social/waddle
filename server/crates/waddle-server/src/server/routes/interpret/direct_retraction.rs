@@ -12,6 +12,52 @@ pub(super) async fn apply_retraction_tombstone(
     let sm_session_registry = deps.sm_session_registry;
     let pending_storage = deps.pending_delivery_storage;
     let effects = deps.effects;
+    let original = match mam_storage
+        .get_message_by_message_id(archive, target_wire_id)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            debug!(
+                archive = %archive,
+                target = target_wire_id,
+                "ApplyRetractionTombstone: target not found in archive; skipping"
+            );
+            return None;
+        }
+        Err(error) => {
+            effects.fail_plan(super::effects::PlanFailure::RetractionTargetRead);
+            warn!(
+                archive = %archive,
+                target = target_wire_id,
+                %error,
+                "ApplyRetractionTombstone: archive lookup failed; skipping"
+            );
+            return None;
+        }
+    };
+    // XEP-0424 §Business rules: a retraction naming a correction retracts the
+    // original message and all of its corrections.
+    let original =
+        match super::correction_target::resolve_correction_original(mam_storage, archive, original)
+            .await
+        {
+            Ok(original) => original,
+            Err(error) => {
+                effects.fail_plan(super::effects::PlanFailure::RetractionTargetRead);
+                warn!(
+                    archive = %archive,
+                    target = target_wire_id,
+                    %error,
+                    "ApplyRetractionTombstone: original lookup failed; skipping"
+                );
+                return None;
+            }
+        };
+    let target_wire_id = original
+        .stanza_id
+        .as_ref()
+        .map_or(target_wire_id, |id| id.id.as_str());
     // XEP-0424 §"Using the correct ID": a non-groupchat retraction
     // names the target by the SENDER's wire id, which is client-chosen
     // and unique only per author. The scrub identity therefore carries
@@ -41,30 +87,6 @@ pub(super) async fn apply_retraction_tombstone(
             None
         }
     };
-    let original = match mam_storage
-        .get_message_by_message_id(archive, target_wire_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            debug!(
-                archive = %archive,
-                target = target_wire_id,
-                "ApplyRetractionTombstone: target not found in archive; skipping"
-            );
-            return None;
-        }
-        Err(error) => {
-            effects.fail_plan(super::effects::PlanFailure::RetractionTargetRead);
-            warn!(
-                archive = %archive,
-                target = target_wire_id,
-                %error,
-                "ApplyRetractionTombstone: archive lookup failed; skipping"
-            );
-            return None;
-        }
-    };
     let Some(retraction_id) = retraction_message
         .id
         .as_ref()
@@ -82,7 +104,12 @@ pub(super) async fn apply_retraction_tombstone(
         stamp: chrono::Utc::now(),
         moderation: None,
         reason: super::groupchat_archive::retraction_reason(retraction_message),
-        replaces_id: None,
+        // XEP-0425 §Tombstones: keep the <replace/> of a retracted correction.
+        replaces_id: original
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.correction_replaces_id())
+            .cloned(),
         // 1:1 tombstones never enter the groupchat tombstone-retry
         // match; there is no occupant identity to retain.
         sender_scope: None,

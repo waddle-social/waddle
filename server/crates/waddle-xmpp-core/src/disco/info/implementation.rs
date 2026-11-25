@@ -610,6 +610,9 @@ pub fn muc_service_features() -> Vec<Feature> {
         // original `id` (enforced in the room dispatch path), so the
         // service advertises stable-id support (#1265 item 14).
         Feature::muc_stable_id(),
+        // XEP-0421 §Discovering Support: every room forces occupant
+        // identifiers on, so the service SHOULD advertise the feature too.
+        Feature::occupant_id(),
     ]
 }
 

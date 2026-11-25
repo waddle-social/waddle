@@ -105,6 +105,10 @@ impl RoomHandler for MucCanonicalizeHandler {
             !crate::muc::is_muc_service_namespace(p.ns().as_str())
                 && !crate::xep::xep0421::is_occupant_id_element(p)
         });
+        // XEP-0425 §Business Rules: moderation markup and `<retracted/>`
+        // tombstones from an occupant are never legitimate; only the
+        // service produces them.
+        crate::xep::xep0425::strip_forged_moderation_markup(message);
 
         let Some(sender) = ctx.sender_snapshot() else {
             // OccupancyValidationHandler should have halted before us.

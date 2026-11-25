@@ -127,7 +127,11 @@ impl MamArchiveRepository {
             references: Vec::new(),
             mentions: Vec::new(),
             subjects: Default::default(),
-            occupant_id: None,
+            // XEP-0421: the tombstone keeps the original author's
+            // occupant-id.
+            occupant_id: current
+                .as_ref()
+                .and_then(|current| current.occupant_id.clone()),
             muc_sender: None,
         };
         let encoded =
@@ -175,8 +179,14 @@ impl MamArchiveRepository {
             tombstone,
         );
         for (id, replacement) in replacements {
+            let occupant_id = candidates
+                .iter()
+                .find(|(candidate, _, _)| *candidate == id)
+                .and_then(|(_, _, rich)| rich.as_ref())
+                .and_then(|rich| rich.occupant_id.clone());
             let encoded = serde_json::to_string(&ArchivedRichMessage {
                 payload: Some(ArchivedRichPayload::Tombstone(replacement)),
+                occupant_id,
                 ..ArchivedRichMessage::default()
             })
             .map_err(|_| IngressUowError::TombstonePayloadEncoding)?;
