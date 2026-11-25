@@ -1297,6 +1297,8 @@ pub struct WaddleActivityOpts {
     pub specific: Option<String>,
     /// Optional description accompanying the published activity.
     pub text: Option<String>,
+    /// BCP 47 language tag of `text`, sent as `xml:lang` on `<text/>`.
+    pub lang: Option<String>,
 }
 
 /// Optional track metadata to publish through PEP.

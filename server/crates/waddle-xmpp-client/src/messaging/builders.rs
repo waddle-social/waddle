@@ -130,7 +130,7 @@ pub fn build_in_call_reaction_message(
     emoji: &InCallReactionEmoji,
 ) -> Element {
     let to = recipient.to_jid_string();
-    Element::builder("message", NS_CLIENT)
+    let mut builder = Element::builder("message", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str())
         .attr(
             minidom::rxml::xml_ncname!("type").to_owned(),
@@ -153,9 +153,13 @@ pub fn build_in_call_reaction_message(
                 )
                 .build(),
         )
-        .append(Element::builder("no-store", NS_HINTS).build())
-        .append(Element::builder("no-copy", NS_HINTS).build())
-        .build()
+        .append(Element::builder("no-store", NS_HINTS).build());
+    // XEP-0334 "No copies": "This hint MUST only be included on messages addressed
+    // to full JIDs"; a room's bare JID must not carry it.
+    if matches!(recipient, InCallReactionRecipient::Direct(_)) {
+        builder = builder.append(Element::builder("no-copy", NS_HINTS).build());
+    }
+    builder.build()
 }
 
 /// Build a `<message><pinned target='…'/></message>` request for #414.

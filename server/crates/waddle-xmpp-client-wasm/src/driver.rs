@@ -573,8 +573,16 @@ impl WasmDriverTask {
                 } => match result {
                     Ok(()) => match stanza.attr("id") {
                         Some(id) => {
-                            self.pending_mam_queries
-                                .insert(id.to_owned(), PendingMamQuery::new(&query_id, responder));
+                            let account = self.core.borrow().runtime.account_bare_jid().to_string();
+                            self.pending_mam_queries.insert(
+                                id.to_owned(),
+                                PendingMamQuery::new(
+                                    &query_id,
+                                    stanza.attr("to"),
+                                    Some(&account),
+                                    responder,
+                                ),
+                            );
                         }
                         None => {
                             let _ = responder.send(Err(ClientError::Disconnected));
@@ -811,14 +819,23 @@ impl WasmDriverTask {
         responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
     ) -> bool {
         let id = stanza.attr("id").map(|value| value.to_string());
+        let queried = stanza.attr("to").map(str::to_string);
+        let account = self.core.borrow().runtime.account_bare_jid().to_string();
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
         {
             Ok(()) => match id {
                 Some(id) => {
-                    self.pending_mam_queries
-                        .insert(id, PendingMamQuery::new(&query_id, responder));
+                    self.pending_mam_queries.insert(
+                        id,
+                        PendingMamQuery::new(
+                            &query_id,
+                            queried.as_deref(),
+                            Some(&account),
+                            responder,
+                        ),
+                    );
                     true
                 }
                 None => {
@@ -1568,6 +1585,7 @@ mod tests {
         ArchivedMessage {
             mam_id: mam_id.to_string(),
             query_id: Some(query_id.to_string()),
+            archive: Some("room@muc.example.com".to_string()),
             id: None,
             stanza_id: Some(stanza_id.clone()),
             origin_id: None,
@@ -1591,7 +1609,7 @@ mod tests {
         let (responder, _rx) = oneshot::channel();
         pending_mam_queries.insert(
             "iq-1".to_string(),
-            PendingMamQuery::new("query-1", responder),
+            PendingMamQuery::new("query-1", Some("room@muc.example.com"), None, responder),
         );
 
         // Original delivery.
@@ -1637,7 +1655,7 @@ mod tests {
         let (responder, _rx) = oneshot::channel();
         pending_mam_queries.insert(
             "iq-1".to_string(),
-            PendingMamQuery::new("query-1", responder),
+            PendingMamQuery::new("query-1", Some("room@muc.example.com"), None, responder),
         );
 
         let mut archived = build_archived("mam-0", "query-1", "hello 0");
@@ -1651,6 +1669,36 @@ mod tests {
             pending.collector.into_messages().is_empty(),
             "a result without a queryid must not be attributed to any pending query"
         );
+    }
+
+    #[test]
+    fn mam_collection_drops_results_from_an_unqueried_sender() {
+        let mut pending_mam_queries = HashMap::new();
+        let (responder, _rx) = oneshot::channel();
+        pending_mam_queries.insert(
+            "iq-1".to_string(),
+            PendingMamQuery::new(
+                "query-1",
+                Some("room@muc.example.com"),
+                Some("alice@example.com"),
+                responder,
+            ),
+        );
+
+        let mut spoofed = build_archived("mam-evil", "query-1", "injected");
+        spoofed.archive = Some("mallory@evil.example".to_string());
+        collect_pending_mam_result(&mut pending_mam_queries, spoofed);
+        collect_pending_mam_result(
+            &mut pending_mam_queries,
+            build_archived("mam-0", "query-1", "hello 0"),
+        );
+
+        let pending = pending_mam_queries
+            .remove("iq-1")
+            .expect("pending query still registered");
+        let messages = pending.collector.into_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].mam_id, "mam-0");
     }
 
     fn build_fin_iq(iq_id: &str, first: &str, last: &str, count: u32) -> Element {
@@ -1690,7 +1738,7 @@ mod tests {
         let (responder, mut rx) = oneshot::channel();
         pending_mam_queries.insert(
             "iq-1".to_string(),
-            PendingMamQuery::new("query-1", responder),
+            PendingMamQuery::new("query-1", Some("room@muc.example.com"), None, responder),
         );
 
         collect_pending_mam_result(

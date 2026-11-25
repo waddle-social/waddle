@@ -1166,7 +1166,7 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_user_pep
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_vcard4(`ptr`: Long,`jid`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(`ptr`: Long,`general`: RustBuffer.ByValue,`specific`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(`ptr`: Long,`general`: RustBuffer.ByValue,`specific`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,`lang`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_avatar(`ptr`: Long,`data`: RustBuffer.ByValue,`mimeType`: RustBuffer.ByValue,`width`: Int,`height`: Int,
 ): Long
@@ -1669,7 +1669,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 7083) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {
@@ -3026,9 +3026,10 @@ public interface WaddleClientInterface {
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
-    suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?)
+    suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?, `lang`: kotlin.String?)
 
     /**
      * XEP-0084 §3: publish `data` as the account's avatar — the
@@ -5893,16 +5894,17 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?) {
+    override suspend fun `publishActivity`(`general`: kotlin.String, `specific`: kotlin.String?, `text`: kotlin.String?, `lang`: kotlin.String?) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(
                 uniffiHandle,
-                FfiConverterString.lower(`general`),FfiConverterOptionalString.lower(`specific`),FfiConverterOptionalString.lower(`text`),
+                FfiConverterString.lower(`general`),FfiConverterOptionalString.lower(`specific`),FfiConverterOptionalString.lower(`text`),FfiConverterOptionalString.lower(`lang`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },

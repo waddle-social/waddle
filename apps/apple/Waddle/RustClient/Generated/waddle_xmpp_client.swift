@@ -1270,9 +1270,10 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
-    func publishActivity(general: String, specific: String?, text: String?) async throws
+    func publishActivity(general: String, specific: String?, text: String?, lang: String?) async throws
 
     /**
      * XEP-0084 §3: publish `data` as the account's avatar — the
@@ -3771,15 +3772,16 @@ open func fetchVcard4(jid: String)async throws  -> WaddleVCard4?  {
     /**
      * XEP-0108: publish a user activity. `general` must be one of the
      * 12 registry categories; `specific` (when present) is free-form
-     * but must be a wire-safe element name.
+     * but must be a wire-safe element name. `lang` is the BCP 47 language
+     * tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
      */
-open func publishActivity(general: String, specific: String?, text: String?)async throws   {
+open func publishActivity(general: String, specific: String?, text: String?, lang: String?)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_activity(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(general),FfiConverterOptionString.lower(specific),FfiConverterOptionString.lower(text)
+                    FfiConverterString.lower(general),FfiConverterOptionString.lower(specific),FfiConverterOptionString.lower(text),FfiConverterOptionString.lower(lang)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
@@ -22668,7 +22670,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_vcard4() != 32334) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 32701) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_activity() != 7083) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_avatar() != 15067) {

@@ -77,7 +77,7 @@ fn publication(payload: Element) -> Element {
 }
 
 fn call_activity() -> Element {
-    build_activity_element_with_specific("talking", Some("on_the_phone"), Some("In a call"))
+    build_activity_element_with_specific("talking", Some("on_the_phone"), Some("In a call"), None)
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn an_unreadable_publication_clears_the_peer_activity() {
                 .build(),
         )
         .build();
-    let unknown_general = build_activity_element_with_specific("flying", None, None);
+    let unknown_general = build_activity_element_with_specific("flying", None, None, None);
     let no_payload = Element::builder("item", NS_PUBSUB_EVENT).build();
     for item in [
         publication(wrong_namespace),

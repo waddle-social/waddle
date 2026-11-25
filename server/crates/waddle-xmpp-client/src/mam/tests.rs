@@ -794,6 +794,7 @@ mod query {
         ArchivedMessage {
             mam_id: mam_id.to_string(),
             query_id: Some(query_id.to_string()),
+            archive: Some("room@muc.example.com".to_string()),
             id: None,
             stanza_id: Some(stanza_id.clone()),
             origin_id: None,
@@ -904,7 +905,8 @@ mod query {
 
     #[test]
     fn collector_dedups_replayed_results_and_filters_foreign_query_ids() {
-        let mut collector = super::super::MamResultCollector::new("query-1");
+        let mut collector =
+            super::super::MamResultCollector::new("query-1", Some("room@muc.example.com"), None);
 
         // Original delivery.
         collector.collect(build_archived("mam-0", "query-1", "hello 0"));
@@ -923,6 +925,85 @@ mod query {
         );
         assert_eq!(messages[0].mam_id, "mam-0");
         assert_eq!(messages[1].mam_id, "mam-1");
+    }
+
+    #[test]
+    fn collector_drops_results_from_an_entity_other_than_the_queried_archive() {
+        let mut collector = super::super::MamResultCollector::new(
+            "query-1",
+            Some("room@muc.example.com"),
+            Some("alice@example.com"),
+        );
+
+        let mut spoofed = build_archived("mam-evil", "query-1", "injected");
+        spoofed.archive = Some("mallory@evil.example".to_string());
+        collector.collect(spoofed);
+        // No `from` means the own account, which is not the queried room.
+        let mut unattributed = build_archived("mam-own", "query-1", "own");
+        unattributed.archive = None;
+        collector.collect(unattributed);
+        collector.collect(build_archived("mam-ok", "query-1", "legit"));
+
+        let messages = collector.into_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].mam_id, "mam-ok");
+    }
+
+    #[test]
+    fn collector_attributes_absent_from_to_own_account_for_personal_archive() {
+        let mut collector =
+            super::super::MamResultCollector::new("query-1", None, Some("alice@example.com/res"));
+
+        let mut absent = build_archived("mam-0", "query-1", "no from");
+        absent.archive = None;
+        collector.collect(absent);
+        let mut own = build_archived("mam-1", "query-1", "own from");
+        own.archive = Some("alice@example.com".to_string());
+        collector.collect(own);
+        // A different entity must not pass as the personal archive.
+        collector.collect(build_archived("mam-2", "query-1", "room"));
+
+        let ids: Vec<_> = collector
+            .into_messages()
+            .into_iter()
+            .map(|m| m.mam_id)
+            .collect();
+        assert_eq!(ids, ["mam-0", "mam-1"]);
+    }
+
+    #[test]
+    fn parse_mam_result_records_wrapper_sender_bare_jid() {
+        let inner = Element::builder("message", CLIENT_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("from").to_owned(),
+                "room@muc.example.com/alice",
+            )
+            .append(Element::builder("body", CLIENT_NS).append("hi").build())
+            .build();
+        let wrap = |from: Option<&str>| {
+            let mut builder = Element::builder("message", CLIENT_NS);
+            if let Some(from) = from {
+                builder = builder.attr(minidom::rxml::xml_ncname!("from").to_owned(), from);
+            }
+            builder
+                .append(
+                    Element::builder("result", MAM_NS)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "m1")
+                        .attr(minidom::rxml::xml_ncname!("queryid").to_owned(), "q1")
+                        .append(
+                            Element::builder("forwarded", "urn:xmpp:forward:0")
+                                .append(inner.clone())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build()
+        };
+        let with_from =
+            super::super::parse_mam_result(&wrap(Some("room@muc.example.com"))).expect("parses");
+        assert_eq!(with_from.archive.as_deref(), Some("room@muc.example.com"));
+        let without = super::super::parse_mam_result(&wrap(None)).expect("parses");
+        assert_eq!(without.archive, None);
     }
 
     #[tokio::test(flavor = "current_thread")]

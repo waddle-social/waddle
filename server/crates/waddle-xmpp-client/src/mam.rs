@@ -61,6 +61,10 @@ pub struct ArchivedMessage {
     pub mam_id: String,
     /// Identifier of the query associated with this value.
     pub query_id: Option<String>,
+    /// Bare JID of the entity that sent the result wrapper (`from` on the outer
+    /// `<message/>`), or `None` when the stanza carried no `from`, which
+    /// means the user's own account.
+    pub archive: Option<String>,
     /// Inner forwarded `<message id='...'/>` value.
     pub id: Option<ArchivedMessageId>,
     /// Identifier used for stanza correlation.
@@ -596,24 +600,41 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
         .map(|jid| bare_jid(jid).to_string())
 }
 
-/// Accumulates MAM results for one query: filters out results belonging to
-/// other queries and drops duplicates by `mam_id` (XEP-0198 §5 leaves weeding
-/// out resume-replayed duplicates to the recipient). Every collection path —
-/// both arms of the native `run_mam_query` and the WASM driver's pending
-/// query — delegates to one instance per query, so the dedup state cannot
+/// Accumulates MAM results for one query: keeps only results that come from
+/// the queried archive and carry this query's `queryid`, and drops duplicates
+/// by `mam_id` (XEP-0198 §5 leaves weeding out resume-replayed duplicates to
+/// the recipient). XEP-0313 Security Considerations (Sender Impersonation): "A client MUST verify the source of MAM
+/// query results against an open query (i.e. checking the stanza 'from'
+/// matches the entity that was queried) and MUST either ignore or otherwise
+/// disregard ... unsolicited results". Every collection path — both arms of
+/// the native `run_mam_query` and the WASM driver's pending query — delegates
+/// to one instance per query, so the verification and dedup state cannot
 /// diverge between them.
 pub struct MamResultCollector {
     query_id: String,
+    archive: Option<String>,
+    account: Option<String>,
     seen_mam_ids: HashSet<String>,
     messages: Vec<ArchivedMessage>,
 }
 
 impl MamResultCollector {
-    /// Create a collector for one query identifier with no accumulated messages.
+    /// Create a collector for one query with no accumulated messages.
+    ///
+    /// `queried` is the `to` address of the query IQ (`None` when omitted),
+    /// and `account` the session's own bare JID. An omitted `to` addresses
+    /// the user's own archive, and a result without `from` is likewise
+    /// attributed to the own account.
     #[must_use]
-    pub fn new(query_id: &str) -> Self {
+    pub fn new(query_id: &str, queried: Option<&str>, account: Option<&str>) -> Self {
+        let account = account.map(|jid| bare_jid(jid).to_string());
+        let archive = queried
+            .map(|jid| bare_jid(jid).to_string())
+            .or_else(|| account.clone());
         Self {
             query_id: query_id.to_string(),
+            archive,
+            account,
             seen_mam_ids: HashSet::new(),
             messages: Vec::new(),
         }
@@ -625,10 +646,17 @@ impl MamResultCollector {
         &self.query_id
     }
 
-    /// Keep the result if it belongs to this query and its `mam_id` has not
-    /// been collected yet; ignore it otherwise.
+    fn is_from_queried_archive(&self, archived: &ArchivedMessage) -> bool {
+        let source = archived.archive.as_ref().or(self.account.as_ref());
+        matches!((source, &self.archive), (Some(source), Some(archive)) if source == archive)
+    }
+
+    /// Keep the result if it belongs to this query, comes from the queried
+    /// archive, and its `mam_id` has not been collected yet; ignore it
+    /// otherwise.
     pub fn collect(&mut self, archived: ArchivedMessage) {
         if archived.query_id.as_deref() == Some(&self.query_id)
+            && self.is_from_queried_archive(&archived)
             && self.seen_mam_ids.insert(archived.mam_id.clone())
         {
             self.messages.push(archived);
@@ -660,9 +688,15 @@ async fn run_mam_query(
 ) -> ClientResult<MamPage> {
     // Subscribe BEFORE sending so we don't miss any result messages.
     let mut rx = handle.events();
+    let iq_target = iq.attr("to").map(str::to_string);
 
+    let account = handle
+        .snapshot()
+        .binding
+        .map(|binding| binding.jid.to_bare().to_string());
     let query = async {
-        let mut collector = MamResultCollector::new(query_id);
+        let mut collector =
+            MamResultCollector::new(query_id, iq_target.as_deref(), account.as_deref());
         let mut send_iq_fut = Box::pin(handle.send_iq(iq));
 
         let fin_el = loop {
@@ -742,6 +776,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
 
     let mam_id = result.attr("id")?.to_string();
     let query_id = result.attr("queryid").map(str::to_string);
+    let archive = element.attr("from").map(|from| bare_jid(from).to_string());
 
     let forwarded = result.get_child("forwarded", FORWARD_NS)?;
 
@@ -799,6 +834,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
     Some(ArchivedMessage {
         mam_id,
         query_id,
+        archive,
         id,
         stanza_id,
         origin_id,

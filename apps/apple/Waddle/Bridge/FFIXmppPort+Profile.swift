@@ -46,7 +46,13 @@ extension FFIXmppPort {
 
     func publishActivity(_ activity: UserActivity) async throws {
         try await mappingPortErrors {
-            try await client.publishActivity(general: activity.general, specific: activity.specific, text: activity.text)
+            // XEP-0108: the free-text description is tagged with the UI language.
+            try await client.publishActivity(
+                general: activity.general,
+                specific: activity.specific,
+                text: activity.text,
+                lang: Locale.preferredLanguages.first
+            )
         }
     }
 
