@@ -502,11 +502,11 @@ async fn read_existing_vcard4(
 
 /// Build the canonical vCard4 photo URI for `jid` referencing the
 /// `urn:xmpp:avatar:data` PEP item with the given SHA-1 hex. Uses
-/// the XEP-0147 `xmpp:` URI scheme with a `?pubsub` query so a
+/// the XEP-0147 `xmpp:` URI scheme with a `?pubsub;action=retrieve` query so a
 /// dereferencing client can pull the bytes via PEP rather than a
 /// `data:` URI inflating every fan-out stanza.
 fn vcard4_photo_pep_uri(jid: &BareJid, sha1_hex: &str) -> String {
-    format!("xmpp:{jid}?pubsub;node={NODE_AVATAR_DATA};item={sha1_hex}")
+    format!("xmpp:{jid}?pubsub;action=retrieve;node={NODE_AVATAR_DATA};item={sha1_hex}")
 }
 
 /// Pre-create the PEP node with its canonical `pep_for_node` config
@@ -597,7 +597,7 @@ mod tests {
         let uri = vcard4_photo_pep_uri(&jid, "abc123");
         assert_eq!(
             uri,
-            "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc123"
+            "xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=abc123"
         );
     }
 }
