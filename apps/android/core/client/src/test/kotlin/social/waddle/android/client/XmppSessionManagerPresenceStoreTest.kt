@@ -115,7 +115,7 @@ class XmppSessionManagerPresenceStoreTest {
         val harness = Harness(this)
         harness.loginReady()
         harness.emit(roomMessage("s1", mentions = listOf("xmpp:Icepuma@waddle.test")))
-        harness.emit(roomMessage("s2", broadcast = MENTION_URI_EVERYONE))
+        harness.emit(roomMessage("s2", broadcast = BROADCAST_EVERYONE))
         harness.emit(roomMessage("s3", mentions = listOf("xmpp:bob@waddle.test")))
         harness.emit(roomMessage("s4", nick = "icepuma", mentions = listOf("xmpp:icepuma@waddle.test")))
         harness.emit(roomMessage("s5", mentions = listOf("xmpp:icepuma@waddle.test"), thread = "root-1"))
@@ -145,7 +145,7 @@ class XmppSessionManagerPresenceStoreTest {
     fun `mention counts are live-only and reset on reconnect`() = runTest {
         val harness = Harness(this)
         harness.loginReady()
-        harness.emit(roomMessage("s1", broadcast = MENTION_URI_HERE))
+        harness.emit(roomMessage("s1", broadcast = BROADCAST_HERE))
         assertEquals(1, harness.manager.mentionStore.counts.value[ROOM])
 
         harness.reconnect()

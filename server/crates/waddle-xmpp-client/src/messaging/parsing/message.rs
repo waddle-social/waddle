@@ -1,6 +1,5 @@
 //! Implementation behind the parent module facade.
 
-use super::parse_markup_spans;
 use super::parse_presence;
 use super::Cow;
 use super::Element;
@@ -8,6 +7,7 @@ use super::StableStanzaId;
 use super::Url;
 use super::{body_fallbacks_for, strip_fallback_ranges, BodyFallback};
 use super::{first_eligible_https_url_text, PreviewImageMediaType};
+use super::{parse_broadcast_mention, parse_markup_spans};
 use super::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
     parse_extension_envelope, parse_in_call_reaction_payload, parse_markable_marker_payload,
@@ -156,6 +156,9 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         .get_child("markup", NS_MARKUP)
         .map(parse_markup_spans)
         .unwrap_or_default();
+    let broadcast_mention = el
+        .get_child("markup", NS_MARKUP)
+        .and_then(parse_broadcast_mention);
 
     let chat_state = parse_chat_state_payload(el).map(|payload| payload.state);
     let displayed_marker_requested = parse_markable_marker_payload(el, id.as_deref()).is_some();
@@ -173,7 +176,6 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
     // boundary may stringify protocol values.
     let mut references: Vec<ReferenceData> = Vec::new();
     let mut mention_uris: Vec<String> = Vec::new();
-    let mut broadcast_mention: Option<String> = None;
     let mut shared_files: Vec<SharedFile> = Vec::new();
 
     for child in el
@@ -215,15 +217,7 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         });
 
         match ref_type {
-            "mention" => {
-                let uri_str = uri.to_string();
-                if uri_str.starts_with("xmpp:")
-                    && (uri_str.contains("@everyone") || uri_str.contains("@here"))
-                {
-                    broadcast_mention = Some(uri_str.clone());
-                }
-                mention_uris.push(uri_str);
-            }
+            "mention" => mention_uris.push(uri.to_string()),
             "data" => {
                 if let Some(file) = parse_shared_file(child) {
                     shared_files.push(file);

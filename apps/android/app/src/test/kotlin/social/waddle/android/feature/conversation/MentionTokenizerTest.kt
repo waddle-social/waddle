@@ -68,7 +68,7 @@ class MentionTokenizerTest {
     @Test
     fun `directory hits follow matching room candidates without duplicates`() {
         val room = listOf(
-            MentionCandidate("everyone", "xmpp:@everyone", isBroadcast = true),
+            MentionCandidate("everyone", "everyone", isBroadcast = true),
             person("carl", "carl@waddle.test"),
             person("bob", "bob@waddle.test"),
         )

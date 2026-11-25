@@ -287,7 +287,7 @@ class ConversationScreenshotTest {
                 )
                 MentionPopover(
                     candidates = listOf(
-                        MentionCandidate("everyone", "xmpp:general@muc.waddle.test?everyone", isBroadcast = true),
+                        MentionCandidate("everyone", "everyone", isBroadcast = true),
                         MentionCandidate("carol", "xmpp:carol@waddle.test", false, jid = "carol@waddle.test"),
                         MentionCandidate("cass", "xmpp:cass@waddle.test", false, jid = "cass@waddle.test"),
                     ),

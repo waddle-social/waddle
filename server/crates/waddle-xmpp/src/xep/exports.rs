@@ -322,13 +322,6 @@ pub use super::xep0449::{
     StickerRef, NS_STICKERS,
 };
 
-pub use super::xep0452::{
-    build_mention_notification_element, build_mention_notification_message,
-    extract_mention_notification, has_mention_notification, is_mention_notification_element,
-    set_mention_notification, strip_mention_notification, MentionCounter, MentionNotification,
-    MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
-};
-
 pub use waddle_xmpp_core::xcal::{
     build_vcalendar_with_event, is_vcalendar_element, parse_vcalendar_event, Freq, Rrule, RruleEnd,
     VEvent, Weekday, NS_XCAL, PUBSUB_NODE_EVENTS, PUBSUB_TYPE_XCAL,
@@ -416,15 +409,13 @@ pub use super::xep0490::{
 
 pub use super::xep0513::{
     add_explicit_mention, build_mention_markup, build_mention_span, build_mentions_markup,
-    build_mentions_permissions_query, explicit_mention_names_jid, extract_explicit_mentions,
-    has_explicit_mentions, has_malformed_mention_markup, is_mention_markup,
-    is_mentions_permissions_query, mention_target_count, mention_target_count_from_parts,
-    mentions_exceed_threshold, mentions_exceed_threshold_from_parts, parse_mention_markup,
-    personal_mention_targets, reference_mention_names_jid, set_explicit_mentions,
-    strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier, ExplicitMentions,
-    MentionsPermission, MentionsPermissions, CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT,
-    FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
-    NS_WADDLE_MENTIONS, OCCUPANT_MENTION,
+    explicit_mention_names_jid, extract_explicit_mentions, has_explicit_mentions,
+    has_malformed_mention_markup, is_mention_markup, mention_target_count,
+    mention_target_count_from_parts, mentions_exceed_threshold,
+    mentions_exceed_threshold_from_parts, parse_mention_markup, personal_mention_targets,
+    reference_mention_names_jid, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
+    ExplicitMentionCarrier, ExplicitMentions, CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT,
+    NS_EXPLICIT_MENTIONS, NS_WADDLE_MENTIONS, OCCUPANT_MENTION,
 };
 
 pub use super::xep_waddle_forums::{

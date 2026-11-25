@@ -42,6 +42,9 @@ pub const NS_WADDLE_MENTIONS: &str = "urn:waddle:mentions:0";
 /// XEP-0513 `type` for an individual mention by XEP-0421 occupant-id.
 pub const MENTION_TYPE_OCCUPANT: &str = "urn:xmpp:mentions:0#occupant";
 
+/// XEP-0513 `type` for a mention of every occupant of the room.
+pub const MENTION_TYPE_CHANNEL: &str = "urn:xmpp:mentions:0#channel";
+
 /// One mention with its body range, decoded from or encoded to a `<span/>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MentionSpan {

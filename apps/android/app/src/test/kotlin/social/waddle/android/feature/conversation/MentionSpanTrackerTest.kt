@@ -111,4 +111,20 @@ class MentionSpanTrackerTest {
         assertNull(tracker.insertMention(first!!.text, token, bob))
         assertEquals(1, tracker.mentionRefs().size)
     }
+
+    @Test
+    fun `broadcast picks are not sent as references`() {
+        // `@everyone` / `@here` travel as XEP-0513 `#channel` mentions the
+        // Rust send builder derives from the typed token; XEP-0372 has no
+        // valid URI for them.
+        val everyone = MentionCandidate(display = "everyone", uri = "everyone", isBroadcast = true)
+        val tracker = tracker("@ev @bo")
+        val first = tracker.insertMention("@ev @bo", MentionToken(0, 3, "ev"), everyone)
+        tracker.insertMention(first!!.text, MentionToken(first.text.length - 3, first.text.length, "bo"), bob)
+
+        assertEquals(
+            listOf(MentionRef(uri = "xmpp:bob@waddle.test", begin = 11u, end = 15u)),
+            tracker.mentionRefs(),
+        )
+    }
 }
