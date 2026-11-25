@@ -96,6 +96,19 @@ struct LiveCallsTests {
         #expect(LiveCalls.list([], elsewhere: [(call, "Ada")], state: .idle, now: now).isEmpty)
     }
 
+    @Test func theListNextChangesWhenItsOldestCallRunsOut() {
+        let now = Date()
+        let ada = bare("ada@waddle.test")
+        let older = CallElsewhere(sid: "a", peer: ada, media: nil, since: now.addingTimeInterval(-3600))
+        let newer = CallElsewhere(sid: "b", peer: ada, media: nil, since: now)
+        let gone = CallElsewhere(sid: "c", peer: ada, media: nil, since: now.addingTimeInterval(-CallElsewhere.longestShown - 1))
+        #expect(LiveCalls.nextExpiry(of: [newer, older, gone], after: now) == older.shownUntil)
+        #expect(LiveCalls.nextExpiry(of: [gone], after: now) == nil)
+        #expect(LiveCalls.nextExpiry(of: [], after: now) == nil)
+        // And at that moment the call is no longer listed.
+        #expect(LiveCalls.list([], elsewhere: [(older, "Ada")], state: .idle, now: older.shownUntil).isEmpty)
+    }
+
     @Test func aCallWhoseInvitationWeMissedIsJustACall() {
         let call = CallElsewhere(sid: "s1", peer: bare("ada@waddle.test"), media: nil, since: Date())
         let live = LiveCalls.list([], elsewhere: [(call, "Ada")], state: .idle)[0]

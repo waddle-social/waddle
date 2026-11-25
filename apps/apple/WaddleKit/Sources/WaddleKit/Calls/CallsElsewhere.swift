@@ -26,9 +26,10 @@ public struct CallElsewhere: Identifiable, Equatable, Sendable {
         self.since = since
     }
 
-    public func isShown(at now: Date) -> Bool {
-        now.timeIntervalSince(since) < Self.longestShown
-    }
+    /// When it stops being shown, if nothing has ended it by then.
+    public var shownUntil: Date { since.addingTimeInterval(Self.longestShown) }
+
+    public func isShown(at now: Date) -> Bool { now < shownUntil }
 }
 
 /// Follows the XEP-0353 messages of calls this device is not part of, as

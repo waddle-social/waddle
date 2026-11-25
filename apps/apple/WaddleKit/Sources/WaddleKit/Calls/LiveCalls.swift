@@ -150,6 +150,13 @@ public enum LiveCalls {
         }
     }
 
+    /// When the list next changes by the clock alone: the first of `calls`
+    /// still shown at `now` to reach the end of its day. Nothing else tells
+    /// a list that sits untouched that one of its cards has run out.
+    public static func nextExpiry(of calls: [CallElsewhere], after now: Date) -> Date? {
+        calls.filter { $0.isShown(at: now) }.map(\.shownUntil).min()
+    }
+
     /// "Live now · 2"
     public static func heading(count: Int) -> String { "Live now · \(count)" }
 
