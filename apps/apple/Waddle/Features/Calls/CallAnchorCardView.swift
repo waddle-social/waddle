@@ -10,6 +10,9 @@ struct CallAnchorCardView: View {
     let card: CallAnchorCard
     /// The hour it began, as the rows around it show theirs.
     var time: String?
+    /// The way to the call's chat (`CallChat.linkTitle`); `nil` where there is none to offer.
+    var chatLink: String?
+    var openChat: @MainActor () -> Void = { /* a card with no chat */ }
     let join: @MainActor () -> Void
 
     @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
@@ -42,6 +45,9 @@ struct CallAnchorCardView: View {
         .accessibilityLabel(Text(card.spoken))
         .accessibilityAddTraits(card.action == .join ? .isButton : [])
         .accessibilityAction { if card.action == .join { join() } }
+        .accessibilityActions {
+            if let chatLink { Button("Open call chat: \(chatLink)", action: openChat) }
+        }
     }
 
     private var words: some View {
@@ -74,6 +80,19 @@ struct CallAnchorCardView: View {
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.fgMuted)
                     .lineLimit(2)
+                if let chatLink {
+                    Button(action: openChat) {
+                        HStack(spacing: WaddleTokens.Spacing.s0Half) {
+                            Text(chatLink)
+                            Image(systemName: "chevron.right").imageScale(.small)
+                        }
+                        .huddleText(Theme.Typography.caption.weight(700))
+                        .foregroundStyle(Theme.Colors.actionText)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, WaddleTokens.Spacing.s0Half)
+                }
             }
         }
     }
@@ -106,13 +125,28 @@ struct CallAnchorCardView: View {
 struct CallAnchorRow: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(AppState.self) private var app
+    @Environment(NavigationModel.self) private var navigation
+    @Environment(MessageActionModel.self) private var actions
+    private var placement = ConversationInspectorPlacement()
     let item: TimelineItem
     let anchor: CallThreadAnchor
 
+    init(item: TimelineItem, anchor: CallThreadAnchor) {
+        self.item = item
+        self.anchor = anchor
+    }
+
     var body: some View {
+        // At the head of its own thread the card has nowhere further to lead.
+        let thread = actions.isThread ? nil : item.message.thread
         CallAnchorCardView(
             card: CallAnchorCard.make(anchor: anchor, said: item.body, ended: item.callEnded, live: live, isNewest: isNewest),
-            time: item.sentAt.formatted(date: .omitted, time: .shortened)
+            time: item.sentAt.formatted(date: .omitted, time: .shortened),
+            chatLink: thread.map { CallChat.linkTitle(messages: chatMessages(in: $0)) },
+            openChat: {
+                guard let thread else { return }
+                navigation.openThread(thread, in: item.conversation, usesInspector: placement.usesInspector)
+            }
         ) {
             // As the room's banner joins: with the microphone, and the camera for the person to turn on.
             Task { await session.joinGroupCall(in: item.conversation.jid, video: false) }
@@ -147,6 +181,11 @@ struct CallAnchorRow: View {
             isBusy: calls.state.isLive,
             canJoin: session.canJoinGroupCall(in: room)
         )
+    }
+
+    /// The messages of the call's chat that are loaded and still there.
+    private func chatMessages(in thread: String) -> Int {
+        session.timelines.timeline(for: item.conversation).threadReplies(threadID: thread).count { $0.tombstone == nil }
     }
 
     /// No announcement of a later call in what is loaded of the room.

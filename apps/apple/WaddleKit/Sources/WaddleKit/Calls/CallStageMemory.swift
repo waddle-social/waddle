@@ -12,6 +12,8 @@ public struct CallStageMemory: Equatable, Sendable {
     public var dismissedMediaIssues = CallMediaIssues.Dismissals()
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
+    /// The last message of the call's chat the person has had in front of them.
+    public private(set) var chatSeenID: String?
 
     public init() { /* A stage nobody has touched. */ }
 
@@ -19,6 +21,12 @@ public struct CallStageMemory: Equatable, Sendable {
         guard sid != self.sid else { return }
         self = Self()
         self.sid = sid
+    }
+
+    /// The call's chat was open with `id` its newest message. Nothing newer
+    /// than nothing: an empty chat leaves what was seen as it was.
+    public mutating func sawChat(upTo id: String?) {
+        if let id { chatSeenID = id }
     }
 
     public mutating func togglePin(_ tile: CallStageTile.ID) {

@@ -44,6 +44,10 @@ struct CallStageView: View {
     var connection: CallConnectionQuality?
     /// Whether we are sharing our screen; `nil` where this device cannot.
     var isSharingScreen: Bool?
+    /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
+    var chatUnread: Int?
+    /// The call's chat is open beside the conversation.
+    var showsChat = false
     /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
     var ownScreen: CallStageTile?
     /// Where the tiles get their pictures and send a pin.
@@ -110,7 +114,8 @@ struct CallStageView: View {
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: status != .connecting,
                 isHandRaised: isHandRaised, viewMode: presentation.viewMode,
                 isSelfViewHidden: presentation.isSelfViewHidden, size: size, escapeStepsDown: escapeStepsDown,
-                showsParticipants: participants != nil, isSharingScreen: isSharingScreen, actions: actions
+                showsParticipants: participants != nil, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
+                showsChat: showsChat, actions: actions
             )
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.top, Theme.Spacing.m)
