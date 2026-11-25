@@ -51,6 +51,7 @@ internal fun ownDmEcho(
     parentThreadId = options.thread?.parent,
     markupSpans = options.markupSpans,
     broadcastMention = null,
+    broadcastSpans = emptyList(),
     mentionUris = emptyList(),
     references = options.references,
     forumPostKind = null,

@@ -44,8 +44,8 @@ struct EditMentionTests {
         Draft(text: newText, mentions: MentionTokens.locate(editable.recordedMentions, in: newText))
     }
 
-    private func mention(_ target: MentionTarget, _ begin: Int, _ end: Int) -> Reference {
-        Reference(kind: .mention, uri: target.uri, begin: begin, end: end)
+    private func mention(_ jid: BareJID, _ begin: Int, _ end: Int) -> Reference {
+        Reference(kind: .mention, uri: "xmpp:\(jid)", begin: begin, end: end)
     }
 
     /// A nick reused by someone else: one token, two targets. Neither
@@ -71,16 +71,16 @@ struct EditMentionTests {
 
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: editable.text)))
         #expect(port.corrections.last?.body == "hi @carol")
-        #expect(port.corrections.last?.options.references == [mention(.user(carol), 3, 9)])
+        #expect(port.corrections.last?.options.references == [mention(carol, 3, 9)])
     }
 
     @Test func textInsertedBeforeShiftsMention() async {
         let (coordinator, port, item) = await sent(Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)]))
         let editable = EditableMessage(item: item)
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "oh hi there @carol")))
-        #expect(port.corrections.last?.options.references == [mention(.user(carol), 12, 18)])
+        #expect(port.corrections.last?.options.references == [mention(carol, 12, 18)])
         // 1:1 applies the correction locally, references included.
-        #expect(ownRow(coordinator).message.references == [mention(.user(carol), 12, 18)])
+        #expect(ownRow(coordinator).message.references == [mention(carol, 12, 18)])
     }
 
     @Test func deletedMentionTextDropsMention() async {
@@ -94,7 +94,7 @@ struct EditMentionTests {
     @Test func mentionAfterBoldSpanLandsPastMarkers() async {
         // Wire: "hey @carol", bold 0..<3, mention 4..<10.
         let (coordinator, port, item) = await sent(Draft(text: "**hey** @carol", mentions: [MentionDraft(target: .user(carol), range: 8..<14)]))
-        #expect(item.message.references == [mention(.user(carol), 4, 10)])
+        #expect(item.message.references == [mention(carol, 4, 10)])
         let editable = EditableMessage(item: item)
         #expect(editable.text == "**hey** @carol")
         #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 8..<14)])
@@ -103,7 +103,7 @@ struct EditMentionTests {
         let options = port.corrections.last?.options
         #expect(port.corrections.last?.body == "hey there @carol")
         #expect(options?.markupSpans == [MarkupSpan(kind: .bold, start: 0, end: 3)])
-        #expect(options?.references == [mention(.user(carol), 10, 16)])
+        #expect(options?.references == [mention(carol, 10, 16)])
     }
 
     @Test func mentionWrappedInBoldSurvives() async {
@@ -112,7 +112,7 @@ struct EditMentionTests {
         #expect(editable.text == "**@carol** hi")
         #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 2..<8)])
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "**@carol** hello")))
-        #expect(port.corrections.last?.options.references == [mention(.user(carol), 0, 6)])
+        #expect(port.corrections.last?.options.references == [mention(carol, 0, 6)])
         #expect(port.corrections.last?.options.markupSpans == [MarkupSpan(kind: .bold, start: 0, end: 6)])
     }
 
@@ -139,12 +139,12 @@ struct EditMentionTests {
             Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)], reply: reply),
             after: [parent]
         )
-        #expect(item.message.references == [mention(.user(carol), 8, 14)])
+        #expect(item.message.references == [mention(carol, 8, 14)])
         let editable = EditableMessage(item: item)
         #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 3..<9)])
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "yo @carol")))
         #expect(port.corrections.last?.body == "> q\n\nyo @carol")
-        #expect(port.corrections.last?.options.references == [mention(.user(carol), 8, 14)])
+        #expect(port.corrections.last?.options.references == [mention(carol, 8, 14)])
     }
 
     @Test func correctedRowKeepsMentionOnSecondEdit() async {
@@ -156,18 +156,18 @@ struct EditMentionTests {
         #expect(editable.text == "**hi** there @carol")
         #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 13..<19)])
         #expect(await coordinator.edit(corrected, draft: editDraft(editable, to: "**hi** again @carol")))
-        #expect(port.corrections.last?.options.references == [mention(.user(carol), 9, 15)])
+        #expect(port.corrections.last?.options.references == [mention(carol, 9, 15)])
     }
 
     @Test func referencesThatDoNotMapCleanlyStayPlainText() {
         var message = directMessage("hey carol and room", from: jid("alice@waddle.test/phone"), to: jid("bob@waddle.test"), id: "m1")
         message.references = [
             // Not an `@` token.
-            mention(.user(carol), 4, 9),
+            mention(carol, 4, 9),
             // An occupant JID never widens to the room.
             Reference(kind: .mention, uri: "xmpp:general@muc.waddle.test/bob", begin: 14, end: 18),
             // Out of range.
-            mention(.everyone, 30, 40),
+            mention(carol, 30, 40),
         ]
         message.markupSpans = [MarkupSpan(kind: .bold, start: 5, end: 7)]
         let item = TimelineItem(id: "m1", conversation: bobConversation, isMine: true, message: message, body: "hey carol and room")
@@ -178,7 +178,7 @@ struct EditMentionTests {
 
     @Test func markerInsideMentionDropsIt() {
         var message = directMessage("hi @carol", from: jid("alice@waddle.test/phone"), to: jid("bob@waddle.test"), id: "m1")
-        message.references = [mention(.user(carol), 3, 9)]
+        message.references = [mention(carol, 3, 9)]
         message.markupSpans = [MarkupSpan(kind: .italic, start: 5, end: 9)]
         let item = TimelineItem(id: "m1", conversation: bobConversation, isMine: true, message: message, body: "hi @carol")
         let editable = EditableMessage(item: item)
@@ -187,9 +187,9 @@ struct EditMentionTests {
     }
 
     @Test func mentionTargetReversesURI() {
-        #expect(MentionTarget(reference: mention(.user(carol), 0, 1)) == .user(carol))
-        #expect(MentionTarget(reference: mention(.everyone, 0, 1)) == .everyone)
-        #expect(MentionTarget(reference: mention(.here, 0, 1)) == .here)
+        #expect(MentionTarget(reference: mention(carol, 0, 1)) == .user(carol))
+        // Room-wide mentions are XEP-0513 spans, never references.
+        #expect(MentionTarget(reference: Reference(kind: .mention, uri: "xmpp:@everyone", begin: 0, end: 9)) == nil)
         #expect(MentionTarget(reference: Reference(kind: .data, uri: "xmpp:carol@waddle.test", begin: 0, end: 1)) == nil)
         #expect(MentionTarget(reference: Reference(kind: .mention, uri: "https://waddle.test", begin: 0, end: 1)) == nil)
     }

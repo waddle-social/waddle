@@ -90,7 +90,7 @@ pub fn client_caps_features() -> Vec<&'static str> {
         // replies, it MUST specify the 'urn:xmpp:reply:0' feature". Replies
         // are built and parsed in xep/reply.rs.
         crate::xep::reply::NS_REPLY,
-        // XEP-0372 §Discovery: "If a client implements references, it MUST
+        // XEP-0372 §2 (Discovery): "If a client implements references, it MUST
         // specify the 'urn:xmpp:reference:0' feature". Built in
         // messaging/builders.rs, parsed in messaging/parsing/message.rs.
         crate::messaging::namespaces::NS_REFERENCES,

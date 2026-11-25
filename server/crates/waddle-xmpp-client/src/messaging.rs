@@ -39,7 +39,9 @@ pub use link_preview_lookup::{
     build_link_preview_lookup_iq, eligible_preview_url, parse_link_preview_lookup_response,
     LinkPreviewLookup, LinkPreviewLookupReady, MAX_LINK_PREVIEW_TOKEN_BYTES,
 };
-pub use mentions::{BroadcastMention, MentionDirectory, MentionTarget, REFERENCE_TYPE_MENTION};
+pub use mentions::{
+    BroadcastMention, BroadcastSpan, MentionDirectory, MentionTarget, REFERENCE_TYPE_MENTION,
+};
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, InCallPresenceMarkers,
     MujiElementOptions, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_JINGLE, NS_JINGLE_RTP,

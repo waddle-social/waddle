@@ -70,6 +70,8 @@ public struct WireMessage: Hashable, Sendable {
     public var markupSpans: [MarkupSpan]
     public var references: [Reference]
     public var broadcastMention: String?
+    /// Body ranges of the XEP-0513 `#channel` mentions.
+    public var broadcastSpans: [BroadcastSpan]
     public var forumPostKind: ForumPostKind?
     public var forumTitle: String?
     public var isSticker: Bool
@@ -119,6 +121,7 @@ public struct WireMessage: Hashable, Sendable {
         markupSpans: [MarkupSpan] = [],
         references: [Reference] = [],
         broadcastMention: String? = nil,
+        broadcastSpans: [BroadcastSpan] = [],
         forumPostKind: ForumPostKind? = nil,
         forumTitle: String? = nil,
         isSticker: Bool = false,
@@ -153,6 +156,7 @@ public struct WireMessage: Hashable, Sendable {
         self.markupSpans = markupSpans
         self.references = references
         self.broadcastMention = broadcastMention
+        self.broadcastSpans = broadcastSpans
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker

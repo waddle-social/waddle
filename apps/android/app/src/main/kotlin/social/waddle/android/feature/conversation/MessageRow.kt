@@ -468,6 +468,7 @@ private fun MessageContent(item: TimelineItem, context: MessageRowContext) {
                 body = item.body,
                 markupSpans = item.markupSpans,
                 references = item.source.references,
+                broadcastSpans = item.source.broadcastSpans,
                 fallbackStart = item.source.replyFallbackStart,
                 fallbackEnd = item.source.replyFallbackEnd,
             )

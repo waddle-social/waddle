@@ -1,6 +1,7 @@
 package social.waddle.android.client.store
 
 import social.waddle.client.ffi.WaddleArchivedMessage
+import social.waddle.client.ffi.WaddleBroadcastSpan
 import social.waddle.client.ffi.WaddleCallThreadAnchor
 import social.waddle.client.ffi.WaddleCallThreadEnded
 import social.waddle.client.ffi.WaddleLinkPreview
@@ -229,6 +230,9 @@ sealed interface TimelineSource {
     /** `@everyone`/`@here` broadcast mention URI, when present. */
     val broadcastMention: String?
 
+    /** XEP-0513 `#channel` mention ranges; offsets are code points over the WIRE body. */
+    val broadcastSpans: List<WaddleBroadcastSpan>
+
     /** XEP-0394 markup spans; offsets are code points over the WIRE body. */
     val markupSpans: List<WaddleMarkupSpan>
 
@@ -267,6 +271,7 @@ sealed interface TimelineSource {
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
+        override val broadcastSpans: List<WaddleBroadcastSpan> get() = message.broadcastSpans
         override val markupSpans: List<WaddleMarkupSpan> get() = message.markupSpans
         override val linkPreviews: List<WaddleLinkPreview> get() = message.linkPreviews
         override val isSticker: Boolean get() = message.isSticker
@@ -299,6 +304,7 @@ sealed interface TimelineSource {
         override val references: List<WaddleReference> get() = message.references
         override val mentionUris: List<String> get() = message.mentionUris
         override val broadcastMention: String? get() = message.broadcastMention
+        override val broadcastSpans: List<WaddleBroadcastSpan> get() = message.broadcastSpans
         override val markupSpans: List<WaddleMarkupSpan> get() = message.markupSpans
         override val linkPreviews: List<WaddleLinkPreview> get() = message.linkPreviews
         override val isSticker: Boolean get() = message.isSticker
