@@ -199,7 +199,6 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
 			provider: github: runner: "ubuntu-24.04"
@@ -270,9 +269,7 @@ schema.#Project & {
 			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
-			when: {
-				pullRequest: true
-			}
+			when: manual: true
 			mode: "expanded"
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
@@ -393,7 +390,6 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
 			provider: github: runner: "ubuntu-24.04"
@@ -573,10 +569,7 @@ schema.#Project & {
 					if ! bun scripts/integration-ci.ts --check; then
 					  overall_status=1
 					fi
-					# The integration planner runs these contracts itself, but
-					# only for merge groups and manual dispatches. Pull requests
-					# that change the planner, its adapter or the cuenv bootstrap
-					# get them here.
+					# Exercise the planner and adapter before main publishes.
 					if ! bun test scripts/integration-ci.test.ts; then
 					  overall_status=1
 					fi

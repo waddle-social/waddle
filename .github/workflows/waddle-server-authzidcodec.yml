@@ -29,32 +29,6 @@ on:
     - server/experiments/authz-id-codec/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
-  pull_request:
-    branches:
-    - main
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-server-authzidcodec.yml
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - ci/contributors/cuenv.cue
-    - ci/contributors/cuenv.cue/**
-    - ci/contributors/nix.cue
-    - ci/contributors/nix.cue/**
-    - cue.mod/**
-    - cuenv.lock
-    - cuenv.lock/**
-    - env.cue
-    - env.cue/**
-    - flake.lock
-    - flake.lock/**
-    - flake.nix
-    - flake.nix/**
-    - server/*.cue
-    - server/.cargo/**
-    - server/experiments/authz-id-codec/**
-    - server/rust-toolchain.toml
-    - server/rust-toolchain.toml/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

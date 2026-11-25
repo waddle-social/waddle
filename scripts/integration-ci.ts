@@ -1,6 +1,6 @@
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import serverQueuePaths from "../ci/rust-tests/queue-paths.json";
+import taskPaths from "../ci/rust-tests/queue-paths.json";
 
 const workflowDirectory = ".github/workflows";
 export const outputFile = `${workflowDirectory}/waddle-integration.yml`;
@@ -34,9 +34,14 @@ export type Lane = { id: string; file: string; workflow: Workflow; paths?: strin
 const queueScopes: Record<string, string[]> = {
   "operational-qualification": ["operational-qualification"],
   "waddle-server-xmppcompliance": ["waddle-server-xmppcompliance"],
+  "waddle-server-authzidcodec": ["waddle-server-authzidcodec"],
+  "waddle-server-rootsync": ["waddle-server-rootsync"],
   "waddle-apple-default": ["waddle-apple-default"],
   "waddle-server-federationgrantfence": ["waddle-server-federationgrantfence"],
-  ...Object.fromEntries(["android", "chat", "linux", "operator"].map(project => [
+  ...Object.fromEntries(["chat", "operator"].map(project => [
+    `waddle-${project}-queuechecks`, [`waddle-${project}-queuechecks`, `waddle-${project}-default`],
+  ])),
+  ...Object.fromEntries(["android", "linux"].map(project => [
     `waddle-${project}-queuechecks`, [`waddle-${project}-pullrequest`, `waddle-${project}-default`],
   ])),
 };
@@ -53,16 +58,17 @@ function triggerPaths(trigger: any, file: string): string[] | undefined {
 export function readLanes(directory = workflowDirectory): Lane[] {
   const workflows = new Map<string, Workflow>();
   for (const file of readdirSync(directory).filter(file => /\.ya?ml$/.test(file)).sort()) {
-    if (file === "waddle-integration.yml") continue;
+    if (file === "waddle-integration.yml" || file === "waddle-pr-smoke.yml") continue;
     const workflow = Bun.YAML.parse(readFileSync(join(directory, file), "utf8")) as Workflow;
     if (typeof workflow.on === "string") workflow.on = { [workflow.on]: {} };
     if (Array.isArray(workflow.on)) workflow.on = Object.fromEntries(workflow.on.map((event: string) => [event, {}]));
     workflows.set(file, workflow);
   }
 
-  const deferred = new Map<string, string[] | undefined>(Object.entries(serverQueuePaths));
+  const deferred = new Map<string, string[] | undefined>(Object.entries(taskPaths));
   for (const [name, scopes] of Object.entries(queueScopes)) {
     const filters = scopes.map(scope => {
+      if (deferred.has(scope)) return deferred.get(scope);
       const source = workflows.get(scope + ".yml");
       if (!source?.on || !["pull_request", "push"].some(event => Object.hasOwn(source.on, event))) {
         throw new Error(`Missing path source ${scope} for ${name}`);
@@ -103,7 +109,7 @@ export function applicable(lane: Lane, files: string[]): boolean {
   // GitHub accepts more glob syntax than Bun. Unknown syntax selects the lane
   // rather than risking a false negative. Checked-in patterns currently use *.
   if (patterns.some(pattern => /[!+\[\]{}()\\]/.test(pattern))) return true;
-  return files.some(file => patterns.some(pattern => new Bun.Glob(pattern).match(file)));
+  return files.some(file => patterns.some(pattern => new Bun.Glob(pattern).match(file) || (!pattern.includes("*") && file.startsWith(pattern + "/"))));
 }
 
 export function jobIds(lane: Lane): string[] {

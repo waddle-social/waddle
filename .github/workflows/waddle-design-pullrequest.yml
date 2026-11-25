@@ -3,22 +3,7 @@
 
 name: waddle-design-pullRequest
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-design-pullrequest.yml
-    - bun.lock
-    - bun.lock/**
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - cue.mod/**
-    - design/*.cue
-    - design/package.json
-    - design/package.json/**
-    - design/src/**
-    - design/test/**
-    - package.json
-    - package.json/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -28,7 +13,6 @@ jobs:
       checks: write
       contents: read
       id-token: write
-      pull-requests: write
     name: waddle-design-pullRequest
     runs-on: ubuntu-24.04
     steps:

@@ -67,9 +67,7 @@ schema.#Project & {
 			"tasks": [tasks.fmt, tasks.clippy, tasks.test, tasks.validateData]
 		}
 		pullRequest: {
-			when: {
-				pullRequest: true
-			}
+			when: manual: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {contents: "read", "id-token": "write"}
 			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.validateData]

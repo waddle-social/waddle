@@ -3,43 +3,7 @@
 
 name: waddle-colony-pullRequest
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-colony-pullrequest.yml
-    - bun.lock
-    - bun.lock/**
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - colony/*.cue
-    - colony/astro.config.ts
-    - colony/astro.config.ts/**
-    - colony/dist/**
-    - colony/drizzle.config.ts
-    - colony/drizzle.config.ts/**
-    - colony/drizzle/**
-    - colony/package.json
-    - colony/package.json/**
-    - colony/panda.config.ts
-    - colony/panda.config.ts/**
-    - colony/public/**
-    - colony/scripts/oidc-smoke-worker.mjs
-    - colony/scripts/oidc-smoke-worker.mjs/**
-    - colony/scripts/smoke-oidc.mjs
-    - colony/scripts/smoke-oidc.mjs/**
-    - colony/src/**
-    - colony/tsconfig.json
-    - colony/tsconfig.json/**
-    - colony/wrangler.jsonc
-    - colony/wrangler.jsonc/**
-    - cue.mod/**
-    - design/**
-    - design/assets/**
-    - design/package.json
-    - design/package.json/**
-    - design/src/**
-    - package.json
-    - package.json/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -49,7 +13,6 @@ jobs:
       checks: write
       contents: read
       id-token: write
-      pull-requests: write
     name: waddle-colony-pullRequest
     runs-on: ubuntu-24.04
     steps:

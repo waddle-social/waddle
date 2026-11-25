@@ -1,7 +1,7 @@
 # Merge candidate verification
 
 `waddle-integration` runs on every merge-group `checks_requested` event and
-explicit workflow dispatch. Ordinary PR updates run the fast project workflows.
+explicit workflow dispatch. Ordinary PR updates run one unfiltered `PR smoke` job on GitHub-hosted Ubuntu. It checks the candidate diff, parses changed sources and runs dependency-free contracts for the affected projects. The same check runs on the combined merge-group revision.
 The queue adds the affected server builds, default-feature Rust tests, XMPP
 compliance, Android Gradle tasks, Apple simulator and Swift builds, web client
 builds, and Linux and operator Rust checks. The PostgreSQL all-features shards
@@ -22,10 +22,7 @@ settings are changed by this addition.
 
 ## Coverage and candidate identity
 
-The generator discovers every checked-in workflow with a `pull_request` trigger,
-and explicitly lists deferred workflows in `queueScopes` in
-`scripts/integration-ci.ts`. Main and PR project trigger paths select queue-only
-checks. The planner copies only verification jobs from the listed sources. It
+The planner derives queue paths from transitive CUE task inputs in `ci/rust-tests/queue-paths.cue` and the main workflow path filters listed in `scripts/integration-ci.ts`. The dispatch-only project workflows provide reusable verification jobs. Chat and operator each share one runner setup for their affected checks. Apple checks the native telemetry contract in its macOS lane. The planner copies only verification jobs from the listed sources. It
 preserves commands, runner sizes,
 dependencies, and internal failure checks. Generated verification jobs are capped
 at `contents: read` (or no permissions for a pure result check). They omit

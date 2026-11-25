@@ -37,10 +37,7 @@ schema.#Project & {
 
 	ci: pipelines: {
 		pullRequest: {
-			when: {
-				pullRequest: true
-			}
-			// Light pull-request lane: free GitHub-hosted runner (public repository).
+			when: manual: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				contents:   "read"

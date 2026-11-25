@@ -3,37 +3,7 @@
 
 name: waddle-website-pullRequest
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-website-pullrequest.yml
-    - bun.lock
-    - bun.lock/**
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - cue.mod/**
-    - design/**
-    - design/assets/**
-    - design/package.json
-    - design/package.json/**
-    - design/src/**
-    - package.json
-    - package.json/**
-    - website/*.cue
-    - website/astro.config.ts
-    - website/astro.config.ts/**
-    - website/package.json
-    - website/package.json/**
-    - website/panda.config.ts
-    - website/panda.config.ts/**
-    - website/public/**
-    - website/src/**
-    - website/tsconfig.json
-    - website/tsconfig.json/**
-    - website/worker-configuration.d.ts
-    - website/worker-configuration.d.ts/**
-    - website/wrangler.jsonc
-    - website/wrangler.jsonc/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -43,7 +13,6 @@ jobs:
       checks: write
       contents: read
       id-token: write
-      pull-requests: write
     name: waddle-website-pullRequest
     runs-on: ubuntu-24.04
     steps:

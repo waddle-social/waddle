@@ -38,18 +38,22 @@ cd "$repo_root"
 
 cue export ./ci/rust-tests -e queueTasks | jq '
   def inputs($prefix):
-    if (.inputs | length) == 0 then "**"
+    if (.inputs | length) == 0 then
+      (if .command == "true" and (.args | length) == 0 then empty else "**" end)
     else .inputs[] |
       if type == "string" then $prefix + .
       elif .cuenvFiles == "module" then .paths[]
       else error("unsupported queue task input: " + tostring) end
     end;
   with_entries(.key as $name | .value = ([
-    "*.cue", "server/*.cue", "ci/*.cue", "ci/contributors/*.cue", "cue.mod/**",
+    "*.cue", "ci/*.cue", "ci/contributors/*.cue", "cue.mod/**",
     "cuenv.lock", (".github/workflows/" + $name + ".yml"),
     (.value[] | .prefix as $prefix |
-      (.extraInputs[]? | $prefix + .),
-      (.tasks[] | recurse(.dependsOn[]?) | inputs($prefix)))
+      (if $prefix == "" then empty else ($prefix | split("/") | .[:-1] | range(1; length + 1) as $i | .[:$i] | join("/") + "/*.cue") end),
+      (.extraInputs[]? | $prefix + .), .workspaceInputs[]?,
+      (.tasks[] | recurse(.dependsOn[]?) | inputs($prefix) |
+        # cuenv widens wildcard task inputs to their containing directory.
+        if test("/[^/]*\\*[^/]*$") and (endswith("/**") | not) then sub("/[^/]*$"; "/**") else . end))
   ] | unique))
 ' > "$generated_paths"
 

@@ -170,9 +170,50 @@ describe("immutable generated action references", () => {
   });
 });
 
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+test("every ordinary PR has exactly one unfiltered read-only smoke job", () => {
+  const workflows = ".github/workflows";
+  const pullRequests = readdirSync(workflows).filter(file => {
+    const { on } = Bun.YAML.parse(readFileSync(join(workflows, file), "utf8"));
+    return Array.isArray(on) ? on.includes("pull_request") : on === "pull_request" || Object.hasOwn(on, "pull_request");
+  });
+  expect(pullRequests).toEqual(["waddle-pr-smoke.yml"]);
+  const smoke = Bun.YAML.parse(readFileSync(join(workflows, pullRequests[0]), "utf8"));
+  expect(smoke.on.pull_request ?? {}).toEqual({});
+  expect(smoke.on.merge_group).toEqual({ types: ["checks_requested"] });
+  expect(smoke.permissions).toEqual({ contents: "read" });
+  expect(Object.keys(smoke.jobs)).toEqual(["smoke"]);
+  expect(smoke.jobs.smoke["runs-on"]).toBe("ubuntu-24.04");
+  expect(readLanes().some(lane => lane.file === pullRequests[0])).toBe(false);
+});
+
+test("the smoke checks the exact diff, filenames and strict JSON", () => {
+  const directory = mkdtempSync(join(tmpdir(), "waddle-smoke-"));
+  const script = resolve("scripts/pr-smoke.ts");
+  const run = (args: string[]) => Bun.spawnSync(args, { cwd: directory });
+  const git = (...args: string[]) => {
+    const result = run(["git", "-c", "commit.gpgsign=false", "-c", "user.name=Test", "-c", "user.email=test@example.test", ...args]);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+  try {
+    git("init", "-q");
+    git("commit", "--allow-empty", "-qm", "base");
+    const base = git("rev-parse", "HEAD");
+    writeFileSync(join(directory, "-a\nfile.sh"), "true\n");
+    writeFileSync(join(directory, "sample.json"), "{}\n");
+    git("add", ".");
+    git("commit", "-qm", "valid syntax");
+    expect(run([process.execPath, script, base, git("rev-parse", "HEAD")]).exitCode).toBe(0);
+    writeFileSync(join(directory, "sample.json"), "{\"trailing\":1,}\n");
+    git("commit", "-qam", "invalid syntax");
+    expect(run([process.execPath, script, base, git("rev-parse", "HEAD")]).exitCode).not.toBe(0);
+    expect(run([process.execPath, script, base, base]).exitCode).not.toBe(0);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 test("planner executes against exact git objects, NUL-safe renames, and missing bases", () => {
   const directory = mkdtempSync(join(tmpdir(), "waddle-integration-contract-"));

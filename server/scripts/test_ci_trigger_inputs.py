@@ -291,8 +291,6 @@ def lane_lists():
     return {
         "android _ffiInputs": (
             cue_list("apps/android/env.cue", r"let _ffiInputs ="), ffi_roots, WORKSPACE_FILES),
-        "apple pullrequest": (
-            workflow_paths(".github/workflows/waddle-apple-pullrequest.yml"), ffi_roots, WORKSPACE_FILES),
         "apple default": (
             workflow_paths(".github/workflows/waddle-apple-default.yml"), ffi_roots, WORKSPACE_FILES),
         "chat _WasmSourceInputs": (
