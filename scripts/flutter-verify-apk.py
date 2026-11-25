@@ -30,7 +30,11 @@ def main():
         raise SystemExit("Standalone APK package/version differs from the requested build")
     with zipfile.ZipFile(apk) as archive:
         entries = set(archive.namelist())
-    required = {f"lib/{abi}/libwaddle_flutter_runtime.so" for abi in ("arm64-v8a", "x86_64")}
+    supported_abis = {"arm64-v8a", "x86_64"}
+    packaged_abis = {name.split("/")[1] for name in entries if name.startswith("lib/") and name.endswith(".so")}
+    if packaged_abis - supported_abis:
+        raise SystemExit("Standalone APK targets an ABI without a supported Rust runtime")
+    required = {f"lib/{abi}/libwaddle_flutter_runtime.so" for abi in supported_abis}
     if not required.issubset(entries):
         raise SystemExit("Standalone APK is missing a required direct Rust ABI")
     if any(name.endswith("/libwaddle_xmpp_client_ffi.so") for name in entries):

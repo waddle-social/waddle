@@ -1005,9 +1005,29 @@
             buildInputs = [
               pkgs.openssl
               pkgs.sqlite
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.gtk3
+              pkgs.libsecret
+              pkgs.libpulseaudio
+              pkgs.libgbm
+              pkgs.libdrm
             ];
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
-            env.JAVA_HOME = "${pkgs.temurin-bin-21}";
+            env = {
+              JAVA_HOME = "${pkgs.temurin-bin-21}";
+            }
+            // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              # GCC's collect2 exceeds Linux's per-argument limit for native
+              # Dart assets and the UniFFI cdylib in a long checkout path.
+              CC = "${pkgs.clang}/bin/clang";
+              CXX = "${pkgs.clang}/bin/clang++";
+              "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" =
+                "${pkgs.clang}/bin/clang";
+              # Keep the system GPU driver first. A mismatched driver, or a
+              # headless host, can use the Mesa provider built with this shell.
+              WADDLE_EGL_VENDOR_DIRS = "${pkgs.addDriverRunpath.driverLink}/share/glvnd/egl_vendor.d:/etc/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d:${pkgs.mesa}/share/glvnd/egl_vendor.d";
+            };
             packages = [
               rustToolchain
               pkgs.flutter
@@ -1026,6 +1046,13 @@
               pkgs.curl
               pkgs.unzip
               pkgs.perl
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.clang
+              pkgs.xdg-utils
+              pkgs.weston
+              pkgs.dbus
+              pkgs.gnome-keyring
             ];
           };
 

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createContext, runInContext } from "node:vm";
 
+const python = Bun.which("python3");
+if (!python) throw new Error("Python 3 is required for Android build fixtures");
 const root = resolve(import.meta.dir, "..");
 const temporary: string[] = [];
 // Opt in with the reviewed Gradle 9 binary; runner-installed Gradle may differ.
@@ -22,7 +24,7 @@ function harness(helper: string) {
   copyFileSync(join(root, "scripts/flutter-verify-apk.py"), join(directory, "scripts/flutter-verify-apk.py"));
   const record = join(directory, "calls.jsonl");
   for (const tool of ["cargo", "wasm-pack", "flutter", "dart", "python3"]) {
-    writeFileSync(join(directory, "bin", tool), `#!/usr/bin/python3
+    writeFileSync(join(directory, "bin", tool), `#!${python}
 import json, os, sys
 with open(os.environ["FLUTTER_TEST_RECORD"], "a") as output:
     output.write(json.dumps({"tool": "${tool}", "args": sys.argv[1:], "cwd": os.getcwd(), "library": os.environ.get("WADDLE_FLUTTER_RUNTIME_LIBRARY")}) + "\\n")
@@ -44,8 +46,10 @@ if "${tool}" == "flutter" and sys.argv[1:3] == ["build", "apk"]:
         output.writestr("lib/arm64-v8a/libwaddle_flutter_runtime.so", b"arm64")
         if not os.environ.get("FLUTTER_TEST_MISSING_ABI"):
             output.writestr("lib/x86_64/libwaddle_flutter_runtime.so", b"x64")
+        if os.environ.get("FLUTTER_TEST_EXTRA_ABI"):
+            output.writestr("lib/armeabi-v7a/libflutter.so", b"engine")
 if "${tool}" == "python3" and sys.argv[1].endswith("flutter-verify-apk.py"):
-    os.execv("/usr/bin/python3", ["/usr/bin/python3", *sys.argv[1:]])
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 sys.exit(int(os.environ.get("FLUTTER_TEST_EXIT", "0")))
 `, { mode: 0o755 });
   }
@@ -64,14 +68,14 @@ esac
   };
   const buildTools = join(directory, "sdk/build-tools/36.0.0");
   mkdirSync(buildTools, { recursive: true });
-  writeFileSync(join(buildTools, "aapt"), `#!/usr/bin/python3
+  writeFileSync(join(buildTools, "aapt"), `#!${python}
 import os, sys
 if sys.argv[-1].startswith("-"):
     raise SystemExit("Unexpected aapt option in place of APK")
 package = "wrong.app" if os.environ.get("FLUTTER_TEST_BAD_PACKAGE") else "social.waddle.flutter"
 print("package: name='%s' versionCode='30000000' versionName='pr-abcdef123456'" % package)
 `, { mode: 0o755 });
-  writeFileSync(join(buildTools, "apksigner"), `#!/usr/bin/python3
+  writeFileSync(join(buildTools, "apksigner"), `#!${python}
 import hashlib, os, sys
 if sys.argv[-1].startswith("-"):
     raise SystemExit("Unexpected apksigner option in place of APK")
@@ -84,7 +88,7 @@ print("Signer #1 certificate SHA-256 digest: " + digest)
     run: (mode: string, extra: Record<string, string> = {}) =>
       Bun.spawnSync(["bash", script, mode], { env: { ...env, ...extra } }),
     verify: (apk: string) => Bun.spawnSync(
-      ["/usr/bin/python3", join(directory, "scripts/flutter-verify-apk.py"), apk, "30000000", "pr-abcdef123456"],
+      [python, join(directory, "scripts/flutter-verify-apk.py"), apk, "30000000", "pr-abcdef123456"],
       { cwd: directory, env },
     ),
     calls: () => readFileSync(record, "utf8").trim().split("\n").map(line => JSON.parse(line)),
@@ -183,8 +187,8 @@ describe("standalone verification contracts", () => {
     ]);
     expect(readFileSync(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk"))).toEqual(readFileSync(join(h.directory, "apps/flutter/build/app/outputs/flutter-apk/app-profile.apk")));
   });
-  test("wrong package, missing Rust ABI and wrong signer cannot be promoted for upload", () => {
-    for (const failure of ["FLUTTER_TEST_BAD_PACKAGE", "FLUTTER_TEST_MISSING_ABI", "FLUTTER_TEST_BAD_CERT"]) {
+  test("wrong package, mismatched ABIs and wrong signer cannot be promoted for upload", () => {
+    for (const failure of ["FLUTTER_TEST_BAD_PACKAGE", "FLUTTER_TEST_MISSING_ABI", "FLUTTER_TEST_EXTRA_ABI", "FLUTTER_TEST_BAD_CERT"]) {
       const h = harness("flutter-ci.sh");
       expect(h.run("apk", { [failure]: "1" }).exitCode).not.toBe(0);
       expect(Bun.file(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk")).size).toBe(0);
@@ -212,7 +216,7 @@ describe("standalone verification contracts", () => {
     const calls = h.calls();
     expect(calls).toHaveLength(6);
     expect(calls[0].args).toEqual([`${h.directory}/server/crates/waddle-flutter-runtime/scripts/generate_dispatch.py`, "--check"]);
-    expect(calls[2].args).toEqual(["clippy", "--locked", "-p", "waddle-flutter-runtime", "-p", "waddle-flutter-timeline", "-p", "waddle-xmpp-client", "-p", "waddle-xmpp-client-ffi", "--features", "waddle-xmpp-client-ffi/serde", "--all-targets", "--", "-D", "warnings"]);
+    expect(calls[2].args).toEqual(["clippy", "--locked", "-p", "waddle-flutter-runtime", "-p", "waddle-xmpp-client-community", "-p", "waddle-flutter-timeline", "-p", "waddle-xmpp-client", "-p", "waddle-xmpp-client-ffi", "--features", "waddle-xmpp-client-ffi/serde", "--all-targets", "--", "-D", "warnings"]);
     expect(calls[3].args).toContain("waddle-client-session");
     expect(calls[3].args).toContain("waddle-flutter-timeline");
     expect(calls[3].args).toContain("--all-targets");
@@ -233,7 +237,7 @@ describe("standalone verification contracts", () => {
     writeFileSync(join(h.directory, "apps/android/README.md"), "Native app\n");
     execute("git", "init", "--quiet");
     execute("git", "add", "apps/android/README.md");
-    execute("git", "-c", "user.name=CI contract", "-c", "user.email=ci@example.org", "commit", "--quiet", "-m", "fixture");
+    execute("git", "-c", "user.name=CI contract", "-c", "user.email=ci@example.org", "commit", "--no-gpg-sign", "--quiet", "-m", "fixture");
     const base = execute("git", "rev-parse", "HEAD");
     writeFileSync(join(h.directory, "apps/flutter/lib/bridge.dart"), "// Direct Rust transport\n");
     expect(h.run("", { WADDLE_NATIVE_BASE_SHA: base }).exitCode).toBe(0);
@@ -276,7 +280,7 @@ describe("artifact and aggregate quality gates", () => {
     expect(job.steps.some((value: Record<string, unknown>) => value["continue-on-error"])).toBe(false);
     expect(step("apk").if).toContain("!cancelled()");
     expect(step("apk").if).not.toMatch(/analyze|tests|rust/);
-    expect(step("native").if).not.toMatch(/analyze|tests|rust/);
+    expect(step("apk").if).toContain("steps.sdk.outcome == 'success'");
     expect(step("apk_artifact").if).toContain("always()");
     expect(step("apk_artifact").with).toMatchObject({ name: "waddle-flutter-apk", "if-no-files-found": "error", "retention-days": 7 });
     expect(step("preview_artifact").if).toContain("always()");
@@ -308,7 +312,7 @@ describe("Android smoke screenshot handshake", () => {
     mkdirSync(artifact);
     mkdirSync(join(directory, "temp"));
     const adb = join(directory, "adb");
-    writeFileSync(adb, `#!/usr/bin/python3
+    writeFileSync(adb, `#!${python}
 import base64, json, os, sys
 from pathlib import Path
 root = Path(os.environ["SMOKE_FIXTURE"])

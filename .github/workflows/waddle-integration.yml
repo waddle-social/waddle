@@ -310,7 +310,7 @@ jobs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_colony_pullrequest == 'true' }}"
   waddle_flutter_apk__flutter:
-    name: waddle-flutter-apk / Independent Flutter Android and web
+    name: "waddle-flutter-apk / Independent Flutter Android, Wayland and web"
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -363,13 +363,27 @@ jobs:
         name: Flutter tests and rendered design evidence
         if: "${{ !cancelled() && steps.pub.outcome == 'success' && steps.host.outcome == 'success' }}"
         run: "nix develop .#flutter --command bash scripts/flutter-ci.sh test"
-      - id: native
-        name: Build direct Rust Android libraries for both ABIs
-        if: "${{ !cancelled() && steps.sdk.outcome == 'success' && steps.pub.outcome == 'success' }}"
-        run: "nix develop .#flutter --command bash scripts/build-flutter-rust.sh --android"
+      - id: wayland
+        name: Launch the packaged Flutter client on Wayland
+        if: "${{ !cancelled() && steps.pub.outcome == 'success' }}"
+        run: "nix develop .#flutter --command bash scripts/flutter-wayland-smoke.sh"
+      - id: linux
+        name: Build the Wayland release bundle
+        if: "${{ !cancelled() && steps.pub.outcome == 'success' }}"
+        working-directory: apps/flutter
+        run: "nix develop ../..#flutter --command flutter build linux --release --no-pub\nmkdir -p build/artifacts\ntar -C build/linux/x64/release/bundle -czf build/artifacts/waddle-linux-x64.tar.gz .\n"
+      - id: linux_artifact
+        name: Upload the Linux release bundle
+        if: "${{ !cancelled() && steps.linux.outcome == 'success' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-linux-x64
+          path: apps/flutter/build/artifacts/waddle-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
       - id: apk
-        name: Build independent Flutter debug APK
-        if: "${{ !cancelled() && steps.native.outcome == 'success' && steps.pub.outcome == 'success' }}"
+        name: Build independent Flutter profile APK
+        if: "${{ !cancelled() && steps.sdk.outcome == 'success' && steps.pub.outcome == 'success' }}"
         run: "nix develop .#flutter --command bash scripts/flutter-ci.sh apk"
       - id: apk_artifact
         name: Upload standalone Flutter APK
@@ -427,6 +441,7 @@ jobs:
       - name: Link standalone downloads in run summary
         if: "${{ always() }}"
         env:
+          FLUTTER_LINUX_URL: "${{ steps.linux_artifact.outputs.artifact-url }}"
           FLUTTER_APK_URL: "${{ steps.apk_artifact.outputs.artifact-url }}"
           FLUTTER_PREVIEWS_URL: "${{ steps.preview_artifact.outputs.artifact-url }}"
           FLUTTER_WEB_URL: "${{ steps.web_artifact.outputs.artifact-url }}"

@@ -4,6 +4,19 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val runtimeAbis = mapOf("android-arm64" to "arm64-v8a", "android-x64" to "x86_64")
+val targetPlatforms = providers.gradleProperty("target-platform").orNull?.split(",") ?: runtimeAbis.keys
+val targetAbis = targetPlatforms.mapNotNull(runtimeAbis::get)
+require(targetAbis.isNotEmpty()) { "Waddle supports Android arm64 and x86_64" }
+val sdkDirectory = androidComponents.sdkComponents.sdkDirectory
+val buildWaddleRuntime by tasks.registering(Exec::class) {
+    workingDir(rootDir.resolve("../../.."))
+    commandLine("bash", "scripts/build-flutter-rust.sh", "--android")
+    doFirst { environment("ANDROID_HOME", sdkDirectory.get().asFile.absolutePath) }
+}
+
+tasks.named("preBuild") { dependsOn(buildWaddleRuntime) }
+
 android {
     namespace = "social.waddle.flutter"
     compileSdk = flutter.compileSdkVersion
@@ -40,6 +53,20 @@ android {
         }
     }
 
+}
+
+// Package the intersection of Flutter engines and Rust runtimes for this build.
+androidComponents.finalizeDsl { extension ->
+    val split = extension.splits.abi
+    if (split.isEnable) {
+        split.reset()
+        split.include(*targetAbis.toTypedArray())
+    } else {
+        extension.defaultConfig.ndk.abiFilters.apply {
+            clear()
+            addAll(targetAbis)
+        }
+    }
 }
 
 // UnifiedPush uses desktop Tink; secure storage needs its Android implementation.

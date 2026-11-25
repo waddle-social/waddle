@@ -4,6 +4,9 @@ set -euo pipefail
 {
   printf '%s\n\n' '### Alternative Flutter client'
   printf '%s\n\n' 'This is the independent social.waddle.flutter app. It installs alongside the Kotlin Android app. Artifacts expire after seven days.'
+  if [[ -n "${FLUTTER_LINUX_URL:-}" ]]; then
+    printf '[Download the Linux x64 bundle](%s) — extract the archive and run waddle_flutter in the Flutter development shell.\n\n' "$FLUTTER_LINUX_URL"
+  fi
   if [[ -n "${FLUTTER_APK_URL:-}" ]]; then
     printf '[Download Flutter profile APK](%s) — unzip and install waddle-flutter.apk.\n\n' "$FLUTTER_APK_URL"
   fi

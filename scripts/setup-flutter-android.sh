@@ -35,7 +35,8 @@ set -o pipefail
 test "$LICENSE_STATUS" -eq 0
 "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
   "platform-tools" "platforms;android-37.0" "platforms;android-36" \
-  "build-tools;36.0.0" "ndk;$NDK_VERSION"
+  "platforms;android-35" "platforms;android-34" \
+  "build-tools;36.0.0" "ndk;$NDK_VERSION" "cmake;3.22.1"
 
 test -d "$REPO_ROOT/apps/flutter/android"
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > "$REPO_ROOT/apps/flutter/android/local.properties"

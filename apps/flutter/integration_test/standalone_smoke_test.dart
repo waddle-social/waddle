@@ -30,7 +30,7 @@ Future<void> _pumpUntil(
 }
 
 Future<void> _exerciseBundledRust() async {
-  // No override and no fake bindings: Android must load its packaged Rust .so.
+  // No override and no fake bindings: load the Rust library from the application bundle.
   final transport = NativeRustTransport(FfiRustBindings.load());
   final events = <Map<String, dynamic>>[];
   final subscription = transport.events.listen(events.add);
@@ -132,21 +132,26 @@ Future<void> _captureMountedApp(WidgetTester tester) async {
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('standalone Android bootstrap, ownership, secure storage and Rust', (
+  testWidgets('native bootstrap, ownership, secure storage and bundled Rust', (
     tester,
   ) async {
     expect(
-      Platform.isAndroid,
+      Platform.isLinux || Platform.isAndroid,
       isTrue,
-      reason: 'Run on the dedicated Android emulator.',
+      reason: 'Run on an isolated Wayland session or the Android emulator.',
     );
+    if (Platform.isLinux) {
+      expect(Platform.environment['GDK_BACKEND'], 'wayland');
+      expect(Platform.environment['WAYLAND_DISPLAY'], isNotEmpty);
+      expect(Platform.environment['DISPLAY'], isNull);
+      expect(Platform.environment['WADDLE_FLUTTER_RUNTIME_LIBRARY'], isNull);
+    }
     const storage = SecureRuntimeStorage();
     final hasSavedAccount = (await storage.read('session'))?.isNotEmpty == true;
     expect(
       hasSavedAccount,
       isFalse,
-      reason:
-          'Use a clean emulator; this smoke test never restores a real account.',
+      reason: 'The native smoke requires an empty account store.',
     );
     final scratch = 'device-smoke.${DateTime.now().microsecondsSinceEpoch}';
     try {
@@ -173,7 +178,7 @@ void main() {
     await _pumpUntil(
       tester,
       () => bridge.session['state'] == 'signedOut',
-      'A clean emulator did not reach the signed-out production screen.',
+      'The app did not reach the signed-out production screen.',
     );
     expect(bridge.session['state'], 'signedOut');
     expect(IsolateNameServer.lookupPortByName(_ownerPort), isNotNull);
@@ -200,7 +205,7 @@ void main() {
     expect(tester.takeException(), isNull);
 
     // Keep the normal rendered app mounted until the host captures its display.
-    await _captureMountedApp(tester);
+    if (Platform.isAndroid) await _captureMountedApp(tester);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _pumpUntil(

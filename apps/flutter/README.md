@@ -1,8 +1,8 @@
 # Waddle Flutter
 
-An independent Flutter app backed directly by the shared Rust XMPP client. The
-existing Kotlin application remains at `apps/android`, unchanged by this PR.
-Both applications can be installed together: this app uses `social.waddle.flutter`,
+An independent Flutter app backed directly by the shared Rust XMPP client. It runs on
+Wayland desktops, Android and the web. On Android it installs alongside the
+Kotlin app in `apps/android`. This app uses `social.waddle.flutter`,
 its own credential namespace, storage, resource identity and push registration.
 
 | Layer | Owner |
@@ -11,7 +11,7 @@ its own credential namespace, storage, resource identity and push registration.
 | Authentication, account lifecycle, reconnect, views and durable outbox | Dart application runtime |
 | XMPP authentication, protocol operations and signaling | Shared Rust XMPP client |
 | Message identity, archive authority, deduplication and mutations | Shared Rust timeline |
-| Android protocol binding | Direct `dart:ffi` to `waddle-flutter-runtime` |
+| Android and Wayland protocol binding | Direct `dart:ffi` to `waddle-flutter-runtime` |
 | Browser protocol binding | Rust WASM, loaded through Dart JS interop |
 | Files, secure credentials, notifications and call media | Flutter platform plugins and Dart adapters |
 
@@ -29,7 +29,8 @@ text scaling, reduced animation, adaptive navigation and restored navigation are
 supported. Room chat uses compact sender groups and a bottom composer in both
 reading orders, with formatting, attachments and safety details on demand.
 
-The UI includes device-flow sign-in, rooms/DMs/threads, rich composition,
+The UI includes server selection, device-flow sign-in, rooms, DMs, nested threads,
+a searchable Threads view, the community feed, stories, calendar events, rich composition,
 mentions, reactions, message actions, moderation, encrypted attachments,
 GIFs/stickers, profiles/status, room/group administration and voice/video calls.
 Dart orchestrates these features through typed Rust operations; Rust remains the
@@ -77,11 +78,29 @@ flutter pub get --enforce-lockfile
 WADDLE_FLUTTER_RUNTIME_LIBRARY="$PWD/../../server/target/debug/libwaddle_flutter_runtime.so" flutter test
 ```
 
-For an independent Android APK:
+For Wayland, start a desktop session with a Secret Service keyring for storing
+credentials. Desktop notifications use the session notification daemon while
+Waddle is running. The build bundles the Rust runtime and native plugins beside
+the executable.
+
+```sh
+cd apps/flutter
+flutter pub get --enforce-lockfile
+GDK_BACKEND=wayland flutter run -d linux
+```
+
+To build an optimized desktop bundle, run `flutter build linux --release`
+from the Flutter app directory. On x86_64 the executable is
+`build/linux/x64/release/bundle/waddle_flutter`. Keep its `lib` and `data`
+directories beside it. The CI bundle uses the repository's Nix dependencies.
+
+For an independent Android APK, run these commands from the repository root.
+Gradle builds the Rust libraries for arm64 and x86_64 as part of the app build.
+After SDK setup, `flutter run -d <device-id>` from `apps/flutter` uses the same
+Gradle integration.
 
 ```sh
 scripts/setup-flutter-android.sh
-scripts/build-flutter-rust.sh --android
 scripts/flutter-ci.sh apk
 ```
 
@@ -122,8 +141,8 @@ and retirement; Dart/native ABI conversion and Rust timeline trust; account
 handoff, authentication cancellation and stale operations; encrypted transfers;
 call permission/SID races; and the UI in light/dark/wallpaper colors, wide panes,
 320px/2× text, both reading orders and keyboard/reply/mention layouts. Android
-emulator smoke verifies the standalone bootstrap, secure storage and packaged
-Rust library. Each claim of passing verification must be tied to its run result.
+and headless Weston smoke tests exercise the standalone bootstrap, secure storage
+and packaged Rust library under their respective operating systems. Each claim of passing verification must be tied to its run result.
 
 To export synthetic UI previews:
 
