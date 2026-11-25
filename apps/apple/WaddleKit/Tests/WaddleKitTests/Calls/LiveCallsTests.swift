@@ -23,8 +23,8 @@ struct LiveCallsTests {
         #expect(calls[0].action == .join)
         #expect(calls[0].meta == "Group call · 3 people")
         #expect(calls[0].headcount == "3 people")
-        #expect(calls[0].preview() == "Ada, Linus +1")
-        #expect(calls[0].spoken == "Join Design, Group call · 3 people, Ada, Linus +1 in call")
+        #expect(calls[0].preview() == "Ada, Linus and 1 more")
+        #expect(calls[0].spoken == "Join Design, group call, 3 people: Ada, Linus and 1 more")
     }
 
     @Test func oneAloneInAVideoCall() {
@@ -64,10 +64,42 @@ struct LiveCallsTests {
         #expect(calls.map(\.title) == ["Room 2", "Room 10", "Zebra", "apple"])
     }
 
-    @Test func theHeadingCountsAndTheChangeIsSaid() {
+    @Test func ourOtherDeviceInTheCallIsYou() {
+        var rows = people("Me", "Ada")
+        rows[0].isSelf = true
+        let call = LiveCalls.list([room("Design", rows)], state: .idle)[0]
+        #expect(call.preview() == "You and Ada")
+        #expect(call.spoken == "Join Design, group call, 2 people: You and Ada")
+    }
+
+    @Test func theHeadingCountsAndACallStartingIsSaid() {
         #expect(LiveCalls.heading(count: 2) == "Live now · 2")
-        #expect(LiveCalls.announcement(count: 0) == "No other active calls.")
-        #expect(LiveCalls.announcement(count: 1) == "1 other active call.")
-        #expect(LiveCalls.announcement(count: 3) == "3 other active calls.")
+        #expect(LiveCalls.announcement(count: 1, besidesOurs: false) == "1 active call.")
+        #expect(LiveCalls.announcement(count: 3, besidesOurs: true) == "3 other active calls.")
+    }
+
+    private func change(_ count: Int, own: String? = nil, online: Bool = true) -> LiveCalls.Change {
+        LiveCalls.Change(count: count, ownCall: own, isOnline: online)
+    }
+
+    @Test func aCallStartingIsNews() {
+        #expect(LiveCalls.isNews(before: change(0), after: change(1)))
+        #expect(LiveCalls.isNews(before: change(1, own: "g1"), after: change(2, own: "g1")))
+    }
+
+    @Test func aCallEndingIsNot() {
+        #expect(!LiveCalls.isNews(before: change(2), after: change(1)))
+    }
+
+    /// Joining takes the call out of the list and leaving puts it back: the call itself says both.
+    @Test func ourOwnComingAndGoingIsNot() {
+        #expect(!LiveCalls.isNews(before: change(1), after: change(0, own: "g1")))
+        #expect(!LiveCalls.isNews(before: change(0, own: "g1"), after: change(1)))
+    }
+
+    /// Presence is cleared when the connection drops and comes back room by room.
+    @Test func roomsComingBackAfterAReconnectAreNot() {
+        #expect(!LiveCalls.isNews(before: change(0, online: false), after: change(1)))
+        #expect(!LiveCalls.isNews(before: change(1), after: change(2, online: false)))
     }
 }

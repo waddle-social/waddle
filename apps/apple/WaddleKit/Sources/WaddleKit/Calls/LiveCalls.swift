@@ -46,16 +46,17 @@ public struct LiveCall: Identifiable, Equatable, Sendable {
         people.count == 1 ? "1 person" : "\(people.count) people"
     }
 
-    /// "Ada, Linus +2": the first names, for whoever cannot see the faces.
+    /// "You, Ada and 2 more": who is there, in words, for whoever cannot see
+    /// the faces. Our own other device in the call is "You", as on the room's banner.
     public func preview(naming limit: Int = 2) -> String {
-        let names = people.map(\.nick)
-        guard names.count > limit else { return names.joined(separator: ", ") }
-        return "\(names.prefix(limit).joined(separator: ", ")) +\(names.count - limit)"
+        let names = people.map { $0.isSelf ? "You" : $0.nick }
+        guard names.count > limit else { return names.formatted(.list(type: .and)) }
+        return "\(names.prefix(limit).joined(separator: ", ")) and \(names.count - limit) more"
     }
 
-    /// The whole card in a sentence.
+    /// The whole card in a sentence, with nothing in it that is read out as a symbol.
     public var spoken: String {
-        "\(action.title) \(title), \(meta), \(preview()) in call"
+        "\(action.title) \(title), \(hasVideo ? "group video call" : "group call"), \(headcount): \(preview())"
     }
 }
 
@@ -101,12 +102,32 @@ public enum LiveCalls {
     /// "Live now · 2"
     public static func heading(count: Int) -> String { "Live now · \(count)" }
 
-    /// What is said when the list changes (web: a polite live region).
-    public static func announcement(count: Int) -> String {
-        switch count {
-        case 0: "No other active calls."
-        case 1: "1 other active call."
-        default: "\(count) other active calls."
+    /// What is said when a call starts in one of our rooms (web: a polite
+    /// live region). "Other" only while we are in a call ourselves.
+    public static func announcement(count: Int, besidesOurs: Bool) -> String {
+        let other = besidesOurs ? "other " : ""
+        return count == 1 ? "1 \(other)active call." : "\(count) \(other)active calls."
+    }
+
+    /// Whether a change in the list is news worth saying: a call has started
+    /// somewhere. Not a call ending, not our own joining or leaving one,
+    /// which moves a call out of or into the list and is said by the call
+    /// itself, and not the rooms coming back one by one after a reconnect.
+    public static func isNews(before: Change, after: Change) -> Bool {
+        after.count > before.count && before.ownCall == after.ownCall && before.isOnline && after.isOnline
+    }
+
+    /// The list at one moment, as far as `isNews` cares.
+    public struct Change: Equatable, Sendable {
+        public let count: Int
+        /// The call our slot holds.
+        public let ownCall: String?
+        public let isOnline: Bool
+
+        public init(count: Int, ownCall: String?, isOnline: Bool) {
+            self.count = count
+            self.ownCall = ownCall
+            self.isOnline = isOnline
         }
     }
 }

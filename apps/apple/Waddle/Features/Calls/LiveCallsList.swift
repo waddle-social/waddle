@@ -128,8 +128,14 @@ struct LiveCallsHost: View {
             }
         }
         .huddleAnimation(.settle, value: calls.map(\.id))
-        .onChange(of: calls.count) { _, count in
-            AccessibilityNotification.Announcement(LiveCalls.announcement(count: count)).post()
+        .onChange(
+            of: LiveCalls.Change(count: calls.count, ownCall: session.calls.state.sid, isOnline: session.connection == .online)
+        ) { before, after in
+            guard LiveCalls.isNews(before: before, after: after) else { return }
+            // Said when there is a pause: it is not worth interrupting anything for.
+            var text = AttributedString(LiveCalls.announcement(count: after.count, besidesOurs: after.ownCall != nil))
+            text.accessibilitySpeechAnnouncementPriority = .low
+            AccessibilityNotification.Announcement(text).post()
         }
     }
 
