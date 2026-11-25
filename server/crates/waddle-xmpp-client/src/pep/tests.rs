@@ -152,6 +152,7 @@ fn parse_pep_iq_results_round_trip() {
                                     "working",
                                     Some("coding"),
                                     Some("flow"),
+                                    None,
                                 ))
                                 .build(),
                         )
@@ -251,7 +252,7 @@ fn on_the_phone() -> UserActivity {
 }
 
 fn on_the_phone_payload() -> Element {
-    build_activity_element_with_specific("talking", Some("on_the_phone"), None)
+    build_activity_element_with_specific("talking", Some("on_the_phone"), None, None)
 }
 
 #[test]

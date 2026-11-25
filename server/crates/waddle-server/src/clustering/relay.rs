@@ -122,6 +122,8 @@ pub use implementation::RelayHandle;
 pub use implementation::RelayMucAdminQuery;
 pub use implementation::RelayMucAdminQueryItem;
 pub use implementation::RelayMucAdminQueryReply;
+pub use implementation::RelayMucVoiceForm;
+pub use implementation::RelayMucVoiceFormReply;
 pub use implementation::RelayPing;
 pub use implementation::RelayPong;
 pub use implementation::RelayReassertMediaGrants;

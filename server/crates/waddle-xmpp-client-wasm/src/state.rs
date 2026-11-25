@@ -738,10 +738,12 @@ pub(crate) struct PendingMamQuery {
 impl PendingMamQuery {
     pub(crate) fn new(
         query_id: &str,
+        queried: Option<&str>,
+        account: Option<&str>,
         responder: oneshot::Sender<DriverResult<waddle_xmpp_client::MamPage>>,
     ) -> Self {
         Self {
-            collector: MamResultCollector::new(query_id),
+            collector: MamResultCollector::new(query_id, queried, account),
             responder,
         }
     }

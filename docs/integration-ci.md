@@ -1,10 +1,11 @@
 # Merge candidate verification
 
 `waddle-integration` runs on every merge-group `checks_requested` event and
-explicit workflow dispatch. It does not run on pull requests: every lane it
-contains is a copy of a workflow that already runs there (the Rust shard workflow
-`waddle-server-rustTests` is dispatch-only and is not part of this graph), and running both
-doubled the demand for each runner, including the 32-core test builder. **Its same-repository `integration`
+explicit workflow dispatch. Ordinary PR updates run the fast project workflows.
+The queue adds the affected server builds, default-feature Rust tests, XMPP
+compliance, Android Gradle tasks, Apple simulator and Swift builds, web client
+builds, and Linux and operator Rust checks. The PostgreSQL all-features shards
+remain a main publish gate. **Its same-repository `integration`
 aggregate is candidate-controlled and is not eligible as the required trusted
 gate.** A candidate can edit the workflow, generator, adapter, tests or task
 definitions and manufacture success. Action SHA pins, read-only permissions,
@@ -22,7 +23,10 @@ settings are changed by this addition.
 ## Coverage and candidate identity
 
 The generator discovers every checked-in workflow with a `pull_request` trigger,
-including native experiments. It copies its jobs, commands, runner sizes,
+and explicitly lists deferred workflows in `queueScopes` in
+`scripts/integration-ci.ts`. Main and PR project trigger paths select queue-only
+checks. The planner copies only verification jobs from the listed sources. It
+preserves commands, runner sizes,
 dependencies, and internal failure checks. Generated verification jobs are capped
 at `contents: read` (or no permissions for a pure result check). They omit
 FlakeHub cache setup, which requires cloud OIDC, retain Hestia, remove explicit
@@ -62,12 +66,9 @@ Thin source workflows retain the original `cuenv ci` executor, using its support
 `--all` selection policy to execute every declared task of each selected thin
 lane with the original runtime, environment, inputs and dependency behavior.
 There is no provider/event override and no switch to the different `cuenv task`
-sandbox implementation. The adapter supports only the reviewed non-publishing
-`pullRequest` pipelines and Android `deviceTests`. It uses explicit-path `cuenv info --json [--meta]` to
-require one exact project, a nonempty executable task inventory, and consistent
-named bindings. Environment/continue-on-error pipeline options and unsupported
-task forms fail. Upstream `--all` independently rejects inline tasks, including
-an inline task that imitates a named binding's JSON output references.
+sandbox implementation. The adapter supports the reviewed verification pipelines and checks the
+native cuenv dry-run task inventory against the project's named task bindings
+before execution. An inline command that imitates a binding must fail this check.
 
 Before execution, the fixed report filename must be absent and every existing
 parent must be a real directory. After a successful CLI exit, the adapter requires
@@ -85,24 +86,13 @@ cryptographic evidence against arbitrary candidate code forging its own files.
 
 ## Verified release bootstrap
 
-The CLI is explicitly pinned to **cuenv 0.76.1** through the shared
-`#CuenvVersion` in `ci/contributors/cuenv.cue` and root
-`config.ci.cuenv.version`. Each of the seven projects is checked separately for
-that resolved configuration. The CUE schema module is pinned to the same
-version, 0.76.1, in `cue.mod/module.cue`.
-
-[Release 0.76.1](https://github.com/cuenv/cuenv/releases/tag/0.76.1) contains the
-supported `ci --all` behavior. The downloaded release artifacts have these SHA-256 pins:
-
-| Asset | SHA-256 |
-| --- | --- |
-| `cuenv-darwin-arm64` | `e83e91d8421b800f08adac153d22bc9be0bb0aa830207f2fed5e6648b1931160` |
-| `cuenv-linux-arm64` | `653bbd07f3241870ad9ebeda358fbf858089a96a27eb42e15c7820cd75fffea4` |
-| `cuenv-linux-x64` | `3d1f29083f7873fef404ef5bb0116269803c9cda7f765de2daf62fa2648bd102` |
+The shared `#CuenvVersion` in `ci/contributors/cuenv.cue` and the CUE
+schema module in `cue.mod/module.cue` pin cuenv 0.81.1. The contributor
+contains the SHA-256 digest for each supported release binary.
 
 The CUE-owned contributor checks OS/architecture, rejects any other version or
 missing digest, downloads to a temporary file, verifies SHA-256 before chmod or
-execution, then requires exact `cuenv 0.76.1` version output. Only then does it
+execution, then requires exact `cuenv 0.81.1` version output. Only then does it
 install into a private `RUNNER_TEMP` directory, append that directory to
 `GITHUB_PATH`, and run that installed binary for VCS materialization. There is no
 `latest` or unverified fallback and no `/usr/local` installation. The integration
@@ -130,7 +120,7 @@ architecture/authority work must be resolved before production activation.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
 NUL-safe diff success. Deleted, empty, malformed, stale or empty-pipeline
-configuration fails project discovery. All seven current thin task/dependency
+configuration fails project discovery. The reviewed thin task/dependency
 closures were inspected: they contain build, test, lint, SDK/bindings and token
 checks, with no publication/deployment tasks; production pipelines are excluded.
 Broader execution adds work, and source task/runtime changes still require
@@ -160,16 +150,15 @@ does not override the real workflow execution context.
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
 Adding or changing a source PR lane without regenerating fails those checks.
-Original PR workflows remain active with their existing privileges and are the
-only copy that runs on a pull request. A merge-group event runs the copies in
-this graph as well; the main ruleset requires no status check, so the queue does
-not wait for them. The planner's own contracts (`integration-ci.test.ts`,
+Fast PR workflows run directly on pull requests. The queue graph runs the
+affected fast and expensive checks once for the combined candidate. The main
+ruleset has no required status check, so the queue does not wait for it. The planner's own contracts (`integration-ci.test.ts`,
 `test_integration_ci_project.py`, `test_cuenv_bootstrap.py`) also run in the
 server `checkCiDrift` task, which pull requests run. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
-warnings in `crates/ci/src/executor/reporting.rs` of cuenv (now CLI 0.76.1). Generated
+warnings in `crates/ci/src/executor/reporting.rs` of cuenv (CLI 0.81.1). Generated
 integration jobs rely on Actions job results rather than those notifications.
 
 ## Open trusted-gate boundary

@@ -228,17 +228,26 @@ pub fn build_mood_clear_element() -> Element {
 }
 
 /// Build an XEP-0108 activity element from a broad activity token and optional text.
+///
+/// `lang` is the BCP 47 language of `text`, emitted as `xml:lang` on `<text/>`.
 #[must_use]
-pub fn build_activity_element(activity: &str, text: Option<&str>) -> Element {
-    build_activity_element_with_specific(activity, None, text)
+pub fn build_activity_element(activity: &str, text: Option<&str>, lang: Option<&str>) -> Element {
+    build_activity_element_with_specific(activity, None, text, lang)
 }
 
 /// Build an XEP-0108 broad activity with an optional specific subactivity and explanatory text.
+///
+/// XEP-0108 Internationalization Considerations: "if a <text/> element is
+/// included the sending application SHOULD also ensure that the <text/>
+/// element or the parent <activity/> element possesses an 'xml:lang'
+/// attribute". `lang` is the BCP 47 tag of `text` and is set on `<text/>`;
+/// an empty tag is treated as absent.
 #[must_use]
 pub fn build_activity_element_with_specific(
     general: &str,
     specific: Option<&str>,
     text: Option<&str>,
+    lang: Option<&str>,
 ) -> Element {
     let mut general_builder = Element::builder(general, NS_ACTIVITY);
     if let Some(specific) = specific {
@@ -246,7 +255,15 @@ pub fn build_activity_element_with_specific(
     }
     let mut builder = Element::builder("activity", NS_ACTIVITY).append(general_builder.build());
     if let Some(text) = text {
-        builder = builder.append(Element::builder("text", NS_ACTIVITY).append(text).build());
+        let mut text_builder = Element::builder("text", NS_ACTIVITY);
+        if let Some(lang) = lang.filter(|lang| !lang.is_empty()) {
+            text_builder = text_builder.attr_ns(
+                minidom::rxml::Namespace::XML,
+                minidom::rxml::xml_ncname!("lang").to_owned(),
+                lang,
+            );
+        }
+        builder = builder.append(text_builder.append(text).build());
     }
     builder.build()
 }
@@ -370,11 +387,12 @@ pub fn build_publish_activity_iq(
     general: &str,
     specific: Option<&str>,
     text: Option<&str>,
+    lang: Option<&str>,
 ) -> Element {
     build_pep_publish_iq(
         id,
         NS_ACTIVITY,
-        build_activity_element_with_specific(general, specific, text),
+        build_activity_element_with_specific(general, specific, text, lang),
     )
 }
 
@@ -470,7 +488,7 @@ pub trait PepExt {
     ///
     /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn clear_mood(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
-    /// Queue a PEP activity publication with optional explanatory text.
+    /// Queue a PEP activity publication with optional explanatory text and its `xml:lang`.
     ///
     /// # Errors
     ///
@@ -479,6 +497,7 @@ pub trait PepExt {
         &'a self,
         activity: &'a str,
         text: Option<&'a str>,
+        lang: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
     /// Queue an empty PEP activity publication to clear the current activity.
     ///
@@ -524,12 +543,17 @@ impl PepExt for ClientHandle {
         self.send_stanza(build_pep_clear_iq(&id, NS_MOOD)).await
     }
 
-    async fn publish_activity(&self, activity: &str, text: Option<&str>) -> ClientResult<()> {
+    async fn publish_activity(
+        &self,
+        activity: &str,
+        text: Option<&str>,
+        lang: Option<&str>,
+    ) -> ClientResult<()> {
         let id = Uuid::new_v4().to_string();
         self.send_stanza(build_pep_publish_iq(
             &id,
             NS_ACTIVITY,
-            build_activity_element(activity, text),
+            build_activity_element(activity, text, lang),
         ))
         .await
     }

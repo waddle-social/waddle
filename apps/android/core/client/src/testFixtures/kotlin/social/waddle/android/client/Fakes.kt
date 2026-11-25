@@ -1403,7 +1403,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         profileVerbFailure?.let { throw it }
     }
 
-    override suspend fun publishActivity(general: String, specific: String?, text: String?) {
+    override suspend fun publishActivity(general: String, specific: String?, text: String?, lang: String?) {
         profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishActivity(general, specific, text)
         profileVerbFailure?.let { throw it }

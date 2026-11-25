@@ -72,7 +72,48 @@ describe("graph parity", () => {
     expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
     expect(Object.keys(workflow.on).sort()).toEqual(["merge_group", "workflow_dispatch"]);
   });
-  test("discovers all existing PR lanes, including experiment and native lanes", () => {
+  test("expensive work runs once in the affected queue graph and never on PR updates", () => {
+    const lanes = readLanes();
+    const cases = [
+      ["operational-qualification", "server/experiments/operational-qualification/Cargo.toml"],
+      ["waddle-android-queuechecks", "apps/android/app/src/main/AndroidManifest.xml"],
+      ["waddle-apple-default", "apps/apple/WaddleKit/Package.swift"],
+      ["waddle-chat-queuechecks", "server/crates/waddle-xmpp-client-wasm/src/lib.rs"],
+      ["waddle-linux-queuechecks", "apps/linux/src/main.rs"],
+      ["waddle-operator-queuechecks", "operator/crates/waddle-operator/src/main.rs"],
+      ["waddle-server-queuechecks", "server/crates/waddle-server/src/lib.rs"],
+      ["waddle-server-namespacerustchecks", "server/crates/waddle-server/src/lib.rs"],
+      ["waddle-server-xmppcompliance", "server/crates/waddle-xmpp/src/lib.rs"],
+      ["waddle-server-federationgrantfence", "server/experiments/grant-fence/src/lib.rs"],
+    ];
+    for (const [name, changed] of cases) {
+      const matches = lanes.filter(lane => lane.file === name + ".yml");
+      expect(matches).toHaveLength(1);
+      const [lane] = matches;
+      expect(Object.keys(lane.workflow.on)).not.toContain("pull_request");
+      expect(applicable(lane, [changed]), name + " should cover " + changed).toBe(true);
+      expect(applicable(lane, ["website/src/unrelated.astro"])).toBe(false);
+      expect(applicable(lane, [".github/workflows/" + lane.file])).toBe(true);
+    }
+    const rust = lanes.find(lane => lane.file === "waddle-server-namespacerustchecks.yml")!;
+    for (const path of ["ci/cache-benchmark/cargo.cue", "scripts/ci-timings.py", "server/.config/required-cluster-tests.txt"]) {
+      expect(applicable(rust, [path]), path).toBe(false);
+    }
+    const serverPr = lanes.find(lane => lane.file === "waddle-server-pullrequest.yml")!;
+    expect(Object.keys(serverPr.workflow.jobs)).toEqual(["pullRequestChecks"]);
+    expect(lanes.some(lane => Object.hasOwn(lane.workflow.jobs, "publishContainerImage"))).toBe(false);
+  });
+
+  test("removing a deferred workflow fails queue planning", () => {
+    const directory = mkdtempSync(join(tmpdir(), "waddle-queue-inventory-"));
+    try {
+      cpSync(".github/workflows", directory, { recursive: true });
+      rmSync(join(directory, "waddle-server-queuechecks.yml"));
+      expect(() => readLanes(directory)).toThrow("Missing deferred workflow waddle-server-queuechecks");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test("discovers PR and deferred verification lanes", () => {
     const lanes = readLanes();
     const workflow = Bun.YAML.parse(generate(lanes)) as any;
     for (const name of ["apple", "android", "chat", "federationgrantfence", "namespacerustchecks", "xmppcompliance"]) {
@@ -129,7 +170,7 @@ describe("immutable generated action references", () => {
   });
 });
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -144,6 +185,7 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
   };
   try {
     mkdirSync(join(directory, ".github/workflows"), { recursive: true });
+    cpSync(".github/workflows", join(directory, ".github/workflows"), { recursive: true });
     writeFileSync(join(directory, ".github/workflows/example.yml"), Bun.YAML.stringify(lane(["old/**"]).workflow));
     mkdirSync(join(directory, "old"));
     writeFileSync(join(directory, "old/a\nfile.rs"), "unchanged payload");
@@ -161,7 +203,8 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
     const env = { GITHUB_EVENT_NAME: "merge_group", GITHUB_EVENT_PATH: eventPath, GITHUB_SHA: sha, GITHUB_OUTPUT: outputPath };
     const result = run([process.execPath, script, "plan"], env);
     expect(result.exitCode).toBe(0);
-    expect(readFileSync(outputPath, "utf8")).toContain('expected=["example__build","example__verify"]');
+    const expected = readFileSync(outputPath, "utf8").split("\n").find(line => line.startsWith("expected="))!;
+    expect(JSON.parse(expected.slice("expected=".length)).filter((id: string) => id.startsWith("example__"))).toEqual(["example__build", "example__verify"]);
     const report = JSON.parse(result.stdout.toString());
     expect(report.changedFiles).toEqual(["new/a\nfile.rs", "old/a\nfile.rs"]);
     const thin = lane(["old/**"]);

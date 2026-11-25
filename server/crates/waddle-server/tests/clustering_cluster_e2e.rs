@@ -3534,6 +3534,231 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
     drop(client_a);
 }
 
+/// XEP-0045 §7.13 and §8.6 voice requests and approvals for a room whose
+/// actor lives on the other replica: a visitor on node B asks for voice, the
+/// moderators (on both nodes) receive the approval form, and a moderator
+/// on node B approves it, all carried to the claim owner on node A.
+#[tokio::test]
+async fn voice_request_and_approval_route_to_foreign_room_owner() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping voice_request_and_approval_route_to_foreign_room_owner: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const NS_MUC: &str = "http://jabber.org/protocol/muc";
+    const NS_MUC_ADMIN: &str = "http://jabber.org/protocol/muc#admin";
+    const NS_XDATA: &str = "jabber:x:data";
+    const FORM_TYPE_REQUEST: &str = "http://jabber.org/protocol/muc#request";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let owner_password = server_b.fixed_account_password().to_string();
+    let room = format!("voice-foreign-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+
+    // Node A holds the room claim and its owner.
+    let mut owner = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &owner_password,
+        &format!("voice-owner-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("the owner connects to node A");
+    owner
+        .send(&format!(
+            r#"<presence to="{room}/owner"><x xmlns="{NS_MUC}"/></presence>"#
+        ))
+        .await
+        .expect("the owner joins");
+    owner
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("the owner's join completes");
+
+    // Two sessions of the peer account join through node B, whose room
+    // actor is on node A: a moderator and a visitor.
+    let connect_b = |resource: &str| {
+        let url = server_b.ws_url();
+        let resource = format!("{resource}-{}", uuid::Uuid::new_v4());
+        async move {
+            WsXmppClient::connect_and_auth(
+                &url,
+                DOMAIN,
+                CLUSTER_PEER_USERNAME,
+                CLUSTER_PEER_PASSWORD,
+                &resource,
+            )
+            .await
+            .expect("a client connects to node B")
+        }
+    };
+    let mut moderator = connect_b("voice-mod").await;
+    let mut visitor = connect_b("voice-visitor").await;
+    for (client, nick) in [(&mut moderator, "mod-b"), (&mut visitor, "visitor-b")] {
+        client
+            .send(&format!(
+                r#"<presence to="{room}/{nick}"><x xmlns="{NS_MUC}"/></presence>"#
+            ))
+            .await
+            .expect("a client of node B joins");
+        client
+            .recv_until(|frame| frame.contains("<subject"))
+            .await
+            .expect("the relayed join completes");
+    }
+    let set_role = |id: &str, nick: &str, role: &str| {
+        format!(
+            r#"<iq type="set" id="{id}" to="{room}"><query xmlns="{NS_MUC_ADMIN}"><item nick="{nick}" role="{role}"/></query></iq>"#
+        )
+    };
+    for (id, nick, role) in [
+        ("role-mod", "mod-b", "moderator"),
+        ("role-visitor", "visitor-b", "visitor"),
+    ] {
+        owner
+            .send(&set_role(id, nick, role))
+            .await
+            .expect("the owner changes a role");
+        owner
+            .recv_matching(|frame| frame.contains(id))
+            .await
+            .expect("the role change is answered");
+    }
+    // The visitor has been told of its role before it asks.
+    visitor
+        .recv_until(|frame| {
+            frame.contains(&format!("{room}/visitor-b")) && frame.contains("role=\"visitor\"")
+        })
+        .await
+        .expect("the visitor learns of its role");
+
+    // §7.13: the visitor on node B asks the room.
+    let form = |extra: &str| {
+        format!(
+            r#"<x xmlns="{NS_XDATA}" type="submit"><field var="FORM_TYPE"><value>{FORM_TYPE_REQUEST}</value></field><field var="muc#role"><value>participant</value></field>{extra}</x>"#
+        )
+    };
+    visitor
+        .send(&format!(
+            r#"<message to="{room}" id="voice-req">{}</message>"#,
+            form("")
+        ))
+        .await
+        .expect("the visitor requests voice");
+    // The owner's session and the moderator on node B both receive the
+    // approval form, from the room.
+    let at_owner = owner
+        .recv_matching(|frame| frame.contains(FORM_TYPE_REQUEST) && frame.contains("visitor-b"))
+        .await
+        .expect("the owner receives the approval form");
+    assert!(
+        at_owner.contains(&format!("from=\"{room}\""))
+            || at_owner.contains(&format!("from='{room}'")),
+        "{at_owner}"
+    );
+    let at_moderator = moderator
+        .recv_matching(|frame| frame.contains(FORM_TYPE_REQUEST) && frame.contains("visitor-b"))
+        .await
+        .expect("the moderator on node B receives the approval form");
+    assert!(!at_moderator.contains("type=\"error\"") && !at_moderator.contains("type='error'"));
+
+    // A second request in quick succession is refused by the owner and the
+    // refusal reaches the visitor on node B.
+    visitor
+        .send(&format!(
+            r#"<message to="{room}" id="voice-req-2">{}</message>"#,
+            form("")
+        ))
+        .await
+        .expect("the visitor requests voice again");
+    let refused = visitor
+        .recv_matching(|frame| frame.contains("voice-req-2") && frame.contains("<error"))
+        .await
+        .expect("the repeat request is refused");
+    assert!(refused.contains("resource-constraint"), "{refused}");
+
+    // §8.6: the moderator on node B answers with the form, allowed.
+    let visitor_full = {
+        at_moderator
+            .split("muc#jid")
+            .nth(1)
+            .and_then(|rest| rest.split("<value>").nth(1))
+            .and_then(|rest| rest.split("</value>").next())
+            .expect("the approval form names the requester")
+            .to_owned()
+    };
+    moderator
+        .send(&format!(
+            r#"<message to="{room}" id="voice-allow">{}</message>"#,
+            form(&format!(
+                r#"<field var="muc#jid"><value>{visitor_full}</value></field><field var="muc#roomnick"><value>visitor-b</value></field><field var="muc#request_allow"><value>true</value></field>"#
+            ))
+        ))
+        .await
+        .expect("the moderator approves");
+    let granted = visitor
+        .recv_until(|frame| {
+            frame.contains(&format!("{room}/visitor-b")) && frame.contains("role=\"participant\"")
+                || frame.contains(&format!("{room}/visitor-b"))
+                    && frame.contains("role='participant'")
+        })
+        .await
+        .expect("the visitor is granted voice");
+    assert!(
+        granted
+            .iter()
+            .all(|frame| !frame.contains("type=\"error\"")),
+        "{granted:?}"
+    );
+    owner
+        .recv_matching(|frame| {
+            frame.contains(&format!("{room}/visitor-b"))
+                && (frame.contains("role=\"participant\"") || frame.contains("role='participant'"))
+        })
+        .await
+        .expect("the owner sees the role change");
+
+    // A non-moderator on node B is refused, and the refusal comes back.
+    visitor
+        .send(&format!(
+            r#"<message to="{room}" id="voice-forged">{}</message>"#,
+            form(&format!(
+                r#"<field var="muc#jid"><value>{visitor_full}</value></field><field var="muc#roomnick"><value>visitor-b</value></field><field var="muc#request_allow"><value>true</value></field>"#
+            ))
+        ))
+        .await
+        .expect("the visitor sends a forged approval");
+    let forged = visitor
+        .recv_matching(|frame| frame.contains("voice-forged") && frame.contains("<error"))
+        .await
+        .expect("the forged approval is refused");
+    assert!(forged.contains("forbidden"), "{forged}");
+
+    drop(owner);
+    drop(moderator);
+    drop(visitor);
+    drop(server_a);
+    drop(server_b);
+}
+
 /// #1594: a `participant_joined` webhook that lands on the replica NOT
 /// holding the room's claim must converge that participant's media
 /// grants immediately — relayed to the claim owner, which re-derives

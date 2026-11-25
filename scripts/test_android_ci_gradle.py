@@ -193,6 +193,7 @@ class AndroidCiGradleTests(unittest.TestCase):
         workflows = (
             "waddle-android-default.yml",
             "waddle-android-pullrequest.yml",
+            "waddle-android-queuechecks.yml",
             "waddle-android-devicetests.yml",
         )
         for workflow in workflows:

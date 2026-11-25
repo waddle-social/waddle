@@ -47,9 +47,12 @@ public struct ThreadHeader: Equatable, Sendable {
     /// count shown under the root.
     public init(root: TimelineItem?, replies: [TimelineItem], replyCount: Int, breadcrumb: [ThreadCrumb]) {
         title = root.map(ThreadSummary.snippet(of:))
-        startedBy = root.map(\.authorName).flatMap { $0.isEmpty ? nil : $0 }
+        // A call's chat is headed by the room's own announcement, which
+        // nobody wrote: the room is neither its author nor one of its faces.
+        let author = root.flatMap { $0.callAnchor == nil ? $0 : nil }
+        startedBy = author.map(\.authorName).flatMap { $0.isEmpty ? nil : $0 }
         self.replyCount = replyCount
-        let everyone = ThreadSummary(replyCount: replyCount, replies: (root.map { [$0] } ?? []) + replies, maxFaces: Self.maxFaces)
+        let everyone = ThreadSummary(replyCount: replyCount, replies: (author.map { [$0] } ?? []) + replies, maxFaces: Self.maxFaces)
         lastActivity = everyone.latestReply?.sentAt
         faces = everyone.faces
         otherParticipantCount = everyone.otherParticipantCount

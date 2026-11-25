@@ -50,6 +50,21 @@ pub enum VoiceFormError {
     IncompleteApproval,
 }
 
+/// Whether `message` is a voice approval form (§8.6) as a room puts it to a
+/// moderator: a normal message carrying a `muc#request` form of type `form`.
+pub fn is_voice_approval_form(message: &Message) -> bool {
+    matches!(message.type_, MessageType::Normal)
+        && message
+            .payloads
+            .iter()
+            .filter(|payload| is_data_form(payload))
+            .filter_map(|payload| DataForm::from_element(payload).ok())
+            .any(|form| {
+                form.form_type == FormType::Form
+                    && form.form_type_value() == Some(FORM_TYPE_MUC_REQUEST)
+            })
+}
+
 /// Classify a message addressed to a room as a voice request or approval.
 ///
 /// `Ok(None)` is any other message. A `muc#request` submit that cannot be
@@ -154,6 +169,19 @@ mod tests {
         message.type_ = MessageType::Normal;
         message.payloads.push(form.to_element());
         message
+    }
+
+    #[test]
+    fn the_rooms_approval_form_is_recognised_and_a_submit_is_not() {
+        let room: BareJid = "coven@chat.shakespeare.lit".parse().unwrap();
+        let moderator: FullJid = "crone@shakespeare.lit/desk".parse().unwrap();
+        let requester: FullJid = "hag66@shakespeare.lit/pda".parse().unwrap();
+        let form = build_voice_approval_message(&room, &moderator, "id-1", &requester, "witch");
+        assert!(is_voice_approval_form(&form));
+        assert!(!is_voice_approval_form(&submit(vec![Field::boolean(
+            FIELD_REQUEST_ALLOW,
+            true
+        )])));
     }
 
     #[test]

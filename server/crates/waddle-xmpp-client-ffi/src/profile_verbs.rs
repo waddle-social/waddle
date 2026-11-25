@@ -530,12 +530,14 @@ impl WaddleClient {
 
     /// XEP-0108: publish a user activity. `general` must be one of the
     /// 12 registry categories; `specific` (when present) is free-form
-    /// but must be a wire-safe element name.
+    /// but must be a wire-safe element name. `lang` is the BCP 47 language
+    /// tag of `text` (the app's UI locale), sent as `xml:lang` on `<text/>`.
     pub async fn publish_activity(
         &self,
         general: String,
         specific: Option<String>,
         text: Option<String>,
+        lang: Option<String>,
     ) -> Result<(), WaddleError> {
         require_activity_general(&general)?;
         if let Some(ref specific) = specific {
@@ -546,6 +548,7 @@ impl WaddleClient {
             &general,
             specific.as_deref(),
             text.as_deref(),
+            lang.as_deref(),
         ))
         .await
     }

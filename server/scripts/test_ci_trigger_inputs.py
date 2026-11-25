@@ -17,6 +17,7 @@ part of the closure: no lane runs these crates' tests.
 """
 
 from pathlib import Path
+import json
 import re
 import subprocess
 import tomllib
@@ -181,6 +182,19 @@ class ExplicitInputListsTest(unittest.TestCase):
                         and entry not in FILES
                     ]
                     self.assertEqual([], stale, "listed files that are not tracked")
+
+
+class QueueScopeTest(unittest.TestCase):
+    def test_nix_queue_jobs_cover_the_server_check_fileset(self):
+        scopes = json.loads((ROOT / "ci/rust-tests/queue-paths.json").read_text())
+        expected = (ROOT / "flake.nix").read_text().split(
+            "serverCheckFiles = lib.fileset.unions [", 1
+        )[1].split("];", 1)[0]
+        entries = [line.strip().removeprefix("./") for line in expected.splitlines() if line.strip()]
+        self.assertTrue(all(path.startswith("server/") for path in entries))
+        files = covered(entries, FILES)
+        self.assertTrue(files)
+        self.assertEqual([], sorted(files - covered(scopes["waddle-server-queuechecks"], FILES)))
 
 
 class CargoConfigTest(unittest.TestCase):

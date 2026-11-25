@@ -665,7 +665,13 @@ export class PubsubManager {
 
   async publishActivity(activity: ActivityPublication): Promise<void> {
     const xmpp = await this.deps.requireConnectedXmpp();
-    await xmpp.publish_activity?.({ general: activity.general, ...(activity.specific ? { specific: activity.specific } : {}), ...(activity.text ? { text: activity.text } : {}) });
+    // XEP-0108: free-text activity descriptions carry the UI language as xml:lang.
+    const lang = typeof navigator === "undefined" ? "" : navigator.language;
+    await xmpp.publish_activity?.({
+      general: activity.general,
+      ...(activity.specific ? { specific: activity.specific } : {}),
+      ...(activity.text ? { text: activity.text, ...(lang ? { lang } : {}) } : {}),
+    });
   }
 
   async retractActivity(): Promise<void> {
