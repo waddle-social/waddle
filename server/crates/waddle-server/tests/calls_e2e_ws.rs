@@ -112,25 +112,30 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         .await
         .expect("disco#info");
 
+    // The bare domain is not a Jingle/RTP endpoint (1:1 sessions run
+    // between clients; the Muji responder is the `calls.<domain>`
+    // mixer), so it advertises only the domain-level call features.
+    for ns in [
+        "urn:xmpp:jingle-message:0",
+        "urn:xmpp:extdisco:2",
+        "urn:waddle:transports:livekit:0",
+        NS_WADDLE_CALL_LIFECYCLE,
+    ] {
+        assert!(
+            resp.contains(ns),
+            "disco#info must advertise {ns}; got: {resp}"
+        );
+    }
     for ns in [
         "urn:xmpp:jingle:1",
         "urn:xmpp:jingle:apps:rtp:1",
         "urn:xmpp:jingle:apps:rtp:audio",
         "urn:xmpp:jingle:apps:rtp:video",
-        "urn:xmpp:jingle-message:0",
-        "urn:xmpp:extdisco:2",
-        "urn:waddle:transports:livekit:0",
-        NS_WADDLE_CALL_LIFECYCLE,
-        // XEP-0272 (Muji) — MUC group call presence advertisement +
-        // Jingle session-initiate join surface to the SFU mixer.
-        // Backed by the Muji branch in `JingleHandler`; the legacy
-        // `urn:waddle:muc-call:0` IQ surface and `MucCallHandler`
-        // have been removed.
         "urn:xmpp:jingle:muji:0",
     ] {
         assert!(
-            resp.contains(ns),
-            "disco#info must advertise {ns}; got: {resp}"
+            !resp.contains(ns),
+            "the server domain must not advertise {ns}; got: {resp}"
         );
     }
 
@@ -220,10 +225,14 @@ async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
         resp.contains("urn:xmpp:jingle:1"),
         "mixer must advertise base Jingle feature; got: {resp}"
     );
-    assert!(
-        resp.contains("urn:waddle:transports:livekit:0"),
-        "mixer must advertise the LiveKit transport feature; got: {resp}"
-    );
+    for ns in [
+        "urn:xmpp:jingle:apps:rtp:1",
+        "urn:xmpp:jingle:apps:rtp:audio",
+        "urn:xmpp:jingle:apps:rtp:video",
+        "urn:waddle:transports:livekit:0",
+    ] {
+        assert!(resp.contains(ns), "mixer must advertise {ns}; got: {resp}");
+    }
 }
 
 #[tokio::test]
