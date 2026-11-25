@@ -383,8 +383,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn services_query_returns_turns_and_stun_entries() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn services_query_returns_turns_and_stun_entries() {
+        // Minting bumps the process-wide credential counter; hold the
+        // metrics lock so the counter assertions elsewhere stay exact.
+        let _metrics = crate::telemetry::test_support::acquire().await;
         let iq = services_get_iq();
         let jid = test_jid();
         let handler = ExtDiscoHandler::new(fixture_sfu(), 443, 3478);
@@ -567,8 +570,11 @@ mod tests {
         assert_eq!(err.defined_condition, DefinedCondition::BadRequest);
     }
 
-    #[test]
-    fn services_query_with_type_turn_returns_only_turn_entry() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn services_query_with_type_turn_returns_only_turn_entry() {
+        // Minting bumps the process-wide credential counter; hold the
+        // metrics lock so the counter assertions elsewhere stay exact.
+        let _metrics = crate::telemetry::test_support::acquire().await;
         let iq = Iq::Get {
             from: Some("alice@waddle.test/desktop".parse().unwrap()),
             to: Some("waddle.test".parse().unwrap()),
