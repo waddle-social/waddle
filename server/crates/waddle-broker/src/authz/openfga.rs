@@ -516,19 +516,22 @@ impl PermissionBackend for OpenFgaPermissionBackend {
     }
 
     async fn delete_tenant_store(&self, tenant: &TenantId) -> Result<(), PermissionBackendError> {
-        let removed = {
-            let mut stores = self.stores.write().map_err(|_| {
-                PermissionBackendError::Backend("OpenFGA store map poisoned".to_owned())
-            })?;
-            stores.remove(tenant)
-        };
-        if let Some(store_ref) = removed {
+        if let Some(store_ref) = self.store_ref(tenant) {
             self.send_empty::<serde_json::Value>(
                 reqwest::Method::DELETE,
                 &format!("/stores/{}", store_ref.store_id),
                 None,
             )
             .await?;
+            let mut stores = self.stores.write().map_err(|_| {
+                PermissionBackendError::Backend("OpenFGA store map poisoned".to_owned())
+            })?;
+            if stores
+                .get(tenant)
+                .is_some_and(|current| current.store_id == store_ref.store_id)
+            {
+                stores.remove(tenant);
+            }
         }
         Ok(())
     }
@@ -553,6 +556,7 @@ struct MockOpenFgaStore {
 struct MockOpenFgaState {
     stores: HashMap<String, MockOpenFgaStore>,
     requests: Vec<RecordedOpenFgaRequest>,
+    fail_next_deletes: usize,
 }
 
 /// Real HTTP/1.1 in-process OpenFGA server for deterministic integration,
@@ -615,6 +619,14 @@ impl InProcessOpenFgaServer {
             .read()
             .map(|s| s.stores.contains_key(store_id))
             .unwrap_or(false)
+    }
+
+    /// Causes the next `count` `DELETE /stores/{store_id}` requests to fail
+    /// with HTTP 500 before modifying server state (for retry tests).
+    pub fn fail_next_deletes(&self, count: usize) {
+        if let Ok(mut guard) = self.state.write() {
+            guard.fail_next_deletes = count;
+        }
     }
 }
 
@@ -732,6 +744,14 @@ fn route_openfga_request(
 
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if segments.len() == 2 && segments[0] == "stores" && method == "DELETE" {
+        if guard.fail_next_deletes > 0 {
+            guard.fail_next_deletes -= 1;
+            return (
+                500,
+                "Internal Server Error",
+                Some(json!({"message": "injected transient delete failure"})),
+            );
+        }
         let store_id = segments[1];
         guard.stores.remove(store_id);
         return (204, "No Content", None);
