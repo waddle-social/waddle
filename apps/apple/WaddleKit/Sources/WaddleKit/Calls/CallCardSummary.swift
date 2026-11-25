@@ -1,9 +1,7 @@
 /// The line under the title of the sidebar's current-call card (web
 /// `CurrentCallPanel`): how the call is doing, what kind it is, and who is in it.
 public enum CallCardSummary {
-    public enum Status: Equatable, Sendable {
-        case connecting, connected, reconnecting
-    }
+    public typealias Status = CallSessionStatus
 
     public enum Kind: Equatable, Sendable {
         case direct(CallMedia)
