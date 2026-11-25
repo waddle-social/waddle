@@ -64,6 +64,8 @@ mod xep0045_partial_fanout;
 mod failure_matrix;
 mod sm_resume_token_support;
 
+mod pep_caps_support;
+
 use base64::Engine;
 use cluster_support::{
     activate_mailbox_epoch, cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool,
@@ -4410,6 +4412,222 @@ async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
 
     let _ = admin.close().await;
     let _ = peer.close().await;
+    drop(server_a);
+    drop(server_b);
+}
+
+/// XEP-0163 section 3 on a cluster: a publication is filtered by the
+/// caps of each contact resource on the replica that processed the publish,
+/// which does not hold a contact's socket when the contact is connected to
+/// another replica. The caps are resolved by the replica that holds the
+/// socket (disco#info reply, XEP-0115 section 5.4), so they must be shared:
+/// the `<c/>` in the contact's replicated presence names the key, and the
+/// shared `entity_caps` table holds the verified answer.
+///
+/// Admin publishes on node A; its contact `cluster-peer` is on node B with
+/// one resource advertising `+notify` and one that does not. Before caps were
+/// shared, node A found no caps for either resource and notified neither.
+#[tokio::test]
+async fn pep_notification_reaches_a_contact_connected_to_another_node() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping pep_notification_reaches_a_contact_connected_to_another_node: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const ADMIN_BARE: &str = "admin@localhost";
+    const PEER_BARE: &str = "cluster-peer@localhost";
+    const TUNE_NODE: &str = "http://jabber.org/protocol/tune";
+    const TUNE_NOTIFY: &str = "http://jabber.org/protocol/tune+notify";
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Node B started last: its generated password is admin's live credential.
+    let admin_password = server_b.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("pep-xnode-pub-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("admin connects to node A");
+    let mut interested = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("pep-xnode-notify-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("cluster peer connects to node B");
+    let mut uninterested = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        CLUSTER_PEER_USERNAME,
+        CLUSTER_PEER_PASSWORD,
+        &format!("pep-xnode-quiet-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("second cluster peer resource connects to node B");
+
+    let _ = send_roster_get(&mut admin, "pep-xnode-admin-roster").await;
+    let _ = send_roster_get(&mut interested, "pep-xnode-peer-roster").await;
+    admin
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::None,
+            None,
+            None,
+        ))
+        .await
+        .expect("admin sends available presence");
+    interested
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::None,
+            None,
+            None,
+        ))
+        .await
+        .expect("peer sends available presence");
+
+    // The peer becomes a presence-from contact of admin: the roster
+    // standing XEP-0163 section 3 delivers to.
+    interested
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::Subscribe,
+            Some(ADMIN_BARE),
+            None,
+        ))
+        .await
+        .expect("peer subscribes to admin");
+    admin
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame_has_attr(frame, "type", "subscribe")
+                && frame_attr_starts_with(frame, "from", PEER_BARE)
+        })
+        .await
+        .expect("admin receives the subscription request");
+    admin
+        .send(&presence_xml(
+            xmpp_parsers::presence::Type::Subscribed,
+            Some(PEER_BARE),
+            None,
+        ))
+        .await
+        .expect("admin approves");
+    interested
+        .recv_matching(|frame| {
+            frame.contains("<presence")
+                && frame_has_attr(frame, "type", "subscribed")
+                && frame_attr_starts_with(frame, "from", ADMIN_BARE)
+        })
+        .await
+        .expect("peer receives the approval");
+
+    // Each peer resource advertises caps that node B resolves. The names are
+    // unique per run: the verified answer for a `ver` persists in the shared
+    // database, and a known `ver` is not queried again.
+    let run = uuid::Uuid::new_v4();
+    pep_caps_support::go_available_with_caps(
+        &mut interested,
+        &format!("pep-xnode-notify-{run}"),
+        &["http://jabber.org/protocol/disco#info", TUNE_NOTIFY],
+    )
+    .await;
+    pep_caps_support::go_available_with_caps(
+        &mut uninterested,
+        &format!("pep-xnode-quiet-{run}"),
+        &["http://jabber.org/protocol/disco#info"],
+    )
+    .await;
+    // Frames of one connection are handled in order: the ping result proves
+    // node B handled the disco#info answer and recorded the caps.
+    for (client, id) in [
+        (&mut interested, "pep-xnode-ping-notify"),
+        (&mut uninterested, "pep-xnode-ping-quiet"),
+    ] {
+        client
+            .send(&format!(
+                "<iq xmlns=\"jabber:client\" type=\"get\" id=\"{id}\">\
+                 <ping xmlns=\"urn:xmpp:ping\"/></iq>"
+            ))
+            .await
+            .expect("ping");
+        client
+            .recv_matching(|frame| frame.contains(&format!("id='{id}'")) && frame.contains("<iq"))
+            .await
+            .expect("ping result");
+    }
+
+    admin
+        .send(&format!(
+            "<iq xmlns=\"jabber:client\" type=\"set\" id=\"pep-xnode-publish\">\
+             <pubsub xmlns=\"{NS_PUBSUB}\"><publish node=\"{TUNE_NODE}\">\
+             <item id=\"current\"><tune xmlns=\"{TUNE_NODE}\"><artist>Waddle</artist></tune></item>\
+             </publish></pubsub></iq>"
+        ))
+        .await
+        .expect("admin publishes");
+    let publish_result = admin
+        .recv_matching(|frame| frame.contains("id='pep-xnode-publish'") && frame.contains("<iq"))
+        .await
+        .expect("publish result");
+    assert!(
+        publish_result.contains("type='result'"),
+        "publish succeeds: {publish_result}"
+    );
+
+    let notification =
+        pep_caps_support::wait_for_event(&mut interested, TUNE_NODE, Duration::from_secs(10))
+            .await
+            .expect(
+                "a contact resource on another node that advertised +notify receives the \
+                 publication",
+            );
+    assert!(
+        frame_attr_starts_with(&notification, "from", ADMIN_BARE),
+        "the notification comes from the owner's bare JID: {notification}"
+    );
+    assert!(
+        frame_attr_starts_with(
+            &notification,
+            "to",
+            &format!("{PEER_BARE}/pep-xnode-notify-")
+        ),
+        "the notification is addressed to the interested resource: {notification}"
+    );
+    // The fan-out pass that reached the first resource also decided on the
+    // second: without +notify it is not notified.
+    assert!(
+        pep_caps_support::wait_for_event(&mut uninterested, TUNE_NODE, Duration::from_secs(2))
+            .await
+            .is_none(),
+        "a resource without +notify is not notified"
+    );
+
+    let _ = admin.close().await;
+    let _ = interested.close().await;
+    let _ = uninterested.close().await;
     drop(server_a);
     drop(server_b);
 }

@@ -938,7 +938,13 @@ async fn resolve_caps_for_presence(
     };
     let resolver = &state.deps.protocol.caps_resolver;
     let cache_key = waddle_xmpp::xep::xep0115::CapsCacheKey::from_caps(&caps);
-    if resolver.cache().contains(&cache_key) {
+    // This process's cache, then the entries every replica shares: another
+    // replica may have verified this `(hash, ver)` already.
+    if resolver
+        .shared(state.deps.app_state.db_pool.entity_caps(), &cache_key)
+        .await
+        .is_some()
+    {
         resolver.record_resource(sender_jid, cache_key);
         return;
     }
