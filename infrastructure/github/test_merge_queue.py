@@ -1,8 +1,33 @@
 from copy import deepcopy
+import json
+from pathlib import Path
+import subprocess
 import unittest
 from unittest.mock import patch
 
-from merge_queue import REPO, RULESET_ID, plan, reconcile
+from merge_queue import REPO, RULESET_ID, api, plan, reconcile
+
+
+class RulesetRequestTest(unittest.TestCase):
+    def test_put_reads_complete_file_and_removes_it_after_exit(self):
+        payload = {"name": "révision", "rules": []}
+        for exit_code in (0, 1):
+            with self.subTest(exit_code=exit_code):
+                def gh(command):
+                    self.assertEqual(command[-4:-1], ["--method", "PUT", "--input"])
+                    self.body_path = Path(command[-1])
+                    self.assertEqual(json.loads(self.body_path.read_bytes()), payload)
+                    if exit_code:
+                        raise subprocess.CalledProcessError(exit_code, command)
+                    return b'{"id": 1}'
+
+                with patch("merge_queue.subprocess.check_output", side_effect=gh):
+                    if exit_code:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            api("repos/example/test/rulesets/1", payload)
+                    else:
+                        self.assertEqual(api("repos/example/test/rulesets/1", payload), {"id": 1})
+                self.assertFalse(self.body_path.exists())
 
 
 class MergeQueueTest(unittest.TestCase):

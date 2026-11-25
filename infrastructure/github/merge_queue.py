@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from tempfile import NamedTemporaryFile
 
 REPO = "waddle-social/waddle"
 RULESET_ID = 6335231
@@ -19,11 +20,12 @@ READ_ONLY = {
 
 def api(endpoint, payload=None):
     command = ["gh", "api", "--hostname", "github.com", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint]
-    if payload is not None:
-        command += ["--method", "PUT", "--input", "-"]
-    result = subprocess.run(command, input=json.dumps(payload) if payload else None,
-                            text=True, stdout=subprocess.PIPE, check=True)
-    return json.loads(result.stdout)
+    if payload is None:
+        return json.loads(subprocess.check_output(command))
+    with NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json") as body:
+        json.dump(payload, body)
+        body.flush()
+        return json.loads(subprocess.check_output([*command, "--method", "PUT", "--input", body.name]))
 
 
 def add_required_check(rules, smoke):
