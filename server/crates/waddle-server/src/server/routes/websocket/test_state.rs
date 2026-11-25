@@ -473,12 +473,17 @@ where
                     },
                     // Finish every schema constructor, including push registration,
                     // before invoking the deferred authority factory.
-                    ingress: match ingress_override {
-                        Some(ingress) => ingress,
-                        None => match start_ingress().await {
+                    ingress: {
+                        let ingress = match ingress_override {
                             Some(ingress) => ingress,
-                            None => Arc::new(IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
-                        },
+                            None => match start_ingress().await {
+                                Some(ingress) => ingress,
+                                None => Arc::new(IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
+                            },
+                        };
+                        // Production binds the same secret in `create_websocket_state`.
+                        ingress.bind_occupant_id_secret(crate::config::test_occupant_id_secret());
+                        ingress
                     },
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),

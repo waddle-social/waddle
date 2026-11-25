@@ -162,6 +162,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
             host_owned_resources: vec![bot.clone()],
             departed_occupants: vec![],
             blocked_recipients: &[],
+            occupant_id_secret: None,
         })
         .expect("rebuild host-owned route");
     assert!(

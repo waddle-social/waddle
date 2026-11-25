@@ -293,9 +293,14 @@ where
         != waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
         || matches!(stanza, Stanza::Message(message) if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
     {
-        super::append_authority::check_canonical_obligation(uow.database(), stanza, &reference)
-            .await
-            .map_err(|_| IngressUowError::EffectIntentConflict)?;
+        super::append_authority::check_canonical_obligation(
+            uow.database(),
+            stanza,
+            &reference,
+            uow.occupant_id_secret(),
+        )
+        .await
+        .map_err(|_| IngressUowError::EffectIntentConflict)?;
     }
     let obligation = obligation(context, target);
     let mut tx = transaction(uow).await?;
@@ -307,7 +312,15 @@ where
     if envelope.room_manifest().is_some() && !sealed_sink_guarded {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    authorize_direct_stanza(&mut tx, context, target, stanza, &intents).await?;
+    authorize_direct_stanza(
+        &mut tx,
+        context,
+        target,
+        stanza,
+        &intents,
+        uow.occupant_id_secret(),
+    )
+    .await?;
     if let Some(status) = delivery_status(&mut tx, &obligation).await? {
         tx.commit().await?;
         return Ok(status);
@@ -450,6 +463,7 @@ async fn authorize_direct_stanza(
     target: &FullJid,
     stanza: &Stanza,
     intents: &[IngressEffectIntent],
+    occupant_id_secret: Option<&waddle_xmpp::xep::xep0421::OccupantIdSecret>,
 ) -> Result<(), IngressUowError> {
     let Some(intent @ IngressEffectIntent::RouteDirect { route_identity, .. }) = intents
         .iter()
@@ -478,9 +492,12 @@ async fn authorize_direct_stanza(
             Err(IngressUowError::EffectIntentConflict)
         };
     }
-    if let Some(expected) =
-        super::invitation_authority::recorded_message(&envelope, intents, &context.receipt)?
-    {
+    if let Some(expected) = super::invitation_authority::recorded_message(
+        &envelope,
+        intents,
+        &context.receipt,
+        occupant_id_secret,
+    )? {
         return if super::append_authority::same_message_content(&expected, message) {
             Ok(())
         } else {

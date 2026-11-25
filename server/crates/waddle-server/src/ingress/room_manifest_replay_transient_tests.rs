@@ -508,6 +508,7 @@ async fn xep0045_legacy_archive_free_storage_hints_never_acquire_replayable_refl
                     host_owned_resources: Vec::new(),
                     departed_occupants: Vec::new(),
                     blocked_recipients: &[],
+                    occupant_id_secret: None,
                 },
             )
             .expect("maintenance rebuild");

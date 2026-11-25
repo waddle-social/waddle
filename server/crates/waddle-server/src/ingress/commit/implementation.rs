@@ -544,6 +544,7 @@ pub(in crate::ingress::commit) async fn commit_attempt(
         let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
         reconstructed |= crate::server::routes::websocket::handlers::message::muc_direct::restore_recorded_muc_decline(
             &mut plan, &recorded, &unreceipted, &recorded_envelope, created_at,
+            uow.occupant_id_secret(),
         )?;
         if recorded
             .iter()

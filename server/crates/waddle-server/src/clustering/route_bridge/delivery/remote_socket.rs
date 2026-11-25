@@ -569,6 +569,7 @@ impl OrderedRelayDeliveryBridge {
                     state.deps.app_state.db_pool.global(),
                     &msg.frame.stanza.0,
                     obligation,
+                    Some(&state.deps.occupant_id_secret),
                 )
                 .await
             }

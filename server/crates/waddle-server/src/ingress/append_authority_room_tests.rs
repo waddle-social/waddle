@@ -84,7 +84,7 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
             obligation.receipt.kind.to_storage(),
         )
         .expect("room authors the copy");
-        check_canonical_obligation(&fixture.db, &stanza, &obligation)
+        check_canonical_obligation(&fixture.db, &stanza, &obligation, None)
             .await
             .expect("frozen occupant and original-reflection payloads remain authorized");
         let mut changed_parent = copy.clone();
@@ -104,16 +104,21 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
             "forged-parent",
         );
         assert!(
-            check_canonical_obligation(&fixture.db, &Stanza::Message(changed_parent), &obligation)
-                .await
-                .is_err(),
+            check_canonical_obligation(
+                &fixture.db,
+                &Stanza::Message(changed_parent),
+                &obligation,
+                None
+            )
+            .await
+            .is_err(),
             "thread parent remains bound to the canonical payload"
         );
         let mut reordered = copy.clone();
         let last = reordered.payloads.len() - 1;
         reordered.payloads.swap(last - 1, last);
         assert!(
-            check_canonical_obligation(&fixture.db, &Stanza::Message(reordered), &obligation)
+            check_canonical_obligation(&fixture.db, &Stanza::Message(reordered), &obligation, None)
                 .await
                 .is_err(),
             "nonthread extension order remains frozen"
@@ -126,15 +131,18 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
                 .expect("sibling")
                 .into(),
         );
-        assert!(
-            check_canonical_obligation(&fixture.db, &Stanza::Message(sibling), &obligation)
-                .await
-                .is_err()
-        );
+        assert!(check_canonical_obligation(
+            &fixture.db,
+            &Stanza::Message(sibling),
+            &obligation,
+            None
+        )
+        .await
+        .is_err());
         copy.bodies
             .insert(Default::default(), "changed content".into());
         assert!(
-            check_canonical_obligation(&fixture.db, &Stanza::Message(copy), &obligation)
+            check_canonical_obligation(&fixture.db, &Stanza::Message(copy), &obligation, None)
                 .await
                 .is_err()
         );

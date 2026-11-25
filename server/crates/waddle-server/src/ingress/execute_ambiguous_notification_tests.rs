@@ -250,6 +250,7 @@ async fn recovered_attempt_notification_with_delay(
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
+        occupant_id_secret: None,
     })
     .expect("rebuild original route after restart");
     assert!(
