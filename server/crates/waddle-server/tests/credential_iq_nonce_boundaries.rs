@@ -118,7 +118,7 @@ async fn duplicate_nonce_is_idempotent_while_mutated_ciphertext_fails_closed_wit
     let tenant_id = TenantId::parse("example.com").expect("tenant");
     let seal_ctx = ClientSealContext {
         trust_domain: "example.com".to_owned(),
-        tenant_id,
+        tenant_id: tenant_id.clone(),
         account_id: Some(acct),
         provider: "openrouter".to_owned(),
         purpose: "member-inference".to_owned(),
@@ -159,6 +159,8 @@ async fn duplicate_nonce_is_idempotent_while_mutated_ciphertext_fails_closed_wit
 
     let ctx = CredentialIqContext {
         trust_domain: "example.com".to_owned(),
+        caller_tenant_id: tenant_id,
+        caller_account_id: acct,
         provenance: AuthProvenance::ExternalIdp,
         cell_admin_flags: CellAssertedAdminFlags::default(),
         expected_challenge: "nonce-chal".to_owned(),

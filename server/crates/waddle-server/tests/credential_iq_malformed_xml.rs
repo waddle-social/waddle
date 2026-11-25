@@ -6,6 +6,7 @@ use waddle_broker::{
     ColonyJwtVerifier, DeviceKeyRegistry, KeyHierarchyService, LocalKmsProvider,
     SqliteCompatLedgerStore,
 };
+use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_server::credential_iq::{CredentialIqContext, CredentialIqHandler};
 use waddle_xmpp::waddle_credential::MAX_CREDENTIAL_IQ_BYTES;
 
@@ -37,6 +38,8 @@ async fn build_handler() -> CredentialIqHandler {
 fn default_ctx() -> CredentialIqContext {
     CredentialIqContext {
         trust_domain: "example.com".to_owned(),
+        caller_tenant_id: TenantId::parse("example.com").expect("tenant"),
+        caller_account_id: AccountId::new_v4(),
         provenance: AuthProvenance::ExternalIdp,
         cell_admin_flags: CellAssertedAdminFlags::default(),
         expected_challenge: "chal-1".to_owned(),

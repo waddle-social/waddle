@@ -146,6 +146,8 @@ async fn xep0198_sm_replay_is_idempotent_with_opaque_results_and_secret_free_sm_
 
     let ctx = CredentialIqContext {
         trust_domain: "example.com".to_owned(),
+        caller_tenant_id: tenant_id.clone(),
+        caller_account_id: acct,
         provenance: AuthProvenance::ExternalIdp,
         cell_admin_flags: CellAssertedAdminFlags::default(),
         expected_challenge: "sm-chal".to_owned(),

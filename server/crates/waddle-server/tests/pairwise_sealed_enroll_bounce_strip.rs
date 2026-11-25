@@ -179,6 +179,8 @@ async fn pairwise_sealed_enroll_and_all_four_bounce_strip_paths() {
     // 1. Happy-path enrollment succeeds and returns opaque receipt.
     let ctx = CredentialIqContext {
         trust_domain: "example.com".to_owned(),
+        caller_tenant_id: tenant_id,
+        caller_account_id: acct,
         provenance: AuthProvenance::ExternalIdp,
         cell_admin_flags: CellAssertedAdminFlags::default(),
         expected_challenge: "pw-chal".to_owned(),

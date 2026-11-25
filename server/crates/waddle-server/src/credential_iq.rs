@@ -23,26 +23,29 @@ use minidom::Element;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use waddle_broker::{
-    authorize_admin_policy_mutation, enforce_not_scram, AuthProvenance, BrokerCustodyService,
-    BrokerError, BrokerSubkeyRing, CellAssertedAdminFlags, ClientSealContext, ClientSealedBlob,
-    ColonyJwtVerifier, CredentialLifecycleStatus, DeviceKeyRegistry, EnrollCredentialInput,
-    VerifiedIdpIntent,
+    authorize_admin_policy_mutation, enforce_not_scram, AuthError, AuthProvenance,
+    BrokerCustodyService, BrokerError, BrokerSubkeyRing, CellAssertedAdminFlags, ClientSealContext,
+    ClientSealedBlob, ColonyJwtVerifier, CredentialLifecycleStatus, DeviceKeyRegistry,
+    EnrollCredentialInput, EnrollDeviceKeyInput, SignedDeviceCommand, VerifiedIdpIntent,
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_xmpp::waddle_credential::{
     CredentialProtocolVersion, CredentialPurpose, CredentialReceiptXml, CredentialRequest,
-    CredentialResponse, CredentialStatus, CredentialStatusEntry, DeviceReceiptXml, IdpProofXml,
-    PolicyReceiptXml, SealedPayloadXml, SigningAlg, SubkeyAlg, SubkeyBundleXml,
-    MAX_CREDENTIAL_IQ_BYTES,
+    CredentialResponse, CredentialStatus, CredentialStatusEntry, DeviceReceiptXml,
+    DeviceSignatureXml, IdpProofXml, PolicyReceiptXml, SealedPayloadXml, SigningAlg, SubkeyAlg,
+    SubkeyBundleXml, MAX_CREDENTIAL_IQ_BYTES,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-/// Per-request caller provenance and clock context for `CredentialIqHandler`.
+/// Per-request caller provenance, authenticated identity, and clock context for
+/// `CredentialIqHandler`.
 #[derive(Debug, Clone)]
 pub struct CredentialIqContext {
     pub trust_domain: String,
+    pub caller_tenant_id: TenantId,
+    pub caller_account_id: AccountId,
     pub provenance: AuthProvenance,
     pub cell_admin_flags: CellAssertedAdminFlags,
     pub expected_challenge: String,
@@ -129,21 +132,21 @@ impl CredentialIqHandler {
 
     /// Handles a parsed [`Iq`] stanza carrying a `urn:waddle:credential:1` payload.
     pub async fn handle_iq(&self, iq: &Iq, ctx: &CredentialIqContext) -> Iq {
-        let (from, to, id, payload) = match iq {
+        let (is_get, from, to, id, payload) = match iq {
             Iq::Get {
                 from,
                 to,
                 id,
                 payload,
                 ..
-            }
-            | Iq::Set {
+            } => (true, from.clone(), to.clone(), id.clone(), payload),
+            Iq::Set {
                 from,
                 to,
                 id,
                 payload,
                 ..
-            } => (from.clone(), to.clone(), id.clone(), payload),
+            } => (false, from.clone(), to.clone(), id.clone(), payload),
             Iq::Result { .. } | Iq::Error { .. } => {
                 return opaque_error(
                     iq.to().cloned(),
@@ -169,6 +172,25 @@ impl CredentialIqHandler {
                 );
             }
         };
+
+        let requires_get = matches!(
+            req,
+            CredentialRequest::GetSubkey | CredentialRequest::Status(_)
+        );
+        if is_get != requires_get {
+            return opaque_error(
+                to,
+                from,
+                &id,
+                ErrorType::Modify,
+                DefinedCondition::BadRequest,
+                if requires_get {
+                    "credential query requires IQ type='get'"
+                } else {
+                    "credential mutation requires IQ type='set'"
+                },
+            );
+        }
 
         match self.dispatch(req, ctx).await {
             Ok(response) => Iq::Result {
@@ -214,7 +236,15 @@ impl CredentialIqHandler {
             CredentialRequest::EnrollDevice(r) => {
                 enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&r.tenant_id)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let account_id = parse_account(&r.account_id)?;
+                if account_id != ctx.caller_account_id {
+                    return Err((
+                        ErrorType::Cancel,
+                        DefinedCondition::Forbidden,
+                        "enroll-device account_id does not match authenticated caller".to_owned(),
+                    ));
+                }
                 let device_key_id = parse_uuid(&r.device_key_id)?;
                 let pubkey_sec1 = decode_b64(&r.device_public_key_b64)?;
                 let pop_sig = decode_b64(&r.pop_signature_b64)?;
@@ -222,24 +252,24 @@ impl CredentialIqHandler {
                 let intent = self.verify_idp_proof(
                     &r.idp_proof,
                     &tenant_id,
-                    account_id,
+                    ctx.caller_account_id,
                     &ctx.expected_challenge,
                     Some(&jkt),
                     ctx.now_ms,
                 )?;
                 let enrolled = self
                     .device_registry
-                    .enroll_device_key(
-                        ctx.provenance,
-                        &intent,
-                        &ctx.trust_domain,
+                    .enroll_device_key(EnrollDeviceKeyInput {
+                        provenance: ctx.provenance,
+                        idp_intent: &intent,
+                        trust_domain: &ctx.trust_domain,
                         device_key_id,
-                        pubkey_sec1,
-                        &r.nonce,
-                        r.expires_at_ms,
-                        ctx.now_ms,
-                        &pop_sig,
-                    )
+                        public_key_sec1: pubkey_sec1,
+                        nonce: &r.nonce,
+                        expires_at_ms: r.expires_at_ms,
+                        now_ms: ctx.now_ms,
+                        pop_signature: &pop_sig,
+                    })
                     .map_err(auth_err)?;
                 Ok(CredentialResponse::DeviceReceipt(DeviceReceiptXml {
                     device_key_id: enrolled.device_key_id.to_string(),
@@ -249,18 +279,41 @@ impl CredentialIqHandler {
             CredentialRequest::EnrollCredential(r) => {
                 enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&r.tenant_id)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                let auth_account = account_id.unwrap_or_else(AccountId::new_v4);
-                let _intent = self.verify_idp_proof(
+                validate_purpose_and_account(r.purpose, account_id, ctx.caller_account_id)?;
+                let intent = self.verify_idp_proof(
                     &r.idp_proof,
                     &tenant_id,
-                    auth_account,
+                    ctx.caller_account_id,
                     &ctx.expected_challenge,
                     None,
                     ctx.now_ms,
                 )?;
+                if r.purpose == CredentialPurpose::TenantInference {
+                    authorize_admin_policy_mutation(
+                        ctx.provenance,
+                        Some(&intent),
+                        &ctx.cell_admin_flags,
+                    )
+                    .map_err(auth_err)?;
+                }
                 let payload_digest =
                     compute_sealed_payload_digest(&r.provider, r.purpose, &r.sealed_payload);
+                if let Some(ref dev_sig) = r.device_signature {
+                    self.verify_device_signature(&VerifyDeviceSigInput {
+                        dev_sig,
+                        ctx,
+                        tenant_id: &tenant_id,
+                        account_id: ctx.caller_account_id,
+                        operation: "enroll-credential",
+                        target_id: "",
+                        provider: &r.provider,
+                        nonce: &r.nonce,
+                        expires_at_ms: r.expires_at_ms,
+                        payload_sha256: payload_digest,
+                    })?;
+                }
                 let blob = decode_sealed_blob(&r.sealed_payload)?;
                 let seal_ctx = ClientSealContext {
                     trust_domain: ctx.trust_domain.clone(),
@@ -304,7 +357,9 @@ impl CredentialIqHandler {
                 ))
             }
             CredentialRequest::Status(q) => {
+                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&q.tenant_id)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let records = self
                     .custody
                     .ledger()
@@ -319,6 +374,11 @@ impl CredentialIqHandler {
                     })?;
                 let mut entries = Vec::new();
                 for rec in records {
+                    if let Some(owner_acct) = rec.account_id {
+                        if owner_acct != ctx.caller_account_id {
+                            continue;
+                        }
+                    }
                     if let Some(ref p) = q.provider {
                         if rec.provider != *p {
                             continue;
@@ -348,17 +408,63 @@ impl CredentialIqHandler {
             CredentialRequest::RotateCredential(r) => {
                 enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&r.tenant_id)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let credential_id = parse_uuid(&r.credential_id)?;
                 let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                let auth_account = account_id.unwrap_or_else(AccountId::new_v4);
-                let _intent = self.verify_idp_proof(
+                validate_purpose_and_account(r.purpose, account_id, ctx.caller_account_id)?;
+                let intent = self.verify_idp_proof(
                     &r.idp_proof,
                     &tenant_id,
-                    auth_account,
+                    ctx.caller_account_id,
                     &ctx.expected_challenge,
                     None,
                     ctx.now_ms,
                 )?;
+                if r.purpose == CredentialPurpose::TenantInference {
+                    authorize_admin_policy_mutation(
+                        ctx.provenance,
+                        Some(&intent),
+                        &ctx.cell_admin_flags,
+                    )
+                    .map_err(auth_err)?;
+                }
+                let payload_digest =
+                    compute_sealed_payload_digest(&r.provider, r.purpose, &r.sealed_payload);
+                if let Some(ref dev_sig) = r.device_signature {
+                    self.verify_device_signature(&VerifyDeviceSigInput {
+                        dev_sig,
+                        ctx,
+                        tenant_id: &tenant_id,
+                        account_id: ctx.caller_account_id,
+                        operation: "rotate-credential",
+                        target_id: &r.credential_id,
+                        provider: &r.provider,
+                        nonce: &r.nonce,
+                        expires_at_ms: r.expires_at_ms,
+                        payload_sha256: payload_digest,
+                    })?;
+                }
+                if let Some(existing) = self
+                    .custody
+                    .ledger()
+                    .get_envelope(&tenant_id, credential_id)
+                    .await
+                    .map_err(|err| {
+                        (
+                            ErrorType::Cancel,
+                            DefinedCondition::InternalServerError,
+                            err.to_string(),
+                        )
+                    })?
+                {
+                    if existing.account_id != account_id {
+                        return Err((
+                            ErrorType::Cancel,
+                            DefinedCondition::Forbidden,
+                            "rotation target scope/owner mismatch".to_owned(),
+                        ));
+                    }
+                }
                 let blob = decode_sealed_blob(&r.sealed_payload)?;
                 let seal_ctx = ClientSealContext {
                     trust_domain: ctx.trust_domain.clone(),
@@ -396,18 +502,84 @@ impl CredentialIqHandler {
             CredentialRequest::RevokeCredential(r) => {
                 enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&r.tenant_id)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let credential_id = parse_uuid(&r.credential_id)?;
                 let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                if let Some(ref idp) = r.idp_proof {
-                    let auth_account = account_id.unwrap_or_else(AccountId::new_v4);
-                    let _ = self.verify_idp_proof(
+                if r.idp_proof.is_none() && r.device_signature.is_none() {
+                    return Err((
+                        ErrorType::Auth,
+                        DefinedCondition::NotAuthorized,
+                        "revocation requires IdP proof or enrolled device signature".to_owned(),
+                    ));
+                }
+                let verified_intent = match r.idp_proof {
+                    Some(ref idp) => Some(self.verify_idp_proof(
                         idp,
                         &tenant_id,
-                        auth_account,
+                        ctx.caller_account_id,
                         &ctx.expected_challenge,
                         None,
                         ctx.now_ms,
-                    )?;
+                    )?),
+                    None => None,
+                };
+                if let Some(ref dev_sig) = r.device_signature {
+                    self.verify_device_signature(&VerifyDeviceSigInput {
+                        dev_sig,
+                        ctx,
+                        tenant_id: &tenant_id,
+                        account_id: ctx.caller_account_id,
+                        operation: "revoke-credential",
+                        target_id: &r.credential_id,
+                        provider: "",
+                        nonce: &r.nonce,
+                        expires_at_ms: r.expires_at_ms,
+                        payload_sha256: compute_revoke_payload_digest(&r.credential_id),
+                    })?;
+                }
+                let existing = self
+                    .custody
+                    .ledger()
+                    .get_envelope(&tenant_id, credential_id)
+                    .await
+                    .map_err(|err| {
+                        (
+                            ErrorType::Cancel,
+                            DefinedCondition::InternalServerError,
+                            err.to_string(),
+                        )
+                    })?;
+                let targets_tenant_cred = account_id.is_none()
+                    || existing.as_ref().is_some_and(|e| e.account_id.is_none());
+                if targets_tenant_cred {
+                    authorize_admin_policy_mutation(
+                        ctx.provenance,
+                        verified_intent.as_ref(),
+                        &ctx.cell_admin_flags,
+                    )
+                    .map_err(auth_err)?;
+                } else {
+                    let is_admin = verified_intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.is_tenant_admin);
+                    if account_id.is_some_and(|a| a != ctx.caller_account_id) && !is_admin {
+                        return Err((
+                            ErrorType::Cancel,
+                            DefinedCondition::Forbidden,
+                            "cannot revoke another member's credential".to_owned(),
+                        ));
+                    }
+                    if existing
+                        .as_ref()
+                        .is_some_and(|e| e.account_id != Some(ctx.caller_account_id))
+                        && !is_admin
+                    {
+                        return Err((
+                            ErrorType::Cancel,
+                            DefinedCondition::Forbidden,
+                            "cannot revoke another member's credential".to_owned(),
+                        ));
+                    }
                 }
                 let receipt = self
                     .custody
@@ -425,11 +597,11 @@ impl CredentialIqHandler {
             CredentialRequest::MutatePolicy(r) => {
                 enforce_not_scram(ctx.provenance).map_err(auth_err)?;
                 let tenant_id = parse_tenant(&r.tenant_id)?;
-                let admin_account = extract_sub_account(&r.idp_proof)?;
+                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
                 let intent = self.verify_idp_proof(
                     &r.idp_proof,
                     &tenant_id,
-                    admin_account,
+                    ctx.caller_account_id,
                     &ctx.expected_challenge,
                     None,
                     ctx.now_ms,
@@ -467,6 +639,29 @@ impl CredentialIqHandler {
         }
     }
 
+    fn verify_device_signature(
+        &self,
+        input: &VerifyDeviceSigInput<'_>,
+    ) -> Result<(), (ErrorType, DefinedCondition, String)> {
+        let device_key_id = parse_uuid(&input.dev_sig.device_key_id)?;
+        let sig_bytes = decode_b64(&input.dev_sig.signature_b64)?;
+        let cmd = SignedDeviceCommand {
+            trust_domain: &input.ctx.trust_domain,
+            tenant_id: input.tenant_id,
+            account_id: input.account_id,
+            device_key_id,
+            operation: input.operation,
+            target_id: input.target_id,
+            provider: input.provider,
+            nonce: input.nonce,
+            expires_at_ms: input.expires_at_ms,
+            payload_sha256: input.payload_sha256,
+        };
+        self.device_registry
+            .verify_signed_command(&cmd, &sig_bytes, input.ctx.now_ms)
+            .map_err(auth_err)
+    }
+
     fn verify_idp_proof(
         &self,
         proof: &IdpProofXml,
@@ -498,56 +693,61 @@ impl CredentialIqHandler {
     }
 }
 
-fn extract_sub_account(
-    proof: &IdpProofXml,
-) -> Result<AccountId, (ErrorType, DefinedCondition, String)> {
-    match proof {
-        IdpProofXml::ColonyJwt { token } => {
-            let parts: Vec<&str> = token.split('.').collect();
-            if parts.len() != 3 {
-                return Err((
-                    ErrorType::Auth,
-                    DefinedCondition::NotAuthorized,
-                    "malformed JWT".to_owned(),
-                ));
-            }
-            let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(parts[1])
-                .map_err(|_| {
-                    (
-                        ErrorType::Auth,
-                        DefinedCondition::NotAuthorized,
-                        "invalid JWT payload encoding".to_owned(),
-                    )
-                })?;
-            let val: serde_json::Value = serde_json::from_slice(&payload_bytes).map_err(|_| {
-                (
-                    ErrorType::Auth,
-                    DefinedCondition::NotAuthorized,
-                    "invalid JWT payload JSON".to_owned(),
-                )
-            })?;
-            let sub = val
-                .get("sub")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    (
-                        ErrorType::Auth,
-                        DefinedCondition::NotAuthorized,
-                        "missing sub claim".to_owned(),
-                    )
-                })?;
-            parse_account(sub)
-        }
-        IdpProofXml::WebAuthn { .. } => Err((
-            ErrorType::Auth,
-            DefinedCondition::NotAuthorized,
-            "WebAuthn proof unsupported here".to_owned(),
+struct VerifyDeviceSigInput<'a> {
+    dev_sig: &'a DeviceSignatureXml,
+    ctx: &'a CredentialIqContext,
+    tenant_id: &'a TenantId,
+    account_id: AccountId,
+    operation: &'a str,
+    target_id: &'a str,
+    provider: &'a str,
+    nonce: &'a str,
+    expires_at_ms: i64,
+    payload_sha256: [u8; 32],
+}
+
+fn enforce_caller_tenant(
+    requested: &TenantId,
+    caller: &TenantId,
+) -> Result<(), (ErrorType, DefinedCondition, String)> {
+    if requested != caller {
+        return Err((
+            ErrorType::Cancel,
+            DefinedCondition::Forbidden,
+            "requested tenant does not match authenticated caller tenant".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_purpose_and_account(
+    purpose: CredentialPurpose,
+    account_id: Option<AccountId>,
+    caller_account_id: AccountId,
+) -> Result<(), (ErrorType, DefinedCondition, String)> {
+    match (purpose, account_id) {
+        (CredentialPurpose::MemberInference, Some(acct)) if acct == caller_account_id => Ok(()),
+        (CredentialPurpose::MemberInference, Some(_)) => Err((
+            ErrorType::Cancel,
+            DefinedCondition::Forbidden,
+            "member-inference account_id does not match authenticated caller".to_owned(),
+        )),
+        (CredentialPurpose::MemberInference, None) => Err((
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "member-inference requires account-id".to_owned(),
+        )),
+        (CredentialPurpose::TenantInference, None) => Ok(()),
+        (CredentialPurpose::TenantInference, Some(_)) => Err((
+            ErrorType::Modify,
+            DefinedCondition::BadRequest,
+            "tenant-inference must not specify account-id".to_owned(),
         )),
     }
 }
 
-fn compute_sealed_payload_digest(
+/// Computes the canonical SHA-256 digest of a sealed credential payload.
+pub fn compute_sealed_payload_digest(
     provider: &str,
     purpose: CredentialPurpose,
     sealed: &SealedPayloadXml,
@@ -563,6 +763,12 @@ fn compute_sealed_payload_digest(
     h.update(b"|");
     h.update(sealed.ciphertext_b64.as_bytes());
     h.finalize().into()
+}
+
+/// Computes the canonical SHA-256 payload digest signed by a device key for
+/// `<revoke-credential/>`.
+pub fn compute_revoke_payload_digest(credential_id: &str) -> [u8; 32] {
+    Sha256::digest(credential_id.as_bytes()).into()
 }
 
 fn decode_sealed_blob(
@@ -616,12 +822,19 @@ fn map_status(s: CredentialLifecycleStatus) -> CredentialStatus {
     }
 }
 
-fn auth_err(err: waddle_broker::AuthError) -> (ErrorType, DefinedCondition, String) {
-    (
-        ErrorType::Cancel,
-        DefinedCondition::Forbidden,
-        err.to_string(),
-    )
+fn auth_err(err: AuthError) -> (ErrorType, DefinedCondition, String) {
+    match err {
+        AuthError::DeviceKeyAlreadyExists(_) => (
+            ErrorType::Cancel,
+            DefinedCondition::Conflict,
+            err.to_string(),
+        ),
+        other => (
+            ErrorType::Cancel,
+            DefinedCondition::Forbidden,
+            other.to_string(),
+        ),
+    }
 }
 
 fn broker_err(err: BrokerError) -> (ErrorType, DefinedCondition, String) {
