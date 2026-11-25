@@ -15,7 +15,12 @@ struct MessageRow: View {
             if let edge = entry.unreadDivider {
                 TimelineUnreadDivider(edge: edge)
             }
-            MessageRowContent(entry: entry, showsThreadChip: showsThreadChip)
+            if let anchor = entry.item.callAnchor, entry.item.tombstone == nil {
+                // The room's announcement of a call is a card, not a message from anyone.
+                CallAnchorRow(item: entry.item, anchor: anchor)
+            } else {
+                MessageRowContent(entry: entry, showsThreadChip: showsThreadChip)
+            }
         }
     }
 }

@@ -18,6 +18,9 @@ public enum MessageMutation: Hashable, Sendable {
     /// XEP-0422 `urn:waddle:safety-scores:1`: only the room itself may set
     /// scores for one room-verified original stanza and body revision.
     case safetyScores(targetID: String, from: JID, fastening: WireMessage.SafetyScoresFastening)
+    /// XEP-0422 `urn:waddle:call-thread:0`: only the room itself may say
+    /// the call it announced is over. The target is the anchor's origin id.
+    case callEnded(targetID: String, from: JID, ended: CallThreadEnded)
 
     public var targetID: String {
         switch self {
@@ -25,7 +28,8 @@ public enum MessageMutation: Hashable, Sendable {
              let .correction(targetID, _, _),
              let .retraction(targetID, _),
              let .moderation(targetID, _, _, _),
-             let .safetyScores(targetID, _, _):
+             let .safetyScores(targetID, _, _),
+             let .callEnded(targetID, _, _):
             return targetID
         }
     }
@@ -36,7 +40,8 @@ public enum MessageMutation: Hashable, Sendable {
              let .correction(_, from, _),
              let .retraction(_, from),
              let .moderation(_, from, _, _),
-             let .safetyScores(_, from, _):
+             let .safetyScores(_, from, _),
+             let .callEnded(_, from, _):
             return from
         }
     }
@@ -45,7 +50,7 @@ public enum MessageMutation: Hashable, Sendable {
     var isSenderScoped: Bool {
         switch self {
         case .correction, .retraction: return true
-        case .reaction, .moderation, .safetyScores: return false
+        case .reaction, .moderation, .safetyScores, .callEnded: return false
         }
     }
 
@@ -67,6 +72,12 @@ public enum MessageMutation: Hashable, Sendable {
         // trusted to set them, so a peer's claim is ignored outright.
         if let fastening = message.safetyScores, isGroupchat {
             return .safetyScores(targetID: fastening.targetStanzaID, from: from, fastening: fastening)
+        }
+        // A room says when its own call ended. A call of two has no such
+        // message, and a peer's claim of one is ignored outright. An
+        // occupant's is not a mutation at all: their message stays a message.
+        if let ended = message.callThreadEnded, isGroupchat, from.resource == nil {
+            return .callEnded(targetID: ended.anchorID, from: from, ended: ended)
         }
         if let retractsID = message.retractsID {
             return .retraction(targetID: retractsID, from: from)

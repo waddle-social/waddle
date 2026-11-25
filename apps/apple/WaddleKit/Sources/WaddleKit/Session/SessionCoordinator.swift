@@ -770,6 +770,15 @@ public final class SessionCoordinator {
     private func recordActivity(_ item: TimelineItem, message: WireMessage, route: MessageRoute) {
         guard message.isLive, !route.isMine, item.isFeedVisible else { return }
         let conversation = route.conversation
+        guard item.countsAsUnread else {
+            // A call starting is said by the call's own surfaces: its
+            // announcement is no unread message and raises no alert. It is
+            // still a row someone looking at the room has seen.
+            if conversation == unread.activeConversation {
+                Task { await self.markDisplayedIfVisible(conversation) }
+            }
+            return
+        }
         var ids = item.identity.all
         ids.insert(item.id)
         let mentionsMe = mentions(message, in: conversation)

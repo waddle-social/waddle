@@ -80,8 +80,12 @@ private struct ThreadContent: View {
         // in the thread, its sub-threads' included.
         // Merged with the fetched replies only: `replies` already holds the
         // live ones, and a 1:1 merge does not match copies.
-        let replyCount = root.map {
-            ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: fetched?.replies ?? []).count
+        // A call's announcement heads a thread whose id is not its own, so
+        // its replies are not found under it: the rows shown are the count.
+        let replyCount = root.flatMap {
+            $0.callAnchor == nil
+                ? ThreadHistory.merged(live: timeline.threadDescendants(of: $0), fetched: fetched?.replies ?? []).count
+                : nil
         }
             ?? replies.count
         let header = ThreadHeader(

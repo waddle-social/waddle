@@ -141,7 +141,7 @@ enum UnreadOverview {
     }
 
     private static func isUnreadCandidate(_ item: TimelineItem) -> Bool {
-        !item.isMine && item.tombstone == nil && !item.isLocalEcho
+        item.countsAsUnread && !item.isLocalEcho
     }
 
     @MainActor

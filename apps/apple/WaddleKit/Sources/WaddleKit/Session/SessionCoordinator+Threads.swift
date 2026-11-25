@@ -34,6 +34,12 @@ extension SessionCoordinator {
         if let root = timeline.item(withID: threadID) {
             return root
         }
+        // A call's announcement heads its thread without sharing its id. The
+        // feed's own copy is preferred to a fetched one: the room's word that
+        // the call ended is no part of the thread, so only the feed's has it.
+        if let anchor = timeline.items.first(where: { $0.callAnchor != nil && $0.message.thread == threadID }) {
+            return anchor
+        }
         if conversation.isRoom, let root = threadHistory.fetchedRoot(of: ThreadKey(room: conversation.jid, threadID: threadID)) {
             return root
         }
