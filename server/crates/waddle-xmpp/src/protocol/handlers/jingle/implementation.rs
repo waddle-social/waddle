@@ -29,8 +29,8 @@ use super::{OutboundEvent, StanzaContext};
 /// XEP-0298 conference-info namespace. We use only the `isfocus`
 /// attribute on a single element to signal that the Jingle peer
 /// (the SFU mixer) is a conference focus rather than a P2P peer —
-/// matching av-conferences ProtoXEP usage and the XEP-0298 §3.1
-/// "Indicating a Focus" shape. The full COIN spec (participant
+/// matching av-conferences ProtoXEP usage and the XEP-0298
+/// "Creating a conference call" shape. The full COIN spec (participant
 /// rosters, media descriptions per participant, etc.) is NOT
 /// implemented; only this single discriminator is on the wire.
 pub const NS_COIN: &str = "urn:xmpp:coin:1";
@@ -1008,7 +1008,7 @@ impl JingleHandler {
         let room_for_session = room_jid.clone();
         let jingle_sid = jingle.sid.0.clone();
         jingle_builder = jingle_builder.append(Muji::for_room(room_jid).to_element());
-        // 2. XEP-0298 §3.1 focus marker — also a direct child of
+        // 2. XEP-0298 "Creating a conference call" focus marker — also a direct child of
         //    `<jingle/>`. Stamped on the accept so the client can
         //    distinguish this from a P2P session-accept (a normal
         //    peer would never set `isfocus='true'`).

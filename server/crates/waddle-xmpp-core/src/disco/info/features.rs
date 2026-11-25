@@ -589,4 +589,12 @@ impl Feature {
     pub fn muji() -> Self {
         Self::new("urn:xmpp:jingle:muji:0")
     }
+
+    /// XEP-0298: Delivering Conference Information to Jingle
+    /// Participants (Coin). Advertised by the entity that acts as the
+    /// conference focus and emits `<conference-info isfocus='true'/>`.
+    #[must_use]
+    pub fn coin() -> Self {
+        Self::new("urn:xmpp:coin:1")
+    }
 }
