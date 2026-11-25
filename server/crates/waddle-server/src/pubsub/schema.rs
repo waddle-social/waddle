@@ -29,7 +29,9 @@ use super::DatabasePubSubStorage;
 //   `pubsub#type` profile metadata (XEP-0472/XEP-0501).
 // * v9 — pubsub_nodes gains nullable roster_groups_allowed (JSON array)
 //   for XEP-0060 `pubsub#roster_groups_allowed`.
-pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 9;
+// * v10 — pubsub_nodes gains nullable item_expire (seconds) for XEP-0060
+//   `pubsub#item_expire`.
+pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 10;
 
 const DATA_TABLES: &[&str] = &[
     "pubsub_nodes",
@@ -432,6 +434,7 @@ impl SchemaTransaction<'_, '_> {
                     send_last_published_item TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL,
                     roster_groups_allowed TEXT,
+                    item_expire INTEGER,
                     PRIMARY KEY (owner_jid, node_name)
                 )
                 "#
@@ -452,6 +455,7 @@ impl SchemaTransaction<'_, '_> {
                     send_last_published_item TEXT NOT NULL,
                     created_at_ms BIGINT NOT NULL,
                     roster_groups_allowed TEXT,
+                    item_expire BIGINT,
                     PRIMARY KEY (owner_jid, node_name)
                 )
                 "#

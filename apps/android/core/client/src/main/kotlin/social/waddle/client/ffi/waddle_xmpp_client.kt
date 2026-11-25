@@ -1230,17 +1230,17 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_sticke
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_retract_sticker_pack(`ptr`: Long,`packId`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`maxItems`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(`ptr`: Long,`authorJid`: RustBuffer.ByValue,`maxItems`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(`ptr`: Long,`authorJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reads(`ptr`: Long,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`post`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(`ptr`: Long,`post`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story_reads(`ptr`: Long,`reads`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,`emojis`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(`ptr`: Long,`authorJid`: RustBuffer.ByValue,`storyId`: RustBuffer.ByValue,`emojis`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_init_callback_vtable_waddleeventlistener(`vtable`: UniffiVTableCallbackInterfaceWaddleEventListener,
 ): Unit
@@ -1765,22 +1765,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_retract_sticker_pack() != 30329) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 30988) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_stories() != 54370) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 10812) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reactions() != 55531) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_story_reads() != 37503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21939) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story() != 21585) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_story_reads() != 61647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 32798) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_story_reactions() != 4359) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_constructor_waddleclient_new() != 16174) {
@@ -3283,16 +3283,18 @@ public interface WaddleClientInterface {
     suspend fun `retractStickerPack`(`packId`: kotlin.String): kotlin.Boolean
 
     /**
-     * XEP-0501: fetch the stories on `community_jid` (the
-     * `community.<domain>` service). Expired stories are included.
+     * XEP-0501: fetch the stories on the stories node of `author_jid`,
+     * the account's own bare JID or a contact's. Expired stories are
+     * included.
      */
-    suspend fun `fetchStories`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?): List<WaddleStory>
+    suspend fun `fetchStories`(`authorJid`: kotlin.String, `maxItems`: kotlin.UInt?): List<WaddleStory>
 
     /**
      * XEP-0470: fetch the reaction counts on one story and which
-     * emoji this account reacted with.
+     * emoji this account reacted with. `author_jid` is the story's
+     * author, whose PEP service hosts the reactions.
      */
-    suspend fun `fetchStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String): WaddleStoryReactions
+    suspend fun `fetchStoryReactions`(`authorJid`: kotlin.String, `storyId`: kotlin.String): WaddleStoryReactions
 
     /**
      * Fetch which stories this account has seen, from its private
@@ -3301,10 +3303,11 @@ public interface WaddleClientInterface {
     suspend fun `fetchStoryReads`(): List<WaddleStoryRead>
 
     /**
-     * XEP-0501: post a story and return it as published, so the
-     * caller can show it without fetching again.
+     * XEP-0501: post a story on the account's own stories node and
+     * return it as published, so the caller can show it without
+     * fetching again.
      */
-    suspend fun `publishStory`(`communityJid`: kotlin.String, `post`: WaddleStoryPost): WaddleStory
+    suspend fun `publishStory`(`post`: WaddleStoryPost): WaddleStory
 
     /**
      * Replace this account's read state with `reads`. The item holds
@@ -3315,9 +3318,10 @@ public interface WaddleClientInterface {
     /**
      * XEP-0470: make `emojis` this account's reactions to one story,
      * replacing the ones it had; an empty list removes them. At most
-     * 12 reactions, each a single emoji.
+     * 12 reactions, each a single emoji. `author_jid` is the story's
+     * author.
      */
-    suspend fun `setStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>)
+    suspend fun `setStoryReactions`(`authorJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>)
 
     companion object
 }
@@ -6760,17 +6764,18 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * XEP-0501: fetch the stories on `community_jid` (the
-     * `community.<domain>` service). Expired stories are included.
+     * XEP-0501: fetch the stories on the stories node of `author_jid`,
+     * the account's own bare JID or a contact's. Expired stories are
+     * included.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fetchStories`(`communityJid`: kotlin.String, `maxItems`: kotlin.UInt?) : List<WaddleStory> {
+    override suspend fun `fetchStories`(`authorJid`: kotlin.String, `maxItems`: kotlin.UInt?) : List<WaddleStory> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_stories(
                 uniffiHandle,
-                FfiConverterString.lower(`communityJid`),FfiConverterOptionalUInt.lower(`maxItems`),
+                FfiConverterString.lower(`authorJid`),FfiConverterOptionalUInt.lower(`maxItems`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6786,16 +6791,17 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
     /**
      * XEP-0470: fetch the reaction counts on one story and which
-     * emoji this account reacted with.
+     * emoji this account reacted with. `author_jid` is the story's
+     * author, whose PEP service hosts the reactions.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fetchStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String) : WaddleStoryReactions {
+    override suspend fun `fetchStoryReactions`(`authorJid`: kotlin.String, `storyId`: kotlin.String) : WaddleStoryReactions {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_story_reactions(
                 uniffiHandle,
-                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`storyId`),
+                FfiConverterString.lower(`authorJid`),FfiConverterString.lower(`storyId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6835,17 +6841,18 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
-     * XEP-0501: post a story and return it as published, so the
-     * caller can show it without fetching again.
+     * XEP-0501: post a story on the account's own stories node and
+     * return it as published, so the caller can show it without
+     * fetching again.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `publishStory`(`communityJid`: kotlin.String, `post`: WaddleStoryPost) : WaddleStory {
+    override suspend fun `publishStory`(`post`: WaddleStoryPost) : WaddleStory {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_story(
                 uniffiHandle,
-                FfiConverterString.lower(`communityJid`),FfiConverterTypeWaddleStoryPost.lower(`post`),
+                FfiConverterTypeWaddleStoryPost.lower(`post`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -6888,16 +6895,17 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
     /**
      * XEP-0470: make `emojis` this account's reactions to one story,
      * replacing the ones it had; an empty list removes them. At most
-     * 12 reactions, each a single emoji.
+     * 12 reactions, each a single emoji. `author_jid` is the story's
+     * author.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setStoryReactions`(`communityJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>) {
+    override suspend fun `setStoryReactions`(`authorJid`: kotlin.String, `storyId`: kotlin.String, `emojis`: List<kotlin.String>) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_story_reactions(
                 uniffiHandle,
-                FfiConverterString.lower(`communityJid`),FfiConverterString.lower(`storyId`),FfiConverterSequenceString.lower(`emojis`),
+                FfiConverterString.lower(`authorJid`),FfiConverterString.lower(`storyId`),FfiConverterSequenceString.lower(`emojis`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },

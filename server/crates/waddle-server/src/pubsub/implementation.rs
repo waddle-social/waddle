@@ -100,6 +100,13 @@ impl PubSubStorage for DatabasePubSubStorage {
         self.retract_item_impl(owner, node_name, item_id).await
     }
 
+    async fn purge_expired_items(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<waddle_xmpp::pubsub::ExpiredItem>, XmppError> {
+        self.purge_expired_items_impl(now).await
+    }
+
     async fn retract_item_if_publisher(
         &self,
         owner: &BareJid,

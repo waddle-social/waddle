@@ -182,7 +182,7 @@ async fn seed_initial_xmpp_topology(
     }
 
     // Community service hosts the non-space pubsub nodes (XEP-0472
-    // social feed, XEP-0501 stories). Kept distinct from
+    // social feed, xCal events). Kept distinct from
     // `spaces.<domain>` so the spaces disco#items enumeration cleanly
     // returns only actual community spaces.
     let community_jid: jid::BareJid = services
@@ -194,8 +194,8 @@ async fn seed_initial_xmpp_topology(
     // announcements and microblog-style posts. Access model is
     // `community_feed()`: anyone can subscribe and read, and any
     // authenticated member may publish (`publish_model: Open`), per
-    // XEP-0472 §"Replying to a Post". Stories use the same member-postable
-    // access shape below; calendar keeps `community_calendar()` plus an RSVP carve-out.
+    // XEP-0472 §"Replying to a Post". Calendar keeps `community_calendar()`
+    // plus an RSVP carve-out. XEP-0501 stories are per-account PEP nodes.
     pubsub_storage
         .get_or_create_node(&community_jid, waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED)
         .await
@@ -208,27 +208,6 @@ async fn seed_initial_xmpp_topology(
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to configure social feed node: {error}"))?;
-
-    // XEP-0501 Stories — community-wide ephemeral pubsub node. Any
-    // authenticated, non-outcast member may publish; the service stamps
-    // the authenticated author into the payload before storing it.
-    // Stories carry an `expires` timestamp and the chat client filters
-    // expired items out of the view.
-    pubsub_storage
-        .get_or_create_node(
-            &community_jid,
-            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to create stories node: {error}"))?;
-    pubsub_storage
-        .update_node_config(
-            &community_jid,
-            waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES,
-            &NodeConfig::community_stories(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to configure stories node: {error}"))?;
 
     // xCal Proto-calendar events — community-wide PubSub node for
     // events with optional RSVP tracking. Calendar event creation stays

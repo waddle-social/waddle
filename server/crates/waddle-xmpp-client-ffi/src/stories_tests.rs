@@ -25,10 +25,11 @@ use crate::{
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_ATOM: &str = "http://www.w3.org/2005/Atom";
 const STORIES_NODE: &str = "urn:xmpp:pubsub-social-feed:stories:0";
-const COMMUNITY: &str = "community.waddle.test";
+/// A story author, whose PEP service hosts the stories node.
+const AUTHOR: &str = "bob@waddle.test";
 
-fn community() -> BareJid {
-    COMMUNITY.parse().expect("valid service jid")
+fn author() -> BareJid {
+    AUTHOR.parse().expect("valid bare jid")
 }
 
 fn alice() -> BareJid {
@@ -83,10 +84,10 @@ fn strings(values: &[&str]) -> Vec<String> {
 // ── Stories: wire shapes ─────────────────────────────────────────────
 
 #[test]
-fn fetch_stanza_asks_the_community_stories_node() {
-    let iq = stories_fetch_stanza(&community(), Some(50));
+fn fetch_stanza_asks_the_authors_stories_node() {
+    let iq = stories_fetch_stanza(&author(), Some(50));
     assert_eq!(iq.attr("type"), Some("get"));
-    assert_eq!(iq.attr("to"), Some(COMMUNITY));
+    assert_eq!(iq.attr("to"), Some(AUTHOR));
     let items = iq
         .get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
@@ -98,9 +99,13 @@ fn fetch_stanza_asks_the_community_stories_node() {
 #[test]
 fn publish_stanza_carries_the_story_as_an_atom_entry_with_its_media() {
     let story = story_from_post(photo_post(), &alice()).expect("valid story");
-    let iq = story_publish_stanza(&community(), &story);
+    let iq = story_publish_stanza(&story);
     assert_eq!(iq.attr("type"), Some("set"));
-    assert_eq!(iq.attr("to"), Some(COMMUNITY));
+    assert_eq!(
+        iq.attr("to"),
+        None,
+        "the own PEP service is addressed without `to`"
+    );
     let publish = iq
         .get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))
@@ -474,12 +479,12 @@ fn too_many_reactions_or_more_than_one_emoji_each_are_refused() {
 #[tokio::test]
 async fn story_verbs_report_not_connected() {
     let client = offline_client();
-    let community = || COMMUNITY.to_string();
+    let author = || AUTHOR.to_string();
     let story = || "story-1".to_string();
     let offline = Err(WaddleError::NotConnected);
-    assert_eq!(client.fetch_stories(community(), None).await, offline);
+    assert_eq!(client.fetch_stories(author(), None).await, offline);
     assert_eq!(
-        client.publish_story(community(), photo_post()).await,
+        client.publish_story(photo_post()).await,
         Err(WaddleError::NotConnected)
     );
     assert_eq!(
@@ -491,12 +496,12 @@ async fn story_verbs_report_not_connected() {
         Err(WaddleError::NotConnected)
     );
     assert_eq!(
-        client.fetch_story_reactions(community(), story()).await,
+        client.fetch_story_reactions(author(), story()).await,
         Err(WaddleError::NotConnected)
     );
     assert_eq!(
         client
-            .set_story_reactions(community(), story(), strings(&["👍"]))
+            .set_story_reactions(author(), story(), strings(&["👍"]))
             .await,
         Err(WaddleError::NotConnected)
     );
@@ -511,10 +516,6 @@ async fn story_verbs_refuse_invalid_input_before_they_need_a_session() {
         Err(WaddleError::InvalidJid)
     );
     assert_eq!(
-        client.publish_story(bad_jid(), photo_post()).await,
-        Err(WaddleError::InvalidJid)
-    );
-    assert_eq!(
         client
             .fetch_story_reactions(bad_jid(), "story-1".to_string())
             .await,
@@ -522,14 +523,14 @@ async fn story_verbs_refuse_invalid_input_before_they_need_a_session() {
     );
     assert_eq!(
         client
-            .fetch_story_reactions(COMMUNITY.to_string(), " ".to_string())
+            .fetch_story_reactions(AUTHOR.to_string(), " ".to_string())
             .await,
         Err(WaddleError::InvalidArgument)
     );
     assert_eq!(
         client
             .set_story_reactions(
-                COMMUNITY.to_string(),
+                AUTHOR.to_string(),
                 "story-1".to_string(),
                 strings(&["👍👍"])
             )

@@ -169,6 +169,7 @@ const NODE_COLUMNS: &[Column] = &[
     text("send_last_published_item", true),
     bigint("created_at_ms", true),
     text("roster_groups_allowed", false),
+    bigint("item_expire", false),
 ];
 const ITEM_COLUMNS: &[Column] = &[
     Column {

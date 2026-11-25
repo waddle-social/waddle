@@ -1,9 +1,11 @@
 /**
- * XEP-0501 Stories composable. Mirrors `useSocialFeed` for the
- * ephemeral stories pubsub node. The composable filters expired
- * entries locally — the wasm bridge returns ALL items, and we
- * re-derive `activeStories` every minute so stories fade out as
- * their countdowns hit zero without a server roundtrip.
+ * XEP-0501 Stories composable. Every account hosts its own stories
+ * XEP-0163 node, so the composable reads the user's own node and each
+ * contact's (`authorJids`), and posts to the user's own. The composable
+ * filters expired entries locally — the wasm bridge returns ALL items,
+ * and we re-derive `activeStories` every minute so stories fade out as
+ * their countdowns hit zero without a server roundtrip. Live updates
+ * arrive as PEP events; the client advertises the stories `+notify`.
  *
  * Read state is synced via a private PEP node (XEP-0223) — see
  * `services/story-read-store.ts`. Marking a story read is fire-and-
@@ -35,7 +37,8 @@ const REACTION_FETCH_BATCH_SIZE = 8;
 export function useStories(
   xmppClient: Ref<BrowserXmppClient | null>,
   options: {
-    communityJid: Ref<string | null>;
+    /** Bare JIDs whose stories nodes are read: the user and the contacts the user is subscribed to. */
+    authorJids: Ref<readonly string[]>;
     pageSize?: number;
   },
 ) {
@@ -47,6 +50,9 @@ export function useStories(
   const reactionSummariesByStory = ref<Record<string, StoryReactionSummary>>({});
   const pageSize = options.pageSize ?? 50;
   let fetchRequestId = 0;
+  // Story id -> bare JID of the PEP service hosting it. The reaction nodes of
+  // a story live on its author's service, so every reaction call needs it.
+  const hostByStory = new Map<string, string>();
   let removePubsubEventHandler: (() => void) | null = null;
   const reactionMutationVersionsByStory = new Map<string, number>();
   const pendingReactionMutationVersionsByStory = new Map<string, number>();
@@ -68,12 +74,21 @@ export function useStories(
     readStore.dispose();
   });
 
-  watch([xmppClient, options.communityJid], ([client, communityJid]) => {
+  watch(xmppClient, (client) => {
     removePubsubEventHandler?.();
     removePubsubEventHandler = null;
-    if (!client || !communityJid) return;
+    if (!client) return;
     removePubsubEventHandler = client.addPubsubEventHandler?.((event) => applyPubsubEvent(event)) ?? null;
   }, { immediate: true });
+
+  // The roster arrives after the session bootstraps: read a contact's stories
+  // as soon as they are known.
+  watch(
+    () => authorKey(options.authorJids.value),
+    () => {
+      if (xmppClient.value) void refresh();
+    },
+  );
 
   const activeStories = computed(() => {
     const live = stories.value.filter((s) => isStoryActive(s, nowMs.value));
@@ -94,23 +109,47 @@ export function useStories(
 
   async function refresh(): Promise<boolean> {
     const client = xmppClient.value;
-    const jid = options.communityJid.value;
-    if (!client || !jid) {
+    const authors = uniqueAuthors(options.authorJids.value);
+    if (!client || authors.length === 0) {
       stories.value = [];
+      hostByStory.clear();
       return false;
     }
     const requestId = ++fetchRequestId;
     isLoading.value = true;
     error.value = null;
     try {
-      const fetched = await client.fetchStories(jid, pageSize);
+      const results = await Promise.allSettled(
+        authors.map(async (author) => ({ author, items: await client.fetchStories(author, pageSize) })),
+      );
       if (requestId !== fetchRequestId || client !== xmppClient.value) return false;
+      const fetched: Story[] = [];
+      hostByStory.clear();
+      let failure: unknown = null;
+      for (const result of results) {
+        if (result.status === "rejected") {
+          // A contact whose node is unreadable (no presence relationship,
+          // no stories yet) is the normal empty case; only report a failure
+          // of the user's own node.
+          failure ??= result.reason;
+          continue;
+        }
+        for (const story of result.value.items) {
+          hostByStory.set(story.id, result.value.author);
+          fetched.push(story);
+        }
+      }
+      const own = client.bareJid?.toLowerCase();
+      const ownResult = results[authors.findIndex((author) => author.toLowerCase() === own)];
+      if (ownResult?.status === "rejected") {
+        error.value = ownResult.reason instanceof Error ? ownResult.reason.message : String(ownResult.reason);
+      } else if (fetched.length === 0 && failure !== null && results.every((r) => r.status === "rejected")) {
+        error.value = failure instanceof Error ? failure.message : String(failure);
+      }
       stories.value = fetched;
       const mutationVersions = new Map(reactionMutationVersionsByStory);
       const liveSummaryVersions = new Map(liveSummaryVersionsByStory);
-      await client.subscribeStories?.(jid);
-      await client.subscribeStoryReactionSummaries?.(jid);
-      await refreshReactionSummariesFor(fetched, client, jid, requestId, mutationVersions, liveSummaryVersions);
+      await refreshReactionSummariesFor(fetched, client, requestId, mutationVersions, liveSummaryVersions);
       if (!readStore.loaded()) {
         // Hydrate after the first stories fetch so the rail doesn't
         // pop unread→read on first paint.
@@ -132,13 +171,13 @@ export function useStories(
 
   async function post(input: StoryPostInput): Promise<Story | null> {
     const client = xmppClient.value;
-    const jid = options.communityJid.value;
-    if (!client || !jid) return null;
+    if (!client) return null;
     if (!input.mediaUrl.trim()) return null;
     isPosting.value = true;
     error.value = null;
     try {
-      const story = await client.publishStory(jid, input);
+      const story = await client.publishStory(input);
+      if (client.bareJid) hostByStory.set(story.id, client.bareJid);
       stories.value = [story, ...stories.value.filter((s) => s.id !== story.id)];
       // Auto-mark: a user should never see their own freshly-posted
       // story as unread on another device. XEP-0501 has no
@@ -156,7 +195,6 @@ export function useStories(
   async function refreshReactionSummariesFor(
     fetched: readonly Story[],
     client: BrowserXmppClient,
-    communityJid: string,
     requestId: number,
     mutationVersions: ReadonlyMap<string, number>,
     liveSummaryVersions: ReadonlyMap<string, number>,
@@ -169,12 +207,15 @@ export function useStories(
         batch.map(async (story): Promise<readonly [string, StoryReactionSummary, StoryReactionItem | null]> => {
           let summary: StoryReactionSummary = { counts: {}, reactors: {}, mine: [] };
           let selfItem: StoryReactionItem | null = null;
-          const [fetchedSummary, fetchedSelf] = await Promise.all([
-            client.fetchStoryReactionSummary(communityJid, story.id).catch(() => null),
-            client.bareJid
-              ? client.fetchMyStoryReactions(communityJid, story.id).catch(() => null)
-              : Promise.resolve(null),
-          ]);
+          const host = hostByStory.get(story.id);
+          const [fetchedSummary, fetchedSelf] = host
+            ? await Promise.all([
+                client.fetchStoryReactionSummary(host, story.id).catch(() => null),
+                client.bareJid
+                  ? client.fetchMyStoryReactions(host, story.id).catch(() => null)
+                  : Promise.resolve(null),
+              ])
+            : [null, null];
           if (fetchedSummary) summary = fetchedSummary;
           selfItem = fetchedSelf;
           return [story.id, summary, selfItem] as const;
@@ -258,11 +299,11 @@ export function useStories(
   }
 
   function applyPubsubEvent(event: PubsubEvent): void {
-    const communityJid = options.communityJid.value?.toLowerCase();
     const eventFrom = event.from?.split("/", 1)[0]?.toLowerCase();
-    if (!communityJid || eventFrom !== communityJid) return;
+    if (!eventFrom || !uniqueAuthors(options.authorJids.value).some((author) => author.toLowerCase() === eventFrom)) return;
     if (event.node === STORIES_NODE) {
       applyStoryRetracts(event);
+      if (event.items.some((item) => !item.retracted)) void refreshAuthor(eventFrom);
       return;
     }
     if (event.node !== STORY_REACTIONS_SUMMARY_NODE) return;
@@ -311,12 +352,31 @@ export function useStories(
     reactionSummariesByStory.value = { ...reactionSummariesByStory.value, ...updates };
   }
 
+  /** A contact published a story: the notification carries only the item id, so read the node. */
+  async function refreshAuthor(author: string): Promise<void> {
+    const client = xmppClient.value;
+    if (!client) return;
+    const host = uniqueAuthors(options.authorJids.value).find((candidate) => candidate.toLowerCase() === author) ?? author;
+    try {
+      const items = await client.fetchStories(host, pageSize);
+      if (client !== xmppClient.value) return;
+      for (const [storyId, storyHost] of hostByStory) {
+        if (storyHost === host) hostByStory.delete(storyId);
+      }
+      for (const story of items) hostByStory.set(story.id, host);
+      stories.value = [...stories.value.filter((story) => !items.some((item) => item.id === story.id) && hostByStory.has(story.id)), ...items];
+    } catch {
+      /* the next refresh picks the story up */
+    }
+  }
+
   function applyStoryRetracts(event: PubsubEvent): void {
     const retractedStoryIds = new Set(event.items
       .filter((item) => item.retracted && item.id)
       .map((item) => item.id as string));
     if (retractedStoryIds.size === 0) return;
     stories.value = stories.value.filter((story) => !retractedStoryIds.has(story.id));
+    for (const storyId of retractedStoryIds) hostByStory.delete(storyId);
     clearReactionStateForStories(retractedStoryIds);
   }
 
@@ -340,7 +400,7 @@ export function useStories(
 
   async function toggleReaction(storyId: string, emoji: string): Promise<boolean> {
     const client = xmppClient.value;
-    const jid = options.communityJid.value;
+    const jid = hostByStory.get(storyId);
     const self = client?.bareJid;
     if (!client || !jid || !self || !storyId || !emoji.trim()) return false;
     const previousItems = reactionsByStory.value[storyId] ?? [];
@@ -395,6 +455,7 @@ export function useStories(
   function clear() {
     fetchRequestId += 1;
     stories.value = [];
+    hostByStory.clear();
     reactionsByStory.value = {};
     reactionSummariesByStory.value = {};
     reactionMutationVersionsByStory.clear();
@@ -421,6 +482,20 @@ export function useStories(
     reactionSummary,
     toggleReaction,
   };
+}
+
+function uniqueAuthors(authors: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return authors.filter((author) => {
+    const key = author.toLowerCase();
+    if (!author || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function authorKey(authors: readonly string[]): string {
+  return uniqueAuthors(authors).map((author) => author.toLowerCase()).sort().join("\n");
 }
 
 function optimisticSummary(

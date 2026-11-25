@@ -237,6 +237,11 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam_extended(),
         Feature::push(),
         Feature::vcard4(),
+        // XEP-0501 §"Discovery": an entity that implements Pubsub Stories
+        // MUST advertise both the base social-feed feature and the stories
+        // feature. Each account hosts its own stories PEP node.
+        Feature::social_feed(),
+        Feature::stories(),
     ]
 }
 

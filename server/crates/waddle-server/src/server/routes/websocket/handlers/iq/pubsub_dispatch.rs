@@ -197,6 +197,22 @@ pub(super) async fn handle_pubsub_iq(
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
                 }
 
+                if super::story_attachments::is_story_attachment_node(&node, &target_jid) {
+                    return super::story_attachments::handle_story_attachment_publish(
+                        iq,
+                        state,
+                        &target_jid,
+                        &node,
+                        item,
+                        authenticated_session,
+                    )
+                    .await;
+                }
+                if super::story_attachments::is_story_attachment_summary_node(&node) {
+                    // The service maintains summary nodes; no entity writes them.
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                }
+
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_publish(
                     &state.deps.protocol.pubsub_storage,
@@ -265,6 +281,17 @@ pub(super) async fn handle_pubsub_iq(
                         return vec![iq_to_xml(build_pubsub_error(iq, error))];
                     }
                 }
+
+                // XEP-0501: every item of a stories node carries exactly one
+                // enclosure. The service binds the story to its author.
+                let item = if is_pep && node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                    match stamp_story_publish(item, &user_jid) {
+                        Ok(item) => item,
+                        Err(error) => return vec![iq_to_xml(build_pubsub_error(iq, error))],
+                    }
+                } else {
+                    item
+                };
 
                 // Pre-publish reconcile for well-known PEP nodes whose
                 // canonical XEP-defined config differs from the
@@ -609,6 +636,18 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                if super::story_attachments::is_story_attachment_node(&node, &target_jid) {
+                    return super::story_attachments::handle_story_attachment_retract(
+                        iq,
+                        state,
+                        &target_jid,
+                        &node,
+                        &item_id,
+                        authenticated_session,
+                    )
+                    .await;
+                }
+
                 if target_jid != user_jid {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
@@ -664,6 +703,23 @@ pub(super) async fn handle_pubsub_iq(
                                 notify,
                             )
                             .await;
+                            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                                if let Err(error) =
+                                    super::story_attachments::cleanup_story_attachment_state(
+                                        state,
+                                        &target_jid,
+                                        &item_id,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        node = %node,
+                                        item_id = %item_id,
+                                        error = ?error,
+                                        "Failed to clean story attachment state after accepted story retract"
+                                    );
+                                }
+                            }
                             let response = build_pubsub_success(iq);
                             return vec![iq_to_xml(response)];
                         } else {
@@ -845,6 +901,22 @@ fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) ->
         return false;
     }
     payload.children().next().is_none()
+}
+
+/// A stories item must be a story entry with one enclosure (XEP-0501
+/// §"Pubsub Stories profile"); the stored entry names the authenticated
+/// publisher as its author so an item cannot claim another identity.
+fn stamp_story_publish(
+    mut item: waddle_xmpp::pubsub::PubSubItem,
+    publisher: &BareJid,
+) -> Result<waddle_xmpp::pubsub::PubSubItem, PubSubError> {
+    let payload = item.payload.as_ref().ok_or(PubSubError::PayloadRequired)?;
+    let item_id = item.id.as_deref().unwrap_or_default();
+    item.payload = Some(
+        waddle_xmpp_core::xep0501::stamp_story_author(item_id, payload, publisher.as_str())
+            .ok_or(PubSubError::InvalidPayload)?,
+    );
+    Ok(item)
 }
 
 fn validate_xep0402_bookmark_publish_request(

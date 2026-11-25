@@ -401,6 +401,9 @@ fn configuration_payload_setting(
             "pubsub#max_items" if value.parse::<u32>().ok() != Some(current.max_items) => {
                 return None
             }
+            "pubsub#item_expire" if !item_expire_matches(value, current.item_expire) => {
+                return None
+            }
             "pubsub#persist_items" if !setting_matches(value, current.persist_items) => {
                 return None
             }
@@ -421,6 +424,15 @@ fn configuration_payload_setting(
         }
     }
     Some(deliver_payloads.map_or(PayloadSetting::Unchanged, PayloadSetting::Change))
+}
+
+/// XEP-0060 §16.4.4: `pubsub#item_expire` is a number of seconds, or `max`
+/// for no expiry.
+fn item_expire_matches(value: &str, current: Option<u32>) -> bool {
+    match current {
+        None => value == "max",
+        Some(seconds) => value.parse::<u32>().ok() == Some(seconds),
+    }
 }
 
 fn setting_matches(value: &str, enabled: bool) -> bool {

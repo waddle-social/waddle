@@ -2713,9 +2713,7 @@ export class BrowserXmppClient {
 
   setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.events.set("mdsDisplayed", handler); }
 
-  async subscribeStoryReactionSummaries(communityJid: string): Promise<void> { return this.pubsub.subscribeStoryReactionSummaries(communityJid); }
 
-  async subscribeStories(communityJid: string): Promise<void> { return this.pubsub.subscribeStories(communityJid); }
 
   addPubsubEventHandler(handler: (event: PubsubEvent) => void): () => void {
     return this.events.on("pubsubEvent", handler);
@@ -3256,17 +3254,17 @@ export class BrowserXmppClient {
 
   async fetchFeed(communityJid: string, maxItems: number | undefined = undefined): Promise<FeedEntry[]> { return this.pubsub.fetchFeed(communityJid, maxItems); }
   async publishFeedPost(communityJid: string, post: FeedPostInput): Promise<FeedEntry> { return this.pubsub.publishFeedPost(communityJid, post); }
-  async fetchStories(communityJid: string, maxItems: number | undefined = undefined): Promise<Story[]> { return this.pubsub.fetchStories(communityJid, maxItems); }
+  async fetchStories(authorJid: string, maxItems: number | undefined = undefined): Promise<Story[]> { return this.pubsub.fetchStories(authorJid, maxItems); }
   async fetchStoryReads(): Promise<StoryReads> { return this.pubsub.fetchStoryReads(); }
   async publishStoryReads(reads: StoryReads): Promise<StoryReads> { return this.pubsub.publishStoryReads(reads); }
   async publishStatusPreference(pref: StatusPreferenceWire): Promise<void> { return this.pubsub.publishStatusPreference(pref); }
   async fetchStatusPreference(): Promise<StatusPreferenceWire | null> { return this.pubsub.fetchStatusPreference(); }
-  async publishStory(communityJid: string, input: StoryPostInput): Promise<Story> { return this.pubsub.publishStory(communityJid, input); }
-  async fetchStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem[]> { return this.pubsub.fetchStoryReactions(communityJid, storyId); }
-  async fetchMyStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem | null> { return this.pubsub.fetchMyStoryReactions(communityJid, storyId); }
-  async fetchStoryReactionSummary(communityJid: string, storyId: string): Promise<StoryReactionSummary> { return this.pubsub.fetchStoryReactionSummary(communityJid, storyId); }
-  async publishStoryReactions(communityJid: string, storyId: string, emojis: readonly string[], unknownChildrenXml: readonly string[] = []): Promise<void> { return this.pubsub.publishStoryReactions(communityJid, storyId, emojis, unknownChildrenXml); }
-  async retractStoryReactions(communityJid: string, storyId: string): Promise<void> { return this.pubsub.retractStoryReactions(communityJid, storyId); }
+  async publishStory(input: StoryPostInput): Promise<Story> { return this.pubsub.publishStory(input); }
+  async fetchStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem[]> { return this.pubsub.fetchStoryReactions(hostJid, storyId); }
+  async fetchMyStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem | null> { return this.pubsub.fetchMyStoryReactions(hostJid, storyId); }
+  async fetchStoryReactionSummary(hostJid: string, storyId: string): Promise<StoryReactionSummary> { return this.pubsub.fetchStoryReactionSummary(hostJid, storyId); }
+  async publishStoryReactions(hostJid: string, storyId: string, emojis: readonly string[], unknownChildrenXml: readonly string[] = []): Promise<void> { return this.pubsub.publishStoryReactions(hostJid, storyId, emojis, unknownChildrenXml); }
+  async retractStoryReactions(hostJid: string, storyId: string): Promise<void> { return this.pubsub.retractStoryReactions(hostJid, storyId); }
   async fetchCommunityEvents(communityJid: string, maxItems: number | undefined = undefined): Promise<CommunityEvent[]> { return this.pubsub.fetchCommunityEvents(communityJid, maxItems); }
   async publishCommunityEvent(communityJid: string, input: CommunityEventInput): Promise<CommunityEvent> { return this.pubsub.publishCommunityEvent(communityJid, input); }
   async updateCommunityEvent(communityJid: string, itemId: string, input: CommunityEventInput): Promise<CommunityEvent> { return this.pubsub.updateCommunityEvent(communityJid, itemId, input); }

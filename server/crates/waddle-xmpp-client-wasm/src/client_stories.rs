@@ -1,10 +1,10 @@
 //! XEP-0501 Pubsub Stories — wasm bridge surface.
 //!
-//! The server bootstraps a community stories node at
-//! `urn:xmpp:pubsub-social-feed:stories:0` on the community service. These wasm methods
-//! let the chat read active stories (`stories_items`, returns ALL
-//! items; the chat filters expired locally) and publish new stories
-//! with an expiry (`stories_publish`).
+//! Every account hosts its own stories XEP-0163 node,
+//! `urn:xmpp:pubsub-social-feed:stories:0`, on its PEP service. These wasm
+//! methods let the chat read one author's stories (`stories_items`, returns
+//! ALL items; the chat filters expired locally) and publish a story on the
+//! user's own node with an expiry (`stories_publish`).
 
 use chrono::{DateTime, Duration, Utc};
 use minidom::Element;
@@ -54,20 +54,18 @@ pub(crate) struct JsStoryInput {
     pub expiry_hours: Option<i64>,
 }
 
-fn build_stories_items_iq(community_service: &jid::BareJid, max_items: Option<u32>) -> Element {
+/// Items GET on the stories node of `author`'s PEP service.
+fn build_stories_items_iq(author: &jid::BareJid, max_items: Option<u32>) -> Element {
     let id = format!("stories-items-{}", Uuid::new_v4());
-    build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_STORIES, max_items)
+    build_pubsub_items_iq(&id, Some(author), PUBSUB_NODE_STORIES, max_items)
 }
 
-fn build_story_publish_iq(
-    community_service: &jid::BareJid,
-    item_id: &str,
-    story: &Story,
-) -> Element {
+/// Publish SET on the user's own stories node (no `to`: XEP-0163 §3).
+fn build_story_publish_iq(item_id: &str, story: &Story) -> Element {
     let id = format!("stories-publish-{}", Uuid::new_v4());
     build_pubsub_publish_iq(
         &id,
-        Some(community_service),
+        None,
         PUBSUB_NODE_STORIES,
         Some(item_id),
         build_story_element(story),
@@ -87,32 +85,31 @@ fn parse_stories_items_result(iq: &Element) -> Vec<JsStory> {
 
 #[wasm_bindgen]
 impl WaddleClient {
-    /// Fetch the latest stories from the community stories node on
-    /// `community_jid`. Returns ALL items including expired ones —
+    /// Fetch the stories on the stories PEP node of `author_jid` (the
+    /// user's own JID or a contact's). Returns ALL items including expired ones —
     /// the chat filters active vs expired locally so a story fades
     /// out as the countdown hits zero without a server roundtrip.
-    pub fn stories_items(&self, community_jid: String, max_items: Option<u32>) -> js_sys::Promise {
+    pub fn stories_items(&self, author_jid: String, max_items: Option<u32>) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            let service = service_bare_jid(&community_jid)?;
-            let iq = build_stories_items_iq(&service, max_items);
+            let author = service_bare_jid(&author_jid)?;
+            let iq = build_stories_items_iq(&author, max_items);
             let result = send_iq_command(inner, iq).await?;
             let stories = parse_stories_items_result(&result);
             to_js_value(&stories)
         })
     }
 
-    /// Publish a new story. `media_url` is required by XEP-0501; `body`
+    /// Publish a new story on the user's own stories node. `media_url` is required by XEP-0501; `body`
     /// is optional text content attached to that media. `expiry_hours`
     /// defaults to 24.
     ///
     /// # Panics
     /// Panics if `expiry_hours` cannot be represented as a Chrono duration, or if the
     /// story builder fails to retain the expiry set before publishing.
-    pub fn stories_publish(&self, community_jid: String, input: JsValue) -> js_sys::Promise {
+    pub fn stories_publish(&self, input: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
-            let service = service_bare_jid(&community_jid)?;
             let input: JsStoryInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid story input: {err}")))?;
             let media_url = input
@@ -138,7 +135,7 @@ impl WaddleClient {
             }
             let hours = input.expiry_hours.unwrap_or(DEFAULT_EXPIRY_HOURS).max(1);
             story = story.with_expiry(Duration::hours(hours));
-            let iq = build_story_publish_iq(&service, &item_id, &story);
+            let iq = build_story_publish_iq(&item_id, &story);
             send_iq_command(inner, iq).await?;
             let posted: DateTime<Utc> = story.posted.unwrap_or_else(Utc::now);
             let expires: DateTime<Utc> = story.expires.expect("with_expiry always sets expires");
@@ -161,15 +158,15 @@ mod tests {
 
     const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 
-    fn service() -> jid::BareJid {
-        "community.waddle.test".parse().expect("valid service jid")
+    fn author() -> jid::BareJid {
+        "alice@waddle.test".parse().expect("valid author jid")
     }
 
     #[test]
     fn stories_items_iq_pins_the_xep0060_wire_shape() {
-        let iq = build_stories_items_iq(&service(), Some(100));
+        let iq = build_stories_items_iq(&author(), Some(100));
         assert_eq!(iq.attr("type"), Some("get"));
-        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert_eq!(iq.attr("to"), Some("alice@waddle.test"));
         assert!(iq.attr("id").expect("iq id").starts_with("stories-items-"));
         let items = iq
             .get_child("pubsub", NS_PUBSUB)
@@ -182,9 +179,13 @@ mod tests {
     #[test]
     fn story_publish_iq_pins_the_atom_entry_publish_shape() {
         let story = Story::new("story-1");
-        let iq = build_story_publish_iq(&service(), "story-1", &story);
+        let iq = build_story_publish_iq("story-1", &story);
         assert_eq!(iq.attr("type"), Some("set"));
-        assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+        assert_eq!(
+            iq.attr("to"),
+            None,
+            "own PEP service is addressed without `to`"
+        );
         assert!(iq
             .attr("id")
             .expect("iq id")

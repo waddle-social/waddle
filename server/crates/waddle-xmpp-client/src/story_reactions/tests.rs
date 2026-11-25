@@ -1,5 +1,5 @@
 //! XEP-0470 story-reaction client suite: the attachment and summary
-//! node names the community service expects, the fetch/publish/retract
+//! node names the story author's PEP service expects, the fetch/publish/retract
 //! IQ wire shapes, and reply parsing (summary counts, the caller's own
 //! attachment with children this client does not understand).
 
@@ -17,10 +17,11 @@ const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_ATTACHMENTS: &str = "urn:xmpp:pubsub-attachments:1";
 const SUMMARY_NODE: &str =
     "urn:xmpp:pubsub-attachments:summary:1/urn:xmpp:pubsub-social-feed:stories:0";
-const STORY_NODE: &str = "urn:xmpp:pubsub-attachments:1/xmpp:community.waddle.test?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1";
+const STORY_NODE: &str = "urn:xmpp:pubsub-attachments:1/xmpp:bob@waddle.test?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=story-1";
 
-fn community() -> BareJid {
-    "community.waddle.test".parse().expect("valid service jid")
+/// The story author, whose PEP service hosts the story and its attachments.
+fn author() -> BareJid {
+    "bob@waddle.test".parse().expect("valid bare jid")
 }
 
 fn alice() -> BareJid {
@@ -44,22 +45,22 @@ fn summary_node_is_the_summary_namespace_over_the_stories_node() {
 
 #[test]
 fn attachment_node_is_the_namespace_over_the_story_item_uri() {
-    assert_eq!(story_attachment_node(&community(), "story-1"), STORY_NODE);
+    assert_eq!(story_attachment_node(&author(), "story-1"), STORY_NODE);
 }
 
 #[test]
 fn attachment_node_percent_encodes_the_story_id() {
     assert_eq!(
-        story_attachment_node(&community(), "a b;c=d/é"),
-        "urn:xmpp:pubsub-attachments:1/xmpp:community.waddle.test?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=a%20b%3Bc%3Dd%2F%C3%A9"
+        story_attachment_node(&author(), "a b;c=d/é"),
+        "urn:xmpp:pubsub-attachments:1/xmpp:bob@waddle.test?;node=urn%3Axmpp%3Apubsub-social-feed%3Astories%3A0;item=a%20b%3Bc%3Dd%2F%C3%A9"
     );
 }
 
 #[test]
 fn summary_iq_asks_the_summary_node_for_the_story_item() {
-    let iq = build_story_reaction_summary_iq("iq-1", &community(), "story-1");
+    let iq = build_story_reaction_summary_iq("iq-1", &author(), "story-1");
     assert_eq!(iq.attr("type"), Some("get"));
-    assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+    assert_eq!(iq.attr("to"), Some("bob@waddle.test"));
     let items = pubsub_child(&iq, "items");
     assert_eq!(items.attr("node"), Some(SUMMARY_NODE));
     let item = items.get_child("item", NS_PUBSUB).expect("item");
@@ -68,7 +69,7 @@ fn summary_iq_asks_the_summary_node_for_the_story_item() {
 
 #[test]
 fn own_attachment_iq_asks_the_attachment_node_for_the_callers_item() {
-    let iq = build_own_story_attachment_iq("iq-2", &community(), "story-1", &alice());
+    let iq = build_own_story_attachment_iq("iq-2", &author(), "story-1", &alice());
     assert_eq!(iq.attr("type"), Some("get"));
     let items = pubsub_child(&iq, "items");
     assert_eq!(items.attr("node"), Some(STORY_NODE));
@@ -79,10 +80,9 @@ fn own_attachment_iq_asks_the_attachment_node_for_the_callers_item() {
 #[test]
 fn publish_iq_stores_the_attachment_under_the_callers_bare_jid() {
     let attachment = Attachment::reactions(ReactionSet::new(["👍", "❤️"]));
-    let iq =
-        build_story_attachment_publish_iq("iq-3", &community(), "story-1", &alice(), &attachment);
+    let iq = build_story_attachment_publish_iq("iq-3", &author(), "story-1", &alice(), &attachment);
     assert_eq!(iq.attr("type"), Some("set"));
-    assert_eq!(iq.attr("to"), Some("community.waddle.test"));
+    assert_eq!(iq.attr("to"), Some("bob@waddle.test"));
     let publish = pubsub_child(&iq, "publish");
     assert_eq!(publish.attr("node"), Some(STORY_NODE));
     let item = publish.get_child("item", NS_PUBSUB).expect("item");
@@ -99,7 +99,7 @@ fn publish_iq_stores_the_attachment_under_the_callers_bare_jid() {
 
 #[test]
 fn retract_iq_removes_the_callers_item() {
-    let iq = build_story_attachment_retract_iq("iq-4", &community(), "story-1", &alice());
+    let iq = build_story_attachment_retract_iq("iq-4", &author(), "story-1", &alice());
     assert_eq!(iq.attr("type"), Some("set"));
     let retract = pubsub_child(&iq, "retract");
     assert_eq!(retract.attr("node"), Some(STORY_NODE));

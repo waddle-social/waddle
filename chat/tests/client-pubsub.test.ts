@@ -63,7 +63,7 @@ describe("PubsubManager story reactions", () => {
       },
     });
 
-    await manager.publishStoryReactions("community.example.com", "s1", ["👍"]);
+    await manager.publishStoryReactions("bob@example.com", "s1", ["👍"]);
 
     expect(iqs).toHaveLength(1);
     expect(iqs[0]).toContain("<publish");
@@ -80,7 +80,7 @@ describe("PubsubManager story reactions", () => {
       },
     });
 
-    await manager.publishStoryReactions("community.example.com", "s1", []);
+    await manager.publishStoryReactions("bob@example.com", "s1", []);
 
     expect(iqs).toHaveLength(1);
     expect(iqs[0]).toContain("<retract");
