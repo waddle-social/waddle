@@ -794,7 +794,21 @@ pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, ni
     );
     // The first occupant creates the room locked (XEP-0045 §10.1.1) and
     // unlocks it so the joins that follow are admitted.
-    if replies.iter().any(|frame| frame.contains("code=\"201\"")) {
+    // The server serializes attributes with either quote style, so the
+    // status is read from the parsed stanza rather than matched as text.
+    let created = replies.iter().any(|frame| {
+        frame.parse::<minidom::Element>().is_ok_and(|element| {
+            element
+                .get_child("x", "http://jabber.org/protocol/muc#user")
+                .is_some_and(|x| {
+                    x.children().any(|child| {
+                        child.is("status", "http://jabber.org/protocol/muc#user")
+                            && child.attr("code") == Some("201")
+                    })
+                })
+        })
+    });
+    if created {
         waddle_ws_test_support::iq::unlock_created_room(client, room.as_str()).await;
     }
 }

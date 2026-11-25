@@ -3646,7 +3646,8 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
     // The visitor has been told of its role before it asks.
     visitor
         .recv_until(|frame| {
-            frame.contains(&format!("{room}/visitor-b")) && frame.contains("role=\"visitor\"")
+            frame.contains(&format!("{room}/visitor-b"))
+                && (frame.contains("role=\"visitor\"") || frame.contains("role='visitor'"))
         })
         .await
         .expect("the visitor learns of its role");
