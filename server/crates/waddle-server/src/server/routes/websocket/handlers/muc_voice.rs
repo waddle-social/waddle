@@ -7,6 +7,12 @@
 //! are the ones the IQ gets. Neither form is archived or carbon-copied: both
 //! are room control traffic, answered by this handler instead of the message
 //! ingress pipeline.
+//!
+//! The decision runs where the room's actor lives ([`decide_voice_form`]).
+//! A session on another replica of the cluster hands its form to the room's
+//! owner over the relay (`muc_voice_relay`), and a principal at another
+//! server reaches it through the S2S room host, which already runs on the
+//! owner; all three apply the same decision.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -32,6 +38,8 @@ use super::message::muc_direct::{deliver_pm_to_session, message_error_frame};
 use crate::auth::Session;
 use crate::permissions::host_grant::PrincipalEvidence;
 use crate::server::routes::interpret::Deps;
+#[cfg(feature = "clustering")]
+use std::sync::Arc;
 
 /// A visitor may ask again this long after its last request in a room; a
 /// request sooner is refused, so one occupant cannot flood the moderators.
@@ -69,6 +77,22 @@ fn admit_voice_request(room: &BareJid, requester: &BareJid, now: Instant) -> boo
     true
 }
 
+/// What the room holding the actor decided about a form.
+pub(crate) enum VoiceDecision {
+    /// This node runs no actor for the room.
+    NotHere,
+    /// The room answered; the batch holds the frames for the sender.
+    Answered(ResponseBatch),
+}
+
+/// Who sent a form to the room and the stream evidence its standing is
+/// honoured under: none for a session of this deployment, and for a
+/// principal at another server the S2S stream that carried it.
+pub(crate) struct VoiceSender<'a> {
+    pub jid: &'a FullJid,
+    pub evidence: &'a PrincipalEvidence,
+}
+
 pub(crate) async fn handle_voice_form(
     incoming: Message,
     state: &WebSocketState,
@@ -81,34 +105,89 @@ pub(crate) async fn handle_voice_form(
     };
     let principal = authenticated_session.map(ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
-    let reject = |condition, error_type, text| {
-        ResponseBatch::from(vec![message_error_frame(
-            &incoming, bound_jid, &deps, error_type, condition, text,
-        )])
-    };
     let form = match parse_voice_form(&incoming) {
         Ok(Some(form)) => form,
         Ok(None) => return ResponseBatch::default(),
-        Err(_) => {
-            return reject(
-                DefinedCondition::BadRequest,
-                ErrorType::Modify,
-                "The voice request form is not valid.",
-            );
-        }
+        Err(_) => return reject_invalid_form(&incoming, bound_jid, &deps),
     };
     let Some(room_jid) = incoming.to.as_ref().map(Jid::to_bare) else {
         return ResponseBatch::default();
     };
-    let snapshot = match room_snapshot(state, &room_jid).await {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => {
-            return reject(
-                DefinedCondition::ItemNotFound,
-                ErrorType::Cancel,
-                "Requested room not found.",
-            );
+    let sender = VoiceSender {
+        jid: bound_jid,
+        evidence: &PrincipalEvidence::NoStream,
+    };
+    match decide_voice_form(
+        &incoming, state, &deps, &sender, &room_jid, form, muc_domain,
+    )
+    .await
+    {
+        VoiceDecision::Answered(batch) => batch,
+        VoiceDecision::NotHere => {
+            #[cfg(feature = "clustering")]
+            {
+                use super::muc_voice_relay::{forward_voice_form, ForwardedVoice};
+                return match forward_voice_form(state, &room_jid, bound_jid, &incoming).await {
+                    ForwardedVoice::Frames(stanzas) => ResponseBatch::from(stanzas),
+                    ForwardedVoice::NoOwner => reject_room_not_found(&incoming, bound_jid, &deps),
+                    ForwardedVoice::Unavailable => ResponseBatch::from(vec![message_error_frame(
+                        &incoming,
+                        bound_jid,
+                        &deps,
+                        ErrorType::Wait,
+                        DefinedCondition::ResourceConstraint,
+                        "The room's owner is unavailable; try again shortly.",
+                    )]),
+                };
+            }
+            #[cfg(not(feature = "clustering"))]
+            reject_room_not_found(&incoming, bound_jid, &deps)
         }
+    }
+}
+
+fn reject_invalid_form(incoming: &Message, sender: &FullJid, deps: &Deps<'_>) -> ResponseBatch {
+    ResponseBatch::from(vec![message_error_frame(
+        incoming,
+        sender,
+        deps,
+        ErrorType::Modify,
+        DefinedCondition::BadRequest,
+        "The voice request form is not valid.",
+    )])
+}
+
+fn reject_room_not_found(incoming: &Message, sender: &FullJid, deps: &Deps<'_>) -> ResponseBatch {
+    ResponseBatch::from(vec![message_error_frame(
+        incoming,
+        sender,
+        deps,
+        ErrorType::Cancel,
+        DefinedCondition::ItemNotFound,
+        "Requested room not found.",
+    )])
+}
+
+/// Decide `form`, which `sender` put to the room, against the room's actor
+/// on this node: a visitor's request goes to the moderators (§7.13) and a
+/// moderator's approval is applied as the role change (§8.6).
+pub(crate) async fn decide_voice_form(
+    incoming: &Message,
+    state: &WebSocketState,
+    deps: &Deps<'_>,
+    sender: &VoiceSender<'_>,
+    room_jid: &BareJid,
+    form: VoiceForm,
+    muc_domain: &str,
+) -> VoiceDecision {
+    let reject = |condition, error_type, text| {
+        VoiceDecision::Answered(ResponseBatch::from(vec![message_error_frame(
+            incoming, sender.jid, deps, error_type, condition, text,
+        )]))
+    };
+    let snapshot = match room_snapshot(state, room_jid).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return VoiceDecision::NotHere,
         Err(()) => {
             return reject(
                 DefinedCondition::InternalServerError,
@@ -117,7 +196,7 @@ pub(crate) async fn handle_voice_form(
             );
         }
     };
-    let Some(sender) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {
+    let Some(occupant) = snapshot.room.find_occupant_by_real_jid(sender.jid) else {
         return reject(
             DefinedCondition::NotAcceptable,
             ErrorType::Cancel,
@@ -126,23 +205,27 @@ pub(crate) async fn handle_voice_form(
     };
     match form {
         VoiceForm::Request => {
-            if sender.role != Role::Visitor {
+            if occupant.role != Role::Visitor {
                 // Only a visitor lacks voice to ask for.
-                return ResponseBatch::default();
+                return VoiceDecision::Answered(ResponseBatch::default());
             }
-            if !admit_voice_request(&room_jid, &bound_jid.to_bare(), Instant::now()) {
+            if !admit_voice_request(room_jid, &sender.jid.to_bare(), Instant::now()) {
                 return reject(
                     DefinedCondition::ResourceConstraint,
                     ErrorType::Wait,
                     "A voice request was sent recently; try again later.",
                 );
             }
-            relay_request_to_moderators(&snapshot, &room_jid, bound_jid, &sender.nick, &deps).await;
-            ResponseBatch::default()
+            relay_request_to_moderators(&snapshot, room_jid, sender.jid, &occupant.nick, deps)
+                .await;
+            VoiceDecision::Answered(ResponseBatch::default())
         }
         VoiceForm::Approval { jid, nick, allow } => {
-            let moderates = sender.role == Role::Moderator
-                || matches!(sender.affiliation, Affiliation::Owner | Affiliation::Admin);
+            let moderates = occupant.role == Role::Moderator
+                || matches!(
+                    occupant.affiliation,
+                    Affiliation::Owner | Affiliation::Admin
+                );
             if !moderates {
                 return reject(
                     DefinedCondition::Forbidden,
@@ -151,7 +234,7 @@ pub(crate) async fn handle_voice_form(
                 );
             }
             if !allow {
-                return ResponseBatch::default();
+                return VoiceDecision::Answered(ResponseBatch::default());
             }
             let names_the_requester = snapshot
                 .room
@@ -164,7 +247,60 @@ pub(crate) async fn handle_voice_form(
                     "Requested occupant not found.",
                 );
             }
-            grant_voice(&incoming, state, bound_jid, &room_jid, &nick, muc_domain).await
+            VoiceDecision::Answered(
+                grant_voice(incoming, state, sender, room_jid, &nick, muc_domain).await,
+            )
+        }
+    }
+}
+
+/// The decision of a form a replica carried here for one of its sessions:
+/// the frames the room answers the sender with. `None` when this node runs
+/// no actor for the room, and nothing was decided.
+#[cfg(feature = "clustering")]
+pub(crate) async fn relayed_voice_form(
+    state: &Arc<WebSocketState>,
+    message: crate::clustering::relay::RelayMucVoiceForm,
+) -> crate::clustering::relay::RelayMucVoiceFormReply {
+    use crate::clustering::codec::RemoteStanza;
+    use crate::clustering::relay::RelayMucVoiceFormReply;
+    let RemoteStanza(Stanza::Message(mut incoming)) = message.message else {
+        return RelayMucVoiceFormReply::Handled(Vec::new());
+    };
+    // The origin vouches for the session; the form says nothing of who sent it.
+    incoming.from = Some(Jid::from(message.sender.clone()));
+    incoming.to = Some(Jid::from(message.room.clone()));
+    let Ok(Some(form)) = parse_voice_form(&incoming) else {
+        return RelayMucVoiceFormReply::Handled(Vec::new());
+    };
+    let deps = build_interpret_deps(state, None);
+    let sender = VoiceSender {
+        jid: &message.sender,
+        evidence: &PrincipalEvidence::NoStream,
+    };
+    let muc_domain = state.deps.service_domains.muc.as_str();
+    let decision = decide_voice_form(
+        &incoming,
+        state,
+        &deps,
+        &sender,
+        &message.room,
+        form,
+        muc_domain,
+    )
+    .await;
+    match decision {
+        VoiceDecision::NotHere => RelayMucVoiceFormReply::NotOwner,
+        VoiceDecision::Answered(batch) => {
+            match super::super::s2s_rooms::settle_answered(state, batch).await {
+                Some(stanzas) => {
+                    RelayMucVoiceFormReply::Handled(stanzas.into_iter().map(RemoteStanza).collect())
+                }
+                None => {
+                    tracing::warn!(room = %message.room, "a relayed voice form's answer was not a stanza");
+                    RelayMucVoiceFormReply::Handled(Vec::new())
+                }
+            }
         }
     }
 }
@@ -226,11 +362,12 @@ async fn relay_request_to_moderators(
 async fn grant_voice(
     incoming: &Message,
     state: &WebSocketState,
-    moderator: &FullJid,
+    sender: &VoiceSender<'_>,
     room_jid: &BareJid,
     nick: &str,
     muc_domain: &str,
 ) -> ResponseBatch {
+    let moderator = sender.jid;
     let item = Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
         .attr(minidom::rxml::xml_ncname!("nick").to_owned(), nick)
         .attr(minidom::rxml::xml_ncname!("role").to_owned(), "participant")
@@ -249,7 +386,7 @@ async fn grant_voice(
         muc_domain,
         state,
         Some(moderator),
-        &PrincipalEvidence::NoStream,
+        sender.evidence,
         None,
         None,
     )
