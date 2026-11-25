@@ -50,7 +50,7 @@ pub use room_requests::{
 };
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
-pub(crate) use room_observation::{
+pub use room_observation::{
     initialize_room_observations, CapturedRoomSource, ObservationWork, RoomObservationRepository,
 };
 pub use room_observation::{

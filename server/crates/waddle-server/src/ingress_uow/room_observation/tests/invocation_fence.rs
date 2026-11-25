@@ -44,108 +44,52 @@ async fn seed_with_stanza(fixture: &IngressFixture, stanza: &str) -> (Configured
 async fn terminal_outcome_cannot_erase_prior_uncertainty(
     fixture: IngressFixture,
     outcome: RoomObservationOutcome,
-    cancel: bool,
+    _cancel: bool,
 ) {
     let (observer, now) = seed(&fixture).await;
     let subscription = subscription(&observer);
-    let mut last = None;
-    for index in 0..20 {
-        let at = now + index * 180_000;
-        let mut tx = fixture.uow.begin().await.expect("started invocation");
-        let work = Repo::claim(&mut tx, &subscription, at)
-            .await
-            .expect("claim")
-            .expect("work");
-        assert_eq!(i64::from(work.attempt), index + 1);
-        assert!(Repo::start(&mut tx, &work, at).await.expect("start"));
-        tx.commit()
-            .await
-            .expect("invocation commits before lost result");
-        last = Some(work);
-    }
-    let first = last.expect("expired twentieth invocation");
-    let at = now + 20 * 180_000;
+    let mut tx = fixture.uow.begin().await.expect("started invocation");
+    let first = Repo::claim(&mut tx, &subscription, now)
+        .await
+        .expect("claim")
+        .expect("work");
+    assert_eq!(first.attempt, 1);
+    assert!(Repo::start(&mut tx, &first, now).await.expect("start"));
+    tx.commit()
+        .await
+        .expect("invocation commits before lost result");
+
+    // Once the started lease expires, claim() immediately quarantines the work
+    // as terminal `unknown_after_send` instead of re-dispatching it.
+    let at = now + 180_000;
     let mut tx = fixture
         .uow
         .begin()
         .await
-        .expect("expired invocation recovery");
-    let retry = Repo::claim(&mut tx, &subscription, at)
+        .expect("expired invocation quarantine");
+    assert!(Repo::claim(&mut tx, &subscription, at)
         .await
-        .expect("reclaim")
-        .expect("retry");
-    assert_ne!(retry.lease, first.lease);
-    assert_eq!(retry.attempt, 21);
+        .expect("claim quarantines")
+        .is_none());
     assert!(!Repo::finish(&mut tx, &first, &outcome, at)
         .await
         .expect("old lease remains fenced"));
-    assert!(Repo::start(&mut tx, &retry, at)
-        .await
-        .expect("retry starts"));
-    assert!(Repo::finish(&mut tx, &retry, &outcome, at)
-        .await
-        .expect("record retry outcome"));
-    tx.commit()
-        .await
-        .expect("later known outcome preserves earlier unknown invocation");
-    assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'pending' AND terminal_category = 'unknown_after_send' AND body = 'body' AND lease_id IS NULL AND lease_until_ms IS NULL AND settled_at_ms IS NULL").await, 1);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert_eq!(
-        fixture.count("extension_room_observation_receipts").await,
-        0
-    );
-    assert_eq!(fixture.count("extension_room_publications").await, 0);
+    tx.commit().await.expect("quarantine commit");
 
-    let mut tx = fixture.uow.begin().await.expect("bounded retry backoff");
-    assert!(Repo::claim(&mut tx, &subscription, at + 59_999)
-        .await
-        .expect("not due")
-        .is_none());
-    let next_at = at + 60_000;
-    let next = Repo::claim(&mut tx, &subscription, next_at)
-        .await
-        .expect("due retry")
-        .expect("uncertainty remains reclaimable");
-    assert_ne!(next.lease, retry.lease);
-    assert_eq!(next.attempt, 22);
-    assert!(Repo::start(&mut tx, &next, next_at)
-        .await
-        .expect("new lease starts"));
-    let result = RoomObservationOutcome::Completed(RoomObservationResult {
-        payloads: vec![payload()],
-        usage: None,
-    });
-    assert!(!Repo::finish(&mut tx, &retry, &result, next_at)
-        .await
-        .expect("previous retry result fenced"));
-    if cancel {
-        Repo::sync_configured(&mut tx, &[configured_observer(2, 'b')], next_at)
-            .await
-            .expect("explicit generation cancellation");
-        assert!(!Repo::finish(&mut tx, &next, &result, next_at)
-            .await
-            .expect("cancelled callback fenced"));
-    } else {
-        assert!(Repo::finish(&mut tx, &next, &result, next_at)
-            .await
-            .expect("successful completion resolves uncertainty"));
-    }
-    tx.commit().await.expect("explicit resolution");
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert_eq!(
-        fixture.count("extension_room_observation_receipts").await,
-        1
-    );
-    assert_eq!(
-        fixture.count("extension_room_publications").await,
-        i64::from(!cancel)
-    );
     assert_eq!(
         fixture
-            .count("extension_room_observation_work WHERE status = 'pending'")
+            .count("extension_room_observation_work WHERE status = 'terminal' AND terminal_category = 'unknown_after_send' AND body = '' AND lease_id IS NULL AND lease_until_ms IS NULL AND settled_at_ms IS NOT NULL")
             .await,
-        0
+        1
     );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_receipts WHERE category = 'unknown_after_send'")
+            .await,
+        1
+    );
+    assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }
 
