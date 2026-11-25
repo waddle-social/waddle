@@ -23,8 +23,9 @@ pub use error::{AuthError, BrokerError, CryptoError, KmsError, LedgerError, Seal
 pub use idp_proof::{
     authorize_admin_policy_mutation, build_device_enroll_pop_transcript, enforce_not_scram,
     p256_jwk_thumbprint, AuthProvenance, CellAssertedAdminFlags, ColonyBrokerClaims,
-    ColonyJwtVerifier, ConfirmationClaim, DeviceKeyRegistry, IdpProof, RegisteredDeviceKey,
-    RegisteredWebAuthnKey, SignedDeviceCommand, VerifiedIdpIntent, WebAuthnVerifier,
+    ColonyJwtVerifier, ConfirmationClaim, DeviceKeyRegistry, EnrollDeviceKeyInput, IdpProof,
+    RegisteredDeviceKey, RegisteredWebAuthnKey, SignedDeviceCommand, VerifiedIdpIntent,
+    WebAuthnAssertionInput, WebAuthnVerifier,
 };
 pub use key_hierarchy::{KeyHierarchyService, TenantDekRecord, UserDekRecord};
 pub use kms::local::LocalKmsProvider;
@@ -35,7 +36,8 @@ pub use ledger::postgres::{PostgresLedgerStore, SqliteCompatLedgerStore};
 pub use ledger::turso::TursoLedgerStore;
 pub use ledger::{
     DestructionLedgerStore, DestructionReason, DestructionRecord, DestructionTargetKind,
-    EgressGateState, EnrollmentNonceRecord, RetiredAccountRecord, StoredEnvelopeRecord,
+    EgressGateState, EnrollmentNonceRecord, NonceClaimOutcome, RetiredAccountRecord,
+    StoredEnvelopeRecord,
 };
 pub use sealed_enrollment::{
     compute_root_kid, seal_credential_for_broker, BrokerSubkeyRing, ClientSealContext,

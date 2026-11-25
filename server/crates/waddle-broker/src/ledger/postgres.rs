@@ -2,6 +2,7 @@
 //! implementations of [`DestructionLedgerStore`].
 
 use async_trait::async_trait;
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{PgPool, Row, SqlitePool};
 use uuid::Uuid;
 use waddle_broker_core::identity::{AccountId, TenantId};
@@ -9,7 +10,8 @@ use waddle_broker_core::identity::{AccountId, TenantId};
 use crate::error::LedgerError;
 use crate::ledger::{
     DestructionLedgerStore, DestructionReason, DestructionRecord, DestructionTargetKind,
-    EgressGateState, EnrollmentNonceRecord, RetiredAccountRecord, StoredEnvelopeRecord,
+    EgressGateState, EnrollmentNonceRecord, NonceClaimOutcome, RetiredAccountRecord,
+    StoredEnvelopeRecord,
 };
 
 const PG_SCHEMA: &[&str] = &[
@@ -250,53 +252,92 @@ impl DestructionLedgerStore for PostgresLedgerStore {
         let Some(row) = row else {
             return Ok(None);
         };
-        let n_bytes: Vec<u8> = row.get(0);
-        let d_bytes: Vec<u8> = row.get(1);
-        let tenant_str: String = row.get(2);
-        let cred_str: String = row.get(3);
-        let version_i32: i32 = row.get(4);
-        Ok(Some(EnrollmentNonceRecord {
-            nonce_sha256: n_bytes
-                .try_into()
-                .map_err(|_| LedgerError::InvalidState("invalid nonce_sha256".to_owned()))?,
-            payload_digest_sha256: d_bytes
-                .try_into()
-                .map_err(|_| LedgerError::InvalidState("invalid payload_digest".to_owned()))?,
-            tenant_id: TenantId::parse(&tenant_str)
-                .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
-            credential_id: Uuid::parse_str(&cred_str)
-                .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
-            credential_version: u32::try_from(version_i32)
-                .map_err(|_| LedgerError::InvalidState("invalid version".to_owned()))?,
-            expires_at_ms: row.get(5),
-            created_at_ms: row.get(6),
-        }))
+        Ok(Some(parse_pg_nonce_row(&row)?))
     }
 
-    async fn put_enrollment_nonce(
+    async fn claim_enrollment_nonce_and_put_envelope(
         &self,
-        record: &EnrollmentNonceRecord,
-    ) -> Result<(), LedgerError> {
-        let version_i32 = i32::try_from(record.credential_version)
+        nonce_record: &EnrollmentNonceRecord,
+        envelope_record: &StoredEnvelopeRecord,
+    ) -> Result<NonceClaimOutcome, LedgerError> {
+        let nonce_version_i32 = i32::try_from(nonce_record.credential_version)
             .map_err(|_| LedgerError::InvalidState("version overflow".to_owned()))?;
-        sqlx::query(
+        let env_version_i32 = i32::try_from(envelope_record.version)
+            .map_err(|_| LedgerError::InvalidState("version overflow".to_owned()))?;
+        let env_json = serde_json::to_string(envelope_record)
+            .map_err(|err| LedgerError::Serialization(err.to_string()))?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?;
+
+        let inserted = sqlx::query(
             "INSERT INTO broker_enrollment_nonces
              (nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
               credential_version, expires_at_ms, created_at_ms)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (nonce_sha256) DO NOTHING",
+             ON CONFLICT (nonce_sha256) DO NOTHING
+             RETURNING nonce_sha256",
         )
-        .bind(record.nonce_sha256.as_slice())
-        .bind(record.payload_digest_sha256.as_slice())
-        .bind(record.tenant_id.as_str())
-        .bind(record.credential_id.to_string())
-        .bind(version_i32)
-        .bind(record.expires_at_ms)
-        .bind(record.created_at_ms)
-        .execute(&self.pool)
+        .bind(nonce_record.nonce_sha256.as_slice())
+        .bind(nonce_record.payload_digest_sha256.as_slice())
+        .bind(nonce_record.tenant_id.as_str())
+        .bind(nonce_record.credential_id.to_string())
+        .bind(nonce_version_i32)
+        .bind(nonce_record.expires_at_ms)
+        .bind(nonce_record.created_at_ms)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|err| LedgerError::Backend(err.to_string()))?;
-        Ok(())
+
+        if inserted.is_some() {
+            sqlx::query(
+                "INSERT INTO credential_envelopes
+                 (credential_id, tenant_id, account_id, provider, version, record_json, created_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (credential_id) DO UPDATE SET
+                   version = EXCLUDED.version,
+                   record_json = EXCLUDED.record_json,
+                   created_at_ms = EXCLUDED.created_at_ms",
+            )
+            .bind(envelope_record.credential_id.to_string())
+            .bind(envelope_record.tenant_id.as_str())
+            .bind(
+                envelope_record
+                    .account_id
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+            )
+            .bind(&envelope_record.provider)
+            .bind(env_version_i32)
+            .bind(env_json)
+            .bind(envelope_record.created_at_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|err| LedgerError::Backend(err.to_string()))?;
+            Ok(NonceClaimOutcome::Claimed)
+        } else {
+            let row = sqlx::query(
+                "SELECT nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
+                        credential_version, expires_at_ms, created_at_ms
+                 FROM broker_enrollment_nonces WHERE nonce_sha256 = $1 LIMIT 1",
+            )
+            .bind(nonce_record.nonce_sha256.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?
+            .ok_or_else(|| {
+                LedgerError::InvalidState("enrollment nonce conflict but row missing".to_owned())
+            })?;
+            let existing = parse_pg_nonce_row(&row)?;
+            let _ = tx.rollback().await;
+            Ok(NonceClaimOutcome::Existing(existing))
+        }
     }
 
     async fn get_egress_state(&self) -> Result<EgressGateState, LedgerError> {
@@ -509,7 +550,9 @@ pub struct SqliteCompatLedgerStore {
 
 impl SqliteCompatLedgerStore {
     pub async fn connect_in_memory() -> Result<Self, LedgerError> {
-        let pool = SqlitePool::connect("sqlite::memory:")
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
             .await
             .map_err(|err| LedgerError::Backend(err.to_string()))?;
         Self::new(pool).await
@@ -713,50 +756,103 @@ impl DestructionLedgerStore for SqliteCompatLedgerStore {
         let Some(row) = row else {
             return Ok(None);
         };
-        let n_bytes: Vec<u8> = row.get(0);
-        let d_bytes: Vec<u8> = row.get(1);
-        let tenant_str: String = row.get(2);
-        let cred_str: String = row.get(3);
-        let version_i64: i64 = row.get(4);
-        Ok(Some(EnrollmentNonceRecord {
-            nonce_sha256: n_bytes
-                .try_into()
-                .map_err(|_| LedgerError::InvalidState("invalid nonce_sha256".to_owned()))?,
-            payload_digest_sha256: d_bytes
-                .try_into()
-                .map_err(|_| LedgerError::InvalidState("invalid payload_digest".to_owned()))?,
-            tenant_id: TenantId::parse(&tenant_str)
-                .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
-            credential_id: Uuid::parse_str(&cred_str)
-                .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
-            credential_version: u32::try_from(version_i64)
-                .map_err(|_| LedgerError::InvalidState("invalid version".to_owned()))?,
-            expires_at_ms: row.get(5),
-            created_at_ms: row.get(6),
-        }))
+        Ok(Some(parse_sqlite_nonce_row(&row)?))
     }
 
-    async fn put_enrollment_nonce(
+    async fn claim_enrollment_nonce_and_put_envelope(
         &self,
-        record: &EnrollmentNonceRecord,
-    ) -> Result<(), LedgerError> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO broker_enrollment_nonces
-             (nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
-              credential_version, expires_at_ms, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .bind(record.nonce_sha256.as_slice())
-        .bind(record.payload_digest_sha256.as_slice())
-        .bind(record.tenant_id.as_str())
-        .bind(record.credential_id.to_string())
-        .bind(i64::from(record.credential_version))
-        .bind(record.expires_at_ms)
-        .bind(record.created_at_ms)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| LedgerError::Backend(err.to_string()))?;
-        Ok(())
+        nonce_record: &EnrollmentNonceRecord,
+        envelope_record: &StoredEnvelopeRecord,
+    ) -> Result<NonceClaimOutcome, LedgerError> {
+        let env_json = serde_json::to_string(envelope_record)
+            .map_err(|err| LedgerError::Serialization(err.to_string()))?;
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?;
+
+        let tx_res: Result<NonceClaimOutcome, LedgerError> = async {
+            let res = sqlx::query(
+                "INSERT OR IGNORE INTO broker_enrollment_nonces
+                 (nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
+                  credential_version, expires_at_ms, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(nonce_record.nonce_sha256.as_slice())
+            .bind(nonce_record.payload_digest_sha256.as_slice())
+            .bind(nonce_record.tenant_id.as_str())
+            .bind(nonce_record.credential_id.to_string())
+            .bind(i64::from(nonce_record.credential_version))
+            .bind(nonce_record.expires_at_ms)
+            .bind(nonce_record.created_at_ms)
+            .execute(&mut *conn)
+            .await
+            .map_err(|err| LedgerError::Backend(err.to_string()))?;
+
+            if res.rows_affected() > 0 {
+                sqlx::query(
+                    "INSERT OR REPLACE INTO credential_envelopes
+                     (credential_id, tenant_id, account_id, provider, version, record_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .bind(envelope_record.credential_id.to_string())
+                .bind(envelope_record.tenant_id.as_str())
+                .bind(
+                    envelope_record
+                        .account_id
+                        .map(|a| a.to_string())
+                        .unwrap_or_default(),
+                )
+                .bind(&envelope_record.provider)
+                .bind(i64::from(envelope_record.version))
+                .bind(env_json)
+                .bind(envelope_record.created_at_ms)
+                .execute(&mut *conn)
+                .await
+                .map_err(|err| LedgerError::Backend(err.to_string()))?;
+                Ok(NonceClaimOutcome::Claimed)
+            } else {
+                let row = sqlx::query(
+                    "SELECT nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
+                            credential_version, expires_at_ms, created_at_ms
+                     FROM broker_enrollment_nonces WHERE nonce_sha256 = ?1 LIMIT 1",
+                )
+                .bind(nonce_record.nonce_sha256.as_slice())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|err| LedgerError::Backend(err.to_string()))?
+                .ok_or_else(|| {
+                    LedgerError::InvalidState(
+                        "enrollment nonce conflict but row missing".to_owned(),
+                    )
+                })?;
+                Ok(NonceClaimOutcome::Existing(parse_sqlite_nonce_row(&row)?))
+            }
+        }
+        .await;
+
+        match tx_res {
+            Ok(NonceClaimOutcome::Claimed) => {
+                if let Err(err) = sqlx::query("COMMIT").execute(&mut *conn).await {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    return Err(LedgerError::Backend(err.to_string()));
+                }
+                Ok(NonceClaimOutcome::Claimed)
+            }
+            Ok(NonceClaimOutcome::Existing(existing)) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Ok(NonceClaimOutcome::Existing(existing))
+            }
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(err)
+            }
+        }
     }
 
     async fn get_egress_state(&self) -> Result<EgressGateState, LedgerError> {
@@ -911,4 +1007,54 @@ impl DestructionLedgerStore for SqliteCompatLedgerStore {
             .map_err(|err| LedgerError::Backend(err.to_string()))?;
         Ok(res.rows_affected())
     }
+}
+
+fn parse_pg_nonce_row(row: &sqlx::postgres::PgRow) -> Result<EnrollmentNonceRecord, LedgerError> {
+    let n_bytes: Vec<u8> = row.get(0);
+    let d_bytes: Vec<u8> = row.get(1);
+    let tenant_str: String = row.get(2);
+    let cred_str: String = row.get(3);
+    let version_i32: i32 = row.get(4);
+    Ok(EnrollmentNonceRecord {
+        nonce_sha256: n_bytes
+            .try_into()
+            .map_err(|_| LedgerError::InvalidState("invalid nonce_sha256".to_owned()))?,
+        payload_digest_sha256: d_bytes
+            .try_into()
+            .map_err(|_| LedgerError::InvalidState("invalid payload_digest".to_owned()))?,
+        tenant_id: TenantId::parse(&tenant_str)
+            .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
+        credential_id: Uuid::parse_str(&cred_str)
+            .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
+        credential_version: u32::try_from(version_i32)
+            .map_err(|_| LedgerError::InvalidState("invalid version".to_owned()))?,
+        expires_at_ms: row.get(5),
+        created_at_ms: row.get(6),
+    })
+}
+
+fn parse_sqlite_nonce_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<EnrollmentNonceRecord, LedgerError> {
+    let n_bytes: Vec<u8> = row.get(0);
+    let d_bytes: Vec<u8> = row.get(1);
+    let tenant_str: String = row.get(2);
+    let cred_str: String = row.get(3);
+    let version_i64: i64 = row.get(4);
+    Ok(EnrollmentNonceRecord {
+        nonce_sha256: n_bytes
+            .try_into()
+            .map_err(|_| LedgerError::InvalidState("invalid nonce_sha256".to_owned()))?,
+        payload_digest_sha256: d_bytes
+            .try_into()
+            .map_err(|_| LedgerError::InvalidState("invalid payload_digest".to_owned()))?,
+        tenant_id: TenantId::parse(&tenant_str)
+            .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
+        credential_id: Uuid::parse_str(&cred_str)
+            .map_err(|err| LedgerError::InvalidState(err.to_string()))?,
+        credential_version: u32::try_from(version_i64)
+            .map_err(|_| LedgerError::InvalidState("invalid version".to_owned()))?,
+        expires_at_ms: row.get(5),
+        created_at_ms: row.get(6),
+    })
 }

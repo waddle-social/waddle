@@ -82,6 +82,8 @@ pub enum AuthError {
     SignCountRollback,
     #[error("device key not found or inactive: {0}")]
     UnknownOrInactiveDeviceKey(Uuid),
+    #[error("device key already registered: {0}")]
+    DeviceKeyAlreadyExists(Uuid),
     #[error("device key proof-of-possession or command signature invalid")]
     InvalidDeviceSignature,
     #[error("signed command expired or TTL exceeds maximum")]

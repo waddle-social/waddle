@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::sync::Barrier;
 use waddle_broker::{
-    BrokerCustodyService, BrokerError, CredentialLifecycleStatus, EnrollCredentialInput,
-    KeyHierarchyService, LocalKmsProvider, SecretBytes, SqliteCompatLedgerStore, TursoLedgerStore,
+    BrokerCustodyService, BrokerError, CredentialLifecycleStatus, DestructionLedgerStore,
+    EnrollCredentialInput, KeyHierarchyService, KmsError, LocalKmsProvider, SecretBytes,
+    SqliteCompatLedgerStore, TursoLedgerStore,
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_broker_core::permission::{
@@ -554,4 +556,241 @@ async fn e2e_gate5_backup_restore_drill_turso_wal() {
             .expect("unseal c3"),
         c3_secret
     );
+}
+
+async fn run_concurrent_same_payload_cas(ledger: Arc<dyn DestructionLedgerStore>) {
+    let kms = Arc::new(LocalKmsProvider::new());
+    let hierarchy = Arc::new(KeyHierarchyService::new("waddle.social", kms));
+    let svc = Arc::new(
+        BrokerCustodyService::new(hierarchy, ledger.clone())
+            .await
+            .expect("svc"),
+    );
+
+    let t = tenant("cas-same.waddle.social");
+    let secret = SecretBytes::from_slice(b"sk-cas-same-payload").expect("secret");
+    let payload_digest = digest("cas-same-payload");
+    let n = 16usize;
+    let barrier = Arc::new(Barrier::new(n));
+
+    let mut handles = Vec::with_capacity(n);
+    for _ in 0..n {
+        let svc = Arc::clone(&svc);
+        let barrier = Arc::clone(&barrier);
+        let t = t.clone();
+        let secret = secret.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            svc.enroll(EnrollCredentialInput {
+                tenant_id: t,
+                account_id: None,
+                provider: "openrouter".to_owned(),
+                nonce: "cas-shared-nonce-same".to_owned(),
+                payload_digest_sha256: payload_digest,
+                expires_at_ms: i64::MAX,
+                plaintext: secret,
+            })
+            .await
+        }));
+    }
+
+    let mut fresh = 0usize;
+    let mut replayed = 0usize;
+    let mut cred_ids = HashSet::new();
+    for h in handles {
+        let receipt = h.await.expect("join").expect("enroll ok");
+        if receipt.replayed {
+            replayed += 1;
+        } else {
+            fresh += 1;
+        }
+        cred_ids.insert(receipt.credential_id);
+    }
+
+    assert_eq!(fresh, 1, "exactly one caller must win the nonce claim");
+    assert_eq!(replayed, n - 1, "all other callers must observe replay");
+    assert_eq!(
+        cred_ids.len(),
+        1,
+        "all callers must receive identical credential_id"
+    );
+
+    let envelopes = ledger
+        .list_envelopes_for_tenant(&t)
+        .await
+        .expect("list envelopes");
+    assert_eq!(envelopes.len(), 1, "must store exactly one envelope");
+
+    let cred_id = *cred_ids.iter().next().expect("cred id");
+    let unsealed = svc
+        .unseal_for_egress(&t, cred_id)
+        .await
+        .expect("winning envelope must be unsealable");
+    assert_eq!(unsealed, secret);
+}
+
+async fn run_concurrent_mutated_payload_cas(ledger: Arc<dyn DestructionLedgerStore>) {
+    let kms = Arc::new(LocalKmsProvider::new());
+    let hierarchy = Arc::new(KeyHierarchyService::new("waddle.social", kms));
+    let svc = Arc::new(
+        BrokerCustodyService::new(hierarchy, ledger.clone())
+            .await
+            .expect("svc"),
+    );
+
+    let t = tenant("cas-mutated.waddle.social");
+    let n = 16usize;
+    let barrier = Arc::new(Barrier::new(n));
+
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let svc = Arc::clone(&svc);
+        let barrier = Arc::clone(&barrier);
+        let t = t.clone();
+        handles.push(tokio::spawn(async move {
+            let secret =
+                SecretBytes::from_slice(format!("sk-mutated-{i}").as_bytes()).expect("secret");
+            let d = digest(&format!("mutated-payload-{i}"));
+            barrier.wait().await;
+            svc.enroll(EnrollCredentialInput {
+                tenant_id: t,
+                account_id: None,
+                provider: "openrouter".to_owned(),
+                nonce: "cas-shared-nonce-mutated".to_owned(),
+                payload_digest_sha256: d,
+                expires_at_ms: i64::MAX,
+                plaintext: secret,
+            })
+            .await
+        }));
+    }
+
+    let mut ok_count = 0usize;
+    let mut conflict_count = 0usize;
+    for h in handles {
+        match h.await.expect("join") {
+            Ok(receipt) => {
+                assert!(!receipt.replayed, "sole winner must not be marked replayed");
+                ok_count += 1;
+            }
+            Err(BrokerError::NoncePayloadConflict) => {
+                conflict_count += 1;
+            }
+            Err(other) => panic!("unexpected error under mutated nonce race: {other}"),
+        }
+    }
+
+    assert_eq!(ok_count, 1, "exactly one caller must succeed");
+    assert_eq!(
+        conflict_count,
+        n - 1,
+        "all other mutated-payload callers must fail with NoncePayloadConflict"
+    );
+
+    let envelopes = ledger
+        .list_envelopes_for_tenant(&t)
+        .await
+        .expect("list envelopes");
+    assert_eq!(envelopes.len(), 1, "must store exactly one envelope");
+}
+
+#[tokio::test]
+async fn concurrent_nonce_replay_same_payload_cas_turso() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = Arc::new(
+        TursoLedgerStore::open_in_dir(dir.path())
+            .await
+            .expect("turso"),
+    );
+    run_concurrent_same_payload_cas(store).await;
+}
+
+#[tokio::test]
+async fn concurrent_nonce_replay_same_payload_cas_sqlite_compat() {
+    let store = Arc::new(
+        SqliteCompatLedgerStore::connect_in_memory()
+            .await
+            .expect("sqlite compat"),
+    );
+    run_concurrent_same_payload_cas(store).await;
+}
+
+#[tokio::test]
+async fn concurrent_nonce_replay_mutated_payload_cas_turso() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = Arc::new(
+        TursoLedgerStore::open_in_dir(dir.path())
+            .await
+            .expect("turso"),
+    );
+    run_concurrent_mutated_payload_cas(store).await;
+}
+
+#[tokio::test]
+async fn concurrent_nonce_replay_mutated_payload_cas_sqlite_compat() {
+    let store = Arc::new(
+        SqliteCompatLedgerStore::connect_in_memory()
+            .await
+            .expect("sqlite compat"),
+    );
+    run_concurrent_mutated_payload_cas(store).await;
+}
+
+#[tokio::test]
+async fn delete_tenant_propagates_kms_unavailable_on_user_key_destruction() {
+    let dir = TempDir::new().expect("tempdir");
+    let broker_store = Arc::new(
+        TursoLedgerStore::open_in_dir(&dir.path().join("broker"))
+            .await
+            .expect("broker turso store"),
+    );
+    let kms = Arc::new(LocalKmsProvider::new());
+    let hierarchy = Arc::new(KeyHierarchyService::new("waddle.social", kms.clone()));
+    let svc = BrokerCustodyService::new(hierarchy, broker_store)
+        .await
+        .expect("svc");
+
+    let tenant_data_dir = dir.path().join("tenants");
+    let tenant_store = TursoTenantStore::new(&tenant_data_dir, TursoPoolConfig::default(), None)
+        .expect("turso tenant store");
+    let perm_backend = RecordingPermissionBackend::default();
+
+    let t = tenant("kms-outage.waddle.social");
+    let alice = AccountId::new_v4();
+    tenant_store
+        .provision_tenant(&t)
+        .await
+        .expect("provision tenant");
+
+    svc.enroll(EnrollCredentialInput {
+        tenant_id: t.clone(),
+        account_id: Some(alice),
+        provider: "openrouter".to_owned(),
+        nonce: "kms-outage-n1".to_owned(),
+        payload_digest_sha256: digest("kms-outage-c1"),
+        expires_at_ms: i64::MAX,
+        plaintext: SecretBytes::from_slice(b"sk-kms-outage").expect("secret"),
+    })
+    .await
+    .expect("enroll member cred");
+
+    // Simulate KMS outage during tenant deletion: MUST propagate error and NOT
+    // silently swallow it or proceed to delete the permission store.
+    kms.set_available(false);
+    let err = svc
+        .delete_tenant(&t, &tenant_store, &perm_backend)
+        .await
+        .expect_err("delete_tenant must fail when KMS is unavailable");
+    assert!(matches!(err, BrokerError::Kms(KmsError::Unavailable(_))));
+    assert!(
+        !perm_backend.was_deleted(&t),
+        "permission store must not be deleted when KMS shredding fails"
+    );
+
+    // Once KMS recovers, retrying delete_tenant succeeds cleanly.
+    kms.set_available(true);
+    svc.delete_tenant(&t, &tenant_store, &perm_backend)
+        .await
+        .expect("delete_tenant succeeds after KMS recovery");
+    assert!(perm_backend.was_deleted(&t));
 }

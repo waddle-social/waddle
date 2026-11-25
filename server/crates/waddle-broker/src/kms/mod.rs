@@ -60,6 +60,18 @@ pub trait KmsProvider: Send + Sync {
         aad: &[u8],
     ) -> Result<Key256, KmsError>;
 
+    /// Resolves the provider-specific KMS key reference for `(tenant, account)`
+    /// without creating or mutating key material.
+    fn user_wrapping_secret_ref(
+        &self,
+        tenant: &TenantId,
+        account: AccountId,
+    ) -> Result<KmsKeyRef, KmsError>;
+
+    /// Resolves the provider-specific KMS key reference for `tenant`
+    /// without creating or mutating key material.
+    fn tenant_kek_ref(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError>;
+
     /// Ensures a KMS-resident wrapping key exists for `(tenant, account)` so
     /// destroying it cryptographically shreds historical backups of that user.
     async fn ensure_user_wrapping_secret(

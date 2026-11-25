@@ -170,17 +170,29 @@ impl KmsProvider for LocalKmsProvider {
         Ok(Key256::from_bytes(arr))
     }
 
+    fn user_wrapping_secret_ref(
+        &self,
+        tenant: &TenantId,
+        account: AccountId,
+    ) -> Result<KmsKeyRef, KmsError> {
+        KmsKeyRef::new(format!("kms:user:{}:{}", tenant.as_str(), account))
+    }
+
+    fn tenant_kek_ref(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
+        KmsKeyRef::new(format!("kms:tenant:{}", tenant.as_str()))
+    }
+
     async fn ensure_user_wrapping_secret(
         &self,
         tenant: &TenantId,
         account: AccountId,
     ) -> Result<KmsKeyRef, KmsError> {
-        let key_ref = KmsKeyRef::new(format!("kms:user:{}:{}", tenant.as_str(), account))?;
+        let key_ref = self.user_wrapping_secret_ref(tenant, account)?;
         self.ensure_key_inner(key_ref)
     }
 
     async fn ensure_tenant_kek(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
-        let key_ref = KmsKeyRef::new(format!("kms:tenant:{}", tenant.as_str()))?;
+        let key_ref = self.tenant_kek_ref(tenant)?;
         self.ensure_key_inner(key_ref)
     }
 

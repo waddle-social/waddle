@@ -123,6 +123,16 @@ pub struct EnrollmentNonceRecord {
     pub created_at_ms: i64,
 }
 
+/// Result of an atomic compare-and-swap enrollment nonce claim + envelope write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonceClaimOutcome {
+    /// This caller atomically won the nonce claim and persisted the envelope.
+    Claimed,
+    /// Another caller already claimed this nonce; returns the authoritative
+    /// existing record whose envelope is already committed.
+    Existing(EnrollmentNonceRecord),
+}
+
 /// Persisted egress gate state (`broker_egress_state`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressGateState {
@@ -182,8 +192,11 @@ pub trait DestructionLedgerStore: Send + Sync {
         nonce_sha256: &[u8; 32],
     ) -> Result<Option<EnrollmentNonceRecord>, LedgerError>;
 
-    async fn put_enrollment_nonce(&self, record: &EnrollmentNonceRecord)
-        -> Result<(), LedgerError>;
+    async fn claim_enrollment_nonce_and_put_envelope(
+        &self,
+        nonce_record: &EnrollmentNonceRecord,
+        envelope_record: &StoredEnvelopeRecord,
+    ) -> Result<NonceClaimOutcome, LedgerError>;
 
     async fn get_egress_state(&self) -> Result<EgressGateState, LedgerError>;
 

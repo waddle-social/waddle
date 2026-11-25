@@ -1,12 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use proptest::prelude::{any, prop_assert_eq, proptest};
 use uuid::Uuid;
 use waddle_broker::{
     decrypt_secret, encrypt_secret, BrokerError, CryptoError, EnvelopeContext, Key256,
-    KeyHierarchyService, KmsError, LocalKmsProvider, ScalewayKmsConfig, ScalewayKmsProvider,
-    SecretBytes, VaultTransitConfig, VaultTransitKmsProvider, MAX_SECRET_BYTES,
+    KeyHierarchyService, KmsError, KmsKeyRef, KmsProvider, LocalKmsProvider, ScalewayKmsConfig,
+    ScalewayKmsProvider, SecretBytes, VaultTransitConfig, VaultTransitKmsProvider, WrappedKeyBlob,
+    MAX_SECRET_BYTES,
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 use zeroize::Zeroizing;
@@ -208,4 +210,164 @@ proptest! {
         let dec = decrypt_secret(&dek, &ctx, &env).expect("decrypt");
         prop_assert_eq!(dec.as_bytes(), secret.as_bytes());
     }
+}
+
+#[derive(Default)]
+struct RecordingVaultStyleKms {
+    destroyed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl KmsProvider for RecordingVaultStyleKms {
+    async fn wrap_key(
+        &self,
+        key_ref: &KmsKeyRef,
+        plaintext: &Key256,
+        _aad: &[u8],
+    ) -> Result<WrappedKeyBlob, KmsError> {
+        Ok(WrappedKeyBlob {
+            key_ref: key_ref.clone(),
+            ciphertext: plaintext.as_bytes().to_vec(),
+        })
+    }
+
+    async fn unwrap_key(
+        &self,
+        _key_ref: &KmsKeyRef,
+        wrapped: &WrappedKeyBlob,
+        _aad: &[u8],
+    ) -> Result<Key256, KmsError> {
+        let arr: [u8; 32] = wrapped
+            .ciphertext
+            .clone()
+            .try_into()
+            .map_err(|_| KmsError::Crypto("invalid len".to_owned()))?;
+        Ok(Key256::from_bytes(arr))
+    }
+
+    fn user_wrapping_secret_ref(
+        &self,
+        tenant: &TenantId,
+        account: AccountId,
+    ) -> Result<KmsKeyRef, KmsError> {
+        KmsKeyRef::new(format!("vault-custom-user-{}-{}", tenant.as_str(), account))
+    }
+
+    fn tenant_kek_ref(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
+        KmsKeyRef::new(format!("vault-custom-tenant-{}", tenant.as_str()))
+    }
+
+    async fn ensure_user_wrapping_secret(
+        &self,
+        tenant: &TenantId,
+        account: AccountId,
+    ) -> Result<KmsKeyRef, KmsError> {
+        self.user_wrapping_secret_ref(tenant, account)
+    }
+
+    async fn ensure_tenant_kek(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
+        self.tenant_kek_ref(tenant)
+    }
+
+    async fn destroy_wrapping_secret(&self, key_ref: &KmsKeyRef) -> Result<(), KmsError> {
+        self.destroyed
+            .lock()
+            .expect("lock")
+            .push(key_ref.as_str().to_owned());
+        Ok(())
+    }
+
+    async fn is_destroyed(&self, key_ref: &KmsKeyRef) -> Result<bool, KmsError> {
+        Ok(self
+            .destroyed
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|k| k == key_ref.as_str()))
+    }
+}
+
+#[tokio::test]
+async fn kms_provider_key_ref_resolution_matches_provider_format() {
+    let t = tenant("alpha.waddle.social");
+    let acct = AccountId::new_v4();
+
+    let local = LocalKmsProvider::new();
+    assert_eq!(
+        local.tenant_kek_ref(&t).expect("local tenant ref").as_str(),
+        format!("kms:tenant:{}", t.as_str())
+    );
+    assert_eq!(
+        local
+            .user_wrapping_secret_ref(&t, acct)
+            .expect("local user ref")
+            .as_str(),
+        format!("kms:user:{}:{}", t.as_str(), acct)
+    );
+
+    let scw = ScalewayKmsProvider::new(ScalewayKmsConfig {
+        base_url: "https://api.scaleway.com".to_owned(),
+        region: "fr-par".to_owned(),
+        auth_token: Zeroizing::new("scw-token".to_owned()),
+        timeout: Duration::from_secs(5),
+    })
+    .expect("scw");
+    assert_eq!(
+        scw.tenant_kek_ref(&t).expect("scw tenant ref").as_str(),
+        format!("scw-tenant-{}", t.as_str())
+    );
+    assert_eq!(
+        scw.user_wrapping_secret_ref(&t, acct)
+            .expect("scw user ref")
+            .as_str(),
+        format!("scw-user-{}-{}", t.as_str(), acct)
+    );
+
+    let vault = VaultTransitKmsProvider::new(VaultTransitConfig {
+        base_url: "https://vault.internal:8200".to_owned(),
+        mount: "transit".to_owned(),
+        token: Zeroizing::new("hvs.token".to_owned()),
+        namespace: None,
+        timeout: Duration::from_secs(5),
+    })
+    .expect("vault");
+    assert_eq!(
+        vault.tenant_kek_ref(&t).expect("vault tenant ref").as_str(),
+        format!("vault-tenant-{}", t.as_str())
+    );
+    assert_eq!(
+        vault
+            .user_wrapping_secret_ref(&t, acct)
+            .expect("vault user ref")
+            .as_str(),
+        format!("vault-user-{}-{}", t.as_str(), acct)
+    );
+
+    // Verify KeyHierarchyService::destroy_* resolves refs via KmsProvider, not hardcoded "kms:...".
+    let custom_kms = Arc::new(RecordingVaultStyleKms::default());
+    let hierarchy = KeyHierarchyService::new("waddle.social", custom_kms.clone());
+    let destroyed_user_ref = hierarchy
+        .destroy_user_kms_secret(&t, acct)
+        .await
+        .expect("destroy user ref");
+    let destroyed_tenant_ref = hierarchy
+        .destroy_tenant_kms_kek(&t)
+        .await
+        .expect("destroy tenant ref");
+    assert_eq!(
+        destroyed_user_ref.as_str(),
+        format!("vault-custom-user-{}-{}", t.as_str(), acct)
+    );
+    assert_eq!(
+        destroyed_tenant_ref.as_str(),
+        format!("vault-custom-tenant-{}", t.as_str())
+    );
+    let recorded = custom_kms.destroyed.lock().expect("lock").clone();
+    assert_eq!(
+        recorded,
+        vec![
+            format!("vault-custom-user-{}-{}", t.as_str(), acct),
+            format!("vault-custom-tenant-{}", t.as_str()),
+        ]
+    );
 }

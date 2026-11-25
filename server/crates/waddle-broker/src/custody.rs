@@ -11,6 +11,7 @@
 //! - Tenant deletion wired to `TenantStore::delete_tenant` and
 //!   `PermissionBackend::delete_tenant_store`
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -24,11 +25,12 @@ use waddle_broker_core::permission::PermissionBackend;
 use waddle_broker_core::store::TenantStore;
 
 use crate::envelope::{decrypt_secret, encrypt_secret, EnvelopeContext};
-use crate::error::BrokerError;
+use crate::error::{BrokerError, KmsError};
 use crate::key_hierarchy::KeyHierarchyService;
 use crate::ledger::{
     DestructionLedgerStore, DestructionReason, DestructionRecord, DestructionTargetKind,
-    EgressGateState, EnrollmentNonceRecord, RetiredAccountRecord, StoredEnvelopeRecord,
+    EgressGateState, EnrollmentNonceRecord, NonceClaimOutcome, RetiredAccountRecord,
+    StoredEnvelopeRecord,
 };
 use crate::secret::SecretBytes;
 
@@ -81,6 +83,23 @@ fn now_ms() -> i64 {
 
 fn versioned_cred_target(credential_id: Uuid, version: u32) -> String {
     format!("{credential_id}:v{version}")
+}
+
+fn verify_replayed_nonce(
+    existing: &EnrollmentNonceRecord,
+    expected_tenant: &TenantId,
+    expected_digest: &[u8; 32],
+) -> Result<CredentialReceipt, BrokerError> {
+    let same_digest = bool::from(existing.payload_digest_sha256.ct_eq(expected_digest));
+    if !same_digest || existing.tenant_id != *expected_tenant {
+        return Err(BrokerError::NoncePayloadConflict);
+    }
+    Ok(CredentialReceipt {
+        credential_id: existing.credential_id,
+        version: existing.credential_version,
+        status: CredentialLifecycleStatus::Active,
+        replayed: true,
+    })
 }
 
 /// Authoritative broker custody service for encrypted provider credentials.
@@ -152,20 +171,11 @@ impl BrokerCustodyService {
 
         let nonce_hash = sha256_bytes(input.nonce.as_bytes());
         if let Some(existing) = self.ledger.get_enrollment_nonce(&nonce_hash).await? {
-            let same_digest = bool::from(
-                existing
-                    .payload_digest_sha256
-                    .ct_eq(&input.payload_digest_sha256),
+            return verify_replayed_nonce(
+                &existing,
+                &input.tenant_id,
+                &input.payload_digest_sha256,
             );
-            if !same_digest || existing.tenant_id != input.tenant_id {
-                return Err(BrokerError::NoncePayloadConflict);
-            }
-            return Ok(CredentialReceipt {
-                credential_id: existing.credential_id,
-                version: existing.credential_version,
-                status: CredentialLifecycleStatus::Active,
-                replayed: true,
-            });
         }
 
         let credential_id = Uuid::now_v7();
@@ -181,26 +191,31 @@ impl BrokerCustodyService {
             )
             .await?;
 
-        self.ledger.put_envelope(&stored).await?;
         let now = now_ms();
-        self.ledger
-            .put_enrollment_nonce(&EnrollmentNonceRecord {
-                nonce_sha256: nonce_hash,
-                payload_digest_sha256: input.payload_digest_sha256,
-                tenant_id: input.tenant_id,
-                credential_id,
-                credential_version: version,
-                expires_at_ms: input.expires_at_ms,
-                created_at_ms: now,
-            })
-            .await?;
-
-        Ok(CredentialReceipt {
+        let nonce_record = EnrollmentNonceRecord {
+            nonce_sha256: nonce_hash,
+            payload_digest_sha256: input.payload_digest_sha256,
+            tenant_id: input.tenant_id.clone(),
             credential_id,
-            version,
-            status: CredentialLifecycleStatus::Active,
-            replayed: false,
-        })
+            credential_version: version,
+            expires_at_ms: input.expires_at_ms,
+            created_at_ms: now,
+        };
+        match self
+            .ledger
+            .claim_enrollment_nonce_and_put_envelope(&nonce_record, &stored)
+            .await?
+        {
+            NonceClaimOutcome::Claimed => Ok(CredentialReceipt {
+                credential_id,
+                version,
+                status: CredentialLifecycleStatus::Active,
+                replayed: false,
+            }),
+            NonceClaimOutcome::Existing(existing) => {
+                verify_replayed_nonce(&existing, &input.tenant_id, &input.payload_digest_sha256)
+            }
+        }
     }
 
     /// Rotates an existing credential to `version + 1` and records the prior
@@ -404,25 +419,51 @@ impl BrokerCustodyService {
             .await?;
 
         let envelopes = self.ledger.list_envelopes_for_tenant(tenant_id).await?;
+        let mut destroyed_accounts = HashSet::new();
         for env in &envelopes {
             if let Some(account_id) = env.account_id {
-                let _ = self
+                if !destroyed_accounts.insert(account_id) {
+                    continue;
+                }
+                match self
                     .hierarchy
                     .destroy_user_kms_secret(tenant_id, account_id)
-                    .await;
+                    .await
+                {
+                    Ok(user_kms_ref) => {
+                        self.ledger
+                            .append_destruction(&DestructionRecord {
+                                entry_id: Uuid::now_v7(),
+                                target_kind: DestructionTargetKind::KmsKey,
+                                tenant_id: tenant_id.clone(),
+                                target_id: user_kms_ref.as_str().to_owned(),
+                                reason: DestructionReason::TenantDeleted,
+                                destroyed_at_ms: now,
+                            })
+                            .await?;
+                    }
+                    Err(BrokerError::Kms(KmsError::KeyNotFound(_) | KmsError::KeyDestroyed(_))) => {
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
-        let tenant_kek_ref = self.hierarchy.destroy_tenant_kms_kek(tenant_id).await?;
-        self.ledger
-            .append_destruction(&DestructionRecord {
-                entry_id: Uuid::now_v7(),
-                target_kind: DestructionTargetKind::KmsKey,
-                tenant_id: tenant_id.clone(),
-                target_id: tenant_kek_ref.as_str().to_owned(),
-                reason: DestructionReason::TenantDeleted,
-                destroyed_at_ms: now,
-            })
-            .await?;
+        match self.hierarchy.destroy_tenant_kms_kek(tenant_id).await {
+            Ok(tenant_kek_ref) => {
+                self.ledger
+                    .append_destruction(&DestructionRecord {
+                        entry_id: Uuid::now_v7(),
+                        target_kind: DestructionTargetKind::KmsKey,
+                        tenant_id: tenant_id.clone(),
+                        target_id: tenant_kek_ref.as_str().to_owned(),
+                        reason: DestructionReason::TenantDeleted,
+                        destroyed_at_ms: now,
+                    })
+                    .await?;
+            }
+            Err(BrokerError::Kms(KmsError::KeyNotFound(_) | KmsError::KeyDestroyed(_))) => {}
+            Err(err) => return Err(err),
+        }
         let _ = self.ledger.delete_envelopes_for_tenant(tenant_id).await?;
 
         tenant_store.delete_tenant(tenant_id).await?;

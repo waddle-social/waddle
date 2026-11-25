@@ -276,7 +276,7 @@ impl KeyHierarchyService {
         tenant_id: &TenantId,
         account_id: AccountId,
     ) -> Result<KmsKeyRef, BrokerError> {
-        let key_ref = KmsKeyRef::new(format!("kms:user:{}:{}", tenant_id.as_str(), account_id))?;
+        let key_ref = self.kms.user_wrapping_secret_ref(tenant_id, account_id)?;
         self.kms.destroy_wrapping_secret(&key_ref).await?;
         Ok(key_ref)
     }
@@ -286,7 +286,7 @@ impl KeyHierarchyService {
         &self,
         tenant_id: &TenantId,
     ) -> Result<KmsKeyRef, BrokerError> {
-        let key_ref = KmsKeyRef::new(format!("kms:tenant:{}", tenant_id.as_str()))?;
+        let key_ref = self.kms.tenant_kek_ref(tenant_id)?;
         self.kms.destroy_wrapping_secret(&key_ref).await?;
         Ok(key_ref)
     }

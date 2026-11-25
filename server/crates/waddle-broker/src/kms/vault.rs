@@ -186,7 +186,7 @@ impl KmsProvider for VaultTransitKmsProvider {
         Ok(Key256::from_bytes(arr))
     }
 
-    async fn ensure_user_wrapping_secret(
+    fn user_wrapping_secret_ref(
         &self,
         tenant: &TenantId,
         account: AccountId,
@@ -194,8 +194,20 @@ impl KmsProvider for VaultTransitKmsProvider {
         KmsKeyRef::new(format!("vault-user-{}-{}", tenant.as_str(), account))
     }
 
-    async fn ensure_tenant_kek(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
+    fn tenant_kek_ref(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
         KmsKeyRef::new(format!("vault-tenant-{}", tenant.as_str()))
+    }
+
+    async fn ensure_user_wrapping_secret(
+        &self,
+        tenant: &TenantId,
+        account: AccountId,
+    ) -> Result<KmsKeyRef, KmsError> {
+        self.user_wrapping_secret_ref(tenant, account)
+    }
+
+    async fn ensure_tenant_kek(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
+        self.tenant_kek_ref(tenant)
     }
 
     async fn destroy_wrapping_secret(&self, key_ref: &KmsKeyRef) -> Result<(), KmsError> {
@@ -205,10 +217,16 @@ impl KmsProvider for VaultTransitKmsProvider {
             .send()
             .await
             .map_err(|err| KmsError::Transport(err.to_string()))?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Err(KmsError::KeyNotFound(key_ref.as_str().to_owned()));
+        }
+        if status.as_u16() == 410 {
+            return Err(KmsError::KeyDestroyed(key_ref.as_str().to_owned()));
+        }
+        if !status.is_success() {
             return Err(KmsError::Unavailable(format!(
-                "Vault Transit delete key returned HTTP {}",
-                resp.status()
+                "Vault Transit delete key returned HTTP {status}"
             )));
         }
         Ok(())

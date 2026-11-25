@@ -17,8 +17,9 @@ use waddle_broker::{
     authorize_admin_policy_mutation, build_device_enroll_pop_transcript, enforce_not_scram,
     p256_jwk_thumbprint, seal_credential_for_broker, AuthError, AuthProvenance, BrokerSubkeyRing,
     CellAssertedAdminFlags, ClientSealContext, ColonyBrokerClaims, ColonyJwtVerifier,
-    ConfirmationClaim, DeviceKeyRegistry, RegisteredWebAuthnKey, RootBkskPinSet, RootBkskSigner,
-    SealError, SecretBytes, SignedDeviceCommand, WebAuthnVerifier,
+    ConfirmationClaim, DeviceKeyRegistry, EnrollDeviceKeyInput, RegisteredWebAuthnKey,
+    RootBkskPinSet, RootBkskSigner, SealError, SecretBytes, SignedDeviceCommand,
+    WebAuthnAssertionInput, WebAuthnVerifier,
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 
@@ -146,29 +147,30 @@ fn idp_intent_colony_jwt_and_webauthn_verification() {
     signed_msg.extend_from_slice(&Sha256::digest(client_data_json.as_bytes()));
     let sig: Signature = wa_signing.sign(&signed_msg);
 
+    let sig_bytes = sig.to_bytes();
     let wa_intent = wa
-        .verify_assertion(
-            "cred-wa-1",
-            &auth_data,
-            client_data_json.as_bytes(),
-            &sig.to_bytes()[..],
-            &t,
-            acct,
-            &challenge_b64,
-        )
+        .verify_assertion(&WebAuthnAssertionInput {
+            credential_id: "cred-wa-1",
+            authenticator_data: &auth_data,
+            client_data_json: client_data_json.as_bytes(),
+            signature_bytes: &sig_bytes[..],
+            expected_tenant: &t,
+            expected_account: acct,
+            expected_challenge_b64url: &challenge_b64,
+        })
         .expect("valid webauthn assertion");
     assert!(wa_intent.is_tenant_admin);
 
     // Replaying same signCount = 2 must fail with SignCountRollback.
-    let replay = wa.verify_assertion(
-        "cred-wa-1",
-        &auth_data,
-        client_data_json.as_bytes(),
-        &sig.to_bytes()[..],
-        &t,
-        acct,
-        &challenge_b64,
-    );
+    let replay = wa.verify_assertion(&WebAuthnAssertionInput {
+        credential_id: "cred-wa-1",
+        authenticator_data: &auth_data,
+        client_data_json: client_data_json.as_bytes(),
+        signature_bytes: &sig_bytes[..],
+        expected_tenant: &t,
+        expected_account: acct,
+        expected_challenge_b64url: &challenge_b64,
+    });
     assert!(matches!(replay, Err(AuthError::SignCountRollback)));
 }
 
@@ -221,18 +223,19 @@ fn device_key_enrollment_and_single_use_signed_commands() {
     );
     let pop_sig: Signature = dev_signing.sign(&pop_transcript);
 
+    let pop_sig_bytes = pop_sig.to_bytes();
     let enrolled = registry
-        .enroll_device_key(
-            AuthProvenance::ExternalIdp,
-            &intent,
-            "waddle.social",
+        .enroll_device_key(EnrollDeviceKeyInput {
+            provenance: AuthProvenance::ExternalIdp,
+            idp_intent: &intent,
+            trust_domain: "waddle.social",
             device_key_id,
-            dev_pk_sec1,
-            "pop-nonce-1",
-            expires_ms,
+            public_key_sec1: dev_pk_sec1,
+            nonce: "pop-nonce-1",
+            expires_at_ms: expires_ms,
             now_ms,
-            &pop_sig.to_bytes()[..],
-        )
+            pop_signature: &pop_sig_bytes[..],
+        })
         .expect("device key enrolled");
     assert!(enrolled.active);
 
@@ -260,7 +263,7 @@ fn device_key_enrollment_and_single_use_signed_commands() {
     ));
 
     // Revoking device key rejects subsequent fresh commands.
-    registry.revoke_device_key(device_key_id);
+    registry.revoke_device_key(&t, device_key_id);
     let cmd2 = SignedDeviceCommand {
         nonce: "cmd-nonce-2",
         ..cmd
@@ -535,4 +538,247 @@ fn jwt_boundary_rejects_expired_wrong_aud_alg_none_unknown_kid_and_expired_subke
         pins.verify_subkey_bundle(&expired_subkey, "waddle.social", now_ms),
         Err(SealError::SubkeyValidityWindow)
     ));
+}
+
+#[test]
+fn webauthn_sign_count_rollback_to_zero_rejected_and_zero_to_zero_allowed() {
+    let wa = WebAuthnVerifier::new(
+        "waddle.social",
+        vec!["https://app.waddle.social".to_owned()],
+    );
+    let t = tenant("alpha.waddle.social");
+    let acct = AccountId::new_v4();
+    let challenge_b64 = URL_SAFE_NO_PAD.encode(b"sign-count-regression-chal");
+    let client_data_json = format!(
+        r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://app.waddle.social"}}"#
+    );
+
+    let sign_assertion = |signing: &SigningKey, sign_count: u32| -> (Vec<u8>, Vec<u8>) {
+        let mut auth_data = Vec::new();
+        auth_data.extend_from_slice(&Sha256::digest(b"waddle.social"));
+        auth_data.push(0x05); // UP | UV
+        auth_data.extend_from_slice(&sign_count.to_be_bytes());
+        let mut signed_msg = auth_data.clone();
+        signed_msg.extend_from_slice(&Sha256::digest(client_data_json.as_bytes()));
+        let sig: Signature = signing.sign(&signed_msg);
+        (auth_data, sig.to_bytes().to_vec())
+    };
+
+    // Case 1: stored = 5, incoming = 0 -> MUST fail with SignCountRollback.
+    let sk_inc = gen_p256_key();
+    let signing_inc = SigningKey::from(&sk_inc);
+    wa.register_credential(
+        "cred-inc".to_owned(),
+        RegisteredWebAuthnKey {
+            account_id: acct,
+            tenant_id: t.clone(),
+            public_key_sec1: sk_inc.public_key().to_sec1_bytes().to_vec(),
+            sign_count: 5,
+            is_tenant_admin: false,
+        },
+    );
+    let (auth_zero, sig_zero) = sign_assertion(&signing_inc, 0);
+    let rollback = wa.verify_assertion(&WebAuthnAssertionInput {
+        credential_id: "cred-inc",
+        authenticator_data: &auth_zero,
+        client_data_json: client_data_json.as_bytes(),
+        signature_bytes: &sig_zero,
+        expected_tenant: &t,
+        expected_account: acct,
+        expected_challenge_b64url: &challenge_b64,
+    });
+    assert!(matches!(rollback, Err(AuthError::SignCountRollback)));
+
+    // Case 2: stored = 0, incoming = 0 -> MUST succeed (counterless authenticator),
+    // then 0 -> 1 succeeds, then 1 -> 0 MUST fail with SignCountRollback.
+    let sk_zero = gen_p256_key();
+    let signing_zero = SigningKey::from(&sk_zero);
+    wa.register_credential(
+        "cred-zero".to_owned(),
+        RegisteredWebAuthnKey {
+            account_id: acct,
+            tenant_id: t.clone(),
+            public_key_sec1: sk_zero.public_key().to_sec1_bytes().to_vec(),
+            sign_count: 0,
+            is_tenant_admin: false,
+        },
+    );
+    let (auth_0a, sig_0a) = sign_assertion(&signing_zero, 0);
+    wa.verify_assertion(&WebAuthnAssertionInput {
+        credential_id: "cred-zero",
+        authenticator_data: &auth_0a,
+        client_data_json: client_data_json.as_bytes(),
+        signature_bytes: &sig_0a,
+        expected_tenant: &t,
+        expected_account: acct,
+        expected_challenge_b64url: &challenge_b64,
+    })
+    .expect("0 -> 0 allowed for counterless authenticators");
+
+    let (auth_1, sig_1) = sign_assertion(&signing_zero, 1);
+    wa.verify_assertion(&WebAuthnAssertionInput {
+        credential_id: "cred-zero",
+        authenticator_data: &auth_1,
+        client_data_json: client_data_json.as_bytes(),
+        signature_bytes: &sig_1,
+        expected_tenant: &t,
+        expected_account: acct,
+        expected_challenge_b64url: &challenge_b64,
+    })
+    .expect("0 -> 1 allowed");
+
+    let (auth_0b, sig_0b) = sign_assertion(&signing_zero, 0);
+    let rollback_after_inc = wa.verify_assertion(&WebAuthnAssertionInput {
+        credential_id: "cred-zero",
+        authenticator_data: &auth_0b,
+        client_data_json: client_data_json.as_bytes(),
+        signature_bytes: &sig_0b,
+        expected_tenant: &t,
+        expected_account: acct,
+        expected_challenge_b64url: &challenge_b64,
+    });
+    assert!(matches!(
+        rollback_after_inc,
+        Err(AuthError::SignCountRollback)
+    ));
+}
+
+#[test]
+fn device_key_registry_tenant_isolation_and_no_overwrite() {
+    let (jwk, enc) = make_es256_jwk_and_encoding_key("colony-k1");
+    let verifier = ColonyJwtVerifier::new(
+        "https://colony.waddle.social",
+        "urn:waddle:broker:waddle.social",
+        JwkSet { keys: vec![jwk] },
+    );
+
+    let tenant_a = tenant("alpha.waddle.social");
+    let tenant_b = tenant("beta.waddle.social");
+    let acct_a = AccountId::new_v4();
+    let acct_b = AccountId::new_v4();
+    let shared_device_key_id = Uuid::now_v7();
+
+    let sk_a = gen_p256_key();
+    let signing_a = SigningKey::from(&sk_a);
+    let pk_a = sk_a.public_key().to_sec1_bytes().to_vec();
+    let jkt_a = p256_jwk_thumbprint(&pk_a).expect("jkt a");
+
+    let sk_b = gen_p256_key();
+    let signing_b = SigningKey::from(&sk_b);
+    let pk_b = sk_b.public_key().to_sec1_bytes().to_vec();
+    let jkt_b = p256_jwk_thumbprint(&pk_b).expect("jkt b");
+
+    let now_s = 1_760_000_000u64;
+    let now_ms = (now_s * 1000) as i64;
+    let expires_ms = now_ms + 60_000;
+
+    let make_intent = |t: &TenantId, acct: AccountId, jkt: &str, chal: &str| {
+        let claims = ColonyBrokerClaims {
+            iss: "https://colony.waddle.social".to_owned(),
+            sub: acct.to_string(),
+            aud: "urn:waddle:broker:waddle.social".to_owned(),
+            exp: now_s + 120,
+            nbf: now_s - 5,
+            iat: now_s,
+            jti: Uuid::now_v7().to_string(),
+            tenant_id: t.as_str().to_owned(),
+            challenge: chal.to_owned(),
+            cnf: Some(ConfirmationClaim {
+                jkt: jkt.to_owned(),
+            }),
+            waddle_roles: vec![],
+        };
+        let jwt = sign_colony_jwt(Some("colony-k1"), Algorithm::ES256, &enc, &claims);
+        verifier
+            .verify(&jwt, t, acct, chal, Some(jkt), now_s)
+            .expect("verified intent")
+    };
+
+    let registry = DeviceKeyRegistry::new();
+
+    // Enroll Tenant A under shared_device_key_id.
+    let intent_a = make_intent(&tenant_a, acct_a, &jkt_a, "chal-a");
+    let pop_a = build_device_enroll_pop_transcript(
+        "waddle.social",
+        &tenant_a,
+        acct_a,
+        shared_device_key_id,
+        "pop-a",
+        expires_ms,
+    );
+    let sig_a: Signature = signing_a.sign(&pop_a);
+    let sig_a_bytes = sig_a.to_bytes();
+    registry
+        .enroll_device_key(EnrollDeviceKeyInput {
+            provenance: AuthProvenance::ExternalIdp,
+            idp_intent: &intent_a,
+            trust_domain: "waddle.social",
+            device_key_id: shared_device_key_id,
+            public_key_sec1: pk_a.clone(),
+            nonce: "pop-a",
+            expires_at_ms: expires_ms,
+            now_ms,
+            pop_signature: &sig_a_bytes[..],
+        })
+        .expect("tenant A enroll");
+
+    // Tenant B enrolling the same UUID must succeed without overwriting Tenant A.
+    let intent_b = make_intent(&tenant_b, acct_b, &jkt_b, "chal-b");
+    let pop_b = build_device_enroll_pop_transcript(
+        "waddle.social",
+        &tenant_b,
+        acct_b,
+        shared_device_key_id,
+        "pop-b",
+        expires_ms,
+    );
+    let sig_b: Signature = signing_b.sign(&pop_b);
+    let sig_b_bytes = sig_b.to_bytes();
+    registry
+        .enroll_device_key(EnrollDeviceKeyInput {
+            provenance: AuthProvenance::ExternalIdp,
+            idp_intent: &intent_b,
+            trust_domain: "waddle.social",
+            device_key_id: shared_device_key_id,
+            public_key_sec1: pk_b,
+            nonce: "pop-b",
+            expires_at_ms: expires_ms,
+            now_ms,
+            pop_signature: &sig_b_bytes[..],
+        })
+        .expect("tenant B enroll");
+
+    // Revoking Tenant B's key leaves Tenant A's key intact and usable.
+    registry.revoke_device_key(&tenant_b, shared_device_key_id);
+    let cmd_a = SignedDeviceCommand {
+        trust_domain: "waddle.social",
+        tenant_id: &tenant_a,
+        account_id: acct_a,
+        device_key_id: shared_device_key_id,
+        operation: "revoke-credential",
+        target_id: "cred-1",
+        provider: "",
+        nonce: "cmd-a-1",
+        expires_at_ms: now_ms + 30_000,
+        payload_sha256: Sha256::digest(b"cred-1").into(),
+    };
+    let cmd_a_sig: Signature = signing_a.sign(&cmd_a.canonical_transcript());
+    registry
+        .verify_signed_command(&cmd_a, &cmd_a_sig.to_bytes()[..], now_ms)
+        .expect("tenant A key remains active after tenant B revoke");
+
+    // Re-enrolling the same device_key_id within Tenant A must fail closed.
+    let intent_a2 = make_intent(&tenant_a, acct_a, &jkt_a, "chal-a-dup");
+    let dup = registry.enroll_device_key(EnrollDeviceKeyInput {
+        provenance: AuthProvenance::ExternalIdp,
+        idp_intent: &intent_a2,
+        trust_domain: "waddle.social",
+        device_key_id: shared_device_key_id,
+        public_key_sec1: pk_a,
+        nonce: "pop-a",
+        expires_at_ms: expires_ms,
+        now_ms,
+        pop_signature: &sig_a_bytes[..],
+    });
+    assert!(matches!(dup, Err(AuthError::DeviceKeyAlreadyExists(_))));
 }

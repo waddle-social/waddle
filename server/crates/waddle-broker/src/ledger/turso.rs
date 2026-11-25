@@ -15,7 +15,8 @@ use waddle_broker_core::identity::{AccountId, TenantId};
 use crate::error::LedgerError;
 use crate::ledger::{
     DestructionLedgerStore, DestructionReason, DestructionRecord, DestructionTargetKind,
-    EgressGateState, EnrollmentNonceRecord, RetiredAccountRecord, StoredEnvelopeRecord,
+    EgressGateState, EnrollmentNonceRecord, NonceClaimOutcome, RetiredAccountRecord,
+    StoredEnvelopeRecord,
 };
 
 const LEDGER_SCHEMA: &[&str] = &[
@@ -492,36 +493,28 @@ impl DestructionLedgerStore for TursoLedgerStore {
         else {
             return Ok(None);
         };
-        let nonce_sha256 = col_blob32(&row, 0)?;
-        let payload_digest_sha256 = col_blob32(&row, 1)?;
-        let tenant_id = TenantId::parse(&col_text(&row, 2)?)
-            .map_err(|err| LedgerError::InvalidState(err.to_string()))?;
-        let credential_id = Uuid::parse_str(&col_text(&row, 3)?)
-            .map_err(|err| LedgerError::InvalidState(err.to_string()))?;
-        let credential_version = u32::try_from(col_i64(&row, 4)?)
-            .map_err(|_| LedgerError::InvalidState("invalid credential_version".to_owned()))?;
-        Ok(Some(EnrollmentNonceRecord {
-            nonce_sha256,
-            payload_digest_sha256,
-            tenant_id,
-            credential_id,
-            credential_version,
-            expires_at_ms: col_i64(&row, 5)?,
-            created_at_ms: col_i64(&row, 6)?,
-        }))
+        Ok(Some(parse_turso_nonce_row(&row)?))
     }
 
-    async fn put_enrollment_nonce(
+    async fn claim_enrollment_nonce_and_put_envelope(
         &self,
-        record: &EnrollmentNonceRecord,
-    ) -> Result<(), LedgerError> {
-        let guard = self.ledger.lock().await;
-        guard
+        nonce_record: &EnrollmentNonceRecord,
+        envelope_record: &StoredEnvelopeRecord,
+    ) -> Result<NonceClaimOutcome, LedgerError> {
+        let envelope_json = serde_json::to_string(envelope_record)
+            .map_err(|err| LedgerError::Serialization(err.to_string()))?;
+
+        // Lock ordering: `ledger` -> `vault`. No other method acquires both locks,
+        // so this ordering is deadlock-free and ensures concurrent callers cannot
+        // observe `Existing` before the winning envelope is durably committed.
+        let ledger_guard = self.ledger.lock().await;
+        ledger_guard
             .conn
             .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|err| LedgerError::Backend(format!("BEGIN IMMEDIATE: {err}")))?;
-        let res = guard
+
+        let insert_res = ledger_guard
             .conn
             .execute(
                 "INSERT OR IGNORE INTO broker_enrollment_nonces
@@ -529,30 +522,123 @@ impl DestructionLedgerStore for TursoLedgerStore {
                   credential_version, expires_at_ms, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 (
-                    record.nonce_sha256.to_vec(),
-                    record.payload_digest_sha256.to_vec(),
-                    record.tenant_id.as_str().to_owned(),
-                    record.credential_id.to_string(),
-                    i64::from(record.credential_version),
-                    record.expires_at_ms,
-                    record.created_at_ms,
+                    nonce_record.nonce_sha256.to_vec(),
+                    nonce_record.payload_digest_sha256.to_vec(),
+                    nonce_record.tenant_id.as_str().to_owned(),
+                    nonce_record.credential_id.to_string(),
+                    i64::from(nonce_record.credential_version),
+                    nonce_record.expires_at_ms,
+                    nonce_record.created_at_ms,
                 ),
             )
             .await;
-        match res {
-            Ok(_) => {
-                guard
-                    .conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(|err| LedgerError::Backend(format!("COMMIT: {err}")))?;
-                Ok(())
-            }
+
+        let affected = match insert_res {
+            Ok(n) => n,
             Err(err) => {
-                let _ = guard.conn.execute("ROLLBACK", ()).await;
-                Err(LedgerError::Backend(format!("put_enrollment_nonce: {err}")))
+                let _ = ledger_guard.conn.execute("ROLLBACK", ()).await;
+                return Err(LedgerError::Backend(format!(
+                    "claim_enrollment_nonce insert: {err}"
+                )));
+            }
+        };
+
+        if affected == 0 {
+            let query_res = async {
+                let mut rows = ledger_guard
+                    .conn
+                    .query(
+                        "SELECT nonce_sha256, payload_digest_sha256, tenant_id, credential_id,
+                                credential_version, expires_at_ms, created_at_ms
+                         FROM broker_enrollment_nonces
+                         WHERE nonce_sha256 = ?1
+                         LIMIT 1",
+                        (nonce_record.nonce_sha256.to_vec(),),
+                    )
+                    .await
+                    .map_err(|err| {
+                        LedgerError::Backend(format!("claim_enrollment_nonce select: {err}"))
+                    })?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|err| {
+                        LedgerError::Backend(format!("claim_enrollment_nonce next: {err}"))
+                    })?
+                    .ok_or_else(|| {
+                        LedgerError::InvalidState(
+                            "enrollment nonce conflict but row missing".to_owned(),
+                        )
+                    })?;
+                parse_turso_nonce_row(&row)
+            }
+            .await;
+            let _ = ledger_guard.conn.execute("ROLLBACK", ()).await;
+            return Ok(NonceClaimOutcome::Existing(query_res?));
+        }
+
+        // Nonce claimed inside the uncommitted ledger transaction; now commit the
+        // vault envelope before committing the ledger so no orphan nonce or
+        // premature `Existing` visibility can occur.
+        let vault_res: Result<(), LedgerError> = async {
+            let vault_guard = self.vault.lock().await;
+            let vault = vault_guard
+                .as_ref()
+                .ok_or_else(|| LedgerError::Backend("vault handle closed".to_owned()))?;
+            vault
+                .conn
+                .execute("BEGIN IMMEDIATE", ())
+                .await
+                .map_err(|err| LedgerError::Backend(format!("vault BEGIN IMMEDIATE: {err}")))?;
+            let write_res = vault
+                .conn
+                .execute(
+                    "INSERT OR REPLACE INTO credential_envelopes
+                     (credential_id, tenant_id, account_id, provider, version, record_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (
+                        envelope_record.credential_id.to_string(),
+                        envelope_record.tenant_id.as_str().to_owned(),
+                        envelope_record
+                            .account_id
+                            .map(|a| a.to_string())
+                            .unwrap_or_default(),
+                        envelope_record.provider.clone(),
+                        i64::from(envelope_record.version),
+                        envelope_json,
+                        envelope_record.created_at_ms,
+                    ),
+                )
+                .await;
+            match write_res {
+                Ok(_) => {
+                    if let Err(err) = vault.conn.execute("COMMIT", ()).await {
+                        let _ = vault.conn.execute("ROLLBACK", ()).await;
+                        return Err(LedgerError::Backend(format!("vault COMMIT: {err}")));
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    let _ = vault.conn.execute("ROLLBACK", ()).await;
+                    Err(LedgerError::Backend(format!(
+                        "claim_enrollment_nonce put_envelope: {err}"
+                    )))
+                }
             }
         }
+        .await;
+
+        if let Err(err) = vault_res {
+            let _ = ledger_guard.conn.execute("ROLLBACK", ()).await;
+            return Err(err);
+        }
+
+        if let Err(err) = ledger_guard.conn.execute("COMMIT", ()).await {
+            let _ = ledger_guard.conn.execute("ROLLBACK", ()).await;
+            return Err(LedgerError::Backend(format!("ledger COMMIT: {err}")));
+        }
+
+        Ok(NonceClaimOutcome::Claimed)
     }
 
     async fn get_egress_state(&self) -> Result<EgressGateState, LedgerError> {
@@ -819,4 +905,24 @@ impl DestructionLedgerStore for TursoLedgerStore {
             .map_err(|err| LedgerError::Backend(format!("delete_envelopes_for_tenant: {err}")))?;
         Ok(affected)
     }
+}
+
+fn parse_turso_nonce_row(row: &turso::Row) -> Result<EnrollmentNonceRecord, LedgerError> {
+    let nonce_sha256 = col_blob32(row, 0)?;
+    let payload_digest_sha256 = col_blob32(row, 1)?;
+    let tenant_id = TenantId::parse(&col_text(row, 2)?)
+        .map_err(|err| LedgerError::InvalidState(err.to_string()))?;
+    let credential_id = Uuid::parse_str(&col_text(row, 3)?)
+        .map_err(|err| LedgerError::InvalidState(err.to_string()))?;
+    let credential_version = u32::try_from(col_i64(row, 4)?)
+        .map_err(|_| LedgerError::InvalidState("invalid credential_version".to_owned()))?;
+    Ok(EnrollmentNonceRecord {
+        nonce_sha256,
+        payload_digest_sha256,
+        tenant_id,
+        credential_id,
+        credential_version,
+        expires_at_ms: col_i64(row, 5)?,
+        created_at_ms: col_i64(row, 6)?,
+    })
 }

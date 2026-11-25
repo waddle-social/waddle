@@ -3,6 +3,7 @@
 //! verification, and explicit rejection of cell-local SCRAM (`native_users`)
 //! and cell-asserted admin flags (`serverOwnerLocalparts` / `pubsub_affiliations`).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
@@ -241,6 +242,18 @@ pub struct RegisteredWebAuthnKey {
     pub is_tenant_admin: bool,
 }
 
+/// Input parameters for verifying a WebAuthn assertion.
+#[derive(Debug, Clone, Copy)]
+pub struct WebAuthnAssertionInput<'a> {
+    pub credential_id: &'a str,
+    pub authenticator_data: &'a [u8],
+    pub client_data_json: &'a [u8],
+    pub signature_bytes: &'a [u8],
+    pub expected_tenant: &'a TenantId,
+    pub expected_account: AccountId,
+    pub expected_challenge_b64url: &'a str,
+}
+
 /// Broker-side WebAuthn assertion verifier (`p256::ecdsa` + `sha2`).
 pub struct WebAuthnVerifier {
     rp_id: String,
@@ -266,18 +279,11 @@ impl WebAuthnVerifier {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_assertion(
         &self,
-        credential_id: &str,
-        authenticator_data: &[u8],
-        client_data_json: &[u8],
-        signature_bytes: &[u8],
-        expected_tenant: &TenantId,
-        expected_account: AccountId,
-        expected_challenge_b64url: &str,
+        input: &WebAuthnAssertionInput<'_>,
     ) -> Result<VerifiedIdpIntent, AuthError> {
-        let client_data: WebAuthnClientData = serde_json::from_slice(client_data_json)
+        let client_data: WebAuthnClientData = serde_json::from_slice(input.client_data_json)
             .map_err(|err| AuthError::InvalidWebAuthn(format!("clientDataJSON: {err}")))?;
         if client_data.kind != "webauthn.get" {
             return Err(AuthError::InvalidWebAuthn(
@@ -294,22 +300,22 @@ impl WebAuthnVerifier {
             client_data
                 .challenge
                 .as_bytes()
-                .ct_eq(expected_challenge_b64url.as_bytes()),
+                .ct_eq(input.expected_challenge_b64url.as_bytes()),
         ) {
             return Err(AuthError::ChallengeMismatch);
         }
 
         // authenticatorData must be at least 37 bytes: 32B rpIdHash + 1B flags + 4B signCount.
-        if authenticator_data.len() < 37 {
+        if input.authenticator_data.len() < 37 {
             return Err(AuthError::InvalidWebAuthn(
                 "authenticatorData shorter than 37 bytes".to_owned(),
             ));
         }
         let expected_rp_hash: [u8; 32] = Sha256::digest(self.rp_id.as_bytes()).into();
-        if !bool::from(authenticator_data[..32].ct_eq(&expected_rp_hash)) {
+        if !bool::from(input.authenticator_data[..32].ct_eq(&expected_rp_hash)) {
             return Err(AuthError::InvalidWebAuthn("rpIdHash mismatch".to_owned()));
         }
-        let flags = authenticator_data[32];
+        let flags = input.authenticator_data[32];
         // Require UP (0x01) and UV (0x04).
         if (flags & 0x05) != 0x05 {
             return Err(AuthError::InvalidWebAuthn(
@@ -317,39 +323,42 @@ impl WebAuthnVerifier {
             ));
         }
         let sign_count = u32::from_be_bytes([
-            authenticator_data[33],
-            authenticator_data[34],
-            authenticator_data[35],
-            authenticator_data[36],
+            input.authenticator_data[33],
+            input.authenticator_data[34],
+            input.authenticator_data[35],
+            input.authenticator_data[36],
         ]);
 
         let mut guard = self
             .credentials
             .write()
             .map_err(|_| AuthError::InvalidWebAuthn("credentials lock poisoned".to_owned()))?;
-        let cred = guard.get_mut(credential_id).ok_or_else(|| {
-            AuthError::InvalidWebAuthn(format!("unknown WebAuthn credential {credential_id}"))
+        let cred = guard.get_mut(input.credential_id).ok_or_else(|| {
+            AuthError::InvalidWebAuthn(format!(
+                "unknown WebAuthn credential {}",
+                input.credential_id
+            ))
         })?;
-        if cred.tenant_id != *expected_tenant || cred.account_id != expected_account {
+        if cred.tenant_id != *input.expected_tenant || cred.account_id != input.expected_account {
             return Err(AuthError::InvalidWebAuthn(
                 "credential tenant/account mismatch".to_owned(),
             ));
         }
-        if sign_count != 0 && sign_count <= cred.sign_count {
+        if (sign_count != 0 || cred.sign_count != 0) && sign_count <= cred.sign_count {
             return Err(AuthError::SignCountRollback);
         }
 
         let verifying_key = VerifyingKey::from_sec1_bytes(&cred.public_key_sec1)
             .map_err(|_| AuthError::InvalidWebAuthn("invalid stored P-256 key".to_owned()))?;
-        let sig = Signature::from_slice(signature_bytes)
-            .or_else(|_| Signature::from_der(signature_bytes))
+        let sig = Signature::from_slice(input.signature_bytes)
+            .or_else(|_| Signature::from_der(input.signature_bytes))
             .map_err(|_| {
                 AuthError::InvalidWebAuthn("invalid ECDSA signature encoding".to_owned())
             })?;
 
-        let client_data_hash = Sha256::digest(client_data_json);
-        let mut signed_msg = Vec::with_capacity(authenticator_data.len() + 32);
-        signed_msg.extend_from_slice(authenticator_data);
+        let client_data_hash = Sha256::digest(input.client_data_json);
+        let mut signed_msg = Vec::with_capacity(input.authenticator_data.len() + 32);
+        signed_msg.extend_from_slice(input.authenticator_data);
         signed_msg.extend_from_slice(&client_data_hash);
 
         verifying_key
@@ -361,11 +370,11 @@ impl WebAuthnVerifier {
         }
 
         Ok(VerifiedIdpIntent {
-            account_id: expected_account,
-            tenant_id: expected_tenant.clone(),
+            account_id: input.expected_account,
+            tenant_id: input.expected_tenant.clone(),
             device_jkt: None,
             is_tenant_admin: cred.is_tenant_admin,
-            proof_id: format!("webauthn:{credential_id}:{sign_count}"),
+            proof_id: format!("webauthn:{}:{sign_count}", input.credential_id),
         })
     }
 }
@@ -460,11 +469,25 @@ pub struct RegisteredDeviceKey {
     pub active: bool,
 }
 
+/// Input parameters for enrolling a client P-256 device signing key.
+#[derive(Debug, Clone)]
+pub struct EnrollDeviceKeyInput<'a> {
+    pub provenance: AuthProvenance,
+    pub idp_intent: &'a VerifiedIdpIntent,
+    pub trust_domain: &'a str,
+    pub device_key_id: Uuid,
+    pub public_key_sec1: Vec<u8>,
+    pub nonce: &'a str,
+    pub expires_at_ms: i64,
+    pub now_ms: i64,
+    pub pop_signature: &'a [u8],
+}
+
 /// Broker-side registry of IdP-enrolled client P-256 device signing keys and
-/// single-use command nonces.
+/// single-use command nonces, strictly isolated by `(TenantId, device_key_id)`.
 #[derive(Default)]
 pub struct DeviceKeyRegistry {
-    keys: RwLock<HashMap<Uuid, RegisteredDeviceKey>>,
+    keys: RwLock<HashMap<(TenantId, Uuid), RegisteredDeviceKey>>,
     consumed_nonces: RwLock<HashSet<String>>,
 }
 
@@ -476,67 +499,68 @@ impl DeviceKeyRegistry {
     /// Enrolls a client P-256 device signing key after verifying:
     /// 1. Account is not `NativeScram`,
     /// 2. Broker-verified `VerifiedIdpIntent` binds `cnf.jkt == jkt(public_key_sec1)`,
-    /// 3. Device private key signed the proof-of-possession transcript.
-    #[allow(clippy::too_many_arguments)]
+    /// 3. Device private key signed the proof-of-possession transcript,
+    /// 4. `(tenant_id, device_key_id)` is not already occupied.
     pub fn enroll_device_key(
         &self,
-        provenance: AuthProvenance,
-        idp_intent: &VerifiedIdpIntent,
-        trust_domain: &str,
-        device_key_id: Uuid,
-        public_key_sec1: Vec<u8>,
-        nonce: &str,
-        expires_at_ms: i64,
-        now_ms: i64,
-        pop_signature: &[u8],
+        input: EnrollDeviceKeyInput<'_>,
     ) -> Result<RegisteredDeviceKey, AuthError> {
-        enforce_not_scram(provenance)?;
-        if expires_at_ms <= now_ms || expires_at_ms - now_ms > MAX_DEVICE_COMMAND_TTL_MS {
+        enforce_not_scram(input.provenance)?;
+        if input.expires_at_ms <= input.now_ms
+            || input.expires_at_ms - input.now_ms > MAX_DEVICE_COMMAND_TTL_MS
+        {
             return Err(AuthError::CommandExpired);
         }
 
-        let computed_jkt = p256_jwk_thumbprint(&public_key_sec1)?;
-        match idp_intent.device_jkt.as_deref() {
+        let computed_jkt = p256_jwk_thumbprint(&input.public_key_sec1)?;
+        match input.idp_intent.device_jkt.as_deref() {
             Some(jkt) if bool::from(jkt.as_bytes().ct_eq(computed_jkt.as_bytes())) => {}
             _ => return Err(AuthError::ConfirmationKeyMismatch),
         }
 
-        let verifying_key = VerifyingKey::from_sec1_bytes(&public_key_sec1)
+        let verifying_key = VerifyingKey::from_sec1_bytes(&input.public_key_sec1)
             .map_err(|_| AuthError::InvalidDeviceSignature)?;
-        let sig = Signature::from_slice(pop_signature)
-            .or_else(|_| Signature::from_der(pop_signature))
+        let sig = Signature::from_slice(input.pop_signature)
+            .or_else(|_| Signature::from_der(input.pop_signature))
             .map_err(|_| AuthError::InvalidDeviceSignature)?;
         let transcript = build_device_enroll_pop_transcript(
-            trust_domain,
-            &idp_intent.tenant_id,
-            idp_intent.account_id,
-            device_key_id,
-            nonce,
-            expires_at_ms,
+            input.trust_domain,
+            &input.idp_intent.tenant_id,
+            input.idp_intent.account_id,
+            input.device_key_id,
+            input.nonce,
+            input.expires_at_ms,
         );
         verifying_key
             .verify(&transcript, &sig)
             .map_err(|_| AuthError::InvalidDeviceSignature)?;
 
         let rec = RegisteredDeviceKey {
-            device_key_id,
-            tenant_id: idp_intent.tenant_id.clone(),
-            account_id: idp_intent.account_id,
-            public_key_sec1,
+            device_key_id: input.device_key_id,
+            tenant_id: input.idp_intent.tenant_id.clone(),
+            account_id: input.idp_intent.account_id,
+            public_key_sec1: input.public_key_sec1,
             active: true,
         };
         let mut guard = self
             .keys
             .write()
             .map_err(|_| AuthError::InvalidDeviceSignature)?;
-        guard.insert(device_key_id, rec.clone());
+        match guard.entry((input.idp_intent.tenant_id.clone(), input.device_key_id)) {
+            Entry::Occupied(_) => {
+                return Err(AuthError::DeviceKeyAlreadyExists(input.device_key_id))
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(rec.clone());
+            }
+        }
         Ok(rec)
     }
 
-    /// Revokes a registered device key so future commands fail closed.
-    pub fn revoke_device_key(&self, device_key_id: Uuid) {
+    /// Revokes a registered device key within `tenant_id` so future commands fail closed.
+    pub fn revoke_device_key(&self, tenant_id: &TenantId, device_key_id: Uuid) {
         if let Ok(mut guard) = self.keys.write() {
-            if let Some(key) = guard.get_mut(&device_key_id) {
+            if let Some(key) = guard.get_mut(&(tenant_id.clone(), device_key_id)) {
                 key.active = false;
             }
         }
@@ -559,7 +583,7 @@ impl DeviceKeyRegistry {
                 .read()
                 .map_err(|_| AuthError::InvalidDeviceSignature)?;
             let rec = guard
-                .get(&cmd.device_key_id)
+                .get(&(cmd.tenant_id.clone(), cmd.device_key_id))
                 .ok_or(AuthError::UnknownOrInactiveDeviceKey(cmd.device_key_id))?;
             if !rec.active || rec.tenant_id != *cmd.tenant_id || rec.account_id != cmd.account_id {
                 return Err(AuthError::UnknownOrInactiveDeviceKey(cmd.device_key_id));
