@@ -1,5 +1,4 @@
 import LiveKit
-import Observation
 import WaddleKit
 
 @MainActor
@@ -21,10 +20,10 @@ final class CallVideoMeter {
 
     /// The tracks asked to report statistics. Asking one again restarts its
     /// timer, so each is asked once.
-    @ObservationIgnored private var measuredTracks: [ObjectIdentifier: Track] = [:]
+    private var measuredTracks: [ObjectIdentifier: Track] = [:]
     /// How many are looking: a Mac can have the settings open in two
     /// windows, and closing one must not blind the other.
-    @ObservationIgnored private var videoWatchers = 0
+    private var videoWatchers = 0
     private var measuresVideo: Bool { videoWatchers > 0 }
 
     func setMeasuresVideo(_ on: Bool, videoStreams: @MainActor () -> [VideoStream]) async {
