@@ -15,6 +15,7 @@ use thiserror::Error;
 /// Deliberately contains NO fields for prompts, model responses, provider API
 /// keys, ciphertext envelopes, auth tokens, or raw JIDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceRecord {
     pub ts_logical: u64,
     /// Opaque replica/cell identifier (never raw JID or secret).
@@ -25,7 +26,7 @@ pub struct TraceRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "event_type", rename_all = "snake_case")]
+#[serde(tag = "event_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TraceEvent {
     FenceClose {
         fence_kind: String,
@@ -155,6 +156,8 @@ pub enum MonitorViolation {
     InvalidStreamAbort { stream_id: String },
     #[error("stream quarantine on non-open stream {stream_id}")]
     InvalidStreamQuarantine { stream_id: String },
+    #[error("stream {stream_id} requested cancellation but never aborted before trace EOF")]
+    UncanceledStreamAtEof { stream_id: String },
 }
 
 #[derive(Debug, Error)]
@@ -293,15 +296,17 @@ impl PlacementLeaseMonitor {
                 to_key,
                 new_gen,
             } => {
-                let current_holder = self
-                    .active_holder
-                    .get(&rec.tenant_hash)
-                    .cloned()
-                    .unwrap_or_default();
-                if current_holder != *from_key {
+                let Some(current_holder) = self.active_holder.get(&rec.tenant_hash) else {
                     return Err(MonitorViolation::LeaseTransferMismatch {
                         tenant: rec.tenant_hash.clone(),
-                        expected: current_holder,
+                        expected: "<none>".to_owned(),
+                        actual: from_key.clone(),
+                    });
+                };
+                if current_holder != from_key {
+                    return Err(MonitorViolation::LeaseTransferMismatch {
+                        tenant: rec.tenant_hash.clone(),
+                        expected: current_holder.clone(),
                         actual: from_key.clone(),
                     });
                 }
@@ -406,6 +411,15 @@ impl StreamCancellationMonitor {
         }
         Ok(())
     }
+
+    pub fn finalize(&self) -> Result<(), MonitorViolation> {
+        if let Some(stream_id) = self.cancel_req_tick.keys().min() {
+            return Err(MonitorViolation::UncanceledStreamAtEof {
+                stream_id: stream_id.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Ensures no secret sentinels (API keys, prompts, bearer tokens, raw JIDs)
@@ -425,6 +439,7 @@ pub fn verify_jsonl_trace(jsonl: &str) -> Result<TraceSummary, TraceVerifyError>
     let mut placement = PlacementLeaseMonitor::default();
     let mut stream = StreamCancellationMonitor::default();
     let mut records_processed = 0usize;
+    let mut last_line = 0usize;
 
     for (idx, raw_line) in jsonl.lines().enumerate() {
         let trimmed = raw_line.trim();
@@ -432,6 +447,7 @@ pub fn verify_jsonl_trace(jsonl: &str) -> Result<TraceSummary, TraceVerifyError>
             continue;
         }
         let line = idx + 1;
+        last_line = line;
         let rec: TraceRecord = serde_json::from_str(trimmed)
             .map_err(|source| TraceVerifyError::JsonParse { line, source })?;
         admission
@@ -445,6 +461,13 @@ pub fn verify_jsonl_trace(jsonl: &str) -> Result<TraceSummary, TraceVerifyError>
             .map_err(|violation| TraceVerifyError::Violation { line, violation })?;
         records_processed += 1;
     }
+
+    stream
+        .finalize()
+        .map_err(|violation| TraceVerifyError::Violation {
+            line: last_line,
+            violation,
+        })?;
 
     Ok(TraceSummary {
         records_processed,
@@ -658,5 +681,123 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn catches_ghost_lease_transfer_without_active_holder() {
+        let ghost_trace = to_jsonl(&[rec(
+            1,
+            "c2",
+            TraceEvent::LeaseTransfer {
+                from_key: String::new(),
+                to_key: "attacker".to_owned(),
+                new_gen: 1,
+            },
+        )]);
+        let err = verify_jsonl_trace(&ghost_trace).expect_err("must reject ghost lease transfer");
+        assert!(matches!(
+            err,
+            TraceVerifyError::Violation {
+                violation: MonitorViolation::LeaseTransferMismatch {
+                    expected,
+                    actual,
+                    ..
+                },
+                ..
+            } if expected == "<none>" && actual.is_empty()
+        ));
+
+        let post_release_trace = to_jsonl(&[
+            rec(
+                1,
+                "cell-1",
+                TraceEvent::LeaseClaim {
+                    holder_key: "k1".to_owned(),
+                    gen: 1,
+                },
+            ),
+            rec(
+                2,
+                "cell-1",
+                TraceEvent::LeaseRelease {
+                    holder_key: "k1".to_owned(),
+                    gen: 1,
+                },
+            ),
+            rec(
+                3,
+                "c2",
+                TraceEvent::LeaseTransfer {
+                    from_key: String::new(),
+                    to_key: "attacker".to_owned(),
+                    new_gen: 2,
+                },
+            ),
+        ]);
+        let err = verify_jsonl_trace(&post_release_trace)
+            .expect_err("must reject lease transfer after release");
+        assert!(matches!(
+            err,
+            TraceVerifyError::Violation {
+                violation: MonitorViolation::LeaseTransferMismatch {
+                    expected,
+                    ..
+                },
+                ..
+            } if expected == "<none>"
+        ));
+    }
+
+    #[test]
+    fn catches_uncanceled_stream_at_eof() {
+        let trace = to_jsonl(&[
+            rec(
+                1,
+                "b1",
+                TraceEvent::StreamOpen {
+                    stream_id: "s-revoked".to_owned(),
+                    permits_after: 1,
+                    max_permits: 2,
+                },
+            ),
+            rec(
+                2,
+                "b1",
+                TraceEvent::FenceClose {
+                    fence_kind: "cred".to_owned(),
+                    new_gen: 2,
+                },
+            ),
+            rec(3, "b1", TraceEvent::RevokeAck { gen: 2 }),
+            rec(
+                4,
+                "b1",
+                TraceEvent::StreamCancelReq {
+                    stream_id: "s-revoked".to_owned(),
+                    tick: 10,
+                },
+            ),
+        ]);
+        let err = verify_jsonl_trace(&trace).expect_err("must reject uncanceled stream at EOF");
+        assert!(matches!(
+            err,
+            TraceVerifyError::Violation {
+                line: 4,
+                violation: MonitorViolation::UncanceledStreamAtEof { stream_id },
+            } if stream_id == "s-revoked"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_secret_fields_in_record_and_event() {
+        let unknown_event_field = r#"{"ts_logical":1,"actor_id":"broker-1","tenant_hash":"t-acme","event":{"event_type":"revoke_ack","gen":2,"api_key":"sk-live-secret-999"}}"#;
+        let err = verify_jsonl_trace(unknown_event_field)
+            .expect_err("must reject unknown field in TraceEvent");
+        assert!(matches!(err, TraceVerifyError::JsonParse { line: 1, .. }));
+
+        let unknown_record_field = r#"{"ts_logical":1,"actor_id":"broker-1","tenant_hash":"t-acme","event":{"event_type":"revoke_ack","gen":2},"prompt":"user secret prompt","bearer_token":"eyJhbGciOi..."}"#;
+        let err = verify_jsonl_trace(unknown_record_field)
+            .expect_err("must reject unknown fields in TraceRecord");
+        assert!(matches!(err, TraceVerifyError::JsonParse { line: 1, .. }));
     }
 }
