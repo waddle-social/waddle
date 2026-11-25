@@ -905,7 +905,7 @@ async fn handle_xmpp_frame_impl(
             let open_element = websocket_stream_open_element(domain, from.as_ref());
             *stream_open_from = from;
             let features_element =
-                build_stream_features_for_phase_element(phase, state.sasl2_negotiation_enabled());
+                build_stream_features_for_phase_element(phase, super::sasl::sasl2_offer(state));
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
         }

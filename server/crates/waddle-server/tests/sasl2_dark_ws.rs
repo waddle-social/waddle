@@ -194,10 +194,9 @@ async fn explicit_fixture_capability_authenticates_and_sends_post_auth_features_
         offered.mechanisms,
         vec![Sasl2Mechanism::ScramSha256, Sasl2Mechanism::OAuthBearer]
     );
-    assert!(
-        offered.inline.is_none(),
-        "inline features remain out of scope"
-    );
+    // The fixture selects the durable authority, so XEP-0198 resumption and
+    // XEP-0386 Bind 2 are offered inline (`xep0386_bind2_ws.rs`).
+    assert!(offered.inline.is_some());
 
     send(&mut peer, authenticate(bearer(&session.id, None))).await;
     let success = receive(&mut peer).await;

@@ -418,6 +418,10 @@ pub struct ConnectionEntry {
     /// live connection's memberships from a displaced generation's.
     pub occupancy_session:
         Arc<std::sync::Mutex<Option<waddle_xmpp_core::OccupancySessionGeneration>>>,
+    /// The XEP-0388 `<user-agent/>` id of the client installation this
+    /// binding was made for, when its Bind 2 request identified one. A later
+    /// Bind 2 from the same installation ends this binding (XEP-0386).
+    user_agent_id: Arc<std::sync::Mutex<Option<waddle_xmpp_core::xep0388_inline::UserAgentId>>>,
     /// Sender half of this connection's force-detach control channel
     /// (ADR-0017 Phase 3 Slice 6). The receiver half is handed to the
     /// connection's own task exactly once via [`Self::take_force_detach_rx`]
@@ -556,6 +560,7 @@ impl ConnectionEntry {
             pending_subscribes_flushed: Arc::new(AtomicBool::new(false)),
             sm_stream_id: Arc::new(std::sync::Mutex::new(None)),
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
+            user_agent_id: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
             write_interruption,
@@ -975,6 +980,19 @@ impl ConnectionEntry {
     /// for `claim_for_session` (locked Q7b SM-ack lifecycle).
     pub fn occupancy_session(&self) -> Option<waddle_xmpp_core::OccupancySessionGeneration> {
         self.occupancy_session.lock().ok().and_then(|guard| *guard)
+    }
+
+    /// Record the client installation this binding was made for.
+    pub fn set_user_agent_id(&self, id: Option<waddle_xmpp_core::xep0388_inline::UserAgentId>) {
+        if let Ok(mut guard) = self.user_agent_id.lock() {
+            *guard = id;
+        }
+    }
+
+    /// The client installation this binding was made for, if it was
+    /// identified.
+    pub fn user_agent_id(&self) -> Option<waddle_xmpp_core::xep0388_inline::UserAgentId> {
+        self.user_agent_id.lock().ok().and_then(|guard| *guard)
     }
 
     pub fn set_sm_stream_id(&self, session_id: Option<SmSessionId>) {

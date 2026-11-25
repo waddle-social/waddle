@@ -8,20 +8,11 @@
 //! not TLS or early-data behaviour.
 #![cfg(feature = "test-support")]
 
-use axum::serve::Listener;
-use futures::{SinkExt, StreamExt};
 use minidom::Element;
-use std::future;
-use std::io;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::DuplexStream;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 use waddle_server::test_support::{
-    create_test_session, router, websocket_state_with_sasl2_and_durable_sm,
+    create_test_session, websocket_state_with_sasl2_and_durable_sm,
     websocket_state_with_sasl2_without_durable_sm, WebSocketState,
 };
 use waddle_xmpp::ownership::SmSessionKey;
@@ -34,82 +25,10 @@ use waddle_xmpp_core::xep0388_inline::{
     SmInlineEnable, SmInlineResume, SmInlineResumeResult, SmStreamId, NS_SM,
 };
 
-const TIMEOUT: Duration = Duration::from_secs(5);
-const NS_FRAMING: &str = "urn:ietf:params:xml:ns:xmpp-framing";
-const NS_STREAM: &str = "http://etherx.jabber.org/streams";
+#[path = "sasl2_ws_support/mod.rs"]
+mod support;
 
-type Peer = WebSocketStream<DuplexStream>;
-
-struct OneConnection(Option<DuplexStream>);
-
-impl Listener for OneConnection {
-    type Io = DuplexStream;
-    type Addr = ();
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        match self.0.take() {
-            Some(io) => (io, ()),
-            None => future::pending().await,
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        Ok(())
-    }
-}
-
-async fn connect(state: Arc<WebSocketState>) -> (Peer, JoinHandle<()>) {
-    let (server_io, peer_io) = tokio::io::duplex(8192);
-    let server = tokio::spawn(async move {
-        axum::serve(OneConnection(Some(server_io)), router(state))
-            .await
-            .expect("serve");
-    });
-    let (peer, response) = tokio_tungstenite::client_async("ws://localhost/ws", peer_io)
-        .await
-        .expect("websocket upgrade");
-    assert_eq!(response.status(), 101);
-    (peer, server)
-}
-
-async fn send(peer: &mut Peer, element: Element) {
-    peer.send(Message::Text(String::from(&element).into()))
-        .await
-        .expect("send frame");
-}
-
-async fn receive(peer: &mut Peer) -> Element {
-    match timeout(TIMEOUT, peer.next()).await.expect("frame timeout") {
-        Some(Ok(Message::Text(text))) => text.parse().expect("XML frame"),
-        other => panic!("expected text frame, got {other:?}"),
-    }
-}
-
-async fn start_stream(peer: &mut Peer) {
-    send(
-        peer,
-        Element::builder("open", NS_FRAMING)
-            .attr(minidom::rxml::xml_ncname!("to").to_owned(), "example.com")
-            .attr(minidom::rxml::xml_ncname!("version").to_owned(), "1.0")
-            .build(),
-    )
-    .await;
-    assert_eq!(receive(peer).await.name(), "open");
-    let features = receive(peer).await;
-    assert_eq!(
-        (features.name(), features.ns()),
-        ("features", NS_STREAM.to_owned())
-    );
-}
-
-fn bearer(token: &str) -> Vec<u8> {
-    let mut payload = b"n,,".to_vec();
-    payload.push(1);
-    payload.extend_from_slice(b"auth=Bearer ");
-    payload.extend_from_slice(token.as_bytes());
-    payload.extend_from_slice(b"\x01\x01");
-    payload
-}
+use support::{bearer, connect_started, expect_post_auth_features, receive, send, Peer};
 
 /// Authenticate with OAUTHBEARER, carrying `inline` in the request, and
 /// return the next frame.
@@ -127,11 +46,15 @@ async fn authenticate(peer: &mut Peer, token: &str, inline: &Sasl2InlineRequests
 
 fn inline_results(frame: &Element) -> Sasl2InlineResults {
     let success = Sasl2Success::from_element(frame).expect("SASL2 success");
-    assert_eq!(
-        success.authorization_identifier.to_string(),
-        "alice@example.com"
-    );
-    Sasl2InlineResults::from_success(&success).expect("typed inline results")
+    let results = Sasl2InlineResults::from_success(&success).expect("typed inline results");
+    // A bind reports the full JID (XEP-0386); otherwise the bare account.
+    let identifier = success.authorization_identifier.to_string();
+    if results.bound.is_some() {
+        assert!(identifier.starts_with("alice@example.com/"), "{identifier}");
+    } else {
+        assert_eq!(identifier, "alice@example.com");
+    }
+    results
 }
 
 fn bind_with_resumable_session() -> Sasl2InlineRequests {
@@ -145,14 +68,6 @@ fn bind_with_resumable_session() -> Sasl2InlineRequests {
             ..Bind2Request::default()
         }),
     }
-}
-
-async fn expect_post_auth_features(peer: &mut Peer) {
-    let features = receive(peer).await;
-    assert_eq!(
-        (features.name(), features.ns()),
-        ("features", NS_STREAM.to_owned())
-    );
 }
 
 /// The state of the one session the authority holds.
@@ -202,8 +117,7 @@ async fn bind_resumable(peer: &mut Peer, token: &str) -> SmStreamId {
 async fn bind2_binds_and_enables_stream_management_inside_success() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     let resume_token = bind_resumable(&mut peer, &session.id).await;
 
@@ -224,15 +138,13 @@ async fn bind2_binds_and_enables_stream_management_inside_success() {
 async fn inline_resume_reports_resumed_skips_the_bind_and_sends_no_stream_features() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut first, first_server) = connect(state.clone()).await;
-    start_stream(&mut first).await;
+    let (mut first, first_server) = connect_started(state.clone()).await;
     let resume_token = bind_resumable(&mut first, &session.id).await;
     drop(first);
     wait_for_only_session(&state, DurableSmState::Detached).await;
     first_server.abort();
 
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
     let requests = Sasl2InlineRequests {
         resume: Some(SmInlineResume {
             previd: resume_token.clone(),
@@ -266,8 +178,7 @@ async fn inline_resume_reports_resumed_skips_the_bind_and_sends_no_stream_featur
 async fn a_failed_inline_resume_falls_back_to_bind2() {
     let state = websocket_state_with_sasl2_and_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state.clone()).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state.clone()).await;
 
     let requests = Sasl2InlineRequests {
         resume: Some(SmInlineResume {
@@ -300,8 +211,7 @@ async fn a_failed_inline_resume_falls_back_to_bind2() {
 async fn inline_requests_are_malformed_without_the_durable_authority() {
     let state = websocket_state_with_sasl2_without_durable_sm().await;
     let session = create_test_session(&state, "alice").await;
-    let (mut peer, server) = connect(state).await;
-    start_stream(&mut peer).await;
+    let (mut peer, server) = connect_started(state).await;
 
     let frame = authenticate(&mut peer, &session.id, &bind_with_resumable_session()).await;
     let failure = Sasl2Failure::from_element(&frame).expect("SASL2 failure");
