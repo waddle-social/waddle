@@ -29,5 +29,6 @@ jobs:
           bun-version: 1.4.4
       - name: Check changed sources and project contracts
         env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: bun scripts/pr-smoke.ts "$BASE_SHA" "$GITHUB_SHA"
+        run: bun scripts/pr-smoke.ts "$BASE_SHA" "$GITHUB_SHA" "$PR_HEAD_SHA"

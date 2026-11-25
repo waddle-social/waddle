@@ -212,6 +212,20 @@ test("the smoke checks the exact diff, filenames and strict JSON", () => {
     git("commit", "-qam", "invalid syntax");
     expect(run([process.execPath, script, base, git("rev-parse", "HEAD")]).exitCode).not.toBe(0);
     expect(run([process.execPath, script, base, base]).exitCode).not.toBe(0);
+    // The event saw the old target. The synthetic merge includes a newer target
+    // with its own broken JSON. Only changes from the PR itself belong in smoke.
+    const newerBase = git("rev-parse", "HEAD");
+    git("checkout", "-qb", "contribution", base);
+    writeFileSync(join(directory, "changed.py"), "value = 42\n");
+    git("add", "changed.py");
+    git("commit", "-qm", "contribution");
+    const contribution = git("rev-parse", "HEAD");
+    git("checkout", "-q", "--detach", newerBase);
+    git("merge", "--no-ff", "-qm", "synthetic candidate", contribution);
+    const merged = git("rev-parse", "HEAD");
+    expect(run([process.execPath, script, base, merged, contribution]).exitCode).toBe(0);
+    expect(run([process.execPath, script, base, merged, newerBase]).exitCode).not.toBe(0);
+
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

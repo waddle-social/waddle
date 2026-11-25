@@ -2,24 +2,27 @@
 
 Prepared 20 September 2026. Source baseline: `main` at `c6169598d2426e483c1c7a2c062ca7f1aba352ac`. The initial plan is followed by the implementation and measurement record for PR #1801. Proposed timing budgets are acceptance targets, not measured speedups.
 
-**Latest changed-source result:** `b321fc73` passed all 11 ordinary workflows in
+**September changed-source result:** `b321fc73` passed all 11 ordinary workflows in
 **12m56s**, including queueing and cache post work. The Rust workflow took
 **12m53s** and all 10,645 selected test identities passed. This is the first
 successful measured trial under 15 minutes; the planned 20-run sample,
 dependency/toolchain stress cases and live main-publication measurement remain
 outstanding. See the final trial record below.
 
-The primary obstacle is the all-features Rust test build. The latest server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL independently took 19m42s. Both must improve to deliver the requested result.
+In the September baseline, the all-features Rust test build dominated PR feedback. The server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL took 19m42s.
 
 ## Current PR and merge-queue routing
 
-On ordinary PR updates, the server runs its short checks. Android, Linux, chat
-and Apple run fast tooling or contract checks. Full client builds, server
-compilation and default-feature tests run on affected merge candidates. The
-server's all-features PostgreSQL shards still gate publication on main. Its
-concurrency group lets the active revision finish while newer pending pushes
-coalesce. The [integration workflow](integration-ci.md) describes the path
-filters, read-only permissions and the remaining repository ruleset requirement.
+A pull request starts one GitHub-hosted smoke job. It checks the actual diff and runs
+short contracts for affected projects without starting Nix, Gradle, a simulator,
+or a full Cargo build. SonarCloud reports separately through its GitHub App.
+
+The merge queue runs the affected verification lanes on the combined candidate.
+Main owns releases, deployments, and the all-features PostgreSQL publication gate.
+The server lets active main verification finish while newer pending pushes coalesce.
+The [integration workflow](integration-ci.md) describes the checks and their trust
+boundary. The [queue policy](../infrastructure/github/README.md) describes the native
+merge window and how to inspect its live settings.
 
 ## What the measurements show
 

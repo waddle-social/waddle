@@ -1,6 +1,6 @@
 // This job runs without installing workspace dependencies or building artifacts.
-import { lstatSync, readFileSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
 
 function run(args: string[], quiet = false): string {
   const result = Bun.spawnSync(args, { stdout: quiet ? "pipe" : "inherit", stderr: "inherit" });
@@ -8,9 +8,34 @@ function run(args: string[], quiet = false): string {
   return result.stdout?.toString() ?? "";
 }
 
-const [base, head] = Bun.argv.slice(2);
-if (![base, head].every(sha => /^[0-9a-f]{40}$/.test(sha ?? ""))) throw new Error("Expected full base and candidate commit IDs");
+function rustEdition(path: string): string | undefined {
+  // Read the crate and workspace manifests without resolving or downloading dependencies.
+  let inherited = false;
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    const manifest = join(dir, "Cargo.toml");
+    if (existsSync(manifest)) {
+      const cargo = Bun.TOML.parse(readFileSync(manifest, "utf8"));
+      if (!inherited && cargo.package) {
+        const edition = cargo.package.edition;
+        if (!edition?.workspace) return edition ?? "2015";
+        inherited = true;
+      }
+      if (inherited && cargo.workspace) return cargo.workspace.package?.edition ?? "2015";
+    }
+    if (dir === ".") return undefined;
+  }
+}
+
+const [eventBase, head, prHead] = Bun.argv.slice(2);
+if (![eventBase, head, ...(prHead ? [prHead] : [])].every(sha => /^[0-9a-f]{40}$/.test(sha ?? ""))) throw new Error("Expected full base and candidate commit IDs");
 if (run(["git", "rev-parse", "HEAD"], true).trim() !== head) throw new Error("Checkout differs from the event candidate");
+let base = eventBase;
+if (prHead) {
+  // GitHub can refresh the synthetic merge after the event records the target branch.
+  const [, targetParent, sourceParent] = run(["git", "rev-list", "--parents", "-n", "1", head], true).trim().split(" ");
+  if (sourceParent !== prHead) throw new Error("Synthetic merge does not contain the event PR head as its second parent");
+  base = targetParent;
+}
 run(["git", "merge-base", "--is-ancestor", base, head]);
 run(["git", "diff", "--check", base, head]);
 const paths = run(["git", "diff", "--no-renames", "--name-only", "-z", base, head], true).split("\0").filter(Boolean);
@@ -38,7 +63,9 @@ for (const path of paths) {
       run(["python3", "-c", "import ast, sys, tokenize; p = sys.argv[1]; ast.parse(tokenize.open(p).read(), p)", path]);
     } else if (ext === ".rs" && !path.startsWith("server/vendor/")) {
       // Parse the edited module in isolation. The queue checks workspace formatting and compiles it.
-      run(["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--emit", "stdout", "--", path], true);
+      const edition = rustEdition(path);
+      if (!edition) continue;
+      run(["rustfmt", "--edition", edition, "--config", "skip_children=true", "--emit", "stdout", "--", path], true);
     } else continue;
     checked++;
   } catch (error) {
