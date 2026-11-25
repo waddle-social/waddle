@@ -6,7 +6,6 @@ use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 use super::{FanOutMetrics, WebSocketState};
-use crate::server::routes::interpret::FullJidDeliveryOutcome;
 
 /// Constants threaded through both §3 fan-out passes.
 pub(super) struct CapsFanOutCtx<'a> {
@@ -267,51 +266,10 @@ async fn deliver_to_user_resources(
                 }
             },
             BroadcastOutcome::NotConnected => {
-                // No socket here: the resource is on another replica (its
-                // caps were resolved from replicated presence above) or is
-                // detached. The account coordinator's binding names where it
-                // lives and carries the event there.
-                let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
-                    state, None,
-                );
-                match crate::server::routes::interpret::deliver_to_bound_resource(
-                    &deps,
-                    &resource,
-                    &stanza,
-                    waddle_xmpp::registry::DeliveryKind::DirectFrame,
-                    None,
-                    crate::server::routes::interpret::BoundReach::ANY,
-                )
-                .await
-                {
-                    Some(
-                        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached,
-                    ) => metrics.delivered += 1,
-                    Some(
-                        FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted,
-                    ) => metrics.dropped_closed += 1,
-                    Some(FullJidDeliveryOutcome::Unavailable) | None => match state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_stanza_for_detached_bound_resource(
-                            &resource,
-                            &stanza,
-                            chrono::Utc::now(),
-                        )
-                        .await
-                    {
-                        Ok(true) => metrics.delivered += 1,
-                        Ok(false) => metrics.not_connected += 1,
-                        Err(error) => {
-                            warn!(
-                                resource = %resource,
-                                error = %error,
-                                "Failed to stash §3 fan-out for not-connected detached resource"
-                            );
-                            metrics.not_connected += 1;
-                        }
-                    },
+                match super::deliver_beyond_this_node(state, &resource, &stanza).await {
+                    super::BeyondThisNode::Delivered => metrics.delivered += 1,
+                    super::BeyondThisNode::Dropped => metrics.dropped_closed += 1,
+                    super::BeyondThisNode::NotConnected => metrics.not_connected += 1,
                 }
             }
         }
