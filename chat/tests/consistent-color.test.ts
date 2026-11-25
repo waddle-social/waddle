@@ -1,64 +1,63 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { consistentColor, setConsistentColorBackend } from "../src/lib/chat-ui";
 import {
-  consistentColor,
-  setConsistentColorBackend,
-} from "../src/lib/chat-ui";
+  readStoredConsistentColorPreference,
+  writeStoredConsistentColorPreference,
+} from "../src/lib/consistent-color-preference";
 
-// XEP-0392 §5.1 sample vectors. SHA-1("romeo") = first two bytes
-// 0x6e3c, hue = (0x6e3c / 0x10000) * 360 ≈ 155.13°. The spec's
-// "Juliet" sample uses the JID "juliet@capulet.lit" — we re-derive
-// fresh values here for `consistentColor`'s default sat/light so
-// the test pins the actual chat output, not an intermediate.
-//
-// Reference values produced by running the Rust impl
-// (waddle_xmpp_core::xep0392::compute_hue) on the same inputs.
-const SHA1_HUE_ROMEO = 155.13;
-const SHA1_HUE_JULIET = 80.32;
-
-function djb2Hue(input: string): number {
-  let h = 5381;
-  for (let i = 0; i < input.length; i++) {
-    h = ((h << 5) + h + input.charCodeAt(i)) & 0xffff;
-  }
-  return (h / 65536) * 360;
+function memoryStorage() {
+  const data = new Map<string, string>();
+  return {
+    getItem: (k: string) => data.get(k) ?? null,
+    setItem: (k: string, v: string) => void data.set(k, v),
+    removeItem: (k: string) => void data.delete(k),
+  };
 }
 
-afterEach(() => {
-  // Reset to fallback so test order doesn't leak.
-  setConsistentColorBackend(djb2Hue);
+describe("consistentColor", () => {
+  test("is null (static colour) until the wasm backend is installed", () => {
+    expect(consistentColor("romeo")).toBeNull();
+  });
+
+  test("passes input, saturation and lightness to the installed backend", () => {
+    const calls: Array<[string, number, number]> = [];
+    setConsistentColorBackend((input, s, l) => {
+      calls.push([input, s, l]);
+      return "#dd00af";
+    });
+    expect(consistentColor("Romeo", 100, 50)).toBe("#dd00af");
+    expect(consistentColor("Romeo")).toBe("#dd00af");
+    expect(calls).toEqual([
+      ["Romeo", 100, 50],
+      ["Romeo", 100, 45],
+    ]);
+  });
+
+  test("ignores a non-function backend from a stale wasm bundle", () => {
+    const before = consistentColor("x");
+    setConsistentColorBackend(undefined as never);
+    expect(consistentColor("x")).toBe(before);
+  });
 });
 
-describe("consistentColor", () => {
-  test("uses installed XEP-0392 backend after setConsistentColorBackend", () => {
-    setConsistentColorBackend((input) => {
-      if (input === "romeo") return SHA1_HUE_ROMEO;
-      if (input === "juliet") return SHA1_HUE_JULIET;
-      throw new Error(`unexpected input ${input}`);
-    });
-
-    expect(consistentColor("romeo", 100, 50)).toBe(
-      `hsl(${Math.round(SHA1_HUE_ROMEO)}, 100%, 50%)`,
-    );
-    expect(consistentColor("juliet", 65, 50)).toBe(
-      `hsl(${Math.round(SHA1_HUE_JULIET)}, 65%, 50%)`,
-    );
+describe("consistent colour preference", () => {
+  test("defaults to on and round-trips off", () => {
+    const store = memoryStorage();
+    expect(readStoredConsistentColorPreference(store)).toBe("on");
+    writeStoredConsistentColorPreference("off", store);
+    expect(readStoredConsistentColorPreference(store)).toBe("off");
+    writeStoredConsistentColorPreference("on", store);
+    expect(readStoredConsistentColorPreference(store)).toBe("on");
+    expect(store.getItem("waddle:consistent-color")).toBeNull();
   });
 
-  test("falls back to deterministic DJB2 hue when no backend is installed", () => {
-    // The fallback's exact values are an implementation detail — the
-    // contract is "deterministic + non-empty before wasm loads."
-    const a = consistentColor("alice");
-    const b = consistentColor("alice");
-    expect(a).toBe(b);
-    expect(a).toMatch(/^hsl\(\d+, \d+%, \d+%\)$/);
-  });
-
-  test("different inputs produce different hues with the spec backend", () => {
-    setConsistentColorBackend((input) => {
-      // Real wasm impl will provide collision-resistant output; this
-      // mock just proves consistentColor passes the input through.
-      return input === "alice" ? 30 : 200;
-    });
-    expect(consistentColor("alice")).not.toBe(consistentColor("bob"));
+  test("survives unavailable storage", () => {
+    const broken = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(readStoredConsistentColorPreference(broken)).toBe("on");
+    expect(readStoredConsistentColorPreference(null)).toBe("on");
   });
 });
