@@ -7,9 +7,11 @@ import 'context.dart';
 import 'conversation_runtime.dart';
 import 'session_auth.dart';
 import 'storage.dart';
+import 'account_presence.dart';
 import 'surfaces_runtime.dart';
 
 part 'session_accounts.dart';
+part 'session_admin.dart';
 
 typedef PlatformInvoker =
     Future<dynamic> Function(String method, Map<String, dynamic> args);
@@ -127,6 +129,11 @@ class SessionRuntime implements RuntimeContext {
     _events.add({'topic': topic, 'data': data, 'generation': _generation});
   }
 
+  late final _accountPresence = AccountPresence(
+    request: (method, args) => rpc(method, args),
+    changed: (value) => emit('presence', value),
+  );
+
   void attachPlatformEvents(Stream<Map<String, dynamic>> events) {
     unawaited(_platformEvents?.cancel());
     _platformEvents = events.listen(
@@ -155,6 +162,7 @@ class SessionRuntime implements RuntimeContext {
                   'connecting',
                   'active',
                 ].contains(data['state']);
+            _accountPresence.call(_callDemand);
             _queueDemand();
           }
           emit(topic, data);
@@ -175,6 +183,7 @@ class SessionRuntime implements RuntimeContext {
       _demandLeases.containsValue(generation);
 
   Future<void> onVisibility(bool visible) {
+    if (visible && !_visible) _accountPresence.interaction();
     _visible = visible;
     return _applyDemand();
   }
@@ -475,6 +484,8 @@ class SessionRuntime implements RuntimeContext {
     final captured = generation;
     final epoch = ++_connectionEpoch;
     _connected = false;
+    _canManage = false;
+    _emitHome();
     emit('connection', {
       'state': _retry == 0 ? 'connecting' : 'reconnecting',
       'attempt': _retry,
@@ -542,6 +553,7 @@ class SessionRuntime implements RuntimeContext {
 
   Future<void> _notifyDisconnected(int captured) {
     if (_disconnectNotified) return _disconnectFuture;
+    _accountPresence.disconnect();
     _disconnectNotified = true;
     final event = {'type': 'disconnected', 'data': <String, dynamic>{}};
     rawEventObserver?.call(event);
@@ -656,11 +668,7 @@ class SessionRuntime implements RuntimeContext {
         _joinRequests.clear();
         emit('connection', {'state': 'ready'});
         try {
-          await rpc('send_presence', {
-            'status': null,
-            'show': null,
-            'idle_since': null,
-          });
+          await _accountPresence.connected();
         } catch (_) {
           _scheduleReconnect(captured, epoch, source: source);
           return;
@@ -677,7 +685,8 @@ class SessionRuntime implements RuntimeContext {
                 .toSet()
               ..addAll(
                 (_persistent['joinedRooms'] as List? ?? []).cast<String>(),
-              );
+              )
+              ..removeAll(_blockedRoomJoins);
         for (var index = 0; index < joins.length; index += 4) {
           await Future.wait(
             joins.skip(index).take(4).map((room) async {
@@ -686,7 +695,8 @@ class SessionRuntime implements RuntimeContext {
                 'nick': _session['xmppLocalpart'],
               });
               _requireEventOwner(captured, source, epoch);
-              _joined.add(bareJid(room));
+              if (!_blockedRoomJoins.contains(bareJid(room)))
+                _joined.add(bareJid(room));
             }),
           );
         }
@@ -715,6 +725,15 @@ class SessionRuntime implements RuntimeContext {
       case 'authenticationFailed':
         await _signOut(revoke: false);
         return;
+      case 'statusPreferenceChanged':
+        await _accountPresence.adopt(data);
+        break;
+      case 'pubsub':
+        if (data['node'] == 'urn:waddle:status-preference:0' &&
+            (data['from'] == null || data['from'] == jid)) {
+          await _accountPresence.refresh();
+        }
+        break;
       case 'presence':
         final from = data['from'];
         if (from is String) {
@@ -775,10 +794,16 @@ class SessionRuntime implements RuntimeContext {
       throw StateError('Connect to your account first.');
     }
     final captured = generation;
+    if (method == 'admin_channels_delete' || method == 'admin_spaces_delete') {
+      return _deleteAdminResource(current, captured, method, args);
+    }
     if (method == 'join_room') {
       final room = bareJid('${args['room_jid'] ?? ''}');
       if (room.isEmpty) {
         throw ArgumentError('A room address is required.');
+      }
+      if (_blockedRoomJoins.contains(room)) {
+        throw StateError('This room is no longer available.');
       }
       if (_joined.contains(room)) {
         return null;
@@ -790,6 +815,7 @@ class SessionRuntime implements RuntimeContext {
       late final Future<dynamic> operation;
       operation = _invokeTransport(current, captured, method, args)
           .then((value) {
+            if (_blockedRoomJoins.contains(room)) return value;
             _joined.add(room);
             _persistent['joinedRooms'] = _joined.toList();
             unawaited(persist().catchError((Object _) {}));
@@ -890,6 +916,7 @@ class SessionRuntime implements RuntimeContext {
 
   Future<void> _refreshHome() async {
     final captured = generation;
+    final previouslyDeleted = _blockedRoomJoins;
     final topology = runtimeMap(await rpc('discover_topology'));
     requireGeneration(this, captured);
     if (topology['channels'] is! List) {
@@ -898,6 +925,15 @@ class SessionRuntime implements RuntimeContext {
     _channels
       ..clear()
       ..addAll(runtimeRows(topology['channels']));
+    final rediscovered = previouslyDeleted.intersection(
+      _channels.map((row) => bareJid('${row['room_jid']}')).toSet(),
+    );
+    if (rediscovered.isNotEmpty) {
+      _persistent['adminDeletedRooms'] =
+          (_blockedRoomJoins..removeAll(rediscovered)).toList();
+      await persist();
+      requireGeneration(this, captured);
+    }
     _settled = true;
     _emitHome();
     try {
@@ -1410,6 +1446,11 @@ class SessionRuntime implements RuntimeContext {
           await _resumeConnection(generation, _connectionEpoch);
         }
         return null;
+      case 'presence.active':
+        _accountPresence.interaction();
+        return null;
+      case 'presence.select':
+        return _accountPresence.select('${args['mode']}');
       case 'preferences.set':
         await _setPreference('${args['key']}', args['value']);
         return null;
@@ -1421,6 +1462,9 @@ class SessionRuntime implements RuntimeContext {
       default:
         if (jid == null || _credentials == null) {
           throw StateError('Sign in first.');
+        }
+        if (method.startsWith('admin.') && (!_connected || !_canManage)) {
+          throw StateError('Community owner access is required.');
         }
         if (method == 'threads.list') {
           final page = runtimeMap(await surfaces.invoke(method, args));
@@ -1454,6 +1498,7 @@ class SessionRuntime implements RuntimeContext {
   }
 
   void _clearAccountProjections() {
+    _accountPresence.clear();
     _deliveryResolved = false;
     _pushEnabled = false;
     _backgroundDemand = false;
@@ -1600,6 +1645,7 @@ class SessionRuntime implements RuntimeContext {
   }
 
   Future<void> _dispose() async {
+    _accountPresence.disconnect();
     if (_cleanupComplete) {
       return;
     }

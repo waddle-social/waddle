@@ -37,6 +37,7 @@ pub struct WaddleVEvent {
     pub description: Option<String>,
     pub location: Option<String>,
     pub organizer: Option<String>,
+    pub workspace_room: Option<String>,
     pub dtstamp: Option<String>,
     pub dtstart: Option<WaddleCalendarDateValue>,
     pub dtend: Option<WaddleCalendarDateValue>,
@@ -392,6 +393,7 @@ impl WaddleVEvent {
             description: event.description,
             location: event.location,
             organizer: event.organizer,
+            workspace_room: event.workspace_room.map(|room| room.to_string()),
             dtstamp: event.dtstamp.map(|ts| ts.to_rfc3339()),
             dtstart: event.dtstart.as_ref().map(WaddleCalendarDateValue::from),
             dtend: event.dtend.as_ref().map(WaddleCalendarDateValue::from),
@@ -431,6 +433,7 @@ pub fn build_rsvp_publish_iq(
     let id = format!("xcal-rsvp-{}", Uuid::new_v4());
     let item_id = format!("{master_uid}-rsvp-{self_localpart}");
     let rsvp_event = VEvent {
+        workspace_room: None,
         uid: master_uid.to_string(),
         dtstamp: Some(Utc::now()),
         dtstart: None,

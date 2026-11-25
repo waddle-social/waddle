@@ -84,6 +84,9 @@ Future<Uint8List> readLocalFileUri(
     );
   }
   final file = uri.scheme == 'file' ? File.fromUri(uri) : File(value);
+  if (await FileSystemEntity.type(file.path) != FileSystemEntityType.file) {
+    throw StateError('Choose a regular file to attach.');
+  }
   if (await file.length() > maxBytes) {
     throw StateError('This attachment is too large.');
   }

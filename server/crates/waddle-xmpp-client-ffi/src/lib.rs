@@ -26,10 +26,18 @@ mod community_admin;
 #[cfg(feature = "serde")]
 mod community_surfaces;
 #[cfg(feature = "serde")]
+mod flutter_planning;
+#[cfg(feature = "serde")]
 pub use community_surfaces::{
-    WaddleAttendee, WaddleCalendarItemInput, WaddleFeedEntry, WaddleFeedEntryInput, WaddleStory,
-    WaddleStoryInput, WaddleStoryReads, WaddleStoryReadsInput, WaddleVEvent, WaddleVEventInput,
+    WaddleAttendee, WaddleCalendarEdit, WaddleCalendarItemInput, WaddleFeedEntry,
+    WaddleFeedEntryInput, WaddleStoryReads, WaddleStoryReadsInput, WaddleVEvent, WaddleVEventInput,
 };
+#[cfg(feature = "serde")]
+pub use waddle_xmpp_client_community::planning::WaddlePlanningItem;
+#[cfg(feature = "serde")]
+mod flutter_stories;
+#[cfg(feature = "serde")]
+pub use flutter_stories::{WaddleStory, WaddleStoryInput, WaddleStoryReactions};
 mod consistent_color;
 mod convert;
 mod error;

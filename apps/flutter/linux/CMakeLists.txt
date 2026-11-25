@@ -94,13 +94,18 @@ set_target_properties(${BINARY_NAME}
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+# The media plugin can use the platform allocator. Avoid downloading a second
+# allocator during CMake configuration.
+set(MIMALLOC_USE_STATIC_LIBS OFF CACHE BOOL "" FORCE)
 include(flutter/generated_plugins.cmake)
+pkg_check_modules(VIDEO_PLATFORM REQUIRED IMPORTED_TARGET egl wayland-client)
+target_link_libraries(media_kit_video_plugin PRIVATE PkgConfig::VIDEO_PLATFORM)
 
-# The prebuilt WebRTC engine has no runpath of its own. Resolve its graphics
-# dependencies alongside the plugin, including on systems without /usr/lib.
-pkg_check_modules(WEBRTC_GRAPHICS REQUIRED gbm libdrm)
+# The prebuilt WebRTC engine has no runpath of its own and loads PipeWire
+# dynamically for Wayland screen capture.
+pkg_check_modules(WEBRTC_RUNTIME REQUIRED gbm libdrm libpipewire-0.3)
 target_link_libraries(flutter_webrtc_plugin PRIVATE
-  "-Wl,--no-as-needed" ${WEBRTC_GRAPHICS_LINK_LIBRARIES} "-Wl,--as-needed")
+  "-Wl,--no-as-needed" ${WEBRTC_RUNTIME_LINK_LIBRARIES} "-Wl,--as-needed")
 
 
 # === Installation ===

@@ -137,6 +137,58 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('call device picker and screen share act on the displayed call', (
+    tester,
+  ) async {
+    final commands = <(String, Map<String, dynamic>)>[];
+    final bridge = WaddleBridge(
+      events: const Stream<dynamic>.empty(),
+      commandInvoker: (method, args) async {
+        commands.add((method, args));
+        return method == 'call.devices'
+            ? [
+                {'kind': 'audiooutput', 'id': 'usb', 'label': 'Headset'},
+              ]
+            : null;
+      },
+      callVideoBuilder: (_, _) => const SizedBox(key: Key('presentation')),
+    );
+    addTearDown(bridge.dispose);
+    bridge.acceptEvent({
+      'topic': 'call',
+      'data': {
+        'state': 'active',
+        'sid': 'voice',
+        'video': false,
+        'screenShareSupported': true,
+        'remoteScreenShare': true,
+      },
+    });
+    await tester.pumpWidget(
+      MaterialApp(home: ActiveCallScreen(bridge: bridge)),
+    );
+    expect(find.byKey(const Key('presentation')), findsOneWidget);
+    final devices = find.byTooltip('Devices');
+    await tester.ensureVisible(devices);
+    await tester.tap(devices);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Headset'));
+    await tester.pumpAndSettle();
+    expect(commands.last.$1, 'call.selectDevice');
+    expect(commands.last.$2, {
+      'expectedSid': 'voice',
+      'kind': 'audiooutput',
+      'id': 'usb',
+    });
+    final share = find.byTooltip('Share screen');
+    await tester.ensureVisible(share);
+    await tester.tap(share);
+    await tester.pump();
+    expect(commands.last.$1, 'call.screenShare');
+    expect(commands.last.$2, {'expectedSid': 'voice'});
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('video calls use the portable renderer outside Android', (
     tester,
   ) async {
@@ -162,7 +214,7 @@ void main() {
         MaterialApp(home: ActiveCallScreen(bridge: bridge)),
       );
       expect(find.byKey(const ValueKey('remote-video')), findsOneWidget);
-      expect(find.byKey(const ValueKey('local-video')), findsOneWidget);
+      expect(find.byKey(const ValueKey('local-video')), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     } finally {
       bridge.dispose();

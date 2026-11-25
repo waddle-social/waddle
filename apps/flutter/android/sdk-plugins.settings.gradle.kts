@@ -1,15 +1,27 @@
-// Nix provides Flutter's SDK packages through an immutable store. integration_test
-// is the SDK's native Android plugin, so Gradle must configure a local copy rather
-// than use its read-only source directory as a project. Its build only references
-// files inside android/; the SDK and generated Flutter package metadata stay intact.
-findProject(":integration_test")?.let { plugin ->
+// Gradle 9 requires a writable project for SDK-supplied integration_test.
+// The Flutter WebRTC Android copy also forwards MediaProjection revocation.
+fun localAndroidPlugin(name: String, configure: (File, File) -> Unit = { _, _ -> }) {
+    val plugin = findProject(":$name") ?: return
     val source = plugin.projectDir
-    check(source.isDirectory) { "Flutter integration_test Android sources missing: $source" }
-    val destination = rootDir.parentFile.resolve(".dart_tool/android-sdk-plugins/integration_test")
-    check(source.canonicalFile != destination.canonicalFile) { "SDK plugin source must be separate from its build copy" }
+    check(source.isDirectory) { "Flutter $name Android sources missing: $source" }
+    val destination = rootDir.parentFile.resolve(".dart_tool/android-sdk-plugins/$name")
+    check(source.canonicalFile != destination.canonicalFile) { "Plugin source must be separate from its build copy" }
     if (destination.exists()) {
-        check(destination.deleteRecursively()) { "Could not replace local SDK plugin: $destination" }
+        check(destination.deleteRecursively()) { "Could not replace local plugin: $destination" }
     }
-    check(source.copyRecursively(destination, overwrite = true)) { "Could not copy SDK plugin: $source" }
+    check(source.copyRecursively(destination, overwrite = true)) { "Could not copy plugin: $source" }
+    configure(source, destination)
     plugin.projectDir = destination
+}
+
+localAndroidPlugin("integration_test")
+localAndroidPlugin("flutter_webrtc") { source, destination ->
+    val version = source.parentFile.resolve("pubspec.yaml").useLines { lines ->
+        lines.first { it.startsWith("version:") }.substringAfter(':').trim()
+    }
+    check(version == "1.6.3") { "Review the MediaProjection stop callback for flutter_webrtc $version" }
+    val patch = rootDir.resolve("flutter-webrtc-1.6.3-projection-stop.patch")
+    val process = ProcessBuilder("git", "apply", patch.absolutePath).directory(destination)
+    process.environment()["GIT_CEILING_DIRECTORIES"] = destination.parentFile.canonicalPath
+    check(process.inheritIO().start().waitFor() == 0) { "Could not patch flutter_webrtc's screen-capture callback" }
 }

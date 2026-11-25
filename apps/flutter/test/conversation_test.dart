@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -983,6 +984,48 @@ void main() {
     expect(find.byTooltip('Save edit'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'Linux drops stage local files for the current account and conversation',
+    (tester) async {
+      final harness = _ConversationHarness()..snapshot();
+      harness.responses['conversation.dropFile'] = true;
+      await _mount(tester, harness);
+      void drop() =>
+          tester.widget<DropTarget>(find.byType(DropTarget)).onDragDone!(
+            DropDoneDetails(
+              files: [
+                DropItemFile('/tmp/a b.txt'),
+                DropItemFile('https://example.org/file'),
+              ],
+              localPosition: Offset.zero,
+              globalPosition: Offset.zero,
+            ),
+          );
+      drop();
+      await tester.pump();
+      expect(find.text('a b.txt'), findsOneWidget);
+      expect(harness.calls('conversation.dropFile'), isEmpty);
+      await tester.tap(find.text('Send files'));
+      await tester.pump();
+      final sent = harness.calls('conversation.dropFile').single;
+      expect(sent, containsPair('uri', 'file:///tmp/a%20b.txt'));
+      expect(sent, containsPair('jid', _jid));
+      expect(sent, containsPair('viewId', isNotEmpty));
+      expect(find.text('a b.txt'), findsNothing);
+      drop();
+      await tester.pump();
+      harness.bridge.acceptEvent({
+        'topic': 'session',
+        'generation': 10,
+        'data': {'state': 'signedOut'},
+      });
+      await tester.pump();
+      expect(find.text('a b.txt'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.linux),
+  );
 
   testWidgets('keyboard images and image paste retain the native upload path', (
     tester,

@@ -805,6 +805,38 @@ void main() {
     );
   });
 
+  test(
+    'a dropped file stays bound to the active view through upload',
+    () async {
+      final context = _Context();
+      final runtime = ConversationRuntime(context);
+      addTearDown(runtime.dispose);
+      await runtime.invoke('conversation.open', viewArgs);
+      final args = {
+        ...viewArgs,
+        'uri': 'file:///tmp/a.txt',
+        'name': 'a.txt',
+        'generation': context.generation,
+      };
+      await expectLater(
+        runtime.invoke('conversation.dropFile', {...args, 'generation': 0}),
+        throwsStateError,
+      );
+      expect(context.recorded('file.uploadUri'), isEmpty);
+      final transfer = Completer<dynamic>();
+      context.callbacks['file.uploadUri'] = (_) => transfer.future;
+      final sent = runtime.invoke('conversation.dropFile', args);
+      await _until(() => context.recorded('file.uploadUri').isNotEmpty);
+      await runtime.invoke('conversation.visibility', {
+        ...viewArgs,
+        'visible': false,
+      });
+      transfer.complete({'url': 'https://files.example.org/encrypted'});
+      await expectLater(sent, throwsStateError);
+      expect(context.persistent['conversationOutbox'], isNull);
+    },
+  );
+
   test('inserted content passes only supplied file metadata', () async {
     final context = _Context();
     final runtime = ConversationRuntime(context);

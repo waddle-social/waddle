@@ -8,6 +8,7 @@ pub mod connection;
 pub mod disco;
 pub mod domain;
 pub mod error;
+pub mod event_planning;
 pub mod link_preview;
 pub mod mam;
 pub mod occupancy_session;
@@ -24,6 +25,7 @@ pub mod xcal;
 pub mod xep0201;
 pub mod xep0359;
 pub mod xep0392;
+pub mod xep0470;
 pub mod xep0472;
 pub mod xep0501;
 

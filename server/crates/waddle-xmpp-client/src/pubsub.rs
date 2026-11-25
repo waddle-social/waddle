@@ -7,7 +7,8 @@
 //! `<publish-options/>` preconditions (§7.1 / §7.1.5), subscribe
 //! (§6.1), and notify-retract (§7.2).
 //!
-//! The XEP-0472 feed, XEP-0501 stories, story-reads, and xCal events
+//! The XEP-0472 feed, XEP-0501 stories (on each author's PEP service),
+//! story-reads, and xCal events
 //! modules layer their typed payloads (`<entry/>`, `<vcalendar/>`,
 //! `<reads/>`) on top of these envelopes; this module owns only the
 //! XEP-0060 pubsub wrapper shapes.
@@ -31,8 +32,8 @@ pub const NS_PUBSUB_PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#p
 const NS_DATA_FORMS: &str = "jabber:x:data";
 
 /// Conventional JID of the Waddle community pubsub component
-/// (`community.<domain>`) hosting the XEP-0472 social feed, XEP-0501
-/// stories, and xCal events nodes. Mirrors
+/// (`community.<domain>`) hosting the XEP-0472 social feed and xCal
+/// events nodes. Mirrors
 /// [`crate::extension_commands::fallback_extension_service_jid`] for
 /// the extensions component.
 ///
@@ -217,6 +218,27 @@ pub fn build_pubsub_items_iq(
     let pubsub = Element::builder("pubsub", NS_PUBSUB)
         .append(items.build())
         .build();
+    wrap_pubsub_iq(iq_id, "get", service, pubsub)
+}
+
+/// XEP-0060 §6.5.8 items GET for the single item `item_id` on `node`.
+/// `service` routes as in [`build_pubsub_items_iq`].
+#[must_use]
+pub fn build_pubsub_item_iq(
+    iq_id: &str,
+    service: Option<&BareJid>,
+    node: &str,
+    item_id: &str,
+) -> Element {
+    let items = Element::builder("items", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(
+            Element::builder("item", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                .build(),
+        )
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB).append(items).build();
     wrap_pubsub_iq(iq_id, "get", service, pubsub)
 }
 

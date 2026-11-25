@@ -48,15 +48,11 @@ pub fn build_stories_items_iq(community_service: &jid::BareJid, max_items: Optio
     build_pubsub_items_iq(&id, Some(community_service), PUBSUB_NODE_STORIES, max_items)
 }
 
-fn build_story_publish_iq(
-    community_service: &jid::BareJid,
-    item_id: &str,
-    story: &Story,
-) -> Element {
+fn build_story_publish_iq(service: Option<&jid::BareJid>, item_id: &str, story: &Story) -> Element {
     let id = format!("stories-publish-{}", Uuid::new_v4());
     build_pubsub_publish_iq(
         &id,
-        Some(community_service),
+        service,
         PUBSUB_NODE_STORIES,
         Some(item_id),
         build_story_element(story),
@@ -75,7 +71,7 @@ pub fn parse_stories_items_result(iq: &Element) -> Vec<WaddleStory> {
 }
 
 pub fn prepare_publication(
-    service: &jid::BareJid,
+    service: Option<&jid::BareJid>,
     input: WaddleStoryInput,
 ) -> Result<(Element, WaddleStory), InvalidInput> {
     let media_url = input
@@ -137,7 +133,7 @@ mod tests {
     #[test]
     fn story_publish_iq_pins_the_atom_entry_publish_shape() {
         let story = Story::new("story-1");
-        let iq = build_story_publish_iq(&service(), "story-1", &story);
+        let iq = build_story_publish_iq(Some(&service()), "story-1", &story);
         assert_eq!(iq.attr("type"), Some("set"));
         assert_eq!(iq.attr("to"), Some("community.waddle.test"));
         assert!(iq

@@ -1005,15 +1005,29 @@
             buildInputs = [
               pkgs.openssl
               pkgs.sqlite
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              pkgs.gtk3
-              pkgs.libsecret
-              pkgs.libpulseaudio
-              pkgs.libgbm
-              pkgs.libdrm
             ];
-            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+            # Desktop plugins query pkg-config. Propagating GTK headers and
+            # linker flags to every Rust, Android and Dart build can overflow
+            # GCC's process environment on long source paths.
+            PKG_CONFIG_PATH = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" (
+              [ pkgs.openssl ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.libsecret
+                pkgs.libpulseaudio
+                pkgs.libgbm
+                pkgs.libdrm
+                pkgs.pipewire
+                # The plugin links shared libmpv. Its public C headers stand
+                # alone, while mpv.pc lists every static backend as private.
+                (pkgs.runCommand "libmpv-shared-pkgconfig" { } ''
+                  mkdir -p "$out/lib/pkgconfig"
+                  sed '/^Requires.private:/d' ${pkgs.lib.getDev pkgs.mpv-unwrapped}/lib/pkgconfig/mpv.pc > "$out/lib/pkgconfig/mpv.pc"
+                '')
+                pkgs.libglvnd
+                pkgs.wayland
+                pkgs.libepoxy
+              ]
+            );
             env = {
               JAVA_HOME = "${pkgs.temurin-bin-21}";
             }
@@ -1051,6 +1065,7 @@
               pkgs.clang
               pkgs.xdg-utils
               pkgs.weston
+              pkgs.chromium
               pkgs.dbus
               pkgs.gnome-keyring
             ];

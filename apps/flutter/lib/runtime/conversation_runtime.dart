@@ -256,6 +256,15 @@ class ConversationRuntime {
           }
         }
         return rows.values.toList();
+      case 'conversation.dropFile':
+        if (args['generation'] != view.generation ||
+            !view.visible ||
+            _active != view.id) {
+          throw StateError(
+            'The conversation changed before the file was sent.',
+          );
+        }
+        return _upload(view, method, args);
       case 'conversation.attach':
       case 'conversation.insertContent':
       case 'conversation.pasteImage':
@@ -1410,7 +1419,9 @@ class ConversationRuntime {
         }),
       );
       lease.check();
-      if (!_valid(view)) {
+      if (!_valid(view) ||
+          (method == 'conversation.dropFile' &&
+              (_active != view.id || !view.visible))) {
         throw StateError('The conversation was closed during upload');
       }
       if (file.isNotEmpty) {

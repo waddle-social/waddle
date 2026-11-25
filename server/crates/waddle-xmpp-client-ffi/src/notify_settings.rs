@@ -42,8 +42,8 @@ use crate::{WaddleClient, WaddleError};
 /// verbs issue two-to-three sequential IQs — a server that accepts
 /// but never answers would otherwise suspend the caller forever
 /// (same invariant as `messaging_verbs::send_iq_with_timeout`).
-struct TimeoutCommandDriver {
-    handle: ClientHandle,
+pub(crate) struct TimeoutCommandDriver {
+    pub(crate) handle: ClientHandle,
 }
 
 impl CommandDriver for TimeoutCommandDriver {

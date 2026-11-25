@@ -379,6 +379,15 @@
   "status_preference_publish": [
     "input"
   ],
+  "event_planning_items": ["room_jid"],
+  "event_planning_publish": ["room_jid", "input"],
+  "event_planning_retract": ["room_jid", "item_id"],
+  "event_room_create": ["name", "private_room"],
+  "story_authors": [],
+  "fetch_stories": ["author_jid", "max_items"],
+  "publish_story": ["input"],
+  "fetch_story_reactions": ["author_jid", "story_id"],
+  "set_story_reactions": ["author_jid", "story_id", "emojis"],
   "stories_items": [
     "community_jid",
     "max_items"
@@ -412,6 +421,7 @@
     "video",
     "in_call"
   ],
+  "edit_calendar_event": ["community_jid", "item_id", "edit"],
   "xcal_items": [
     "community_jid",
     "max_items"
@@ -595,6 +605,7 @@
           case "admin_spaces_delete": parameters=[{...args,confirm:"yes"}];break;
           case "fetch_dm_thread_history": target="fetch_dm_history_by_thread";parameters=[args.peer_jid,args.thread_id,args.max_messages,args.before_id ?? null];break;
           case "fetch_room_thread_history": target="fetch_room_history_by_thread";parameters=[args.room_jid,args.thread_id,args.max_messages,args.before_id ?? null];break;
+          case "publish_status_preference": target="status_preference_publish";parameters=[args.preference.type === "manual" ? {mode:"manual",status:args.preference.status} : {mode:"automatic"}];break;
           case "fetch_status_preference": target="status_preference_fetch";parameters=[];break;
           case "fetch_inbox": parameters=[{only_unread:args.read_filter === "unread_only",no_messages:args.message_content === "omit"}];break;
           case "fetch_push_vapid_public_key": target="fetch_vapid_public_key";parameters=[args.push_service_jid];break;

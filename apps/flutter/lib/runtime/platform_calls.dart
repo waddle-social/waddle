@@ -214,6 +214,27 @@ class PlatformCallService {
         }
         _publish();
         return null;
+      case 'call.devices':
+      case 'call.selectDevice':
+      case 'call.screenShare':
+        if (_phase != 'active') throw StateError('The call is not active.');
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        if (method == 'call.devices') {
+          final devices = await media.devices();
+          _guard(epoch, generation, sid);
+          return devices;
+        }
+        if (method == 'call.selectDevice') {
+          await media.selectDevice(
+            args['kind'] as String,
+            args['id'] as String,
+          );
+        } else {
+          await media.screenShare(media.snapshot['screenShareEnabled'] != true);
+        }
+        _guard(epoch, generation, sid);
+        _publish();
+        return null;
       case 'call.speaker':
         final speakerEpoch = _epoch, speakerGeneration = context.generation;
         await media.speaker(

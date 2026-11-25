@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,6 +11,7 @@ import '../design.dart';
 import '../page_coverage_observer.dart';
 import 'gif_picker.dart';
 import 'message_media.dart';
+import 'trip_plan.dart';
 import 'verified_image.dart';
 
 /// Presentation only. Native conversation view models retain ownership of
@@ -56,6 +59,8 @@ class _ConversationScreenState extends State<ConversationScreen>
   String? _error;
   bool _sending = false;
   bool _startingCall = false;
+  final _droppedFiles = <String>[];
+  bool _dragOverComposer = false;
   bool _opening = true;
   bool _openedOnce = false;
   bool _openStarted = false;
@@ -480,6 +485,8 @@ class _ConversationScreenState extends State<ConversationScreen>
     final connected = widget.bridge.topic('connection')['state'] == 'ready';
     if (generation != _accountGeneration) {
       _accountGeneration = generation;
+      _droppedFiles.clear();
+      _dragOverComposer = false;
       _images.clear();
       _avatarBytes.clear();
       _avatarFailed.clear();
@@ -698,6 +705,8 @@ class _ConversationScreenState extends State<ConversationScreen>
                 if (widget.group)
                   _menuItem('members', 'Members', Icons.people_outline_rounded),
                 _menuItem('threads', 'Threads', Icons.forum_outlined),
+                if (widget.group && !_isGroupDm)
+                  _menuItem('planning', 'Trip plan', Icons.map_outlined),
                 _menuItem('pins', 'Pinned messages', Icons.push_pin_outlined),
                 _menuItem(
                   'notifications',
@@ -945,7 +954,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                         ),
                       ),
                     ),
-                  _composer(),
+                  _dropTarget(_composer()),
                 ],
               ),
             ),
@@ -1819,6 +1828,111 @@ class _ConversationScreenState extends State<ConversationScreen>
     );
   }
 
+  Widget _dropTarget(Widget composer) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.linux) {
+      return composer;
+    }
+    return DropTarget(
+      enable: !_sending && _edit == null && _canRead,
+      onDragEntered: (_) {
+        if (_canRead) setState(() => _dragOverComposer = true);
+      },
+      onDragExited: (_) {
+        if (_dragOverComposer) setState(() => _dragOverComposer = false);
+      },
+      onDragDone: (details) {
+        if (!_canRead || _route?.isCurrent != true || _sending || _edit != null) {
+          return;
+        }
+        final paths = details.files
+            .whereType<DropItemFile>()
+            .map((file) => file.path)
+            .where((path) => path.startsWith('/'));
+        setState(() {
+          _dragOverComposer = false;
+          for (final path in paths) {
+            if (!_droppedFiles.contains(path)) _droppedFiles.add(path);
+          }
+        });
+      },
+      child: DecoratedBox(
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(
+          border: _dragOverComposer
+              ? Border.all(
+                  color: Theme.of(context).colorScheme.primary,
+                  width: 2,
+                )
+              : null,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_droppedFiles.isNotEmpty)
+              Row(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final path in _droppedFiles)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                              ),
+                              child: InputChip(
+                                label: Text(Uri.file(path).pathSegments.last),
+                                onDeleted: _sending
+                                    ? null
+                                    : () => setState(
+                                        () => _droppedFiles.remove(path),
+                                      ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _sending || _edit != null
+                        ? null
+                        : _sendDroppedFiles,
+                    child: const Text('Send files'),
+                  ),
+                ],
+              ),
+            composer,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendDroppedFiles() async {
+    final generation = widget.bridge.generation;
+    final jid = widget.jid;
+    final thread = widget.threadId;
+    bool current() =>
+        mounted &&
+        _canRead &&
+        _route?.isCurrent == true &&
+        widget.bridge.generation == generation &&
+        widget.jid == jid &&
+        widget.threadId == thread;
+    for (final path in List.of(_droppedFiles)) {
+      if (!current()) return;
+      final uri = Uri.file(path);
+      final accepted = await _sendImmediate('conversation.dropFile', {
+        'uri': uri.toString(),
+        'name': uri.pathSegments.last,
+        'generation': generation,
+      });
+      if (!current() || accepted != true) return;
+      setState(() => _droppedFiles.remove(path));
+    }
+  }
+
   Widget _composer() {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
@@ -2360,6 +2474,13 @@ class _ConversationScreenState extends State<ConversationScreen>
         await _members();
       case 'threads':
         await _threads();
+      case 'planning':
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                TripPlanScreen(bridge: widget.bridge, room: widget.jid),
+          ),
+        );
       case 'pins':
         await _pins();
       case 'notifications':

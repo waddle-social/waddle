@@ -192,7 +192,7 @@ pub mod xep0449;
 pub mod xep0452;
 pub mod xep0461;
 pub mod xep0469;
-pub mod xep0470;
+pub use waddle_xmpp_core::xep0470;
 pub mod xep0486;
 pub mod xep0488;
 pub mod xep0490;

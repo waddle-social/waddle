@@ -1,0 +1,33 @@
+--- a/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
+@@ -530,7 +530,7 @@
+     }
+
+     private void getDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
+-        /* Create ScreenCapture */
++        final String trackId = stateProvider.getNextTrackUUID();
+         VideoTrack displayTrack = null;
+         VideoCapturer videoCapturer = null;
+         videoCapturer =
+@@ -539,10 +539,9 @@
+                         new MediaProjection.Callback() {
+                             @Override
+                             public void onStop() {
+-                                super.onStop();
+-                                // After Huawei P30 and Android 10 version test, the onstop method is called, which will not affect the next process,
+-                                // and there is no need to call the resulterror method
+-                                //resultError("MediaProjection.Callback()", "User revoked permission to capture the screen.", result);
++                                String pkg = applicationContext.getPackageName();
++                                applicationContext.sendBroadcast(new Intent(pkg + ".SCREEN_CAPTURE_REVOKED")
++                                        .setPackage(pkg).putExtra("trackId", trackId));
+                             }
+                         });
+         if (videoCapturer == null) {
+@@ -576,7 +575,6 @@
+         videoCapturer.startCapture(info.width, info.height, info.fps);
+         Log.d(TAG, "OrientationAwareScreenCapturer.startCapture: " + info.width + "x" + info.height + "@" + info.fps);
+
+-        String trackId = stateProvider.getNextTrackUUID();
+         mVideoCapturers.put(trackId, info);
+
+         displayTrack = pcFactory.createVideoTrack(trackId, videoSource);

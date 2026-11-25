@@ -1,21 +1,22 @@
 //! Flutter bindings to the same community pubsub operations used by the browser.
+pub use calendar_edit::WaddleCalendarEdit;
 use minidom::Element;
 use uuid::Uuid;
 use waddle_xmpp_client::pubsub::build_pubsub_retract_iq;
-use waddle_xmpp_client_community::{calendar, feed, stories, story_reads};
+use waddle_xmpp_client_community::calendar_edit;
+use waddle_xmpp_client_community::{calendar, feed, story_reads};
 use waddle_xmpp_core::xcal::{CalendarItem, PartStat, PUBSUB_NODE_EVENTS};
 
 pub use calendar::{WaddleAttendee, WaddleCalendarItemInput, WaddleVEvent, WaddleVEventInput};
 pub use feed::{WaddleFeedEntry, WaddleFeedEntryInput};
-pub use stories::{WaddleStory, WaddleStoryInput};
 pub use story_reads::{WaddleStoryReads, WaddleStoryReadsInput};
 
-use crate::{
-    error::client_error_to_waddle, messaging_verbs::send_iq_with_timeout, WaddleClient, WaddleError,
-};
+use crate::error::client_error_to_waddle;
+use crate::messaging_verbs::send_iq_with_timeout;
+use crate::{WaddleClient, WaddleError};
 
 impl WaddleClient {
-    async fn community_iq(&self, request: Element) -> Result<Element, WaddleError> {
+    pub(crate) async fn community_iq(&self, request: Element) -> Result<Element, WaddleError> {
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
         let recipient = request.attr("to").map(str::to_owned).unwrap_or_else(|| {
             self.config
@@ -53,30 +54,6 @@ impl WaddleClient {
     ) -> Result<WaddleFeedEntry, WaddleError> {
         let service = self.require_bare_jid(&spaces_jid)?;
         let (request, published) = feed::prepare_publication(&service, entry);
-        self.community_iq(request).await?;
-        Ok(published)
-    }
-
-    pub async fn stories_items(
-        &self,
-        community_jid: String,
-        max_items: Option<u32>,
-    ) -> Result<Vec<WaddleStory>, WaddleError> {
-        let service = self.require_bare_jid(&community_jid)?;
-        let result = self
-            .community_iq(stories::build_stories_items_iq(&service, max_items))
-            .await?;
-        Ok(stories::parse_stories_items_result(&result))
-    }
-
-    pub async fn stories_publish(
-        &self,
-        community_jid: String,
-        input: WaddleStoryInput,
-    ) -> Result<WaddleStory, WaddleError> {
-        let service = self.require_bare_jid(&community_jid)?;
-        let (request, published) = stories::prepare_publication(&service, input)
-            .map_err(|_| WaddleError::InvalidArgument)?;
         self.community_iq(request).await?;
         Ok(published)
     }
@@ -145,6 +122,25 @@ impl WaddleClient {
         self.community_iq(calendar::build_item_publish_iq(&service, &item_id, &item))
             .await?;
         Ok(WaddleVEvent::from_vevent(&item_id, item.master))
+    }
+
+    pub async fn edit_calendar_event(
+        &self,
+        community_jid: String,
+        item_id: String,
+        edit: WaddleCalendarEdit,
+    ) -> Result<(), WaddleError> {
+        if item_id.trim().is_empty() {
+            return Err(WaddleError::InvalidArgument);
+        }
+        let service = self.require_bare_jid(&community_jid)?;
+        let result = self
+            .community_iq(calendar_edit::fetch_item(&service, &item_id))
+            .await?;
+        let update = calendar_edit::update_item(&result, &service, &item_id, edit)
+            .map_err(|_| WaddleError::InvalidArgument)?;
+        self.community_iq(update).await?;
+        Ok(())
     }
 
     pub async fn xcal_retract(

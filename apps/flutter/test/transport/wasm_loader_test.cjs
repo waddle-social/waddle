@@ -19,6 +19,7 @@ function fixture() {
     async admin_channels_delete(...args){this.calls.push(['delete',args]);}
     async publish_vcard4(...args){this.calls.push(['vcard',args]);}
     async publish_mds_displayed(...args){this.calls.push(['mds',args]);}
+    async status_preference_publish(...args){this.calls.push(['status',args]);}
     async send_reaction(...args){this.calls.push(['reaction',args]);}
     async request_upload_slot(...args){this.calls.push(['upload',args]);return {get_url:'https://files.test/get'};}
     async send_chat_message(...args){this.calls.push(['chat',args]);return {kind:'sent',stanza_id:'sent-id'};}
@@ -53,6 +54,28 @@ test('adapts native named parameters to existing WASM signatures and preserves I
   assert.equal(f.clients[0].calls[1][1][2],123n);
   assert.equal(await adapter.rpc('send_reaction',{target_jid:'room@muc.test',target_stanza_id:'m2',emojis:[],audience:'muc'}),true);
   assert.deepEqual(await adapter.rpc('send_chat_message',{peer_jid:'bob@test',body:'hi',options:{}}),{type:'sent',stanza_id:'sent-id'});
+  await adapter.close();
+});
+
+test('planning operations pass the room, object, and privacy flag to the WASM client', async () => {
+  const f = fixture();
+  for (const name of ['event_room_create', 'event_planning_items', 'event_planning_publish', 'event_planning_retract']) {
+    f.module.WaddleClient.prototype[name] = function (...args) { this.calls.push([name, args]); };
+  }
+  const adapter = await createAdapter(() => {}, async () => f.module);
+  await adapter.rpc('connect', config);
+  const room = 'trip@muc.test';
+  const task = {kind:'task', id:'lunch', title:'Book lunch'};
+  await adapter.rpc('event_room_create', {private_room:true, name:'Trip'});
+  await adapter.rpc('event_planning_publish', {input:task, room_jid:room});
+  await adapter.rpc('event_planning_items', {room_jid:room});
+  await adapter.rpc('event_planning_retract', {item_id:task.id, room_jid:room});
+  assert.deepEqual(f.clients[0].calls, [
+    ['event_room_create',['Trip',true]],
+    ['event_planning_publish',[room,task]],
+    ['event_planning_items',[room]],
+    ['event_planning_retract',[room,'lunch']],
+  ]);
   await adapter.close();
 });
 
@@ -146,4 +169,13 @@ test('typed disconnection cannot replace the physical-close proof',async()=>{
  const g=fixture();const cancelled=await createAdapter(()=>{},async()=>g.module);await cancelled.rpc('connect',config);
  // Rust can cancel startup before opening a socket, yielding proof without a disconnected callback.
  g.clients[0].disconnect_and_wait=async()=>{};await cancelled.close();assert.equal(g.clients[0].freed,1);
+});
+
+
+test('publishes an account-wide manual pick and reset using the WASM status preference shape', async()=>{
+  const f=fixture();const adapter=await createAdapter(()=>{},async()=>f.module);await adapter.rpc('connect',config);
+  await adapter.rpc('publish_status_preference',{preference:{type:'manual',status:'dnd'}});
+  await adapter.rpc('publish_status_preference',{preference:{type:'automatic'}});
+  assert.deepEqual(f.clients[0].calls,[['status',[{mode:'manual',status:'dnd'}]],['status',[{mode:'automatic'}]]]);
+  await adapter.close();
 });

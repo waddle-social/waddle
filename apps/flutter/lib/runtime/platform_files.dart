@@ -156,9 +156,15 @@ class PlatformFileService {
     switch (method) {
       case 'file.pickStoryMedia':
         final generation = context.generation;
-        final picked = await _pick(images: true);
+        final picked = await _pick(type: FileType.media);
         requireGeneration(context, generation);
         if (picked == null) return null;
+        final contentType = picked['media_type'] as String?;
+        if (contentType == null ||
+            !(contentType.startsWith('image/') ||
+                contentType.startsWith('video/'))) {
+          throw StateError('Choose an image or video for your story.');
+        }
         return upload(picked, encrypt: false);
       case 'file.pickAndUpload':
         final picked = await _pick();
@@ -211,7 +217,7 @@ class PlatformFileService {
       case 'profile.pickAvatar':
       case 'image.avatar':
         final generation = context.generation;
-        final picked = await _pick(images: true);
+        final picked = await _pick(type: FileType.image);
         if (picked == null) {
           return null;
         }
@@ -230,12 +236,12 @@ class PlatformFileService {
     }
   }
 
-  Future<Map<String, dynamic>?> _pick({bool images = false}) {
+  Future<Map<String, dynamic>?> _pick({FileType type = FileType.any}) {
     final generation = context.generation;
     return _serializePicker(() async {
       requireGeneration(context, generation);
       final file = await FilePicker.pickFile(
-        type: images ? FileType.image : FileType.any,
+        type: type,
         androidOptions: pickedFileAndroidOptions,
       );
       final picked = await _withPickedCopies(
@@ -249,7 +255,7 @@ class PlatformFileService {
             file,
             generation,
             providerType: providerType,
-            maxBytes: images
+            maxBytes: type == FileType.image
                 ? maxAttachmentBytes
                 : maxUploadBytes - _gcmTagBytes,
           );

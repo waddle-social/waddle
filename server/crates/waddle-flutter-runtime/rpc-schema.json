@@ -173,12 +173,47 @@
     "args": {},
     "result": "Option<String>"
   },
+  "edit_calendar_event": {
+    "args": {
+      "community_jid": "String",
+      "item_id": "String",
+      "edit": "WaddleCalendarEdit"
+    },
+    "result": "Result<(), WaddleError>"
+  },
   "enable_push_notifications": {
     "args": {
       "push_service_jid": "String",
       "node": "String"
     },
     "result": "bool"
+  },
+  "event_planning_items": {
+    "args": {
+      "room_jid": "String"
+    },
+    "result": "Result<Vec<WaddlePlanningItem>, WaddleError>"
+  },
+  "event_planning_publish": {
+    "args": {
+      "room_jid": "String",
+      "input": "Box<WaddlePlanningItem>"
+    },
+    "result": "Result<WaddlePlanningItem, WaddleError>"
+  },
+  "event_planning_retract": {
+    "args": {
+      "room_jid": "String",
+      "item_id": "String"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "event_room_create": {
+    "args": {
+      "name": "String",
+      "private_room": "bool"
+    },
+    "result": "Result<String, WaddleError>"
   },
   "feed_items": {
     "args": {
@@ -282,6 +317,20 @@
       "owner_jid": "Option<String>"
     },
     "result": "Result<Vec<WaddleStickerPack>, WaddleError>"
+  },
+  "fetch_stories": {
+    "args": {
+      "author_jid": "String",
+      "max_items": "Option<u32>"
+    },
+    "result": "Result<Vec<WaddleStory>, WaddleError>"
+  },
+  "fetch_story_reactions": {
+    "args": {
+      "author_jid": "String",
+      "story_id": "String"
+    },
+    "result": "Result<WaddleStoryReactions, WaddleError>"
   },
   "fetch_threads": {
     "args": {
@@ -436,11 +485,23 @@
     },
     "result": "Result<(), WaddleError>"
   },
+  "publish_status_preference": {
+    "args": {
+      "preference": "WaddleStatusPreference"
+    },
+    "result": "Result<(), WaddleError>"
+  },
   "publish_sticker_pack": {
     "args": {
       "pack": "WaddleStickerPack"
     },
     "result": "Result<String, WaddleError>"
+  },
+  "publish_story": {
+    "args": {
+      "input": "WaddleStoryInput"
+    },
+    "result": "Result<WaddleStory, WaddleError>"
   },
   "publish_tune": {
     "args": {
@@ -753,19 +814,17 @@
     },
     "result": "Result<WaddleSetRoomNotificationModeOutcome, WaddleError>"
   },
-  "stories_items": {
+  "set_story_reactions": {
     "args": {
-      "community_jid": "String",
-      "max_items": "Option<u32>"
+      "author_jid": "String",
+      "story_id": "String",
+      "emojis": "Vec<String>"
     },
-    "result": "Result<Vec<WaddleStory>, WaddleError>"
+    "result": "Result<(), WaddleError>"
   },
-  "stories_publish": {
-    "args": {
-      "community_jid": "String",
-      "input": "WaddleStoryInput"
-    },
-    "result": "Result<WaddleStory, WaddleError>"
+  "story_authors": {
+    "args": {},
+    "result": "Result<Vec<String>, WaddleError>"
   },
   "story_reads_fetch": {
     "args": {},

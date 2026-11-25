@@ -7,6 +7,11 @@ import '../bridge.dart';
 import '../design.dart';
 import 'surfaces_vocabulary.dart';
 
+part 'admin_console.dart';
+part 'admin_directory.dart';
+part 'admin_forms.dart';
+
+
 Map<String, dynamic> _map(dynamic value) => value is Map
     ? value.map((key, value) => MapEntry(key.toString(), value))
     : <String, dynamic>{};
@@ -522,6 +527,39 @@ class SettingsScreen extends StatelessWidget {
                   value: delivery['stayConnected'] == true,
                   onChanged: (value) => set('stayConnected', value),
                 ),
+            ]),
+            _Section('Availability', [
+              _SettingChoice(
+                title: 'Account status',
+                icon: Icons.circle_outlined,
+                value: _text(bridge.topic('presence')['mode'], 'automatic'),
+                detail:
+                    'Automatic changes to Away after 10 minutes and Extended away after 30 minutes without input.',
+                choices: const {
+                  'automatic': 'Automatic',
+                  'available': 'Available',
+                  'chat': 'Free to chat',
+                  'away': 'Away',
+                  'dnd': 'Do not disturb',
+                },
+                onChanged: (value) => _command(
+                  context,
+                  bridge,
+                  'presence.select',
+                  {'mode': value},
+                ),
+              ),
+              ListTile(
+                title: const Text('Current presence'),
+                subtitle: Text(switch (bridge.topic('presence')['show']) {
+                  'chat' => 'Free to chat',
+                  'available' => 'Available',
+                  'away' => 'Away',
+                  'xa' => 'Extended away',
+                  'dnd' => 'Do not disturb',
+                  _ => 'Offline',
+                }),
+              ),
             ]),
             _Section('Account', [
               ListTile(
@@ -1459,189 +1497,6 @@ class _GroupNameDialogState extends State<_GroupNameDialog> {
   );
 }
 
-class CommunityAdminScreen extends StatefulWidget {
-  const CommunityAdminScreen({super.key, required this.bridge});
-  final WaddleBridge bridge;
-  @override
-  State<CommunityAdminScreen> createState() => _CommunityAdminScreenState();
-}
-
-class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
-  final _query = TextEditingController();
-  final _users = <Map<String, dynamic>>[];
-  Timer? _timer;
-  String? _cursor, _error;
-  bool _loading = true;
-  bool _connected = false;
-  bool _waitingForConnection = true;
-  int _ticket = 0;
-  @override
-  void initState() {
-    super.initState();
-    widget.bridge.addListener(_connectionChanged);
-    _connectionChanged();
-  }
-
-  @override
-  void dispose() {
-    widget.bridge.removeListener(_connectionChanged);
-    _ticket++;
-    _timer?.cancel();
-    _query.dispose();
-    super.dispose();
-  }
-
-  void _connectionChanged() {
-    final connected = widget.bridge.topic('connection')['state'] == 'ready';
-    if (connected == _connected) return;
-    _connected = connected;
-    if (!connected) {
-      if (_loading) {
-        _ticket++;
-        _waitingForConnection = true;
-      }
-    } else if (_waitingForConnection) {
-      _timer?.cancel();
-      _waitingForConnection = false;
-      unawaited(_load());
-    }
-  }
-
-  Future<void> _load({bool more = false}) async {
-    if (more && (_cursor == null || _loading)) {
-      return;
-    }
-    if (!_connected) {
-      _ticket++;
-      _waitingForConnection = true;
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-      return;
-    }
-    _waitingForConnection = false;
-    final ticket = ++_ticket;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final page = _map(
-        await widget.bridge.invokeQuiet('admin.users', {
-          'prefix': _query.text.trim(),
-          if (more) 'afterCursor': _cursor,
-        }),
-      );
-      if (!mounted || ticket != _ticket) {
-        return;
-      }
-      setState(() {
-        if (!more) {
-          _users.clear();
-        }
-        _users.addAll(_rows(page['users'] ?? page['entries']));
-        _cursor = page['nextCursor'] as String?;
-        _loading = false;
-      });
-    } catch (error) {
-      if (mounted && ticket == _ticket) {
-        setState(() {
-          _loading = false;
-          _error = error.toString();
-        });
-        _waitingForConnection = true;
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const WaddleBrand(compact: true)),
-    body: Column(
-      children: [
-        const _PageIntro(
-          'The people\nbehind it all.',
-          'Your community, thoughtfully looked after.',
-          eyebrow: 'Community users',
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-          child: SearchBar(
-            controller: _query,
-            leading: const Icon(Icons.search_rounded),
-            hintText: 'Search by username',
-            onChanged: (_) {
-              _ticket++;
-              _timer?.cancel();
-              _timer = Timer(const Duration(milliseconds: 250), _load);
-            },
-          ),
-        ),
-        if (_loading) const LinearProgressIndicator(),
-        if (_error != null)
-          MaterialBanner(
-            content: const Text('Could not load community users.'),
-            actions: [TextButton(onPressed: _load, child: const Text('Retry'))],
-          ),
-        Expanded(
-          child: _users.isEmpty && !_loading && _error == null
-              ? const _Empty(
-                  Icons.manage_accounts_outlined,
-                  'No users found',
-                  'Try another username.',
-                )
-              : ListView.builder(
-                  itemCount: _users.length + (_cursor == null ? 0 : 1),
-                  itemBuilder: (context, index) {
-                    if (index == _users.length) {
-                      return Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: FilledButton.tonal(
-                          onPressed: _loading ? null : () => _load(more: true),
-                          child: const Text('Load more'),
-                        ),
-                      );
-                    }
-                    final user = _users[index];
-                    final jid = _text(user['jid']);
-                    final name = _text(user['username'] ?? user['name'], jid);
-                    return _DirectoryRow(
-                      name: name,
-                      detail: jid,
-                      trailing: _text(user['role']).isEmpty
-                          ? null
-                          : Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 7,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.secondaryContainer,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                _text(user['role']),
-                                style: Theme.of(context).textTheme.labelSmall
-                                    ?.copyWith(
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.onSecondaryContainer,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                              ),
-                            ),
-                    );
-                  },
-                ),
-        ),
-      ],
-    ),
-  );
-}
-
 class ActivityScreen extends StatelessWidget {
   const ActivityScreen({
     super.key,
@@ -1878,6 +1733,8 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       final colors = Theme.of(context).colorScheme;
       final showVideo =
           (video ||
+              call['cameraEnabled'] == true ||
+              call['remoteCamera'] == true ||
               call['screenShareEnabled'] == true ||
               call['remoteScreenShare'] == true) &&
           !incoming &&
@@ -1967,27 +1824,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                           aspectRatio: 4 / 5,
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(28),
-                            child: Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: bridge.callVideo(context),
-                                ),
-                                if (call['cameraEnabled'] == true)
-                                  Positioned(
-                                    bottom: 16,
-                                    right: 16,
-                                    width: 96,
-                                    height: 136,
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(18),
-                                      child: bridge.callVideo(
-                                        context,
-                                        local: true,
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
+                            child: bridge.callVideo(context),
                           ),
                         )
                       else

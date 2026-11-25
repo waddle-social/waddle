@@ -9,11 +9,14 @@ import 'platform_test_context.dart';
 
 class FakeMedia extends CallMedia {
   int connects = 0, disconnects = 0;
+  bool sharing = false, denyScreen = false;
+  String? device;
   @override
   Map<String, dynamic> get snapshot => {
     'mediaState': 'idle',
     'microphoneEnabled': false,
     'cameraEnabled': false,
+    'screenShareEnabled': sharing,
   };
   @override
   Future<void> connect(
@@ -37,6 +40,21 @@ class FakeMedia extends CallMedia {
   Future<void> speaker(bool enabled) async {}
   @override
   Future<void> flipCamera() async {}
+  @override
+  Future<List<Map<String, dynamic>>> devices() async => [
+    {'kind': 'audiooutput', 'id': 'headset'},
+  ];
+  @override
+  Future<void> selectDevice(String kind, String id) async {
+    device = id;
+  }
+
+  @override
+  Future<void> screenShare(bool enabled) async {
+    if (denyScreen) throw StateError('Capture was denied');
+    sharing = enabled;
+  }
+
   @override
   Widget buildVideo(BuildContext context, {bool local = false}) =>
       const SizedBox();
@@ -158,6 +176,9 @@ void main() {
         'call.camera',
         'call.speaker',
         'call.flipCamera',
+        'call.devices',
+        'call.selectDevice',
+        'call.screenShare',
         'call.hand',
         'call.dismiss',
         'call.accept',
@@ -172,6 +193,29 @@ void main() {
       expect(media.disconnects, disconnectsBefore);
       expect(views.last['state'], 'active');
       expect(views.last['sid'], 'second');
+      final devices = await service.invoke('call.devices', {
+        'expectedSid': 'second',
+      });
+      expect(devices, [
+        {'kind': 'audiooutput', 'id': 'headset'},
+      ]);
+      await service.invoke('call.selectDevice', {
+        'expectedSid': 'second',
+        'kind': 'audiooutput',
+        'id': 'headset',
+      });
+      expect(media.device, 'headset');
+      await service.invoke('call.screenShare', {'expectedSid': 'second'});
+      expect(views.last['screenShareEnabled'], isTrue);
+      await service.invoke('call.screenShare', {'expectedSid': 'second'});
+      expect(views.last['screenShareEnabled'], isFalse);
+      media.denyScreen = true;
+      await expectLater(
+        service.invoke('call.screenShare', {'expectedSid': 'second'}),
+        throwsStateError,
+      );
+      expect(views.last['state'], 'active');
+      expect(media.sharing, isFalse);
       // Internal teardown without an expected SID intentionally addresses the current call.
       await service.invoke('call.hangup', {});
       expect(views.last['state'], 'ended');

@@ -19,6 +19,7 @@ native = [
 wasm = ["dep:futures", "dep:getrandom", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys"]
 
 [dependencies]
+urlencoding = "2.1"
 base64 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

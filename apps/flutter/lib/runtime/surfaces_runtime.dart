@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import 'context.dart';
 
+part 'admin_runtime.dart';
 part 'community_runtime.dart';
 
 /// Presentation commands are translated into the shared Rust client's typed
@@ -99,6 +100,7 @@ class SurfaceRuntime {
     if (_disposed) {
       throw StateError('This controller is closed.');
     }
+    if (method.startsWith('admin.')) return _admin(method, args);
     switch (method) {
       case 'community.feed':
       case 'community.stories':
@@ -106,10 +108,34 @@ class SurfaceRuntime {
       case 'community.post':
       case 'community.publishStory':
       case 'community.readStory':
+      case 'community.storyReactions':
+      case 'community.setStoryReactions':
       case 'community.createEvent':
+      case 'community.editEvent':
       case 'community.rsvp':
       case 'community.cancelEvent':
         return _community(method, args);
+      case 'planning.createRoom':
+        final room = await _rpc('event_room_create', {
+          'name': _required(args, 'name'),
+          'private_room': args['private'] != false,
+        });
+        unawaited(_refreshHome().catchError((Object _) {}));
+        return room;
+      case 'planning.list':
+        return _rpc('event_planning_items', {
+          'room_jid': _required(args, 'room'),
+        });
+      case 'planning.save':
+        return _rpc('event_planning_publish', {
+          'room_jid': _required(args, 'room'),
+          'input': runtimeMap(args['item']),
+        });
+      case 'planning.remove':
+        return _rpc('event_planning_retract', {
+          'room_jid': _required(args, 'room'),
+          'item_id': _required(args, 'id'),
+        });
       case 'threads.list':
         return _rpc('fetch_threads', {'opts': args});
       case 'threads.markRead':
@@ -136,30 +162,6 @@ class SurfaceRuntime {
               },
             )
             .toList();
-      case 'admin.users':
-        final page = runtimeMap(
-          await _rpc('admin_users_list', {
-            'prefix': _optional(args['prefix']),
-            'page_size': 50,
-            'after_cursor': _optional(args['afterCursor']),
-          }),
-        );
-        if (page['entries'] is! List) {
-          throw StateError('The user list could not be loaded.');
-        }
-        return {
-          'users': runtimeRows(page['entries'])
-              .map(
-                (entry) => {
-                  'jid': entry['jid'],
-                  'username': '${entry['jid']}'.split('@').first,
-                  'name': entry['display_name'],
-                  'role': entry['has_owner_hat'] == true ? 'Owner' : 'Member',
-                },
-              )
-              .toList(),
-          'nextCursor': page['next_cursor'],
-        };
       case 'profile.load':
         return _loadProfile(_optional(args['jid']));
       case 'profile.avatarBytes':

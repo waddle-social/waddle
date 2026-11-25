@@ -204,7 +204,7 @@ fn parse_payload(payload: &Element) -> PubsubEventPayload {
     }
 }
 
-fn parse_attachment_summary(summary: &Element) -> AttachmentSummaryEvent {
+pub(crate) fn parse_attachment_summary(summary: &Element) -> AttachmentSummaryEvent {
     let reactions_parent = summary
         .get_child("reactions", NS_PUBSUB_ATTACHMENTS_SUMMARY)
         .unwrap_or(summary);

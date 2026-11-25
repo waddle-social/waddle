@@ -25,6 +25,7 @@ public final class WaddleEngine {
             if (engine == null) {
                 engine = new FlutterEngine(context.getApplicationContext());
                 PlatformFileChannel.register(engine, context.getApplicationContext());
+                ScreenCaptureService.register(engine, context.getApplicationContext());
                 cache.put(ENGINE_ID, engine);
                 engine.getDartExecutor().executeDartEntrypoint(
                     DartExecutor.DartEntrypoint.createDefault(),

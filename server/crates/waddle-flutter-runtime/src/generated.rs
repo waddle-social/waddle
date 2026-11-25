@@ -12,20 +12,21 @@ use waddle_xmpp_client_ffi::{
     WaddleAdminSpacesCreateArgs, WaddleAdminSpacesListArgs, WaddleAdminSpacesListPage,
     WaddleAdminSpacesMembersArgs, WaddleAdminSpacesMembersPage, WaddleAdminSpacesSetRoleResult,
     WaddleAdminSpacesUpdateArgs, WaddleAdminUsersPage, WaddleAttendee, WaddleAvatarResult,
-    WaddleBookmarkItem, WaddleCalendarItemInput, WaddleCallSessionTerminateOutcome,
-    WaddleChatState, WaddleClient, WaddleDmBookmarkItem, WaddleExtensionCommand,
-    WaddleExtensionCommandResult, WaddleExtensionFormField, WaddleExternalService, WaddleFeedEntry,
-    WaddleFeedEntryInput, WaddleFetchThreadsOptions, WaddleGroupDmHistoryAccess,
-    WaddleInCallPresenceFlags, WaddleInboxMessageContent, WaddleInboxReadFilter, WaddleInboxResult,
-    WaddleJidParts, WaddleJingleReason, WaddleLinkPreviewLookup, WaddleMamPage,
-    WaddleMdsDisplayedEntry, WaddleMessageAudience, WaddleMucAffiliation, WaddleNotifyMode,
-    WaddlePepProfile, WaddlePinEntry, WaddlePushDeviceCredentials, WaddlePushEnvironment,
-    WaddlePushVapidLookup, WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomConfig,
-    WaddleRoomConfigPatch, WaddleRoomMemberEntry, WaddleSendMessageOutcome, WaddleSendOptions,
+    WaddleBookmarkItem, WaddleCalendarEdit, WaddleCalendarItemInput,
+    WaddleCallSessionTerminateOutcome, WaddleChatState, WaddleClient, WaddleDmBookmarkItem,
+    WaddleExtensionCommand, WaddleExtensionCommandResult, WaddleExtensionFormField,
+    WaddleExternalService, WaddleFeedEntry, WaddleFeedEntryInput, WaddleFetchThreadsOptions,
+    WaddleGroupDmHistoryAccess, WaddleInCallPresenceFlags, WaddleInboxMessageContent,
+    WaddleInboxReadFilter, WaddleInboxResult, WaddleJidParts, WaddleJingleReason,
+    WaddleLinkPreviewLookup, WaddleMamPage, WaddleMdsDisplayedEntry, WaddleMessageAudience,
+    WaddleMucAffiliation, WaddleNotifyMode, WaddlePepProfile, WaddlePinEntry, WaddlePlanningItem,
+    WaddlePushDeviceCredentials, WaddlePushEnvironment, WaddlePushVapidLookup,
+    WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomConfig, WaddleRoomConfigPatch,
+    WaddleRoomMemberEntry, WaddleSendMessageOutcome, WaddleSendOptions,
     WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome, WaddleSpaceRole,
-    WaddleStatusPreference, WaddleStickerPack, WaddleStory, WaddleStoryInput, WaddleStoryReads,
-    WaddleStoryReadsInput, WaddleThreadsPage, WaddleTopology, WaddleTune, WaddleUploadSlot,
-    WaddleUserSearchEntry, WaddleVCard4, WaddleVEvent, WaddleVEventInput,
+    WaddleStatusPreference, WaddleStickerPack, WaddleStory, WaddleStoryInput, WaddleStoryReactions,
+    WaddleStoryReads, WaddleStoryReadsInput, WaddleThreadsPage, WaddleTopology, WaddleTune,
+    WaddleUploadSlot, WaddleUserSearchEntry, WaddleVCard4, WaddleVEvent, WaddleVEventInput,
 };
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "args", rename_all = "snake_case")]
@@ -117,9 +118,29 @@ pub(crate) enum Operation {
     DiscoverExtensionCommands {},
     DiscoverTopology {},
     DiscoverUploadService {},
+    EditCalendarEvent {
+        community_jid: jid::Jid,
+        item_id: String,
+        edit: WaddleCalendarEdit,
+    },
     EnablePushNotifications {
         push_service_jid: jid::Jid,
         node: String,
+    },
+    EventPlanningItems {
+        room_jid: jid::Jid,
+    },
+    EventPlanningPublish {
+        room_jid: jid::Jid,
+        input: Box<WaddlePlanningItem>,
+    },
+    EventPlanningRetract {
+        room_jid: jid::Jid,
+        item_id: String,
+    },
+    EventRoomCreate {
+        name: String,
+        private_room: bool,
     },
     FeedItems {
         spaces_jid: jid::Jid,
@@ -175,6 +196,14 @@ pub(crate) enum Operation {
     },
     FetchStickerPacks {
         owner_jid: Option<jid::Jid>,
+    },
+    FetchStories {
+        author_jid: jid::Jid,
+        max_items: Option<u32>,
+    },
+    FetchStoryReactions {
+        author_jid: jid::Jid,
+        story_id: String,
     },
     FetchThreads {
         opts: WaddleFetchThreadsOptions,
@@ -260,8 +289,14 @@ pub(crate) enum Operation {
         kind: String,
         text: Option<String>,
     },
+    PublishStatusPreference {
+        preference: WaddleStatusPreference,
+    },
     PublishStickerPack {
         pack: WaddleStickerPack,
+    },
+    PublishStory {
+        input: WaddleStoryInput,
     },
     PublishTune {
         tune: WaddleTune,
@@ -451,14 +486,12 @@ pub(crate) enum Operation {
         name: Option<String>,
         rich_payload_opt_in: bool,
     },
-    StoriesItems {
-        community_jid: jid::Jid,
-        max_items: Option<u32>,
+    SetStoryReactions {
+        author_jid: jid::Jid,
+        story_id: String,
+        emojis: Vec<String>,
     },
-    StoriesPublish {
-        community_jid: jid::Jid,
-        input: WaddleStoryInput,
-    },
+    StoryAuthors {},
     StoryReadsFetch {},
     StoryReadsPublish {
         input: WaddleStoryReadsInput,
@@ -545,6 +578,9 @@ pub(crate) enum Output {
     DiscoverTopology(WaddleTopology),
     DiscoverUploadService(Option<String>),
     EnablePushNotifications(bool),
+    EventPlanningItems(Vec<WaddlePlanningItem>),
+    EventPlanningPublish(WaddlePlanningItem),
+    EventRoomCreate(String),
     FeedItems(Vec<WaddleFeedEntry>),
     FeedPublish(WaddleFeedEntry),
     FetchDmBookmarks(Vec<WaddleDmBookmarkItem>),
@@ -561,6 +597,8 @@ pub(crate) enum Output {
     FetchStatusPreference(WaddleStatusPreference),
     FetchStickerPack(Option<WaddleStickerPack>),
     FetchStickerPacks(Vec<WaddleStickerPack>),
+    FetchStories(Vec<WaddleStory>),
+    FetchStoryReactions(WaddleStoryReactions),
     FetchThreads(WaddleThreadsPage),
     FetchUserBookmarks(Vec<WaddleBookmarkItem>),
     FetchUserPepProfile(WaddlePepProfile),
@@ -576,6 +614,7 @@ pub(crate) enum Output {
     PublishAvatar(String),
     PublishMdsDisplayed(bool),
     PublishStickerPack(String),
+    PublishStory(WaddleStory),
     RegisterPushDevice(Option<WaddleRegisterDeviceResult>),
     RequestAvatar(Option<WaddleAvatarResult>),
     RequestUploadSlot(Option<WaddleUploadSlot>),
@@ -607,8 +646,7 @@ pub(crate) enum Output {
     SendRetraction(bool),
     SetDmNotificationMode(WaddleSetDmNotificationModeOutcome),
     SetRoomNotificationMode(WaddleSetRoomNotificationModeOutcome),
-    StoriesItems(Vec<WaddleStory>),
-    StoriesPublish(WaddleStory),
+    StoryAuthors(Vec<String>),
     StoryReadsFetch(WaddleStoryReads),
     StoryReadsPublish(WaddleStoryReads),
     SubmitExtensionCommandForm(WaddleExtensionCommandResult),
@@ -816,6 +854,17 @@ impl Operation {
             Self::DiscoverUploadService {} => Ok(Output::DiscoverUploadService(
                 client.discover_upload_service().await,
             )),
+            Self::EditCalendarEvent {
+                community_jid,
+                item_id,
+                edit,
+            } => {
+                client
+                    .edit_calendar_event(community_jid.to_string(), item_id, edit)
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
             Self::EnablePushNotifications {
                 push_service_jid,
                 node,
@@ -823,6 +872,31 @@ impl Operation {
                 client
                     .enable_push_notifications(push_service_jid.to_string(), node)
                     .await,
+            )),
+            Self::EventPlanningItems { room_jid } => Ok(Output::EventPlanningItems(
+                client
+                    .event_planning_items(room_jid.to_string())
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::EventPlanningPublish { room_jid, input } => Ok(Output::EventPlanningPublish(
+                client
+                    .event_planning_publish(room_jid.to_string(), input)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::EventPlanningRetract { room_jid, item_id } => {
+                client
+                    .event_planning_retract(room_jid.to_string(), item_id)
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
+            Self::EventRoomCreate { name, private_room } => Ok(Output::EventRoomCreate(
+                client
+                    .event_room_create(name, private_room)
+                    .await
+                    .map_err(RuntimeError::from)?,
             )),
             Self::FeedItems {
                 spaces_jid,
@@ -954,6 +1028,24 @@ impl Operation {
             Self::FetchStickerPacks { owner_jid } => Ok(Output::FetchStickerPacks(
                 client
                     .fetch_sticker_packs(owner_jid.map(|value| value.to_string()))
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::FetchStories {
+                author_jid,
+                max_items,
+            } => Ok(Output::FetchStories(
+                client
+                    .fetch_stories(author_jid.to_string(), max_items)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::FetchStoryReactions {
+                author_jid,
+                story_id,
+            } => Ok(Output::FetchStoryReactions(
+                client
+                    .fetch_story_reactions(author_jid.to_string(), story_id)
                     .await
                     .map_err(RuntimeError::from)?,
             )),
@@ -1127,9 +1219,22 @@ impl Operation {
                     .map_err(RuntimeError::from)?;
                 Ok(Output::Unit)
             }
+            Self::PublishStatusPreference { preference } => {
+                client
+                    .publish_status_preference(preference)
+                    .await
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
             Self::PublishStickerPack { pack } => Ok(Output::PublishStickerPack(
                 client
                     .publish_sticker_pack(pack)
+                    .await
+                    .map_err(RuntimeError::from)?,
+            )),
+            Self::PublishStory { input } => Ok(Output::PublishStory(
+                client
+                    .publish_story(input)
                     .await
                     .map_err(RuntimeError::from)?,
             )),
@@ -1500,23 +1605,19 @@ impl Operation {
                     .await
                     .map_err(RuntimeError::from)?,
             )),
-            Self::StoriesItems {
-                community_jid,
-                max_items,
-            } => Ok(Output::StoriesItems(
+            Self::SetStoryReactions {
+                author_jid,
+                story_id,
+                emojis,
+            } => {
                 client
-                    .stories_items(community_jid.to_string(), max_items)
+                    .set_story_reactions(author_jid.to_string(), story_id, emojis)
                     .await
-                    .map_err(RuntimeError::from)?,
-            )),
-            Self::StoriesPublish {
-                community_jid,
-                input,
-            } => Ok(Output::StoriesPublish(
-                client
-                    .stories_publish(community_jid.to_string(), input)
-                    .await
-                    .map_err(RuntimeError::from)?,
+                    .map_err(RuntimeError::from)?;
+                Ok(Output::Unit)
+            }
+            Self::StoryAuthors {} => Ok(Output::StoryAuthors(
+                client.story_authors().await.map_err(RuntimeError::from)?,
             )),
             Self::StoryReadsFetch {} => Ok(Output::StoryReadsFetch(
                 client

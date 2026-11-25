@@ -13,6 +13,7 @@ use waddle_xmpp_client_community::calendar::{
     item_from_input, parse_events_items_result, vevent_from_input, WaddleAttendee,
     WaddleCalendarItemInput, WaddleVEvent, WaddleVEventInput,
 };
+use waddle_xmpp_client_community::calendar_edit;
 use waddle_xmpp_core::xcal::{PartStat, PUBSUB_NODE_EVENTS};
 use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
@@ -75,6 +76,27 @@ impl WaddleClient {
             send_iq_command(inner, iq).await?;
             let js_master = WaddleVEvent::from_vevent(&item_id, item.master);
             to_js_value(&js_master)
+        })
+    }
+
+    /// Edit selected fields of a stored event, or cancel one occurrence.
+    pub fn edit_calendar_event(
+        &self,
+        community_jid: String,
+        item_id: String,
+        edit: JsValue,
+    ) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let service = service_bare_jid(&community_jid)?;
+            let edit = serde_wasm_bindgen::from_value(edit).map_err(|e| js_error(e.to_string()))?;
+            let response =
+                send_iq_command(inner.clone(), calendar_edit::fetch_item(&service, &item_id))
+                    .await?;
+            let update = calendar_edit::update_item(&response, &service, &item_id, edit)
+                .map_err(|e| js_error(e.to_string()))?;
+            send_iq_command(inner, update).await?;
+            Ok(JsValue::UNDEFINED)
         })
     }
 

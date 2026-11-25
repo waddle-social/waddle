@@ -108,10 +108,6 @@ if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
   echo 'The ephemeral CI runner must grant its current user access to /dev/kvm.' >&2
   exit 1
 fi
-if [[ ! -f "$REPO_ROOT/apps/flutter/android/app/src/main/jniLibs/x86_64/libwaddle_flutter_runtime.so" ]]; then
-  echo 'Run scripts/build-flutter-rust.sh --android before the device smoke test.' >&2
-  exit 1
-fi
 
 # SDK paths and the AVD are independent of apps/android and any developer AVDs.
 "$SDKMANAGER" --sdk_root="$ANDROID_HOME" 'platform-tools' 'emulator' "$SYSTEM_IMAGE"
@@ -146,6 +142,9 @@ if [[ "$SMOKE_BOOTED" != true ]]; then
   echo 'The emulator did not finish booting within 240 seconds.' >&2
   exit 1
 fi
+# The ATD has no status bar. Its system projection-stop action requires a privileged caller.
+"$ADB" -s "$SERIAL" root
+"$ADB" -s "$SERIAL" wait-for-device
 "$ADB" -s "$SERIAL" shell input keyevent 82
 "$ADB" -s "$SERIAL" shell settings put global window_animation_scale 0
 "$ADB" -s "$SERIAL" shell settings put global transition_animation_scale 0
@@ -167,3 +166,9 @@ else
   echo 'The production UI screenshot was not captured and acknowledged.' >&2
   exit 1
 fi
+
+python3 "$REPO_ROOT/scripts/flutter-projection-smoke.py" "$ADB" "$SERIAL" > "$SMOKE_ARTIFACT/projection.log" 2>&1 &
+CAPTURE_PID=$!
+timeout 600 flutter test integration_test/android_screen_capture_test.dart -d "$SERIAL" --no-pub --reporter expanded
+wait "$CAPTURE_PID"
+CAPTURE_PID=''

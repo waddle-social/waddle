@@ -87,6 +87,10 @@ void main() {
     );
     addTearDown(bridge.dispose);
     bridge.acceptEvent({
+      'topic': 'home',
+      'data': {'isCommunityOwner': true},
+    });
+    bridge.acceptEvent({
       'topic': 'connection',
       'data': {'state': 'connecting'},
     });

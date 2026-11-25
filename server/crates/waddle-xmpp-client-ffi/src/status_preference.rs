@@ -103,3 +103,39 @@ impl WaddleClient {
         }
     }
 }
+
+#[cfg(feature = "serde")]
+fn status_preference_from_ffi(preference: WaddleStatusPreference) -> StatusPreference {
+    match preference {
+        WaddleStatusPreference::Automatic => StatusPreference::Automatic,
+        WaddleStatusPreference::Manual { status } => StatusPreference::Manual(match status {
+            WaddleManualStatus::Available => ManualStatus::Available,
+            WaddleManualStatus::Chat => ManualStatus::Chat,
+            WaddleManualStatus::Away => ManualStatus::Away,
+            WaddleManualStatus::Dnd => ManualStatus::Dnd,
+        }),
+    }
+}
+
+#[cfg(feature = "serde")]
+impl WaddleClient {
+    /// Store `preference` as the account's presence mode, for every
+    /// device of the account to adopt. A reset is stored as `Automatic`,
+    /// never removed. `Ok` means the server accepted it.
+    pub async fn publish_status_preference(
+        &self,
+        preference: WaddleStatusPreference,
+    ) -> Result<(), WaddleError> {
+        let Some(handle) = self.clone_handle().await else {
+            return Err(WaddleError::NotConnected);
+        };
+        let iq = waddle_xmpp_client::status_preference::build_status_preference_publish_iq(
+            &Uuid::new_v4().to_string(),
+            &status_preference_from_ffi(preference),
+        );
+        send_iq_with_timeout(&handle, iq)
+            .await
+            .map(|_| ())
+            .map_err(|e| client_error_to_waddle(&e))
+    }
+}

@@ -13,7 +13,10 @@ git diff --exit-code "$FLUTTER_NATIVE_BASE" -- \
   scripts/android-ci-gradle.sh scripts/build-android-rust.sh \
   scripts/check-android-ffi-bindings.sh scripts/setup-android-sdk.sh \
   scripts/test_android_ci_gradle.py
-if rg -n 'social\.waddle\.android/|social\.waddle\.android/call-video|\bAppGraph\b' apps/flutter/lib; then
+if git grep -n -E --untracked 'social\.waddle\.android/|\bAppGraph\b' -- apps/flutter/lib; then
   echo "Standalone Flutter must not call the native Android application's facade." >&2
   exit 1
+else
+  status=$?
+  [[ "$status" == 1 ]] || exit "$status"
 fi

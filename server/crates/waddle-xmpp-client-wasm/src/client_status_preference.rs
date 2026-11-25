@@ -18,12 +18,11 @@ use minidom::Element;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use waddle_xmpp_core::waddle_status_preference::{
-    StatusPreference, NS_WADDLE_STATUS_PREFERENCE, PEP_ITEM_WADDLE_STATUS_PREFERENCE,
-    PEP_NODE_WADDLE_STATUS_PREFERENCE,
+    StatusPreference, NS_WADDLE_STATUS_PREFERENCE, PEP_NODE_WADDLE_STATUS_PREFERENCE,
 };
 use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
-use super::{js_error, send_iq_command, to_js_value, WaddleClient};
+use super::{js_error, send_iq_command, send_iq_command_stanza_aware, to_js_value, WaddleClient};
 use crate::NS_CLIENT;
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
@@ -52,29 +51,10 @@ fn status_preference_from_js(input: JsStatusPreference) -> Result<StatusPreferen
 }
 
 pub(crate) fn build_status_preference_publish_iq(pref: &StatusPreference) -> Element {
-    let id = format!("status-preference-publish-{}", Uuid::new_v4());
-    let item = Element::builder("item", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("id").to_owned(),
-            PEP_ITEM_WADDLE_STATUS_PREFERENCE,
-        )
-        .append(pref.build_element())
-        .build();
-    let publish = Element::builder("publish", NS_PUBSUB)
-        .attr(
-            minidom::rxml::xml_ncname!("node").to_owned(),
-            PEP_NODE_WADDLE_STATUS_PREFERENCE,
-        )
-        .append(item)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB)
-        .append(publish)
-        .build();
-    Element::builder("iq", NS_CLIENT)
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
-        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
-        .append(pubsub)
-        .build()
+    waddle_xmpp_client::status_preference::build_status_preference_publish_iq(
+        &format!("status-preference-publish-{}", Uuid::new_v4()),
+        pref,
+    )
 }
 
 pub(crate) fn build_status_preference_fetch_iq() -> Element {
@@ -147,7 +127,7 @@ impl WaddleClient {
     ///
     /// Per XEP-0223 §Security Considerations (CVE-2023-28686), the
     /// result IQ's `from` MUST be absent or the account's bare JID;
-    /// anything else is treated as spoofed and yields `null`.
+    /// an unexpected sender is rejected.
     pub fn status_preference_fetch(&self) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
@@ -159,12 +139,13 @@ impl WaddleClient {
                 parsed.to_bare().to_string()
             };
             let iq = build_status_preference_fetch_iq();
-            let result = match send_iq_command(inner, iq).await {
+            let result = match send_iq_command_stanza_aware(inner, iq).await? {
                 Ok(r) => r,
-                Err(_) => return Ok(JsValue::NULL),
+                Err(err) if err.condition == "item-not-found" => return Ok(JsValue::NULL),
+                Err(err) => return Err(js_error(err.to_string())),
             };
             if !accept_fetch_from(result.attr("from"), &own_bare) {
-                return Ok(JsValue::NULL);
+                return Err(js_error("unexpected status preference sender"));
             }
             match parse_status_preference_fetch_result(&result) {
                 Some(pref) => to_js_value(&JsStatusPreference::from(pref)),
@@ -177,7 +158,9 @@ impl WaddleClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp_core::waddle_status_preference::ManualStatus;
+    use waddle_xmpp_core::waddle_status_preference::{
+        ManualStatus, PEP_ITEM_WADDLE_STATUS_PREFERENCE,
+    };
 
     #[test]
     fn publish_iq_targets_node_and_current_item() {

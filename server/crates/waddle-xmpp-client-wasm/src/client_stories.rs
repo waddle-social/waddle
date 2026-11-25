@@ -41,7 +41,7 @@ impl WaddleClient {
             let input: WaddleStoryInput = serde_wasm_bindgen::from_value(input)
                 .map_err(|err| js_error(format!("invalid story input: {err}")))?;
             let (iq, published) =
-                prepare_publication(&service, input).map_err(|e| js_error(e.to_string()))?;
+                prepare_publication(Some(&service), input).map_err(|e| js_error(e.to_string()))?;
             send_iq_command(inner, iq).await?;
             to_js_value(&published)
         })

@@ -7,6 +7,8 @@ import 'design.dart';
 import 'features/conversation.dart';
 import 'features/surfaces.dart';
 import 'features/threads.dart';
+import 'features/presence_input.dart';
+import 'features/trip_plan.dart';
 import 'features/community.dart';
 
 List<Map<String, dynamic>> records(dynamic value) => value is List
@@ -39,9 +41,10 @@ class WaddleShell extends StatelessWidget {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: bridge,
     builder: (context, _) => switch (bridge.session['state']) {
-      'ready' => _AccountNavigator(
+      'ready' => PresenceInput(
         key: ValueKey('account:${bridge.session['jid']}'),
         bridge: bridge,
+        child: _AccountNavigator(bridge: bridge),
       ),
       'signedOut' => _Login(bridge: bridge),
       'error' => Scaffold(
@@ -314,7 +317,7 @@ class _LoginState extends State<_Login> {
 }
 
 class _AccountNavigator extends StatefulWidget {
-  const _AccountNavigator({super.key, required this.bridge});
+  const _AccountNavigator({required this.bridge});
   final WaddleBridge bridge;
   @override
   State<_AccountNavigator> createState() => _AccountNavigatorState();
@@ -1008,6 +1011,11 @@ class _CommunityState extends State<_Community> with RestorationMixin {
                   onTap: () =>
                       _push(CommunityScreen(bridge: bridge, section: section)),
                 ),
+              _CommunityPill(
+                icon: Icons.map_outlined,
+                label: 'Trips',
+                onTap: () => _push(TripPlansScreen(bridge: bridge)),
+              ),
               if (totalUnread > 0)
                 _CommunityPill(
                   icon: Icons.mark_chat_unread_outlined,

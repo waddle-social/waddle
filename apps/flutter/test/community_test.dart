@@ -14,10 +14,19 @@ void main() {
     () async {
       final context = TestRuntimeContext();
       context.handler = (method, args) async => switch (method) {
-        'stories_items' => [
-          {'id': 'old', 'expires': '2000-01-01T00:00:00Z'},
-          {'id': 'active', 'expires': '2100-01-01T00:00:00Z'},
-        ],
+        'story_authors' => ['alice@example.test', 'bob@example.test'],
+        'fetch_stories' =>
+          args['author_jid'] == 'alice@example.test'
+              ? [
+                  {'id': 'old', 'expires': '2000-01-01T00:00:00Z'},
+                ]
+              : [
+                  {
+                    'id': 'active',
+                    'expires': '2100-01-01T00:00:00Z',
+                    'author': 'untrusted@example.test',
+                  },
+                ],
         'story_reads_fetch' => {
           'entries': [
             {'id': 'active'},
@@ -30,9 +39,12 @@ void main() {
       final stories = await runtime.invoke('community.stories', {}) as List;
       expect(stories.single, containsPair('read', true));
       expect(stories.single, containsPair('id', 'active'));
+      expect(stories.single, containsPair('author', 'bob@example.test'));
       expect(
-        context.calls.first['args']['community_jid'],
-        'community.example.test',
+        context.calls
+            .where((call) => call['method'] == 'fetch_stories')
+            .map((call) => call['args']['author_jid']),
+        ['alice@example.test', 'bob@example.test'],
       );
     },
   );
@@ -84,6 +96,67 @@ void main() {
     });
   });
 
+  testWidgets(
+    'story reactions target the selected author and merge the current emoji',
+    (tester) async {
+      final writes = <Map<String, dynamic>>[];
+      final bridge = WaddleBridge(
+        events: const Stream.empty(),
+        commandInvoker: (method, args) async {
+          switch (method) {
+            case 'community.stories':
+              return [
+                {
+                  'id': 'photo',
+                  'author': 'bob@example.test',
+                  'body': 'A photo',
+                },
+              ];
+            case 'community.storyReactions':
+              expect(args, {'id': 'photo', 'author': 'bob@example.test'});
+              return {
+                'counts': {'❤️': 2},
+                'mine': ['❤️'],
+              };
+            case 'community.setStoryReactions':
+              writes.add(args);
+              return null;
+            default:
+              throw StateError(method);
+          }
+        },
+      );
+      addTearDown(bridge.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CommunityScreen(
+            bridge: bridge,
+            section: CommunitySection.stories,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Story reactions'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<FilterChip>(find.widgetWithText(FilterChip, '❤️ 2'))
+            .selected,
+        isTrue,
+      );
+      await tester.tap(find.text('👍 0'));
+      await tester.tap(find.text('Save reactions'));
+      await tester.pumpAndSettle();
+      expect(writes, [
+        {
+          'author': 'bob@example.test',
+          'id': 'photo',
+          'emojis': ['❤️', '👍'],
+        },
+      ]);
+    },
+  );
+
   testWidgets('submitting a new post reloads the feed', (tester) async {
     final input = <Map<String, dynamic>>[];
     final bridge = WaddleBridge(
@@ -108,7 +181,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('New post'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), 'Meet at the dock');
+    await tester.enterText(find.byType(TextField).first, 'Meet at the dock');
     await tester.pump();
     await tester.tap(find.text('Publish'));
     await tester.pumpAndSettle();

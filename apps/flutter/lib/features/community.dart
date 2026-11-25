@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../bridge.dart';
+import 'story_viewer.dart';
+import 'calendar_editor.dart';
+import 'event_calendar.dart';
 
 enum CommunitySection {
   feed('Feed', Icons.article_outlined, 'community.feed', 'New post'),
@@ -83,7 +86,9 @@ class _CommunityScreenState extends State<CommunityScreen> {
   Future<void> _compose() async {
     final input = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => _CommunityComposer(section: widget.section),
+      builder: (_) => widget.section == CommunitySection.events
+          ? const CalendarEditor()
+          : _CommunityComposer(section: widget.section),
     );
     if (!mounted || input == null) return;
     final command = switch (widget.section) {
@@ -94,35 +99,103 @@ class _CommunityScreenState extends State<CommunityScreen> {
     await widget.bridge.invokeQuiet(command, input);
   }
 
-  Future<void> _openStory(Map<String, dynamic> row) async {
-    final url = Uri.tryParse('${row['media_url']}');
-    if (url?.scheme != 'https' ||
-        url!.host.isEmpty ||
-        url.userInfo.isNotEmpty) {
-      throw StateError('This story has no usable media link.');
-    }
-    await widget.bridge.invokeQuiet('link.open', {'url': url.toString()});
-    if (mounted) {
-      await widget.bridge.invokeQuiet('community.readStory', {'id': row['id']});
+  Future<void> _reactToStory(Map<String, dynamic> row) async {
+    final target = {'author': row['author'], 'id': row['id']};
+    final data = await widget.bridge.invokeQuiet(
+      'community.storyReactions',
+      target,
+    );
+    if (!mounted) return;
+    final mine = Set<String>.from(data['mine'] ?? const []);
+    final counts = Map<String, dynamic>.from(data['counts'] ?? const {});
+    final next = await showDialog<Set<String>>(
+      context: context,
+      builder: (dialog) => StatefulBuilder(
+        builder: (context, update) {
+          final choices = {
+            ...counts.keys,
+            ...mine,
+            '❤️',
+            '👍',
+            '😂',
+            '🎉',
+            '😮',
+            '🐧',
+          };
+          return AlertDialog(
+            title: const Text('Story reactions'),
+            content: Wrap(
+              spacing: 8,
+              children: [
+                for (final emoji in choices)
+                  FilterChip(
+                    label: Text('$emoji ${counts[emoji] ?? 0}'),
+                    selected: mine.contains(emoji),
+                    onSelected: (selected) => update(() {
+                      if (selected) {
+                        mine.add(emoji);
+                      } else {
+                        mine.remove(emoji);
+                      }
+                    }),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialog, mine),
+                child: const Text('Save reactions'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (next != null && mounted) {
+      await widget.bridge.invokeQuiet('community.setStoryReactions', {
+        ...target,
+        'emojis': next.toList(),
+      });
     }
   }
 
-  String _start(dynamic raw) {
-    if (raw is! Map) return '';
-    if (raw['kind'] == 'date') return raw['date']?.toString() ?? '';
-    final ms = raw['ms'];
-    if (ms is! num) return '';
-    final date = DateTime.fromMillisecondsSinceEpoch(ms.round());
-    final locale = MaterialLocalizations.of(context);
-    return '${locale.formatMediumDate(date)} · ${TimeOfDay.fromDateTime(date).format(context)}';
-  }
-
-  Widget _entry(Map<String, dynamic> row) {
+  Widget _entry(List<Map<String, dynamic>> rows, int index) {
+    final row = rows[index];
     switch (widget.section) {
       case CommunitySection.feed:
+        const sources = {
+          'mood': 'Mood',
+          'activity': 'Activity',
+          'tune': 'Listening',
+          'avatar': 'New avatar',
+          'vcard': 'Profile update',
+          'rsvp': 'Event RSVP',
+        };
+        final link = Uri.tryParse('${row['link'] ?? ''}');
         return ListTile(
           title: Text('${row['title'] ?? row['author'] ?? 'Community post'}'),
-          subtitle: SelectableText('${row['body'] ?? ''}'),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (sources[row['source']] case final String source)
+                Text(source, style: Theme.of(context).textTheme.labelSmall),
+              SelectableText('${row['body'] ?? ''}'),
+              if (link != null &&
+                  {'https', 'http'}.contains(link.scheme) &&
+                  link.host.isNotEmpty &&
+                  link.userInfo.isEmpty)
+                TextButton(
+                  onPressed: () => widget.bridge.invoke('link.open', {
+                    'url': link.toString(),
+                  }),
+                  child: Text(link.toString()),
+                ),
+            ],
+          ),
         );
       case CommunitySection.stories:
         return ListTile(
@@ -133,82 +206,27 @@ class _CommunityScreenState extends State<CommunityScreen> {
           ),
           title: Text('${row['author'] ?? 'Story'}'),
           subtitle: Text('${row['body'] ?? 'View media'}'),
-          onTap: _busy ? null : () => _action(() => _openStory(row)),
-        );
-      case CommunitySection.events:
-        final responses = row['responses'] as Map? ?? const {};
-        final self = widget.bridge.session['jid'];
-        final lines = [
-          _start(row['dtstart']),
-          if (row['rrule'] is Map)
-            'Repeats ${row['rrule']['freq'].toString().toLowerCase()}',
-          if (row['location'] != null) '${row['location']}',
-          if (row['description'] != null) '${row['description']}',
-          if (responses.isNotEmpty)
-            "${responses.values.where((value) => value == 'ACCEPTED').length} going",
-        ];
-        return ExpansionTile(
-          title: Text('${row['summary'] ?? 'Event'}'),
-          subtitle: Text(lines.where((line) => line.isNotEmpty).join('\n')),
-          children: [
-            Wrap(
-              children: [
-                for (final response in {
-                  'ACCEPTED': 'Going',
-                  'TENTATIVE': 'Maybe',
-                  'DECLINED': 'Decline',
-                }.entries)
-                  Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: ChoiceChip(
-                      selected: responses[self] == response.key,
-                      label: Text(response.value),
-                      onSelected: _busy
-                          ? null
-                          : (_) => _action(() async {
-                              await widget.bridge.invokeQuiet(
-                                'community.rsvp',
-                                {'id': row['uid'], 'response': response.key},
-                              );
-                            }),
+          trailing: IconButton(
+            tooltip: 'Story reactions',
+            icon: const Icon(Icons.add_reaction_outlined),
+            onPressed: _busy ? null : () => _action(() => _reactToStory(row)),
+          ),
+          onTap: _busy
+              ? null
+              : () => _action(
+                  () => Navigator.of(context).push<void>(
+                    MaterialPageRoute(
+                      builder: (_) => StoryViewer(
+                        bridge: widget.bridge,
+                        stories: rows,
+                        initialIndex: index,
+                      ),
                     ),
                   ),
-              ],
-            ),
-            if (row['organizer'] == 'xmpp:$self' && row['id'] == row['uid'])
-              TextButton(
-                onPressed: _busy
-                    ? null
-                    : () => _action(() async {
-                        final confirmed = await showDialog<bool>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text(
-                              'Cancel this event and all its occurrences?',
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text('Keep event'),
-                              ),
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, true),
-                                child: const Text('Cancel event'),
-                              ),
-                            ],
-                          ),
-                        );
-                        if (mounted && confirmed == true) {
-                          await widget.bridge.invokeQuiet(
-                            'community.cancelEvent',
-                            {'id': row['id']},
-                          );
-                        }
-                      }),
-                child: const Text('Cancel event'),
-              ),
-          ],
+                ),
         );
+      case CommunitySection.events:
+        throw StateError('Events use EventCalendar');
     }
   }
 
@@ -217,6 +235,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
     DateTime? next;
     final visible = rows.where((row) {
       final at = DateTime.tryParse('${row['expires']}');
+      if (row['expires'] == null) return true;
       if (at == null || !at.isAfter(now)) return false;
       if (next == null || at.isBefore(next!)) next = at;
       return true;
@@ -264,6 +283,14 @@ class _CommunityScreenState extends State<CommunityScreen> {
             ),
           );
         }
+        if (widget.section == CommunitySection.events) {
+          return EventCalendar(
+            events: snapshot.data!,
+            bridge: widget.bridge,
+            busy: _busy,
+            run: _action,
+          );
+        }
         final rows = widget.section == CommunitySection.stories
             ? _visibleStories(snapshot.data!)
             : snapshot.data!;
@@ -279,7 +306,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
         return ListView.separated(
           itemCount: rows.length,
           separatorBuilder: (_, _) => const Divider(height: 1),
-          itemBuilder: (_, index) => _entry(rows[index]),
+          itemBuilder: (_, index) => _entry(rows, index),
         );
       },
     ),
@@ -295,84 +322,31 @@ class _CommunityComposer extends StatefulWidget {
 }
 
 class _CommunityComposerState extends State<_CommunityComposer> {
-  String _text = '';
-  DateTime? _start;
-  String? _repeat;
-
-  Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final date = await showDatePicker(
-      context: context,
-      initialDate: _start ?? now,
-      firstDate: DateTime(now.year),
-      lastDate: DateTime(now.year + 10),
-    );
-    if (!mounted || date == null) return;
-    final time = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(_start ?? now),
-    );
-    if (mounted && time != null) {
-      setState(
-        () => _start = DateTime(
-          date.year,
-          date.month,
-          date.day,
-          time.hour,
-          time.minute,
-        ),
-      );
-    }
-  }
-
+  String _text = '', _link = '';
   @override
   Widget build(BuildContext context) {
-    final story = widget.section == CommunitySection.stories,
-        event = widget.section == CommunitySection.events;
+    final story = widget.section == CommunitySection.stories;
     return AlertDialog(
       title: Text(widget.section.compose),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              autofocus: true,
-              maxLines: event ? 1 : 3,
-              decoration: InputDecoration(
-                labelText: event
-                    ? 'Event name'
-                    : story
-                    ? 'Caption (optional)'
-                    : 'Post',
-              ),
-              onChanged: (value) => setState(() => _text = value.trim()),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            autofocus: true,
+            maxLines: 3,
+            decoration: InputDecoration(
+              labelText: story ? 'Caption (optional)' : 'Post',
             ),
-            if (event) ...[
-              TextButton(
-                onPressed: _pickDate,
-                child: Text(
-                  _start == null
-                      ? 'Choose start time'
-                      : '${MaterialLocalizations.of(context).formatMediumDate(_start!)} · ${TimeOfDay.fromDateTime(_start!).format(context)}',
-                ),
-              ),
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Repeat'),
-                initialValue: 'Never',
-                items: ['Never', 'Daily', 'Weekly', 'Monthly', 'Yearly']
-                    .map(
-                      (value) =>
-                          DropdownMenuItem(value: value, child: Text(value)),
-                    )
-                    .toList(),
-                onChanged: (value) => setState(
-                  () =>
-                      _repeat = value == 'Never' ? null : value?.toUpperCase(),
-                ),
-              ),
-            ],
-          ],
-        ),
+            onChanged: (value) => setState(() => _text = value.trim()),
+          ),
+          if (!story)
+            TextField(
+              key: const ValueKey('post-link'),
+              decoration: const InputDecoration(labelText: 'Link (optional)'),
+              keyboardType: TextInputType.url,
+              onChanged: (value) => _link = value.trim(),
+            ),
+        ],
       ),
       actions: [
         TextButton(
@@ -380,17 +354,13 @@ class _CommunityComposerState extends State<_CommunityComposer> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: (!story && _text.isEmpty) || (event && _start == null)
+          onPressed: !story && _text.isEmpty
               ? null
               : () => Navigator.pop(context, {
-                  if (event) ...{
-                    'summary': _text,
-                    'starts': _start!.millisecondsSinceEpoch,
-                    'repeat': _repeat,
-                  } else
-                    'body': _text,
+                  'body': _text,
+                  if (_link.isNotEmpty) 'link': _link,
                 }),
-          child: Text(story ? 'Choose image to publish' : 'Publish'),
+          child: Text(story ? 'Choose story media' : 'Publish'),
         ),
       ],
     );

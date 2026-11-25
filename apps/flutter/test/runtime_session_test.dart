@@ -304,6 +304,157 @@ void main() {
   );
 
   test(
+    'only owners can delete rooms and a deleted room cannot be recreated by rejoining',
+    () async {
+      const room = 'dev@rooms.example';
+      const other = 'other@rooms.example';
+      final transport = _Transport();
+      final runtime = SessionRuntime(
+        storage: _Storage()..values['session'] = 'private-token',
+        auth: _Auth(),
+        transportFactory: () async => transport,
+        platformInvoker: (_, _) async => null,
+      );
+      addTearDown(runtime.dispose);
+      await runtime.start();
+      await _until(
+        () => transport.calls.any((v) => v.$1 == 'connect'),
+        'subscribe to the active transport',
+      );
+      transport.controller.add({'type': 'connected', 'data': {}});
+      await _until(
+        () => transport.calls.any((call) => call.$1 == 'fetch_dm_bookmarks'),
+        'community owner probe',
+      );
+      await expectLater(
+        runtime.invoke('admin.deleteRoom', {'channel_jid': room}),
+        throwsStateError,
+      );
+      expect(
+        transport.calls.where((call) => call.$1 == 'admin_channels_delete'),
+        isEmpty,
+      );
+      transport.responses['is_community_owner'] = true;
+      await runtime.refreshHome();
+      await runtime.rpc('join_room', {'room_jid': room});
+      await runtime.rpc('join_room', {'room_jid': other});
+      transport.responses['admin_channels_list'] = {
+        'entries': [
+          {'channel_jid': room},
+        ],
+        'next_cursor': null,
+      };
+      await runtime.invoke('admin.deleteSpace', {
+        'space_jid': 'spaces.example',
+        'space_node': 'node',
+      });
+      expect(runtime.persistent['joinedRooms'], [other]);
+      expect(runtime.persistent['adminDeletedRooms'], [room]);
+      expect(
+        transport.calls
+            .lastWhere((call) => call.$1 == 'admin_channels_list')
+            .$2,
+        {
+          'args': {
+            'space_jid': 'spaces.example',
+            'space_node': 'node',
+            'page_size': 50,
+            'after_cursor': null,
+          },
+        },
+      );
+      await expectLater(
+        runtime.rpc('join_room', {'room_jid': room}),
+        throwsStateError,
+      );
+      expect(
+        transport.calls.where(
+          (call) => call.$1 == 'join_room' && call.$2['room_jid'] == room,
+        ),
+        hasLength(1),
+      );
+      await runtime.refreshHome();
+      transport.responses['discover_topology'] = {
+        'channels': [
+          {'room_jid': room, 'name': 'Dev'},
+        ],
+      };
+      await runtime.refreshHome();
+      expect(runtime.persistent['adminDeletedRooms'], isEmpty);
+      await runtime.rpc('join_room', {'room_jid': room});
+      expect(
+        transport.calls.where(
+          (call) => call.$1 == 'join_room' && call.$2['room_jid'] == room,
+        ),
+        hasLength(2),
+      );
+    },
+  );
+
+  test(
+    'session connects with the account pick, adopts peer-resource updates and ignores contact status nodes',
+    () async {
+      final transport = _Transport();
+      transport.responses['fetch_status_preference'] = {
+        'type': 'manual',
+        'status': 'chat',
+      };
+      final runtime = SessionRuntime(
+        storage: _Storage()..values['session'] = 'private-token',
+        auth: _Auth(),
+        transportFactory: () async => transport,
+        platformInvoker: (_, _) async => null,
+      );
+      addTearDown(runtime.dispose);
+      await runtime.start();
+      await _until(
+        () => transport.calls.any((v) => v.$1 == 'connect'),
+        'subscribe to the active transport',
+      );
+      transport.controller.add({'type': 'connected', 'data': {}});
+      await _until(
+        () => transport.calls.any((v) => v.$1 == 'send_presence'),
+        'initial presence',
+      );
+      expect(
+        transport.calls.firstWhere((v) => v.$1 == 'send_presence').$2['show'],
+        'chat',
+      );
+      transport.controller.add({
+        'type': 'statusPreferenceChanged',
+        'data': {'type': 'manual', 'status': 'dnd'},
+      });
+      await _until(
+        () => transport.calls.any(
+          (v) => v.$1 == 'send_presence' && v.$2['show'] == 'dnd',
+        ),
+        'other resource status',
+      );
+      transport.controller.add({
+        'type': 'pubsub',
+        'data': {
+          'node': 'urn:waddle:status-preference:0',
+          'from': 'other@example.org',
+        },
+      });
+      await _flush();
+      expect(
+        transport.calls.where((v) => v.$1 == 'fetch_status_preference'),
+        hasLength(1),
+      );
+      await runtime.invoke('presence.select', {'mode': 'automatic'});
+      expect(
+        transport.calls
+            .firstWhere((v) => v.$1 == 'publish_status_preference')
+            .$2,
+        {
+          'preference': {'type': 'automatic'},
+        },
+      );
+    },
+  );
+
+  test(
     'Activity keeps separate thread identities from the XMPP inbox',
     () async {
       final transport = _Transport();

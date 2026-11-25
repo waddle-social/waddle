@@ -341,12 +341,12 @@ elif args == ["exec-in", "run-as", "social.waddle.flutter", "tee", "cache/standa
 else: raise AssertionError(args)
 `, { mode: 0o755 });
     const env = { ...process.env, ADB: adb, SERIAL: "emulator-5554", SMOKE_ARTIFACT: artifact, SMOKE_CAPTURE_TOKEN: token, SMOKE_FIXTURE: directory, SMOKE_MODE: mode };
-    return { directory, artifact, env, run: () => Bun.spawnSync(["bash", "-c", `set -euo pipefail\n${capture}\ncapture_production_ui 2`], { env }) };
+    return { directory, artifact, env, run: (deadline = 8) => Bun.spawnSync(["bash", "-c", `set -euo pipefail\n${capture}\ncapture_production_ui ${deadline}`], { env }) };
   }
   test("captures only the current ready token and acknowledges after promoting a valid PNG", () => {
     const h = fixture("delayed");
     const result = h.run();
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(readFileSync(join(h.directory, "probe"), "utf8")).toBe("2");
     expect(readFileSync(join(h.directory, "ack"), "utf8")).toBe(token);
     expect(existsSync(join(h.artifact, "production.png"))).toBe(true);
@@ -362,7 +362,7 @@ else: raise AssertionError(args)
   });
   test("an old run token expires without capturing and acknowledgment errors remain failures", () => {
     const stale = fixture("stale");
-    expect(stale.run().exitCode).toBe(1);
+    expect(stale.run(2).exitCode).toBe(1);
     expect(existsSync(join(stale.artifact, "production.png"))).toBe(false);
     expect(existsSync(join(stale.directory, "ack"))).toBe(false);
     const failed = fixture("ack-failed");

@@ -12,7 +12,7 @@ use waddle_xmpp_client_community::story_reads::{
 };
 use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
-use super::{js_error, send_iq_command, to_js_value, WaddleClient};
+use super::{js_error, send_iq_command, send_iq_command_stanza_aware, to_js_value, WaddleClient};
 
 #[wasm_bindgen]
 impl WaddleClient {
@@ -21,7 +21,7 @@ impl WaddleClient {
     /// Per XEP-0223 §Security Considerations (CVE-2023-28686), the
     /// result IQ's `from` attribute MUST be either absent or equal to
     /// the account's bare JID. Anything else is treated as spoofed
-    /// and produces an empty result.
+    /// and rejected.
     pub fn story_reads_fetch(&self) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {
@@ -33,13 +33,16 @@ impl WaddleClient {
                 parsed.to_bare().to_string()
             };
             let iq = build_story_reads_fetch_iq();
-            let result = match send_iq_command(inner, iq).await {
+            let result = match send_iq_command_stanza_aware(inner, iq).await? {
                 Ok(r) => r,
-                Err(_) => return to_js_value(&WaddleStoryReads::default()),
+                Err(err) if err.condition == "item-not-found" => {
+                    return to_js_value(&WaddleStoryReads::default())
+                }
+                Err(err) => return Err(js_error(err.to_string())),
             };
             if let Some(from) = result.attr("from") {
                 if from != own_bare {
-                    return to_js_value(&WaddleStoryReads::default());
+                    return Err(js_error("unexpected story read-state sender"));
                 }
             }
             let reads = parse_story_reads_fetch_result(&result);
