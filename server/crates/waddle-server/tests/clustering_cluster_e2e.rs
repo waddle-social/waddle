@@ -3592,6 +3592,7 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("the owner's join completes");
+    waddle_ws_test_support::iq::unlock_created_room(&mut owner, &room).await;
 
     // Two sessions of the peer account join through node B, whose room
     // actor is on node A: a moderator and a visitor.

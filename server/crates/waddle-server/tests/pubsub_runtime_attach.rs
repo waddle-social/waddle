@@ -27,6 +27,9 @@ use waddle_xmpp::pubsub::{
     PubSubItem, PubSubStorage, PublicationNode, PublicationVersion, VersionedPublishResult,
 };
 
+/// The PubSub schema version the owner migrates a database to.
+const CURRENT_PUBSUB_SCHEMA_VERSION: i32 = 10;
+
 const V1_HELPER_TABLES: [&str; 12] = [
     "dnd_projection",
     "dnd_projection_source_version",
@@ -2073,7 +2076,7 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
     run_sql(
         &f,
         &format!(
-            "DELETE FROM {}.pubsub_schema_version WHERE version = 8",
+            "DELETE FROM {}.pubsub_schema_version WHERE version = {CURRENT_PUBSUB_SCHEMA_VERSION}",
             f.target
         ),
     )
@@ -2110,7 +2113,10 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
     );
     run_sql(
         &f,
-        &format!("UPDATE {}.pubsub_schema_version SET version = 8", f.target),
+        &format!(
+            "UPDATE {}.pubsub_schema_version SET version = {CURRENT_PUBSUB_SCHEMA_VERSION}",
+            f.target
+        ),
     )
     .await;
     DatabasePubSubStorage::attach_existing(runtime.clone())
@@ -2178,10 +2184,14 @@ async fn restricted_pubsub_attachment_and_guarded_owner_bootstrap() {
     .fetch_one(&f.admin)
     .await
     .unwrap();
-    assert_eq!(marker, 8);
+    assert_eq!(marker, CURRENT_PUBSUB_SCHEMA_VERSION);
     run_sql(
         &f,
-        &format!("UPDATE {}.pubsub_schema_version SET version = 9", f.target),
+        &format!(
+            "UPDATE {}.pubsub_schema_version SET version = {}",
+            f.target,
+            CURRENT_PUBSUB_SCHEMA_VERSION + 1
+        ),
     )
     .await;
     assert!(

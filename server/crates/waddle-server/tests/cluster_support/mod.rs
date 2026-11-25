@@ -792,6 +792,11 @@ pub async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, ni
         }),
         "{occupant} must receive self-presence 110: {replies:?}"
     );
+    // The first occupant creates the room locked (XEP-0045 §10.1.1) and
+    // unlocks it so the joins that follow are admitted.
+    if replies.iter().any(|frame| frame.contains("code=\"201\"")) {
+        waddle_ws_test_support::iq::unlock_created_room(client, room.as_str()).await;
+    }
 }
 
 pub fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom::Element {

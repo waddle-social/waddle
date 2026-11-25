@@ -337,6 +337,7 @@ async fn two_restricted_nodes_form_a_cluster_and_serve_without_ddl() {
     );
     send_element(&mut admin, muc_presence(&format!("{room}/owner"), false)).await;
     collect_until(&mut admin, "room creation on node A", joined).await;
+    waddle_ws_test_support::iq::unlock_created_room(&mut admin, &room).await;
     send_element(&mut bob, muc_presence(&format!("{room}/bob"), false)).await;
     collect_until(&mut bob, "room join from node B", joined).await;
 

@@ -159,7 +159,15 @@ impl OAuthGrantStore {
             return Ok(false);
         };
         let session_id = text(&row, 0)?;
-        // The grant row goes with its session (ON DELETE CASCADE).
+        // The grant row goes first: a grant never outlives its session as a
+        // usable record, and no foreign key removes it with the session.
+        self.actor
+            .ask(DbExecute {
+                sql: "DELETE FROM xmpp_oauth_grants WHERE grant_id = ?".to_string(),
+                params: vec![Value::from(grant_id)],
+            })
+            .await
+            .map_err(db_error)?;
         self.actor
             .ask(DbExecute {
                 sql: "DELETE FROM sessions WHERE id = ?".to_string(),
