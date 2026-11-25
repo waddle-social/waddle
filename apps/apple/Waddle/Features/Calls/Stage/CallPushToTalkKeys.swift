@@ -45,7 +45,7 @@ private struct CallKeyboardReader: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
+    func updateNSView(_: NSView, context: Context) {
         let keyboard = context.coordinator
         keyboard.hasMedia = hasMedia
         keyboard.isMicrophoneOn = isMicrophoneOn
@@ -53,7 +53,7 @@ private struct CallKeyboardReader: NSViewRepresentable {
         keyboard.coversConversation = coversConversation
     }
 
-    static func dismantleNSView(_ view: NSView, coordinator: CallStageKeyboard) {
+    static func dismantleNSView(_: NSView, coordinator: CallStageKeyboard) {
         coordinator.stop()
     }
 }
@@ -80,9 +80,8 @@ final class CallStageKeyboard {
     var isSpaceDown: @MainActor () -> Bool = {
         CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(CallStageKeyboard.spaceKeyCode))
     }
-    /// Opening and closing in the order they were asked for: a quick tap
-    /// of Space must not close the microphone before it has opened.
-    private var work: Task<Void, Never>?
+    /// The microphone being opened for the key now down, or last down.
+    private var opening: Task<Void, Never>?
 
     func start(watching view: NSView) {
         self.view = view
@@ -165,9 +164,19 @@ final class CallStageKeyboard {
 
     private func set(_ on: Bool) {
         let setMicrophone = setMicrophone
-        work = Task { [work] in
-            await work?.value
-            await setMicrophone(on)
+        guard !on else {
+            opening = Task { await setMicrophone(true) }
+            return
+        }
+        // Said at once, not after the opening: an opening still waiting, as
+        // for the person to allow the microphone, sees that it is no longer
+        // wanted and stops. One that was already past asking opens anyway,
+        // so it is closed again when it is done, unless Space is down once more.
+        Task { [opening] in
+            await setMicrophone(false)
+            guard let opening else { return }
+            await opening.value
+            if !talk.isHolding { await setMicrophone(false) }
         }
     }
 

@@ -70,14 +70,16 @@ final class CallStageKeyboardTests: XCTestCase {
         XCTAssertEqual(microphone, [true])
         XCTAssertNil(keyboard.handle(space(.keyUp)))
         await settle()
-        XCTAssertEqual(microphone, [true, false])
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false)
     }
 
     func testAQuickTapOpensThenCloses() async {
         _ = keyboard.handle(space(.keyDown))
         _ = keyboard.handle(space(.keyUp))
         await settle()
-        XCTAssertEqual(microphone, [true, false], "never closed before it was opened")
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false, "never closed before it was opened")
     }
 
     func testSpaceTypedIntoAMessageIsASpace() async {
@@ -114,14 +116,16 @@ final class CallStageKeyboardTests: XCTestCase {
         await settle()
         NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
         await settle()
-        XCTAssertEqual(microphone, [true, false])
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false)
     }
 
     func testTheStageGoingAwayClosesAHeldMicrophone() async {
         _ = keyboard.handle(space(.keyDown))
         keyboard.stop()
         await settle()
-        XCTAssertEqual(microphone, [true, false])
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false)
     }
 
     func testAClickOnTheStageTakesTheKeyboardOutOfTheMessage() async {
@@ -150,7 +154,8 @@ final class CallStageKeyboardTests: XCTestCase {
         await settle()
         NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: NSMenu())
         await settle()
-        XCTAssertEqual(microphone, [true, false])
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false)
     }
 
     func testAKeyThatCameUpUnseenIsNoticedAtTheNextEvent() async {
@@ -159,7 +164,8 @@ final class CallStageKeyboardTests: XCTestCase {
         spaceIsDown = false
         _ = keyboard.handle(click(at: NSPoint(x: 200, y: 20)))
         await settle()
-        XCTAssertEqual(microphone, [true, false])
+        XCTAssertEqual(microphone.first, true)
+        XCTAssertEqual(microphone.last, false)
     }
 
     /// Reached with Tab or Full Keyboard Access: without this Space would be that control's for good.
@@ -170,6 +176,24 @@ final class CallStageKeyboardTests: XCTestCase {
         _ = keyboard.handle(click(at: NSPoint(x: 200, y: 200)))
         await settle()
         XCTAssertTrue(window.firstResponder === window)
+    }
+
+    /// The system asking whether Waddle may use the microphone holds the opening up for as long as it takes to answer.
+    func testLettingGoIsSaidAtOnceEvenWhileTheMicrophoneIsStillOpening() async {
+        var allow: CheckedContinuation<Void, Never>?
+        keyboard.setMicrophone = { [unowned self] on in
+            microphone.append(on)
+            if on { await withCheckedContinuation { allow = $0 } }
+            keyboard.isMicrophoneOn = on
+        }
+        _ = keyboard.handle(space(.keyDown))
+        await settle()
+        _ = keyboard.handle(space(.keyUp))
+        await settle()
+        XCTAssertEqual(microphone, [true, false], "the opening has not finished, and already knows it is not wanted")
+        allow?.resume()
+        await settle()
+        XCTAssertEqual(microphone, [true, false, false], "and whatever it opened is closed when it is done")
     }
 
     private final class FocusableView: NSView {
