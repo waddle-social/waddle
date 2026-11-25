@@ -17,6 +17,7 @@ on:
       - server/Cargo.toml
       - server/Cargo.lock
       - server/rust-toolchain.toml
+      - server/crates/waddle-camera-effects/**
       - server/crates/waddle-flutter-runtime/**
       - server/crates/waddle-flutter-timeline/**
       - server/crates/waddle-client-session/**

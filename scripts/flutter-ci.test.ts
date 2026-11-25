@@ -216,7 +216,7 @@ describe("standalone verification contracts", () => {
     const calls = h.calls();
     expect(calls).toHaveLength(6);
     expect(calls[0].args).toEqual([`${h.directory}/server/crates/waddle-flutter-runtime/scripts/generate_dispatch.py`, "--check"]);
-    expect(calls[2].args).toEqual(["clippy", "--locked", "-p", "waddle-flutter-runtime", "-p", "waddle-xmpp-client-community", "-p", "waddle-flutter-timeline", "-p", "waddle-xmpp-client", "-p", "waddle-xmpp-client-ffi", "--features", "waddle-xmpp-client-ffi/serde", "--all-targets", "--", "-D", "warnings"]);
+    expect(calls[2].args).toEqual(["clippy", "--locked", "-p", "waddle-camera-effects", "-p", "waddle-flutter-runtime", "-p", "waddle-xmpp-client-community", "-p", "waddle-flutter-timeline", "-p", "waddle-xmpp-client", "-p", "waddle-xmpp-client-ffi", "--features", "waddle-xmpp-client-ffi/serde", "--all-targets", "--", "-D", "warnings"]);
     expect(calls[3].args).toContain("waddle-client-session");
     expect(calls[3].args).toContain("waddle-flutter-timeline");
     expect(calls[3].args).toContain("--all-targets");

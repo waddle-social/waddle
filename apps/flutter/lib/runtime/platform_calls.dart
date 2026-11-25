@@ -63,7 +63,11 @@ class PlatformCallService {
   bool _activePresence = false, _disposed = false;
   int _epoch = 0;
   int _nextSignal = 0;
+  Object? _talkHold;
+  Future<void> _talkTransition = Future.value();
   final _signaling = <int>{};
+  final _reactions =
+      <({String sid, String emoji, String from, DateTime expires})>[];
   final _retainedLeaves = <String, Object>{};
   String? _error;
   DateTime? _started;
@@ -105,6 +109,13 @@ class PlatformCallService {
     if (_disposed || _events.isClosed) {
       return;
     }
+    _reactions.removeWhere(
+      (reaction) =>
+          _phase != 'active' ||
+          reaction.sid != _sid ||
+          !reaction.expires.isAfter(DateTime.now()),
+    );
+    if (_phase != 'active') _talkHold = null;
     final mediaView = Map<String, dynamic>.from(media.snapshot);
     if (!{'active', 'ended'}.contains(_phase)) {
       mediaView.remove('error');
@@ -139,6 +150,10 @@ class PlatformCallService {
         'group': _group,
         'accepting': _accepting,
         'handRaised': _hand,
+        'reactions': [
+          for (final item in _reactions)
+            {'emoji': item.emoji, 'from': item.from},
+        ],
         'durationSeconds': _started == null
             ? 0
             : DateTime.now().difference(_started!).inSeconds,
@@ -214,6 +229,21 @@ class PlatformCallService {
         }
         _publish();
         return null;
+      case 'call.quality':
+      case 'call.voiceProcessing':
+        if (_phase != 'active') throw StateError('The call is not active.');
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        if (method == 'call.quality') {
+          final quality = await media.quality();
+          _guard(epoch, generation, sid);
+          return quality;
+        }
+        await media.setVoiceProcessing(
+          args['key'] as String,
+          args['enabled'] as bool,
+        );
+        _guard(epoch, generation, sid);
+        return null;
       case 'call.devices':
       case 'call.selectDevice':
       case 'call.screenShare':
@@ -243,10 +273,54 @@ class PlatformCallService {
         _guard(speakerEpoch, speakerGeneration);
         _publish();
         return null;
+      case 'call.volume':
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        if (_phase != 'active') throw StateError('The call is not active.');
+        await media.setPlaybackVolume(
+          args['track'] as String,
+          (args['gain'] as num).toDouble(),
+        );
+        _guard(epoch, generation, sid);
+        _publish();
+        return null;
+      case 'call.compact':
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        if (_phase != 'active') throw StateError('The call is not active.');
+        await media.compactWindow(args['enabled'] == true);
+        _guard(epoch, generation, sid);
+        _publish();
+        return null;
+      case 'call.talk':
+        return _pushToTalk(args['held'] == true);
+      case 'call.background':
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        if (_phase != 'active') throw StateError('The call is not active.');
+        await media.changeBackground(
+          args['name'] as String,
+          args['bytes'] as Uint8List?,
+        );
+        _guard(epoch, generation, sid);
+        _publish();
+        return null;
       case 'call.flipCamera':
         final cameraEpoch = _epoch, cameraGeneration = context.generation;
         await media.flipCamera();
         _guard(cameraEpoch, cameraGeneration);
+        return null;
+      case 'call.react':
+        final epoch = _epoch, generation = context.generation, sid = _sid;
+        final emoji = args['emoji'];
+        if (_phase != 'active' || emoji is! String || !_isReaction(emoji)) {
+          throw StateError('Choose an emoji in an active call.');
+        }
+        await _rpc('send_in_call_reaction', {
+          'to': _peer,
+          'msg_type': _group ? 'groupchat' : 'chat',
+          'sid': sid,
+          'emoji': emoji,
+        });
+        _guard(epoch, generation, sid);
+        if (!_group) _showReaction(_ownFull, emoji);
         return null;
       case 'call.hand':
         if (!_group || _phase != 'active') {
@@ -712,11 +786,101 @@ class PlatformCallService {
     }
   }
 
+  Future<void> _pushToTalk(bool held) {
+    final epoch = _epoch, generation = context.generation, sid = _sid;
+    if (_phase != 'active') return Future.value();
+    if (held
+        ? (_talkHold != null || media.snapshot['microphoneEnabled'] == true)
+        : _talkHold == null) {
+      return Future.value();
+    }
+    final token = _talkHold = held ? Object() : null;
+    final result = _talkTransition.then((_) async {
+      if (!_current(epoch, generation, sid) || _phase != 'active') return;
+      if (held) {
+        if (!identical(_talkHold, token)) return;
+        await _requestCapture(false);
+        if (!_current(epoch, generation, sid) || !identical(_talkHold, token)) {
+          return;
+        }
+        await _startForeground(
+          epoch,
+          generation,
+          sid,
+          video: _video,
+          refresh: true,
+        );
+        if (!_current(epoch, generation, sid) || !identical(_talkHold, token)) {
+          return;
+        }
+      }
+      await media.microphone(held);
+      if (_current(epoch, generation, sid)) _publish();
+    });
+    _talkTransition = result.catchError((Object _) {});
+    return result;
+  }
+
+  bool _isReaction(String value) =>
+      value.isNotEmpty &&
+      value.length <= 32 &&
+      value.trim().isNotEmpty &&
+      value.characters.length == 1;
+
+  void _showReaction(String from, String emoji) {
+    if (_reactions.length >= 8) _reactions.removeAt(0);
+    _reactions.add((
+      sid: _sid,
+      emoji: emoji,
+      from: from,
+      expires: DateTime.now().add(const Duration(milliseconds: 2400)),
+    ));
+    _publish();
+  }
+
+  void _receiveReaction(
+    Map<String, dynamic> message,
+    Map<String, dynamic> signal,
+  ) {
+    if (_phase != 'active' ||
+        signal['sid'] != _sid ||
+        message['carbon'] != null ||
+        message['muc_pm'] == true) {
+      return;
+    }
+    final emoji = signal['emoji'], from = message['from'];
+    if (emoji is! String ||
+        !_isReaction(emoji) ||
+        from is! String ||
+        !from.contains('/')) {
+      return;
+    }
+    if (_group) {
+      if (message['message_type'] != 'groupchat' || bareJid(from) != _peer) {
+        return;
+      }
+      final nick = from.substring(from.indexOf('/') + 1);
+      final occupant = _rooms[_peer]?[nick];
+      if (runtimeMap(occupant?['muji'])['active'] != true) return;
+    } else if (message['message_type'] != 'chat' ||
+        _fullKey(from) != _fullKey(_peer)) {
+      return;
+    }
+    _showReaction(from, emoji);
+  }
+
   void onEvent(Map<String, dynamic> event) {
     if (_disposed) {
       return;
     }
     switch (event['type']) {
+      case 'callReaction':
+        final data = runtimeMap(event['data']);
+        _receiveReaction(data, data);
+      case 'message':
+        final data = runtimeMap(event['data']),
+            signal = runtimeMap(data['in_call']);
+        if (signal['kind'] == 'reaction') _receiveReaction(data, signal);
       case 'presence':
         _presence(runtimeMap(event['data']));
       case 'call':

@@ -1,10 +1,15 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
 import '../features/call_stage.dart';
 import 'call_screen_share.dart';
+import 'call_camera.dart';
+import 'call_audio_mixer.dart';
+import 'call_quality.dart';
+import 'call_window.dart';
 import 'call_connectivity_stub.dart'
     if (dart.library.io) 'call_connectivity_io.dart';
 import 'context.dart';
@@ -21,6 +26,12 @@ abstract class CallMedia extends ChangeNotifier {
   Future<void> camera(bool enabled);
   Future<void> speaker(bool enabled);
   Future<void> flipCamera();
+  Future<void> compactWindow(bool enabled) async {}
+  Future<void> setPlaybackVolume(String sid, double gain);
+  Future<Map<String, dynamic>> quality() async => const {};
+  Future<void> setVoiceProcessing(String key, bool value) =>
+      throw UnsupportedError('Microphone processing is unavailable.');
+  Future<void> changeBackground(String name, Uint8List? bytes);
   Future<List<Map<String, dynamic>>> devices();
   Future<void> selectDevice(String kind, String id);
   Future<void> screenShare(bool enabled);
@@ -64,10 +75,14 @@ void validateMediaGrant(Map<String, dynamic> join) {
 
 class LiveKitCallMedia extends CallMedia {
   lk.Room? _room;
+  late final _window = CallWindow(_changed);
   lk.EventsListener<lk.RoomEvent>? _listener;
   int _epoch = 0;
   final _sharing = CallScreenShare();
   String? _cameraDevice;
+  NativeCallCamera? _nativeCamera;
+  CallAudioMixer? _mixer;
+  CallQuality _quality = CallQuality();
   bool _speaker = false;
   String _state = 'idle';
   String? _error;
@@ -75,11 +90,17 @@ class LiveKitCallMedia extends CallMedia {
   @override
   Map<String, dynamic> get snapshot => {
     'mediaState': _state,
+    'compactSupported': _window.available,
+    'compact': _window.compact,
     'microphoneEnabled':
         _room?.localParticipant?.isMicrophoneEnabled() ?? false,
     'cameraEnabled': _room?.localParticipant?.isCameraEnabled() ?? false,
     'speakerEnabled': _speaker,
     'speakerSupported': lk.AudioManager.instance.canSwitchSpeakerphone,
+    'cameraBackgroundSupported': NativeCallCamera.supported,
+    'cameraBackground': _nativeCamera?.background ?? 'off',
+    if (_room case final room?)
+      'audioTracks': _mixer?.snapshot(room) ?? const [],
     'screenShareSupported': _sharing.supported,
     'screenShareBusy': _sharing.busy,
     'screenShareEnabled':
@@ -124,15 +145,30 @@ class LiveKitCallMedia extends CallMedia {
       return;
     }
     final next = lk.Room(
-      roomOptions: const lk.RoomOptions(adaptiveStream: true, dynacast: true),
+      roomOptions: lk.RoomOptions(
+        adaptiveStream: true,
+        dynacast: true,
+        // Server mute/unmute must retain the processor attached to this track.
+        // A local user turning off the camera explicitly unpublishes it.
+        defaultCameraCaptureOptions: lk.CameraCaptureOptions(
+          stopCameraCaptureOnMute: !NativeCallCamera.supported,
+        ),
+      ),
     );
     _room = next;
+    if (NativeCallCamera.supported) {
+      _nativeCamera = NativeCallCamera(next);
+      _mixer = CallAudioMixer();
+    }
     _cameraDevice = null;
     _state = 'connecting';
     _error = null;
     notifyListeners();
     next.addListener(_changed);
     _listener = next.createListener()
+      ..on<lk.TrackUnsubscribedEvent>((event) {
+        if (_room == next) _mixer?.remove(event.publication.sid);
+      })
       ..on<lk.ActiveSpeakersChangedEvent>((_) => _changed())
       ..on<lk.LocalTrackUnpublishedEvent>((event) async {
         if (event.publication.source == lk.TrackSource.screenShareVideo &&
@@ -219,6 +255,8 @@ class LiveKitCallMedia extends CallMedia {
         await next.disconnect();
         return;
       }
+      await _window.active(true);
+      if (epoch != _epoch || _room != next) return;
       _state = 'connected';
       notifyListeners();
     } catch (_) {
@@ -231,12 +269,21 @@ class LiveKitCallMedia extends CallMedia {
     }
   }
 
+  @override
+  Future<void> compactWindow(bool enabled) => _window.setCompact(enabled);
+
   void _changed() => notifyListeners();
 
   @override
   Future<void> disconnect() async {
     final epoch = ++_epoch;
     final previous = _room;
+    final restoreWindow = _window.active(false);
+    final retiringCamera = _nativeCamera?.retire();
+    _nativeCamera = null;
+    _mixer = null;
+    final retiringQuality = _quality;
+    _quality = CallQuality();
     _room = null;
     final listener = _listener;
     _listener = null;
@@ -259,6 +306,9 @@ class LiveKitCallMedia extends CallMedia {
         }
       }),
     );
+    await restoreWindow;
+    await retiringQuality.settled;
+    await retiringCamera;
     await listener?.dispose();
     try {
       try {
@@ -287,6 +337,12 @@ class LiveKitCallMedia extends CallMedia {
     if (_room != room) {
       return;
     }
+    final native = _nativeCamera;
+    if (camera && native != null) {
+      await native.setEnabled(enabled);
+      if (epoch == _epoch && _room == room) notifyListeners();
+      return;
+    }
     final participant =
         room.localParticipant ??
         (throw StateError('The call media is not connected.'));
@@ -312,7 +368,9 @@ class LiveKitCallMedia extends CallMedia {
                 ),
               )
             : await lk.LocalAudioTrack.create(
-                room.roomOptions.defaultAudioCaptureOptions,
+                _quality.captureOptions(
+                  room.roomOptions.defaultAudioCaptureOptions,
+                ),
               );
         if (epoch != _epoch || _room != room) {
           return;
@@ -342,10 +400,30 @@ class LiveKitCallMedia extends CallMedia {
   }
 
   @override
+  Future<Map<String, dynamic>> quality() async {
+    final room = _room ?? (throw StateError('The call ended.'));
+    return _quality.sample(room);
+  }
+
+  @override
+  Future<void> setVoiceProcessing(String key, bool value) async {
+    final room = _room ?? (throw StateError('The call ended.'));
+    await _quality.setProcessing(
+      room,
+      () => identical(_room, room),
+      key,
+      value,
+    );
+  }
+
+  @override
   Future<void> microphone(bool enabled) async {
     final room =
         _room ?? (throw StateError('The call media is not connected.'));
-    await _capture(room, enabled, camera: false);
+    await _quality.microphoneChange(() async {
+      if (_room != room) throw StateError('The call ended.');
+      await _capture(room, enabled, camera: false);
+    });
   }
 
   @override
@@ -364,6 +442,8 @@ class LiveKitCallMedia extends CallMedia {
 
   @override
   Future<void> flipCamera() async {
+    final native = _nativeCamera;
+    if (native != null) return native.flip();
     final participant = _local();
     for (final publication in participant.videoTrackPublications) {
       final track = publication.track;
@@ -379,6 +459,30 @@ class LiveKitCallMedia extends CallMedia {
       }
     }
     throw StateError('There is no active camera to switch.');
+  }
+
+  @override
+  Future<void> changeBackground(String name, Uint8List? bytes) async {
+    final camera = _nativeCamera;
+    if (camera == null) throw StateError('Camera backgrounds are unavailable.');
+    final background = await CameraBackground.from(name, bytes);
+    if (!identical(camera, _nativeCamera)) {
+      throw StateError('The call has ended.');
+    }
+    try {
+      await camera.changeBackground(background);
+    } finally {
+      if (identical(camera, _nativeCamera)) notifyListeners();
+    }
+  }
+
+  @override
+  Future<void> setPlaybackVolume(String sid, double gain) async {
+    final room = _connectedRoom;
+    final mixer =
+        _mixer ?? (throw StateError('The audio mixer is unavailable.'));
+    await mixer.set(room, sid, gain);
+    if (_room == room) notifyListeners();
   }
 
   lk.Room get _connectedRoom =>
@@ -421,7 +525,10 @@ class LiveKitCallMedia extends CallMedia {
                 switch (device.kind) {
                   'audioinput' => room.selectedAudioInputDeviceId,
                   'audiooutput' => room.selectedAudioOutputDeviceId,
-                  _ => _cameraDevice ?? room.selectedVideoInputDeviceId,
+                  _ =>
+                    _nativeCamera?.device ??
+                        _cameraDevice ??
+                        room.selectedVideoInputDeviceId,
                 },
           },
     ];
@@ -438,7 +545,10 @@ class LiveKitCallMedia extends CallMedia {
     if (_room != room) throw StateError('The call has ended.');
     switch (kind) {
       case 'audioinput':
-        await room.setAudioInputDevice(device);
+        await _quality.microphoneChange(() async {
+          if (_room != room) throw StateError('The call ended.');
+          await room.setAudioInputDevice(device);
+        });
       case 'audiooutput':
         await room.setAudioOutputDevice(device);
       case 'videoinput':
@@ -447,7 +557,12 @@ class LiveKitCallMedia extends CallMedia {
         final track = room.localParticipant
             ?.getTrackPublicationBySource(lk.TrackSource.camera)
             ?.track;
-        if (track is lk.LocalVideoTrack) await track.switchCamera(id);
+        final native = _nativeCamera;
+        if (native != null) {
+          await native.select(id);
+        } else if (track is lk.LocalVideoTrack) {
+          await track.switchCamera(id);
+        }
         if (_room == room) _cameraDevice = id;
     }
   }
@@ -506,6 +621,18 @@ class LiveKitCallMedia extends CallMedia {
             return const Center(child: Icon(Icons.videocam_off_outlined));
           }
           final tiles = _tiles(room);
+          if (_window.compact) {
+            final tile =
+                tiles
+                    .where((t) => t.screen && !t.self && t.video != null)
+                    .firstOrNull ??
+                tiles.where((t) => !t.self && t.video != null).firstOrNull ??
+                tiles.where((t) => !t.screen && t.video != null).firstOrNull;
+            return tile?.video ??
+                const Center(
+                  child: Icon(Icons.call, color: Colors.white, size: 48),
+                );
+          }
           if (local) {
             return tiles
                     .where((tile) => tile.self && !tile.screen)

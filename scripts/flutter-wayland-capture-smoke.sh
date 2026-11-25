@@ -16,6 +16,12 @@ pulse=$(tool pulseaudio)
 portal=$(tool xdg-desktop-portal)
 wlr=$(tool xdg-desktop-portal-wlr)
 export sway pipewire wireplumber pulse portal wlr
+if [[ -n "${WADDLE_LIVEKIT_FIXTURE:-}" ]]; then
+  gst=$(nix build --no-link --print-out-paths --inputs-from . 'nixpkgs#gst_all_1.gstreamer^bin')
+  gst_core=$(tool gst_all_1.gstreamer)
+  gst_base=$(tool gst_all_1.gst-plugins-base)
+  export gst gst_core gst_base
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -25,6 +31,19 @@ export XDG_DESKTOP_PORTAL_DIR="$wlr/share/xdg-desktop-portal/portals"
 unset DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET SWAYSOCK PIPEWIRE_REMOTE PULSE_SERVER GNOME_KEYRING_CONTROL
 mkdir -m 700 "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 mkdir "$XDG_CONFIG_HOME/xdg-desktop-portal-wlr" "$XDG_CONFIG_HOME/xdg-desktop-portal"
+# WebRTC maps four V4L2 capture buffers. Keep the private camera producer
+# and the PipeWire V4L2 adapter on the same four-buffer queue.
+mkdir -p "$XDG_CONFIG_HOME/pipewire/pipewire.conf.d"
+echo 'context.properties = { link.max-buffers = 4 }' > "$XDG_CONFIG_HOME/pipewire/pipewire.conf.d/50-camera.conf"
+mkdir -p "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d"
+cat > "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/50-isolate.conf" <<'CONFIG'
+wireplumber.profiles = { main = {
+  monitor.alsa = disabled
+  monitor.bluez = disabled
+  monitor.v4l2 = disabled
+  monitor.libcamera = disabled
+} }
+CONFIG
 printf '[preferred]\ndefault=wlr\n' > "$XDG_CONFIG_HOME/xdg-desktop-portal/sway-portals.conf"
 echo 'output * resolution 1280x720' > "$XDG_CONFIG_HOME/sway.conf"
 # Only this private compositor's software output can be shared.
@@ -62,6 +81,7 @@ dbus-run-session "${bus_config[@]}" -- bash -eu <<'SESSION'
   done
   "$pulse/bin/pactl" load-module module-null-sink sink_name=waddle_capture_test >/dev/null
   export PULSE_SOURCE=waddle_capture_test.monitor
+  export PULSE_SINK=waddle_capture_test
   "$wlr/libexec/xdg-desktop-portal-wlr" -l DEBUG >"$XDG_RUNTIME_DIR/wlr.log" 2>&1 &
   "$portal/libexec/xdg-desktop-portal" >"$XDG_RUNTIME_DIR/portal.log" 2>&1 &
   for service in org.freedesktop.impl.portal.desktop.wlr org.freedesktop.portal.Desktop; do
@@ -76,10 +96,26 @@ dbus-run-session "${bus_config[@]}" -- bash -eu <<'SESSION'
   export WADDLE_CAPTURE_TRACE="$XDG_RUNTIME_DIR/wlr.log" WADDLE_ISOLATED_CAPTURE=1
   tests=(integration_test/wayland_screen_capture_test.dart)
   if [[ -n "${WADDLE_LIVEKIT_FIXTURE:-}" ]]; then
+    # A single packed plane can be shared by GStreamer and the PipeWire V4L2
+    # adapter used by WebRTC. A synthetic camera sees no host camera devices.
+    export GST_PLUGIN_PATH="$gst_core/lib/gstreamer-1.0:$gst_base/lib/gstreamer-1.0:$pipewire/lib/gstreamer-1.0"
+    "$gst/bin/gst-launch-1.0" -q videotestsrc is-live=true pattern=snow \
+      ! video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1 \
+      ! pipewiresink mode=provide stream-properties='props,media.class=Video/Source,node.name=waddle-camera-test,node.description=WaddleTestCamera' \
+      >"$XDG_RUNTIME_DIR/camera.log" 2>&1 &
+    for ((attempt=0; attempt<100; attempt++)); do
+      nodes=$("$pipewire/bin/pw-cli" ls Node)
+      [[ "$nodes" == *waddle-camera-test* ]] && break
+      sleep 0.1
+    done
+    [[ "$nodes" == *waddle-camera-test* ]] || { cat "$XDG_RUNTIME_DIR/camera.log" >&2; exit 1; }
+    export WADDLE_ISOLATED_CAMERA=1
     tests+=(integration_test/wayland_sfu_test.dart)
   fi
   for test in "${tests[@]}"; do
-    flutter test --no-pub -d linux "$test" || {
+    run=()
+    [[ "$test" == integration_test/wayland_sfu_test.dart ]] && run=("$pipewire/bin/pw-v4l2")
+    "${run[@]}" flutter test --no-pub -d linux "$test" || {
       cat "$XDG_RUNTIME_DIR/"{portal,wlr,wireplumber}.log >&2
       exit 1
     }

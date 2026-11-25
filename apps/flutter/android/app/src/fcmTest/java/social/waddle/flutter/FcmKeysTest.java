@@ -4,17 +4,14 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.SharedPreferences;
 import com.google.firebase.FirebaseApp;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import com.google.crypto.tink.apps.fixed_webpush.WebPushHybridEncrypt;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import static org.junit.Assert.*;
 
-@RunWith(AndroidJUnit4.class)
 public final class FcmKeysTest {
     @Test
     public void sealedRecipientSurvivesReloadAndRejectsPriorKeys() throws Exception {
@@ -41,7 +38,12 @@ public final class FcmKeysTest {
             assertNull(FcmKeys.open(context, new String(new char[4097])));
             FcmKeys.subscribe(context, second);
             assertFalse(FcmKeys.retire(context, first));
-            assertThrows(Exception.class, () -> FcmKeys.open(context, wire));
+            try {
+                FcmKeys.open(context, wire);
+                fail("The new recipient opened ciphertext for the retired issuer.");
+            } catch (java.security.GeneralSecurityException expected) {
+                // The active recipient cannot authenticate the old ciphertext.
+            }
             assertTrue(FcmKeys.retire(context, second));
             assertNull(FcmKeys.open(context, wire));
         } finally {

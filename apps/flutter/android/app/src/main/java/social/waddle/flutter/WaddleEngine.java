@@ -27,6 +27,8 @@ public final class WaddleEngine {
                 PlatformFileChannel.register(engine, context.getApplicationContext());
                 FcmBridge.register(engine, context.getApplicationContext());
                 StoryVideoRecorder.register(engine, context.getApplicationContext());
+                CameraEffects.register(engine);
+                engine.getPlugins().add(new CallWindow());
                 ScreenCaptureService.register(engine, context.getApplicationContext());
                 cache.put(ENGINE_ID, engine);
                 engine.getDartExecutor().executeDartEntrypoint(

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show ViewFocusEvent, ViewFocusState;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,10 +7,14 @@ import 'package:flutter/services.dart';
 import '../bridge.dart';
 import '../design.dart';
 import 'surfaces_vocabulary.dart';
+import 'call_quality_sheet.dart';
 
 part 'admin_console.dart';
 part 'admin_directory.dart';
 part 'admin_forms.dart';
+part 'call_background_picker.dart';
+part 'call_audio_mixer.dart';
+part 'call_shortcuts.dart';
 
 Map<String, dynamic> _map(dynamic value) => value is Map
     ? value.map((key, value) => MapEntry(key.toString(), value))
@@ -1706,6 +1711,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       final call = bridge.call;
       final sid = _text(call['sid']);
       final state = _text(call['state'], 'idle');
+      if (call['compact'] == true) return const SizedBox.shrink();
       final incoming = state == 'incoming';
       final ended = state == 'ended' || state == 'idle';
       final address = _text(call['peer'] ?? call['peerJid']);
@@ -1781,7 +1787,7 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
           ],
         ),
       );
-      return Scaffold(
+      final screen = Scaffold(
         appBar: AppBar(title: const WaddleBrand(compact: true)),
         body: SafeArea(
           child: LayoutBuilder(
@@ -1891,6 +1897,23 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                               ?.copyWith(color: colors.onSurfaceVariant),
                         ),
                       ],
+                      if (_rows(call['reactions']).isNotEmpty)
+                        Semantics(
+                          liveRegion: true,
+                          child: Wrap(
+                            spacing: 8,
+                            children: [
+                              for (final reaction in _rows(call['reactions']))
+                                Tooltip(
+                                  message: _text(reaction['from']),
+                                  child: Text(
+                                    _text(reaction['emoji']),
+                                    style: const TextStyle(fontSize: 28),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
                       if (call['error'] != null)
                         Padding(
                           padding: const EdgeInsets.only(top: 18),
@@ -2043,6 +2066,100 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
                                   'devices',
                                   action: () => _pickDevice(sid),
                                 ),
+                                control(
+                                  'Call settings',
+                                  Icons.monitor_heart_outlined,
+                                  'quality',
+                                  action: () =>
+                                      showCallQuality(context, bridge, sid),
+                                ),
+                                control(
+                                  'React',
+                                  Icons.add_reaction_outlined,
+                                  'react',
+                                  action: () async {
+                                    final emoji =
+                                        await showModalBottomSheet<String>(
+                                          context: context,
+                                          showDragHandle: true,
+                                          builder: (sheet) => SafeArea(
+                                            child: Wrap(
+                                              alignment: WrapAlignment.center,
+                                              children: [
+                                                for (final symbol in const [
+                                                  '👍',
+                                                  '❤️',
+                                                  '🎉',
+                                                  '😂',
+                                                  '👏',
+                                                  '👋',
+                                                ])
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(
+                                                          sheet,
+                                                          symbol,
+                                                        ),
+                                                    child: Text(
+                                                      symbol,
+                                                      style: const TextStyle(
+                                                        fontSize: 30,
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                        );
+                                    if (emoji != null && context.mounted) {
+                                      await _command(
+                                        context,
+                                        bridge,
+                                        'call.react',
+                                        {'expectedSid': sid, 'emoji': emoji},
+                                      );
+                                    }
+                                  },
+                                ),
+                                if (_rows(call['audioTracks']).isNotEmpty)
+                                  control(
+                                    'Volume mixer',
+                                    Icons.graphic_eq,
+                                    'volume',
+                                    action: () =>
+                                        _showCallMixer(context, bridge, sid),
+                                  ),
+                                if (showVideo)
+                                  control(
+                                    'Full screen',
+                                    Icons.fullscreen,
+                                    'fullScreen',
+                                    action: () =>
+                                        _showFullCall(context, bridge, sid),
+                                  ),
+                                if (call['compactSupported'] == true)
+                                  control(
+                                    'Compact window',
+                                    Icons.picture_in_picture_alt,
+                                    'compact',
+                                    action: () => _command(
+                                      context,
+                                      bridge,
+                                      'call.compact',
+                                      {'expectedSid': sid, 'enabled': true},
+                                    ),
+                                  ),
+                                if (call['cameraBackgroundSupported'] == true)
+                                  control(
+                                    'Background',
+                                    Icons.portrait_outlined,
+                                    'background',
+                                    action: () => _pickCallBackground(
+                                      context,
+                                      bridge,
+                                      sid,
+                                    ),
+                                  ),
                                 if (call['screenShareSupported'] == true)
                                   control(
                                     call['screenShareEnabled'] == true
@@ -2091,6 +2208,12 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
             ),
           ),
         ),
+      );
+      return _CallShortcuts(
+        bridge: bridge,
+        sid: sid,
+        active: state == 'active',
+        child: screen,
       );
     },
   );

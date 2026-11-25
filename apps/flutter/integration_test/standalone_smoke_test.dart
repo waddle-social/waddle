@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
@@ -214,4 +215,38 @@ void main() {
       'Disposing the production app did not release its runtime owner.',
     );
   }, timeout: const Timeout(Duration(minutes: 3)));
+
+  testWidgets(
+    'Wayland restores the original window size after a compact call',
+    (tester) async {
+      const channel = MethodChannel('social.waddle.flutter/call_window');
+      await tester.pumpWidget(
+        const MaterialApp(home: ColoredBox(color: Colors.blue)),
+      );
+      final view = PlatformDispatcher.instance.views.first;
+      final original = view.physicalSize;
+      expect(await channel.invokeMethod<bool>('setCompact', true), isFalse);
+      await channel.invokeMethod<void>('setActive', true);
+      try {
+        expect(await channel.invokeMethod<bool>('setCompact', true), isTrue);
+        await _pumpUntil(
+          tester,
+          () => view.physicalSize.width < original.width * .8,
+          'The compositor did not resize the Waddle window.',
+        );
+        expect(await channel.invokeMethod<bool>('state'), isTrue);
+      } finally {
+        await channel.invokeMethod<void>('setActive', false);
+      }
+      await _pumpUntil(
+        tester,
+        () => view.physicalSize == original,
+        'Ending the call did not restore the original Wayland window.',
+      );
+      expect(await channel.invokeMethod<bool>('state'), isFalse);
+    },
+    skip:
+        !Platform.isLinux ||
+        Platform.environment['WADDLE_WAYLAND_WINDOW_SMOKE'] != '1',
+  );
 }

@@ -102,8 +102,19 @@ GDK_BACKEND=wayland flutter run -d linux
 To build an optimized desktop bundle, run `flutter build linux --release`
 from the Flutter app directory. On x86_64 the executable is
 `build/linux/x64/release/bundle/waddle_flutter`. Keep `lib`, `libexec` and `data`
-beside it. The CI bundle uses the repository's Nix dependencies. The bundled
-FFmpeg records video stories with H.264 and PulseAudio. Wayland screen sharing
+beside it. The x86_64 CI archive uses a dynamic loader and shared libraries
+from the repository's pinned Nix store. To run the archive on another x86_64
+Wayland desktop, install Nix with flakes enabled, check out the Git revision
+that produced the archive, and run the following from the repository root.
+Use the same shell on NixOS and on other Linux distributions with Nix installed.
+
+```sh
+mkdir -p waddle-linux
+tar -xzf waddle-linux-x64.tar.gz -C waddle-linux
+nix develop .#flutter --command env GDK_BACKEND=wayland ./waddle-linux/waddle_flutter
+```
+
+The bundled FFmpeg records video stories with H.264 and PulseAudio. Wayland screen sharing
 uses the session's ScreenCast portal and PipeWire. To test actual frames and
 consent cleanup on a disposable compositor, run this from the repository root.
 

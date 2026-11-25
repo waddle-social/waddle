@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
@@ -38,6 +39,21 @@ void main() {
         );
         expect(track!.mediaStreamTrack.kind, 'video');
         expect(track.mediaStreamTrack.enabled, isTrue);
+        await expectLater(
+          const MethodChannel(
+            'social.waddle.flutter/camera_effects',
+          ).invokeMethod<void>('set', {
+            'trackId': track.mediaStreamTrack.id,
+            'mode': 'blur',
+          }),
+          throwsA(
+            isA<PlatformException>().having(
+              (error) => error.code,
+              'code',
+              'camera_unavailable',
+            ),
+          ),
+        );
         await ready.writeAsString('active', flush: true);
         await revoked.future.timeout(
           const Duration(seconds: 60),

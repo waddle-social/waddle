@@ -106,8 +106,8 @@ dependencies {
     // The story recorder draws the active flutter_webrtc track onto an Android recording surface.
     compileOnly("io.github.webrtc-sdk:android:150.7871.04")
     if (firebaseConfigured) {
-        androidTestImplementation("androidx.test.ext:junit:1.3.0")
-        androidTestImplementation("androidx.test:runner:1.7.0")
+        // Match the runner on Flutter integration_test's app runtime classpath.
+        androidTestImplementation("androidx.test:runner:1.3.0")
         implementation("com.google.firebase:firebase-messaging:25.1.3")
         implementation("org.unifiedpush.android:connector:3.3.5")
         implementation("com.google.crypto.tink:tink-android:1.23.0")

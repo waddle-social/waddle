@@ -2,6 +2,7 @@ package social.waddle.flutter;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import androidx.annotation.NonNull;
 import io.flutter.embedding.android.FlutterActivity;
@@ -32,5 +33,13 @@ public final class MainActivity extends FlutterActivity {
     @Override
     public boolean shouldDestroyEngineWithHost() {
         return false;
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean compact, @NonNull Configuration config) {
+        super.onPictureInPictureModeChanged(compact, config);
+        FlutterEngine engine = getFlutterEngine();
+        CallWindow window = engine == null ? null : (CallWindow) engine.getPlugins().get(CallWindow.class);
+        if (window != null) window.changed(this, compact);
     }
 }

@@ -1,0 +1,29 @@
+--- a/src/main/java/com/cloudwebrtc/webrtc/video/LocalVideoTrack.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/video/LocalVideoTrack.java
+@@ -25,8 +25,15 @@
+         public abstract VideoFrame onFrame(VideoFrame frame);
+     }
+
++    public final boolean isPrimaryCamera;
++
+     public LocalVideoTrack(VideoTrack videoTrack) {
++        this(videoTrack, false);
++    }
++
++    public LocalVideoTrack(VideoTrack videoTrack, boolean isPrimaryCamera) {
+         super(videoTrack);
++        this.isPrimaryCamera = isPrimaryCamera;
+     }
+
+     List<ExternalVideoFrameProcessing> processors = new ArrayList<>();
+--- a/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
++++ b/src/main/java/com/cloudwebrtc/webrtc/GetUserMediaImpl.java
+@@ -881,7 +881,7 @@
+         VideoTrack track = pcFactory.createVideoTrack(trackId, videoSource);
+         mediaStream.addTrack(track);
+
+-        LocalVideoTrack localVideoTrack = new LocalVideoTrack(track);
++        LocalVideoTrack localVideoTrack = new LocalVideoTrack(track, true);
+         videoSource.setVideoProcessor(localVideoTrack);
+
+         stateProvider.putLocalTrack(track.id(),localVideoTrack);

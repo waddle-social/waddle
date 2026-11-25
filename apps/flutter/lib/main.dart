@@ -8,6 +8,7 @@ import 'app.dart';
 import 'bootstrap.dart';
 import 'bridge.dart';
 import 'design.dart';
+import 'features/compact_call.dart';
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -149,39 +150,42 @@ class _WaddleAppState extends State<WaddleApp> {
         // The builder sits above the Navigator and so above its Overlay; the
         // banner's dismiss tooltip needs one of its own.
         builder: (context, child) => Overlay.wrap(
-          child: Column(
-            children: [
-              if (widget.bridge.error != null)
-                Material(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: SafeArea(
-                    bottom: false,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              widget.bridge.error!,
-                              style: TextStyle(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onErrorContainer,
+          child: CompactCall(
+            bridge: widget.bridge,
+            child: Column(
+              children: [
+                if (widget.bridge.error != null)
+                  Material(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    child: SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                widget.bridge.error!,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onErrorContainer,
+                                ),
                               ),
                             ),
-                          ),
-                          IconButton(
-                            onPressed: widget.bridge.dismissError,
-                            tooltip: 'Dismiss error',
-                            icon: const Icon(Icons.close),
-                          ),
-                        ],
+                            IconButton(
+                              onPressed: widget.bridge.dismissError,
+                              tooltip: 'Dismiss error',
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              Expanded(child: child ?? const SizedBox.shrink()),
-            ],
+                Expanded(child: child ?? const SizedBox.shrink()),
+              ],
+            ),
           ),
         ),
         home: WaddleShell(bridge: widget.bridge),

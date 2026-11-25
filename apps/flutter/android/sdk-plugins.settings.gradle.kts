@@ -1,5 +1,5 @@
 // Gradle 9 requires a writable project for SDK-supplied integration_test.
-// The Flutter WebRTC Android copy also forwards MediaProjection revocation.
+// The Flutter WebRTC Android copy forwards projection revocation and identifies camera sources.
 fun localAndroidPlugin(name: String, configure: (File, File) -> Unit = { _, _ -> }) {
     val plugin = findProject(":$name") ?: return
     val source = plugin.projectDir
@@ -19,9 +19,11 @@ localAndroidPlugin("flutter_webrtc") { source, destination ->
     val version = source.parentFile.resolve("pubspec.yaml").useLines { lines ->
         lines.first { it.startsWith("version:") }.substringAfter(':').trim()
     }
-    check(version == "1.6.3") { "Review the MediaProjection stop callback for flutter_webrtc $version" }
-    val patch = rootDir.resolve("flutter-webrtc-1.6.3-projection-stop.patch")
-    val process = ProcessBuilder("git", "apply", patch.absolutePath).directory(destination)
+    check(version == "1.6.3") { "Review the Android capture hooks for flutter_webrtc $version" }
+    val patches = listOf("projection-stop", "camera-source").map {
+        rootDir.resolve("flutter-webrtc-1.6.3-$it.patch").absolutePath
+    }
+    val process = ProcessBuilder(listOf("git", "apply") + patches).directory(destination)
     process.environment()["GIT_CEILING_DIRECTORIES"] = destination.parentFile.canonicalPath
-    check(process.inheritIO().start().waitFor() == 0) { "Could not patch flutter_webrtc's screen-capture callback" }
+    check(process.inheritIO().start().waitFor() == 0) { "Could not patch flutter_webrtc's Android capture hooks" }
 }

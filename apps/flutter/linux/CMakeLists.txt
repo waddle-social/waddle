@@ -79,8 +79,13 @@ add_custom_target(waddle_rust_runtime
   COMMAND cargo build --locked --package waddle-flutter-runtime
     --profile ${RUST_PROFILE} --target-dir "${RUST_TARGET_DIR}"
   WORKING_DIRECTORY "${SERVER_DIR}"
+  BYPRODUCTS "${RUST_LIBRARY}"
   VERBATIM)
 add_dependencies(${BINARY_NAME} waddle_rust_runtime)
+add_library(waddle_camera_runtime SHARED IMPORTED)
+set_target_properties(waddle_camera_runtime PROPERTIES
+  IMPORTED_LOCATION "${RUST_LIBRARY}"
+  IMPORTED_NO_SONAME TRUE)
 
 # Only the install-generated bundle's copy of the executable will launch
 # correctly, since the resources must in the right relative locations. To avoid
@@ -98,6 +103,12 @@ set_target_properties(${BINARY_NAME}
 # allocator during CMake configuration.
 set(MIMALLOC_USE_STATIC_LIBS OFF CACHE BOOL "" FORCE)
 include(flutter/generated_plugins.cmake)
+# Compile the capture callback with the SDK's desktop ABI and its linked
+# WebRTC engine. Both the model library and the plugin live in bundle/lib.
+target_sources(flutter_webrtc_plugin PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runner/camera_effects.cc")
+target_link_libraries(flutter_webrtc_plugin PRIVATE waddle_camera_runtime)
+add_dependencies(flutter_webrtc_plugin waddle_rust_runtime)
+set_property(TARGET flutter_webrtc_plugin APPEND PROPERTY INSTALL_RPATH "$ORIGIN")
 pkg_check_modules(VIDEO_PLATFORM REQUIRED IMPORTED_TARGET egl wayland-client)
 target_link_libraries(media_kit_video_plugin PRIVATE PkgConfig::VIDEO_PLATFORM)
 

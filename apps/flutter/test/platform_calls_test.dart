@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/runtime/context.dart';
@@ -10,7 +11,9 @@ import 'platform_test_context.dart';
 class FakeMedia extends CallMedia {
   int connects = 0, disconnects = 0;
   bool sharing = false, denyScreen = false;
-  String? device;
+  final microphoneChanges = <bool>[];
+  String? device, background;
+  (String, double)? volume;
   @override
   Map<String, dynamic> get snapshot => {
     'mediaState': 'idle',
@@ -33,13 +36,26 @@ class FakeMedia extends CallMedia {
   }
 
   @override
-  Future<void> microphone(bool enabled) async {}
+  Future<void> microphone(bool enabled) async {
+    microphoneChanges.add(enabled);
+  }
+
   @override
   Future<void> camera(bool enabled) async {}
   @override
   Future<void> speaker(bool enabled) async {}
   @override
   Future<void> flipCamera() async {}
+  @override
+  Future<void> changeBackground(String name, Uint8List? bytes) async {
+    background = name;
+  }
+
+  @override
+  Future<void> setPlaybackVolume(String sid, double gain) async {
+    volume = (sid, gain);
+  }
+
   @override
   Future<List<Map<String, dynamic>>> devices() async => [
     {'kind': 'audiooutput', 'id': 'headset'},
@@ -97,6 +113,44 @@ Map<String, dynamic> grantEvent(String sid) => {
 Future<void> settle() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  test(
+    'releasing push-to-talk during permission cannot enable the microphone later',
+    () async {
+      final context = TestRuntimeContext(), media = FakeMedia();
+      Completer<void>? permission;
+      final service = PlatformCallService(
+        context,
+        media: media,
+        requestCapture: (_) async {
+          await permission?.future;
+        },
+      );
+      addTearDown(service.dispose);
+      service.onEvent(proposal('talk'));
+      await settle();
+      await service.invoke('call.accept', {'expectedSid': 'talk'});
+      service.onEvent(grantEvent('talk'));
+      await settle();
+      await settle();
+      permission = Completer<void>();
+      final pressed = service.invoke('call.talk', {
+        'expectedSid': 'talk',
+        'held': true,
+      });
+      await settle();
+      final released = service.invoke('call.talk', {
+        'expectedSid': 'talk',
+        'held': false,
+      });
+      permission.complete();
+      await Future.wait([pressed, released]);
+      expect(media.microphoneChanges, [false]);
+      media.microphoneChanges.clear();
+      await service.invoke('call.talk', {'expectedSid': 'talk', 'held': true});
+      await service.invoke('call.talk', {'expectedSid': 'talk', 'held': false});
+      expect(media.microphoneChanges, [true, false]);
+    },
+  );
   test('answer permission delay cannot accept a successor ring', () async {
     final context = TestRuntimeContext();
     final permission = Completer<void>();
@@ -176,6 +230,9 @@ void main() {
         'call.camera',
         'call.speaker',
         'call.flipCamera',
+        'call.volume',
+        'call.react',
+        'call.background',
         'call.devices',
         'call.selectDevice',
         'call.screenShare',
@@ -205,6 +262,35 @@ void main() {
         'id': 'headset',
       });
       expect(media.device, 'headset');
+      await service.invoke('call.volume', {
+        'expectedSid': 'second',
+        'track': 'mic-1',
+        'gain': 0.4,
+      });
+      expect(media.volume, ('mic-1', 0.4));
+      await service.invoke('call.background', {
+        'expectedSid': 'second',
+        'name': 'blur',
+      });
+      expect(media.background, 'blur');
+      final reaction = {
+        'sid': 'second',
+        'from': 'bob@example.test/phone',
+        'message_type': 'chat',
+        'emoji': '👍',
+      };
+      service.onEvent({
+        'type': 'callReaction',
+        'data': {...reaction, 'from': 'other@example.test/phone'},
+      });
+      expect(views.last['reactions'], isEmpty);
+      service.onEvent({'type': 'callReaction', 'data': reaction});
+      expect(views.last['reactions'], hasLength(1));
+      await service.invoke('call.react', {
+        'expectedSid': 'second',
+        'emoji': '👏',
+      });
+      expect(context.calls.last['method'], 'send_in_call_reaction');
       await service.invoke('call.screenShare', {'expectedSid': 'second'});
       expect(views.last['screenShareEnabled'], isTrue);
       await service.invoke('call.screenShare', {'expectedSid': 'second'});

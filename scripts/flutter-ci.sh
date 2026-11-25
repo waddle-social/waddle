@@ -7,9 +7,9 @@ case "$MODE" in
   rust)
     python3 "$REPO_ROOT/server/crates/waddle-flutter-runtime/scripts/generate_dispatch.py" --check
     cd "$REPO_ROOT/server"
-    cargo fmt --check -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-client-session -p waddle-xmpp-client -p waddle-xmpp-client-ffi -p waddle-xmpp-client-wasm
-    cargo clippy --locked -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-xmpp-client -p waddle-xmpp-client-ffi --features waddle-xmpp-client-ffi/serde --all-targets -- -D warnings
-    cargo test --locked -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-client-session -p waddle-xmpp-client -p waddle-xmpp-client-ffi --features waddle-xmpp-client-ffi/serde --all-targets
+    cargo fmt --check -p waddle-camera-effects -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-client-session -p waddle-xmpp-client -p waddle-xmpp-client-ffi -p waddle-xmpp-client-wasm
+    cargo clippy --locked -p waddle-camera-effects -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-xmpp-client -p waddle-xmpp-client-ffi --features waddle-xmpp-client-ffi/serde --all-targets -- -D warnings
+    cargo test --locked -p waddle-camera-effects -p waddle-flutter-runtime -p waddle-xmpp-client-community -p waddle-flutter-timeline -p waddle-client-session -p waddle-xmpp-client -p waddle-xmpp-client-ffi --features waddle-xmpp-client-ffi/serde --all-targets
     cargo test --locked -p waddle-xmpp-client-wasm --lib
     cargo clippy --locked -p waddle-xmpp-client-wasm --target wasm32-unknown-unknown -- -D warnings
     ;;

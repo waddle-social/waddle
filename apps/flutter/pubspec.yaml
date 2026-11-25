@@ -51,6 +51,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/brand/
+    - assets/backgrounds/
     - assets/fonts/manrope-OFL.txt
     - assets/fonts/fredoka-OFL.txt
   fonts:

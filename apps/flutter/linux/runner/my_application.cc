@@ -1,4 +1,6 @@
 #include "my_application.h"
+#include "camera_effects.h"
+#include "call_window.h"
 #include "screencast_portal.h"
 
 #include <flutter_linux/flutter_linux.h>
@@ -56,6 +58,8 @@ static void activate(GApplication* app) {
   fl_method_channel_set_method_call_handler(channel, window_action, window, nullptr);
   register_screencast_portal(view, g_application_get_dbus_connection(app));
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  register_camera_effects(view);
+  register_call_window(view, window);
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 

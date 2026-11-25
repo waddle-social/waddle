@@ -175,8 +175,13 @@ CAPTURE_PID=''
 # Exercise the configured Firebase SDK and real Keystore using a synthetic
 # Firebase project. The instrumentation test never requests a Google token.
 cd "$REPO_ROOT/apps/flutter/android"
-ANDROID_SERIAL="$SERIAL" ./gradlew --project-cache-dir ../build/gradle-cache :app:connectedDebugAndroidTest --console=plain \
+./gradlew --project-cache-dir ../build/gradle-cache :app:assembleDebug :app:assembleDebugAndroidTest --console=plain \
   -PWADDLE_FIREBASE_PROJECT_ID=waddle-instrumentation \
   -PWADDLE_FIREBASE_APP_ID=1:0:android:0 \
   -PWADDLE_FIREBASE_API_KEY=instrumentation-only \
   -PWADDLE_FIREBASE_SENDER_ID=0
+"$ADB" -s "$SERIAL" install -r ../build/app/outputs/apk/debug/app-debug.apk
+"$ADB" -s "$SERIAL" install -r ../build/app/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+timeout 90 "$ADB" -s "$SERIAL" shell am instrument -w -e class social.waddle.flutter.FcmKeysTest \
+  social.waddle.flutter.test/androidx.test.runner.AndroidJUnitRunner | tee "$SMOKE_ARTIFACT/fcm-test.txt"
+grep -Fq 'OK (1 test)' "$SMOKE_ARTIFACT/fcm-test.txt"
