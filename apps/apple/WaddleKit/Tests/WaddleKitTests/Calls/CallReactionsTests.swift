@@ -8,7 +8,7 @@ struct CallReactionsTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
     private let ada = JID(parsing: "ada@waddle.test/web")!
     private let room = BareJID(parsing: "design@rooms.waddle.test")!
-    private let join = CallJoin(url: "wss://sfu", room: "r", identity: "me@waddle.test/mac", token: "t")
+    private let join = CallJoin(url: "sfu.test", room: "r", identity: "me@waddle.test/mac", token: "t")
     private let audio = CallMedia(audio: true, video: false)
 
     @Test func aReactionShowsForAMomentAndGoes() {

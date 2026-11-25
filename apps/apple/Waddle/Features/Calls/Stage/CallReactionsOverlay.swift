@@ -62,6 +62,12 @@ private struct CallReactionBubble: View {
     @State private var isLeaving = false
     @ScaledMetric(relativeTo: .largeTitle) private var size: CGFloat = 34
 
+    /// It grows a little as it goes; with Reduce Motion it keeps its size.
+    private var scale: CGFloat {
+        if reduceMotion { return 1 }
+        return isLeaving ? 1.18 : 0.82
+    }
+
     var body: some View {
         Text(emoji)
             .font(.system(size: size))
@@ -71,7 +77,7 @@ private struct CallReactionBubble: View {
             // is seen most of the way; nothing outside this line is touched by it.
             .opacity(isLeaving ? 0 : 1)
             .animation(.easeIn(duration: CallReactionLedger.lifetime), value: isLeaving)
-            .scaleEffect(reduceMotion ? 1 : (isLeaving ? 1.18 : 0.82))
+            .scaleEffect(scale)
             // With Reduce Motion it stays where it is and only fades.
             .offset(y: reduceMotion || !isLeaving ? 0 : -rise)
             .onAppear {
