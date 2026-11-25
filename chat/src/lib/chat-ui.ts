@@ -451,10 +451,8 @@ export interface ChannelEditFormData {
 
 type ConsistentColorBackend = (input: string, saturation: number, lightness: number) => string;
 
-let colorImpl: ConsistentColorBackend | null = null;
-
-/** Bumped when the backend is installed so computed colours re-evaluate. */
-const backendVersion = shallowRef(0);
+/** Reactive so computed colours re-evaluate once the backend installs. */
+const colorBackend = shallowRef<ConsistentColorBackend | null>(null);
 
 /** Install the spec-conformant colour implementation. Called at app boot
  * once the wasm module is loaded.
@@ -464,15 +462,13 @@ const backendVersion = shallowRef(0);
  * crashing every `AppAvatar` render. */
 export function setConsistentColorBackend(fn: ConsistentColorBackend): void {
   if (typeof fn !== "function") return;
-  colorImpl = fn;
-  backendVersion.value += 1;
+  colorBackend.value = fn;
 }
 
 /** XEP-0392 `#rrggbb` colour for a username/JID (HSLuv saturation and
  * lightness, 0–100), or `null` while the wasm backend is not installed. */
 export function consistentColor(input: string, saturation = 100, lightness = 45): string | null {
-  void backendVersion.value;
-  return colorImpl ? colorImpl(input, saturation, lightness) : null;
+  return colorBackend.value?.(input, saturation, lightness) ?? null;
 }
 
 // ── Rich Message Rendering ──────────────────────────────────────────

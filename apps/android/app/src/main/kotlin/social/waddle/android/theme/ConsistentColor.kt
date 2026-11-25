@@ -20,9 +20,9 @@ private val hexes = ConsistentColorHexes()
  * shared Rust implementation; JVM screenshot tests, which cannot load the
  * native library, provide a deterministic stand-in.
  */
-val LocalConsistentHex = staticCompositionLocalOf<(String, Double) -> String> {
-    { name, lightness -> hexes.hex(name, CONSISTENT_SATURATION, lightness) }
-}
+val LocalConsistentHex = staticCompositionLocalOf<(String, Double) -> String> { ::sharedHex }
+
+private fun sharedHex(name: String, lightness: Double): String = hexes.hex(name, CONSISTENT_SATURATION, lightness)
 
 private const val CONSISTENT_SATURATION = 100.0
 private const val CONSISTENT_LIGHTNESS = 45.0
@@ -58,7 +58,7 @@ fun consistentTextColor(name: String): Color {
 fun consistentColor(
     name: String,
     onDark: Boolean,
-    hexOf: (String, Double) -> String = { input, lightness -> hexes.hex(input, CONSISTENT_SATURATION, lightness) },
+    hexOf: (String, Double) -> String = ::sharedHex,
     lightness: Double = if (onDark) CONSISTENT_LIGHTNESS_ON_DARK else CONSISTENT_LIGHTNESS,
 ): Color {
     val rgb = hexOf(name, lightness).removePrefix("#").toLong(HEX_RADIX) and RGB_MASK
