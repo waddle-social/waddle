@@ -366,7 +366,7 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
     },
     XepCoverageExemption {
         xep: "XEP-0470",
-        reason: "PubSub attachment helper backs XEP-0501 story reactions; not advertised as standalone XEP-0470 support.",
+        reason: "PubSub attachment helper backs Waddle pin projection but is not advertised as standalone XEP-0470 support.",
     },
     XepCoverageExemption {
         xep: "XEP-0486",
@@ -378,7 +378,7 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
     },
     XepCoverageExemption {
         xep: "XEP-0500",
-        reason: "Only the disabled (0) roominfo duration field is advertised; no enforcement or room config exists.",
+        reason: "Slow-mode config/rate-limit helper is not wired into MUC send authorization yet.",
     },
     XepCoverageExemption {
         xep: "XEP-0502",
