@@ -1237,3 +1237,231 @@ async fn retract_notifications_honor_node_config_and_explicit_notify() {
     let _ = bob_other.close().await;
     let _ = owner.close().await;
 }
+
+// ============================================================================
+// Node deletion and purge notifications (XEP-0060 §8.4, §8.5)
+// ============================================================================
+
+/// Submit a node-configuration form of `field`/`value` pairs.
+async fn configure_node(
+    client: &mut WsXmppClient,
+    owner: &str,
+    node: &str,
+    fields: &[(&str, &str)],
+) {
+    let fields: String = fields
+        .iter()
+        .map(|(var, value)| format!(r#"<field var="{var}"><value>{value}</value></field>"#))
+        .collect();
+    let resp = iq_set_to(
+        client,
+        "configure-node",
+        owner,
+        &format!(
+            r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><configure node="{node}"><x xmlns="jabber:x:data" type="submit">{fields}</x></configure></pubsub>"#
+        ),
+    )
+    .await;
+    assert!(resp.contains("type='result'"), "configure: {resp}");
+}
+
+/// The single child of the `<event/>` in a notification, as `(name, node)`.
+fn event_child(frame: &str) -> (String, Option<String>) {
+    let message: minidom::Element = frame.parse().expect("valid event XML");
+    let child = message
+        .get_child("event", NS_PUBSUB_EVENT)
+        .and_then(|event| event.children().next())
+        .expect("event child");
+    assert_eq!(child.children().count(), 0, "empty notification: {frame}");
+    (
+        child.name().to_owned(),
+        child.attr("node").map(str::to_owned),
+    )
+}
+
+#[tokio::test]
+async fn delete_and_purge_notify_subscribers_per_node_config() {
+    let _serial = TEST_SERIAL.lock().await;
+    let password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &password)]);
+    let mut owner = admin_client(&server, "notify-owner").await;
+    let owner_bare = format!("{USERNAME}@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let mut bob =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &password, "notify-bob")
+            .await
+            .expect("bob connect");
+
+    // §8.4.2 follows pubsub#notify_delete; §8.5.2 follows pubsub#notify_retract.
+    for (index, notify) in [true, false].into_iter().enumerate() {
+        let node = format!("urn:waddle:test:delete-purge:{index}");
+        let flag = if notify { "1" } else { "0" };
+        auto_create_node(&mut owner, &owner_bare, &node, "notify-seed").await;
+        configure_node(
+            &mut owner,
+            &owner_bare,
+            &node,
+            &[
+                ("pubsub#access_model", "open"),
+                ("pubsub#notify_retract", flag),
+                ("pubsub#notify_delete", flag),
+            ],
+        )
+        .await;
+        subscribe_with_jid(&mut bob, &owner_bare, &node, &bob_bare, "notify-sub").await;
+
+        let purge = iq_set_to(
+            &mut owner,
+            "notify-purge",
+            &owner_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><purge node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(purge.contains("type='result'"), "purge: {purge}");
+        let delete = iq_set_to(
+            &mut owner,
+            "notify-delete",
+            &owner_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB_OWNER}"><delete node="{node}"/></pubsub>"#),
+        )
+        .await;
+        assert!(delete.contains("type='result'"), "delete: {delete}");
+
+        for expected in ["purge", "delete"] {
+            if notify {
+                let frame = wait_for_event_message(&mut bob, &node, Duration::from_secs(2))
+                    .await
+                    .unwrap_or_else(|| panic!("subscriber receives {expected}"));
+                assert_eq!(
+                    event_child(&frame),
+                    (expected.to_owned(), Some(node.clone()))
+                );
+            }
+        }
+        assert_no_event_message(&mut bob, &node, Duration::from_millis(250)).await;
+    }
+    let _ = bob.close().await;
+    let _ = owner.close().await;
+}
+
+// ============================================================================
+// Request errors with pubsub-specific conditions (XEP-0060 §6.1.3.1, §7.1.3.6,
+// §7.2.3, §8.1.2.4, §8.4.3)
+// ============================================================================
+
+#[tokio::test]
+async fn malformed_requests_carry_pubsub_specific_conditions() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "conditions").await;
+    let admin_bare = format!("{USERNAME}@{DOMAIN}");
+
+    // (request body, stanza condition, pubsub-specific condition)
+    let cases = [
+        (
+            r#"<publish node="no-item"/>"#,
+            "bad-request",
+            "item-required",
+        ),
+        (
+            r#"<publish><item id="x"/></publish>"#,
+            "bad-request",
+            "nodeid-required",
+        ),
+        (
+            r#"<retract><item id="x"/></retract>"#,
+            "bad-request",
+            "nodeid-required",
+        ),
+        (
+            r#"<retract node="no-item"><item/></retract>"#,
+            "bad-request",
+            "item-required",
+        ),
+        (
+            r#"<subscribe node="no-item" jid="other@localhost"/>"#,
+            "bad-request",
+            "invalid-jid",
+        ),
+        // No instant-node support: a nameless create is refused.
+        ("<create/>", "not-acceptable", "nodeid-required"),
+    ];
+    for (index, (body, condition, specific)) in cases.into_iter().enumerate() {
+        let response = iq_set_to(
+            &mut admin,
+            &format!("condition-{index}"),
+            &admin_bare,
+            &format!(r#"<pubsub xmlns="{NS_PUBSUB}">{body}</pubsub>"#),
+        )
+        .await;
+        let iq: minidom::Element = response.parse().expect("valid IQ XML");
+        let error = iq.get_child("error", "jabber:client").expect("error");
+        assert!(
+            error.children().any(|child| child.name() == condition),
+            "{body} -> {condition}: {response}"
+        );
+        assert!(
+            error
+                .get_child(specific, "http://jabber.org/protocol/pubsub#errors")
+                .is_some(),
+            "{body} -> {specific}: {response}"
+        );
+    }
+
+    // The rejected publish stored nothing and created no node.
+    let items = iq_get_to(
+        &mut admin,
+        "condition-items",
+        &admin_bare,
+        &format!(r#"<pubsub xmlns="{NS_PUBSUB}"><items node="no-item"/></pubsub>"#),
+    )
+    .await;
+    assert!(items.contains("item-not-found"), "no node created: {items}");
+    let _ = admin.close().await;
+}
+
+// ============================================================================
+// PEP service discovery (XEP-0060 §10, XEP-0163 §6)
+// ============================================================================
+
+#[tokio::test]
+async fn account_disco_advertises_the_supported_pubsub_features() {
+    let _serial = TEST_SERIAL.lock().await;
+    let server = TestServer::start();
+    let mut admin = admin_client(&server, "disco-features").await;
+    let admin_bare = format!("{USERNAME}@{DOMAIN}");
+    let response = iq_get_to(
+        &mut admin,
+        "disco-features",
+        &admin_bare,
+        r#"<query xmlns="http://jabber.org/protocol/disco#info"/>"#,
+    )
+    .await;
+    let iq: minidom::Element = response.parse().expect("valid IQ XML");
+    let vars: Vec<&str> = iq
+        .children()
+        .flat_map(|query| query.children())
+        .filter(|child| child.name() == "feature")
+        .filter_map(|feature| feature.attr("var"))
+        .collect();
+    for feature in [
+        "http://jabber.org/protocol/pubsub#config-node",
+        "http://jabber.org/protocol/pubsub#create-nodes",
+        "http://jabber.org/protocol/pubsub#delete-items",
+        "http://jabber.org/protocol/pubsub#delete-nodes",
+        "http://jabber.org/protocol/pubsub#item-ids",
+        "http://jabber.org/protocol/pubsub#last-published",
+        "http://jabber.org/protocol/pubsub#manage-subscriptions",
+        "http://jabber.org/protocol/pubsub#member-affiliation",
+        "http://jabber.org/protocol/pubsub#modify-affiliations",
+        "http://jabber.org/protocol/pubsub#multi-items",
+        "http://jabber.org/protocol/pubsub#outcast-affiliation",
+        "http://jabber.org/protocol/pubsub#publish-only-affiliation",
+        "http://jabber.org/protocol/pubsub#publisher-affiliation",
+        "http://jabber.org/protocol/pubsub#purge-nodes",
+        "http://jabber.org/protocol/pubsub#retract-items",
+    ] {
+        assert!(vars.contains(&feature), "{feature} missing: {response}");
+    }
+    let _ = admin.close().await;
+}

@@ -652,6 +652,7 @@ fn publish_options_form_rejects_unknown_field_and_wrong_form_type() {
 fn publish_without_a_data_form_in_publish_options_is_bad_request() {
     let publish = Element::builder("publish", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n")
+        .append(Element::builder("item", NS_PUBSUB).build())
         .build();
     let options = Element::builder("publish-options", NS_PUBSUB).build();
     let iq = iq_with_payload(
@@ -834,4 +835,43 @@ fn publish_options_roster_groups_precondition_compares_the_group_set() {
     assert!(patch.met_by("urn:example:node", &config));
     config.roster_groups_allowed.push("work".to_owned());
     assert!(!patch.met_by("urn:example:node", &config));
+}
+
+#[test]
+fn purge_event_is_a_single_empty_purge_element() {
+    let service: jid::Jid = "pubsub.example.test".parse().expect("jid");
+    let subscriber: jid::Jid = "bob@example.test/a".parse().expect("jid");
+    let message = super::build_pubsub_purge_event(&service, &subscriber, "n");
+    let event = message.payloads.first().expect("event");
+    assert!(event.is("event", NS_PUBSUB_EVENT));
+    let purge = event.get_child("purge", NS_PUBSUB_EVENT).expect("purge");
+    assert_eq!(purge.attr("node"), Some("n"));
+    assert_eq!(purge.children().count(), 0);
+}
+
+#[test]
+fn request_without_a_node_or_item_maps_to_the_pubsub_condition() {
+    for (child, expected) in [
+        (
+            Element::builder("publish", NS_PUBSUB),
+            PubSubError::NodeIdRequired,
+        ),
+        (
+            Element::builder("create", NS_PUBSUB),
+            PubSubError::InstantNodesUnsupported,
+        ),
+        (
+            Element::builder("publish", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), "n"),
+            PubSubError::ItemRequired,
+        ),
+    ] {
+        let iq = iq_with_payload(
+            "e",
+            None,
+            None,
+            TestIqPayload::Set(pubsub_payload(NS_PUBSUB, [child.build()])),
+        );
+        assert_eq!(parse_pubsub_iq(&iq).expect_err("rejected"), expected);
+    }
 }

@@ -118,6 +118,23 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("http://jabber.org/protocol/pubsub#multi-items", "XEP-0060"),
     ("http://jabber.org/protocol/pubsub#item-ids", "XEP-0060"),
     (
+        "http://jabber.org/protocol/pubsub#last-published",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#member-affiliation",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#outcast-affiliation",
+        "XEP-0060",
+    ),
+    (
+        "http://jabber.org/protocol/pubsub#publisher-affiliation",
+        "XEP-0060",
+    ),
+    ("http://jabber.org/protocol/pubsub#purge-nodes", "XEP-0060"),
+    (
         "http://jabber.org/protocol/pubsub#publish-only-affiliation",
         "XEP-0060",
     ),
