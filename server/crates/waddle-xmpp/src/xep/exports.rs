@@ -162,8 +162,8 @@ pub use super::xep0377::{
 };
 
 pub use waddle_xmpp_core::xep0392::{
-    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
-    CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
+    compute_hue, generate_color, generate_color_with_params, hsluv_to_rgb, ConsistentColor,
+    HsluvColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
 };
 
 pub use super::xep0393::{

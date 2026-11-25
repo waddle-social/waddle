@@ -28,7 +28,7 @@ import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
-import social.waddle.android.theme.LocalConsistentHue
+import social.waddle.android.theme.LocalConsistentHex
 import social.waddle.android.theme.WaddleTheme
 import java.time.Instant
 import java.time.LocalDate
@@ -106,7 +106,7 @@ class TimelineFollowTest {
 
     @Composable
     private fun Timeline() {
-        CompositionLocalProvider(LocalConsistentHue provides { 0.0 }) {
+        CompositionLocalProvider(LocalConsistentHex provides { _, _ -> "#808080" }) {
             WaddleTheme(themeMode = ThemeMode.DAYLIGHT) {
                 TimelineList(
                     entries = shown.value,
