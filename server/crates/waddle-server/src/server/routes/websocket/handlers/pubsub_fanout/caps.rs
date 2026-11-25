@@ -205,15 +205,12 @@ async fn deliver_to_user_resources(
         if already_delivered.contains(&resource) {
             continue;
         }
-        let Some(caps_key) = state
+        let Some(cached) = state
             .deps
             .protocol
             .caps_resolver
-            .key_for_resource(&resource)
+            .info_for_resource(&resource)
         else {
-            continue;
-        };
-        let Some(cached) = state.deps.protocol.caps_resolver.cached(&caps_key) else {
             continue;
         };
         if !cached

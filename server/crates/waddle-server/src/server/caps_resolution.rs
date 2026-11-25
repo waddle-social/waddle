@@ -12,10 +12,12 @@
 //!   features + XEP-0128 forms) and only cache when the recomputed
 //!   hash matches the advertised `ver`.
 //! - **Unsupported `hash` value (e.g. `sha-256` advertised but server
-//!   only implements SHA-1):** XEP-0115 §5.4 step 2 forbids global
-//!   caching but does NOT forbid per-session knowledge. We currently
-//!   skip both the disco#info round-trip and the cache write; the
-//!   resource's caps are simply unknown to fan-out for that session.
+//!   only implements SHA-1):** XEP-0115 §5.4 step 2 sends the same
+//!   disco#info request but forbids validating or globally caching the
+//!   result; the discovered identities and features are associated
+//!   *only* with the generating full JID, so fan-out can still use
+//!   them for that resource until it disconnects or advertises other
+//!   caps.
 //!
 //! Cache keying is per `(hash algorithm, ver)` per XEP-0115 §6.
 //!
@@ -54,6 +56,10 @@ pub enum CapsVerification {
     /// Recomputed hash matched `ver`; the result MUST be cached and
     /// the resource→ver mapping recorded.
     Match,
+    /// The advertised `hash` is not implemented here (§5.4 step 2): the
+    /// reply was not validated and was associated only with the
+    /// generating full JID, never with the global cache.
+    ResourceOnly,
     /// Recomputed hash did not match `ver`; the result MUST NOT be
     /// cached (poisoning defense, §8.1).
     Mismatch,
@@ -83,6 +89,10 @@ pub struct PendingCapsResolution {
 pub struct CapsResolver {
     cache: Arc<CapsCache>,
     resource_to_ver: Arc<DashMap<FullJid, CapsCacheKey>>,
+    /// Unvalidated disco#info results for resources that advertised an
+    /// unsupported `hash`, keyed by the generating full JID only
+    /// (§5.4 step 2). Never consulted for any other JID.
+    resource_only: Arc<DashMap<FullJid, (CapsCacheKey, CachedDiscoInfo)>>,
     pending: Arc<DashMap<String, PendingCapsResolution>>,
 }
 
@@ -97,6 +107,7 @@ impl CapsResolver {
         Self {
             cache,
             resource_to_ver: Arc::new(DashMap::new()),
+            resource_only: Arc::new(DashMap::new()),
             pending: Arc::new(DashMap::new()),
         }
     }
@@ -108,6 +119,7 @@ impl CapsResolver {
     /// Record that `full_jid` is advertising `(hash, ver)`. Used both
     /// on a cache hit and after a successful verification.
     pub fn record_resource(&self, full_jid: &FullJid, key: CapsCacheKey) {
+        self.resource_only.remove(full_jid);
         self.resource_to_ver.insert(full_jid.clone(), key);
     }
 
@@ -117,6 +129,7 @@ impl CapsResolver {
     /// hash-keyed cache warm.
     pub fn drop_resource(&self, full_jid: &FullJid) {
         self.resource_to_ver.remove(full_jid);
+        self.resource_only.remove(full_jid);
         self.pending.retain(|_, v| v.full_jid != *full_jid);
     }
 
@@ -126,6 +139,7 @@ impl CapsResolver {
     /// are treated as new interest (XEP-0163 last-item replay).
     pub fn forget_resource_key(&self, full_jid: &FullJid) {
         self.resource_to_ver.remove(full_jid);
+        self.resource_only.remove(full_jid);
     }
 
     /// Return the (hash, ver) advertised by `full_jid`, if any.
@@ -133,6 +147,26 @@ impl CapsResolver {
         self.resource_to_ver
             .get(full_jid)
             .map(|v| v.value().clone())
+    }
+
+    /// Identity+features known for `full_jid`: the globally cached,
+    /// verified entry for its advertised (hash, ver), or the
+    /// resource-only entry discovered for an unsupported hash.
+    pub fn info_for_resource(&self, full_jid: &FullJid) -> Option<CachedDiscoInfo> {
+        if let Some(key) = self.key_for_resource(full_jid) {
+            return self.cached(&key);
+        }
+        self.resource_only
+            .get(full_jid)
+            .map(|entry| entry.value().1.clone())
+    }
+
+    /// True iff `full_jid` already has resource-only caps for `key`, so
+    /// a repeated advertisement needs no second disco#info round-trip.
+    pub fn has_resource_only(&self, full_jid: &FullJid, key: &CapsCacheKey) -> bool {
+        self.resource_only
+            .get(full_jid)
+            .is_some_and(|entry| entry.value().0 == *key)
     }
 
     /// Look up the cached identity+features for a (hash, ver) tuple.
@@ -177,6 +211,8 @@ impl CapsResolver {
     ///
     /// - On Match, the (hash, ver) is cached and the resource→key
     ///   mapping recorded.
+    /// - On an unsupported hash, the result is recorded for the
+    ///   resource only (never in the global cache).
     /// - On Mismatch, neither side effect occurs (poisoning defense).
     /// - On IllFormed, neither side effect occurs (§5.4 step 2.4).
     ///
@@ -196,8 +232,17 @@ impl CapsResolver {
             return CapsVerification::IllFormed;
         }
         if !is_supported_hash(&pending.caps.hash) {
-            // §5.4 step 2: unsupported hash → MUST NOT cache.
-            return CapsVerification::Mismatch;
+            // §5.4 step 2: do not validate or globally cache; associate
+            // the result only with the generating entity's JID.
+            self.resource_to_ver.remove(&pending.full_jid);
+            self.resource_only.insert(
+                pending.full_jid,
+                (
+                    CapsCacheKey::from_caps(&pending.caps),
+                    CachedDiscoInfo::new(identities, features),
+                ),
+            );
+            return CapsVerification::ResourceOnly;
         }
         let recomputed = compute_caps_hash_with_extensions(&identities, &features, &extensions);
         if recomputed != pending.caps.ver {
@@ -348,16 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn complete_pending_with_unsupported_hash_does_not_cache() {
-        // PR #438 adversarial review issue #1: an unsupported `hash`
-        // attribute MUST NOT be cached even if the recomputed value
-        // happens to match by accident. We always reject when the
-        // advertised hash isn't in our SUPPORTED_HASHES set.
+    fn complete_pending_with_unsupported_hash_is_resource_only() {
+        // XEP-0115 §5.4 step 2: an unsupported hash is neither validated
+        // nor globally cached; the discovered features are associated
+        // only with the generating full JID.
         let resolver = CapsResolver::default();
         let identities = sample_identities();
         let features = sample_features();
         let ver = compute_caps_hash(&identities, &features);
         let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+        let other_jid: FullJid = "alice@localhost/r2".parse().expect("jid");
         let caps = Caps {
             hash: "sha-256".to_string(),
             node: "https://example.test/caps".to_string(),
@@ -366,14 +411,26 @@ mod tests {
         resolver.begin_pending("iq-unsupp".into(), full_jid.clone(), caps);
         let pending = resolver.take_pending("iq-unsupp").expect("pending");
 
-        let outcome = resolver.complete_pending(pending, identities, features, vec![], false);
+        let outcome =
+            resolver.complete_pending(pending, identities, features.clone(), vec![], false);
 
-        assert_eq!(outcome, CapsVerification::Mismatch);
+        assert_eq!(outcome, CapsVerification::ResourceOnly);
         assert!(resolver
             .cached(&CapsCacheKey::new("sha-256", &ver))
             .is_none());
         assert!(resolver.cached(&CapsCacheKey::new("sha-1", &ver)).is_none());
         assert_eq!(resolver.key_for_resource(&full_jid), None);
+        assert_eq!(
+            resolver
+                .info_for_resource(&full_jid)
+                .expect("info")
+                .features,
+            features
+        );
+        assert!(resolver.has_resource_only(&full_jid, &CapsCacheKey::new("sha-256", &ver)));
+        assert!(resolver.info_for_resource(&other_jid).is_none());
+        resolver.drop_resource(&full_jid);
+        assert!(resolver.info_for_resource(&full_jid).is_none());
     }
 
     #[test]
