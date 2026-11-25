@@ -21,6 +21,7 @@ module placement_lease {
   var nextWriteSeq: int
   var writeLog: Set[WriteRecord]
   var staleWriteOccurred: bool
+  var staleRenewOccurred: bool
 
   action init = all {
     clock' = 0,
@@ -32,6 +33,7 @@ module placement_lease {
     nextWriteSeq' = 0,
     writeLog' = Set(),
     staleWriteOccurred' = false,
+    staleRenewOccurred' = false,
   }
 
   action claim(h: Holder): bool = all {
@@ -46,6 +48,7 @@ module placement_lease {
     nextWriteSeq' = nextWriteSeq,
     writeLog' = writeLog,
     staleWriteOccurred' = staleWriteOccurred,
+    staleRenewOccurred' = staleRenewOccurred,
   }
 
   // Renew requires exact incarnationKey (same spiffeRole with different key is denied).
@@ -63,6 +66,7 @@ module placement_lease {
     nextWriteSeq' = nextWriteSeq,
     writeLog' = writeLog,
     staleWriteOccurred' = staleWriteOccurred,
+    staleRenewOccurred' = (staleRenewOccurred or activeHolder != h.incarnationKey or presentedGen != leaseGen),
   }
 
   // Atomic CAS transfer fences previous generation and advances leaseGen.
@@ -82,6 +86,7 @@ module placement_lease {
     nextWriteSeq' = nextWriteSeq,
     writeLog' = writeLog,
     staleWriteOccurred' = staleWriteOccurred,
+    staleRenewOccurred' = staleRenewOccurred,
   }
 
   action release(h: Holder, expectedGen: int): bool = all {
@@ -97,6 +102,7 @@ module placement_lease {
     nextWriteSeq' = nextWriteSeq,
     writeLog' = writeLog,
     staleWriteOccurred' = staleWriteOccurred,
+    staleRenewOccurred' = staleRenewOccurred,
   }
 
   // Storage-host / EnteredTransaction write fence check.
@@ -117,6 +123,7 @@ module placement_lease {
       activeRole' = activeRole,
       leaseExpiry' = leaseExpiry,
       fencedGen' = fencedGen,
+      staleRenewOccurred' = staleRenewOccurred,
     }
   }
 
@@ -131,20 +138,23 @@ module placement_lease {
     nextWriteSeq' = nextWriteSeq,
     writeLog' = writeLog,
     staleWriteOccurred' = staleWriteOccurred,
+    staleRenewOccurred' = staleRenewOccurred,
   }
 
   action step = any {
     nondet h = HOLDERS.oneOf()
     claim(h),
     nondet h = HOLDERS.oneOf()
-    renew(h, leaseGen),
+    nondet g = 0.to(leaseGen).oneOf()
+    renew(h, g),
     nondet fromH = HOLDERS.oneOf()
     nondet toH = HOLDERS.oneOf()
     transfer(fromH, toH, leaseGen),
     nondet h = HOLDERS.oneOf()
     release(h, leaseGen),
     nondet h = HOLDERS.oneOf()
-    fencedWrite(h, leaseGen),
+    nondet g = 0.to(leaseGen).oneOf()
+    fencedWrite(h, g),
     tick,
   }
 
@@ -157,7 +167,8 @@ module placement_lease {
     writeLog.forall(w => w.gen <= leaseGen),
   }
 
-  val sameRoleStaleReplicaDenied: bool = not(staleWriteOccurred)
+  val sameRoleStaleReplicaDenied: bool =
+    not(staleWriteOccurred) and not(staleRenewOccurred)
 
   val monotonicLeaseGen: bool = leaseGen >= fencedGen
 
