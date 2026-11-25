@@ -27,7 +27,7 @@ let _AndroidCiMemory = schema.#Contributor & {
 // across runs; without it every CI run re-downloads ~2 GB of SDK packages.
 let _NamespaceAndroidCache = schema.#Contributor & {
 	id: "namespaceAndroidCache"
-	when: runtimeType: ["nix"]
+	when: taskLabels: ["gradle"]
 	tasks: [
 		{
 			id:       "android.cache"
@@ -45,6 +45,7 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 // differs. The pipeline still fails; reviewers can inspect the evidence.
 let _AndroidTestReports = schema.#Contributor & {
 	id: "androidTestReports"
+	when: taskLabels: ["gradle"]
 	tasks: [{
 		id:        "android.testReports"
 		label:     "Upload Android test failure reports"
@@ -149,8 +150,14 @@ schema.#Project & {
 				pullRequest: true
 				manual:      true
 			}
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.telemetryContract, tasks.ciGradleContract]
+		}
+		queueChecks: {
+			when: manual: true
+			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
+			"tasks": [tasks.checkBindingsDrift, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own job so a flaky emulator never delays unit-test feedback and
@@ -220,6 +227,7 @@ schema.#Project & {
 				".github/workflows/waddle-android-default.yml",
 				".github/workflows/waddle-android-devicetests.yml",
 				".github/workflows/waddle-android-pullrequest.yml",
+				".github/workflows/waddle-android-queuechecks.yml",
 			]}]
 		}
 
@@ -242,6 +250,7 @@ schema.#Project & {
 		// serializers) with placeholder FCM values: the real ones are
 		// secrets, and R8 only needs the build to configure.
 		build: schema.#Task & {
+			labels: ["gradle"]
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", ":app:assembleFossDebug", ":app:assemblePlayDebug", ":app:minifyPlayReleaseWithR8", "-PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder", "-PWADDLE_FIREBASE_APP_ID=1:0:android:0", "-PWADDLE_FIREBASE_API_KEY=ci-placeholder", "-PWADDLE_FIREBASE_SENDER_ID=0"]
 			dependsOn: [setupSdk, buildRustJni]
@@ -257,6 +266,7 @@ schema.#Project & {
 		// change that was not re-recorded fails here. Screenshot tests set
 		// their state explicitly, so both flavours share one set of goldens.
 		test: schema.#Task & {
+			labels: ["gradle"]
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", ":core:client:testDebugUnitTest", ":app:testFossDebugUnitTest", ":app:testPlayDebugUnitTest", "-Proborazzi.test.verify=true"]
 			dependsOn: [setupSdk]
@@ -270,6 +280,7 @@ schema.#Project & {
 		// every transitive dependency: no Google code in `foss`, and no
 		// analytics, crash or performance reporting in `play`.
 		lint: schema.#Task & {
+			labels: ["gradle"]
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", "detekt", ":app:lintFossDebug", ":app:lintPlayDebug", ":app:verifyFossRuntimeClasspath", ":app:verifyPlayRuntimeClasspath"]
 			dependsOn: [setupSdk]
@@ -281,7 +292,7 @@ schema.#Project & {
 		ciGradleContract: schema.#Task & {
 			command: "python3"
 			args: ["../../scripts/test_android_ci_gradle.py"]
-			inputs: ["env.cue", schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh", "scripts/test_android_ci_gradle.py", ".github/workflows/waddle-android-default.yml", ".github/workflows/waddle-android-devicetests.yml", ".github/workflows/waddle-android-pullrequest.yml"]}]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: ["scripts/android-ci-gradle.sh", "scripts/test_android_ci_gradle.py", ".github/workflows/waddle-android-default.yml", ".github/workflows/waddle-android-devicetests.yml", ".github/workflows/waddle-android-pullrequest.yml", ".github/workflows/waddle-android-queuechecks.yml"]}]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).
@@ -298,6 +309,7 @@ schema.#Project & {
 		// device. The Kotlin compiler runs in-process because a separate
 		// Kotlin daemon inherits the Gradle heap and doubles it.
 		gmdCheck: schema.#Task & {
+			labels: ["gradle"]
 			command: "bash"
 			args: ["-c", #"""
 				set -euo pipefail
@@ -331,6 +343,7 @@ schema.#Project & {
 		// no published release is ever mutated. Older rolling releases
 		// are pruned to a bounded window.
 		publishApk: schema.#Task & {
+			labels: ["gradle"]
 			ci: github: permissions: contents: "write"
 			command: "bash"
 			env: {

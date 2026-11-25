@@ -3,15 +3,13 @@ name: Operational qualification contract
 on:
   push:
     branches:
-      - '**'
+      - main
     paths:
       - .github/workflows/operational-qualification.yml
       - server/experiments/operational-qualification/**
       - server/rust-toolchain.toml
       - server/.cargo/**
       - flake.lock
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
 
 permissions:

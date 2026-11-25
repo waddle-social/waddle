@@ -120,8 +120,8 @@ def validate(workflow, tasks, helper_script):
     concurrency = workflow.get("concurrency", {})
     require(
         concurrency.get("group") == "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
-        and concurrency.get("cancel-in-progress") is True,
-        "main workflow concurrency changed",
+        and concurrency.get("cancel-in-progress") is False,
+        "main must finish the active publish run and coalesce pending pushes",
     )
 
     def command(name):
@@ -249,6 +249,12 @@ class PublishGraphTests(unittest.TestCase):
 
     def test_generated_workflow_preserves_the_contract(self):
         self.check()
+
+    def test_new_push_cannot_cancel_an_active_publish_run(self):
+        workflow = copy.deepcopy(self.workflow)
+        workflow["concurrency"]["cancel-in-progress"] = True
+        with self.assertRaisesRegex(ValueError, "finish the active publish run"):
+            self.check(workflow=workflow)
 
     def test_missing_or_added_dependency_is_rejected(self):
         for source, target, add in (

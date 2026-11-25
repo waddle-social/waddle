@@ -211,6 +211,7 @@ schema.#Project & {
 		}
 		default: {
 			mode: "expanded"
+			concurrency: cancelInProgress: false
 			when: {
 				branch: ["main"]
 				defaultBranch: true
@@ -281,11 +282,15 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			// The short checks share one job (pullRequestChecks): each job
-			// repeats about 75 seconds of Nix, cache and cuenv setup and
-			// takes one of the 20 concurrent GitHub job slots.
+			tasks: [_t.pullRequestChecks]
+		}
+		// The integration planner runs these builds on the merge group's SHA.
+		queueChecks: {
+			when: manual: true
+			mode: "expanded"
+			provider: github: runner:      "ubuntu-24.04"
+			provider: github: permissions: {contents: "read", "id-token": "write"}
 			tasks: [
-				_t.pullRequestChecks,
 				_t.nixClippy, _t.nixDoctest,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
@@ -320,19 +325,6 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: runner: "ubuntu-24.04"
-			provider: github: permissions: {
-				"id-token":      "write"
-				contents:        "read"
-				checks:          "write"
-				packages:        "read"
-				"pull-requests": "none"
-			}
-			tasks: [_t.federationGrantFenceProof]
-		}
-		federationGrantFencePullRequest: {
-			mode: "expanded"
-			when: pullRequest: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
@@ -382,10 +374,7 @@ schema.#Project & {
 		namespaceRustChecks: {
 			mode:        "expanded"
 			derivePaths: true
-			when: {
-				pullRequest: true
-				manual:      true
-			}
+			when: manual: true
 			provider: github: permissions: {
 				"id-token":      "write"
 				contents:        "read"
@@ -393,11 +382,8 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			// The default-feature, no-Postgres test lane is the only Rust
-			// gate of the main pipeline that no other pull-request lane
-			// covers. Pull requests get clippy and doctests from the
-			// pullRequest pipeline's nixClippy and nixDoctest, which run the
-			// same commands over the same workspace and features.
+			// The queue runs the default-feature, no-Postgres suite; mainTest
+			// repeats that configuration on the revision eligible to publish.
 			tasks: [_t.test]
 		}
 		// The manual-only rustTests workflow (workflow_dispatch) runs the same
@@ -425,7 +411,6 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
 			provider: github: runner: "ubuntu-24.04"
@@ -645,7 +630,7 @@ schema.#Project & {
 					".github/workflows/waddle-server-authzidcodec.yml",
 					".github/workflows/waddle-server-default.yml",
 					".github/workflows/waddle-server-federationgrantfence.yml",
-					".github/workflows/waddle-server-federationgrantfencepullrequest.yml",
+					".github/workflows/waddle-server-queuechecks.yml",
 					".github/workflows/waddle-server-namespacerustchecks.yml",
 					".github/workflows/waddle-server-parentmovenative.yml",
 					".github/workflows/waddle-server-publish-tags-to-flakehub.yml",

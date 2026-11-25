@@ -22,18 +22,83 @@ name: waddle-ci-cache-benchmark
   workflow_dispatch:
     inputs:
       scope:
-        description: Compare all providers, or retry only the Namespace seed/warm pair
+        description: Compare Nix caches, retry Namespace, or qualify a Cargo target volume
         type: choice
         default: all
         required: true
         options:
           - all
           - namespace
+          - cargo
 permissions: {}
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ inputs.scope == 'cargo' && '-cargo' || '' }}
   cancel-in-progress: true
 jobs:
+  cargo-seed:
+    name: Cargo target volume / seed
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'cargo' && github.ref == 'refs/heads/main' }}
+    outputs:
+      attempt: ${{ github.run_attempt }}
+      inventory: ${{ steps.seed.outputs.inventory }}
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
+      - nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - nscloud-cache-size-50gb
+      - nscloud-cache-allow-commit-from-main
+    permissions:
+      contents: read
+    timeout-minutes: 100
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Mount isolated Cargo workspace and target
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: ~/.cache/waddle-cargo-trial
+          fail-on-cache-miss: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Run default-feature server tests
+        id: seed
+        run: nix develop --command python3 ci/cache-benchmark/cargo_volume.py seed
+  cargo-restore:
+    name: Cargo target volume / restore
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'cargo' && github.ref == 'refs/heads/main' }}
+    needs:
+      - cargo-seed
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
+      - nscloud-cache-tag-waddle-cargo-${{ github.repository_id }}-${{ github.run_id }}-${{ needs.cargo-seed.outputs.attempt }}
+      - nscloud-cache-size-50gb
+      - nscloud-cache-allow-commit-from-main
+      - nscloud-cache-exp-do-not-commit
+    permissions:
+      contents: read
+    timeout-minutes: 100
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Mount isolated Cargo workspace and target
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: ~/.cache/waddle-cargo-trial
+          fail-on-cache-miss: true
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - env:
+          SEED_INVENTORY: ${{ needs.cargo-seed.outputs.inventory }}
+        name: Run default-feature server tests
+        id: restore
+        run: nix develop --command python3 ci/cache-benchmark/cargo_volume.py restore
   bazel-seed:
     name: Operator CRD drift remote cache / seed
     outputs:
@@ -161,8 +226,8 @@ jobs:
       - name: Setup cuenv (release)
         run: |-
           set -euo pipefail
-          cuenv_version="0.77.1"
-          if [ "$cuenv_version" != "0.77.1" ]; then
+          cuenv_version="0.81.1"
+          if [ "$cuenv_version" != "0.81.1" ]; then
             echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
             exit 1
           fi
@@ -170,15 +235,15 @@ jobs:
           case "$cuenv_platform" in
             Darwin-arm64|Darwin-aarch64)
               cuenv_asset="cuenv-darwin-arm64"
-              cuenv_sha256="9672bad1d62c3390c84bb5fc209b3dabb8b5fb140dc3d4f37f106808da742097"
+              cuenv_sha256="2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244"
               ;;
             Linux-aarch64|Linux-arm64)
               cuenv_asset="cuenv-linux-arm64"
-              cuenv_sha256="715d11f172013f115c8ba4c06c0ad9f5987ed5750a050e575f4a51fa541c3e3e"
+              cuenv_sha256="287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8"
               ;;
             Linux-x86_64|Linux-amd64)
               cuenv_asset="cuenv-linux-x64"
-              cuenv_sha256="ebbd618ab47cec51a8cdd6ec723584317c9f0e9ab8c776a8c86ac0abbcdd7fa7"
+              cuenv_sha256="f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc"
               ;;
             *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
           esac
@@ -198,7 +263,7 @@ jobs:
             *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
           esac
           chmod 0755 "$cuenv_download"
-          if [ "$("$cuenv_download" --version)" != "cuenv 0.77.1" ]; then
+          if [ "$("$cuenv_download" --version)" != "cuenv 0.81.1" ]; then
             echo "Downloaded cuenv version differs from the pinned release" >&2
             exit 1
           fi
@@ -340,8 +405,8 @@ jobs:
       - name: Setup cuenv (release)
         run: |-
           set -euo pipefail
-          cuenv_version="0.77.1"
-          if [ "$cuenv_version" != "0.77.1" ]; then
+          cuenv_version="0.81.1"
+          if [ "$cuenv_version" != "0.81.1" ]; then
             echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
             exit 1
           fi
@@ -349,15 +414,15 @@ jobs:
           case "$cuenv_platform" in
             Darwin-arm64|Darwin-aarch64)
               cuenv_asset="cuenv-darwin-arm64"
-              cuenv_sha256="9672bad1d62c3390c84bb5fc209b3dabb8b5fb140dc3d4f37f106808da742097"
+              cuenv_sha256="2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244"
               ;;
             Linux-aarch64|Linux-arm64)
               cuenv_asset="cuenv-linux-arm64"
-              cuenv_sha256="715d11f172013f115c8ba4c06c0ad9f5987ed5750a050e575f4a51fa541c3e3e"
+              cuenv_sha256="287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8"
               ;;
             Linux-x86_64|Linux-amd64)
               cuenv_asset="cuenv-linux-x64"
-              cuenv_sha256="ebbd618ab47cec51a8cdd6ec723584317c9f0e9ab8c776a8c86ac0abbcdd7fa7"
+              cuenv_sha256="f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc"
               ;;
             *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
           esac
@@ -377,7 +442,7 @@ jobs:
             *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
           esac
           chmod 0755 "$cuenv_download"
-          if [ "$("$cuenv_download" --version)" != "cuenv 0.77.1" ]; then
+          if [ "$("$cuenv_download" --version)" != "cuenv 0.81.1" ]; then
             echo "Downloaded cuenv version differs from the pinned release" >&2
             exit 1
           fi
@@ -395,7 +460,7 @@ jobs:
           EXPECTED_ACTION_DIGEST: ${{ needs.bazel-seed.outputs.digest }}
         run: bash ci/cache-benchmark/verify-bazel.sh restore
   normal-ci:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' }}
     permissions:
       contents: read
       actions: read
@@ -1059,7 +1124,7 @@ jobs:
       - warm
       - h3-seed
       - h3-warm
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

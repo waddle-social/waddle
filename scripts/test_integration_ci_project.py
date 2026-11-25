@@ -91,6 +91,11 @@ class DiscoveryContracts(unittest.TestCase):
         config["ci"]["pipelines"]["deviceTests"] = config["ci"]["pipelines"]["pullRequest"]
         self.metadata["instances"]["apps/android"] = config
         self.assertEqual(module.verify_project(self.summary, self.metadata, self.root / "apps/android", "deviceTests")["tasks"], 1)
+        config["ci"]["pipelines"]["queueChecks"] = config["ci"]["pipelines"]["pullRequest"]
+        self.assertEqual(module.verify_project(self.summary, self.metadata, self.root / "apps/android", "queueChecks")["tasks"], 1)
+        self.summary["projects"][0]["name"] = "different-project"
+        with self.assertRaisesRegex(ValueError, "reviewed queue projects"):
+            module.verify_project(self.summary, self.metadata, self.root / "apps/android", "queueChecks")
 
     def test_mismatched_metadata_fails(self):
         self.metadata["instances"]["chat"]["name"] = "other"
@@ -161,9 +166,11 @@ class PinnedCuenvContracts(unittest.TestCase):
             (root / "env.cue").write_text(bound_inline)
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
+            shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             bound_result = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(bound_result.returncode, 0)
-            self.assertIn("named task references", bound_result.stderr)
+            self.assertIn("selected tasks differ", bound_result.stderr)
+            self.assertFalse((root / ".cuenv/reports").exists())
             (root / "env.cue").write_text(named)
             self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
             result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
@@ -250,7 +257,7 @@ class PinnedCuenvContracts(unittest.TestCase):
             # Delegate to the real CLI, then corrupt only its on-disk evidence.
             binary_dir = root / "bin"; binary_dir.mkdir()
             wrapper = binary_dir / "cuenv"
-            wrapper.write_text("#!" + sys.executable + "\n" + "import json, os, pathlib, subprocess, sys, time\n" + "result = subprocess.run([" + repr(real_cli) + "] + sys.argv[1:])\n" + "if sys.argv[1:3] == ['ci', '--all'] and result.returncode == 0:\n" + "    path = next(pathlib.Path('.cuenv/reports').rglob('*.json'))\n" + "    mode = os.environ['REPORT_TAMPER']\n" + "    if mode == 'missing': path.unlink()\n" + "    elif mode == 'symlink':\n" + "        other = path.with_suffix('.saved'); path.rename(other); path.symlink_to(other.name)\n" + "    elif mode == 'future': os.utime(path, (time.time() + 60, time.time() + 60))\n" + "    elif mode == 'parse': path.write_text('{invalid')\n" + "    else:\n" + "        value = json.loads(path.read_text())\n" + "        if mode == 'identity': value['context']['sha'] = 'b' * 40\n" + "        if mode == 'duplicate': value['tasks'] *= 2\n" + "        if mode == 'skipped': value['tasks'][0]['status'] = 'skipped'\n" + "        if mode == 'failed': value['tasks'][0]['exit_code'] = 1\n" + "        path.write_text(json.dumps(value))\n" + "sys.exit(result.returncode)\n")
+            wrapper.write_text("#!" + sys.executable + "\n" + "import json, os, pathlib, subprocess, sys, time\n" + "result = subprocess.run([" + repr(real_cli) + "] + sys.argv[1:])\n" + "if sys.argv[1:3] == ['ci', '--all'] and '--dry-run' not in sys.argv and result.returncode == 0:\n" + "    path = next(pathlib.Path('.cuenv/reports').rglob('*.json'))\n" + "    mode = os.environ['REPORT_TAMPER']\n" + "    if mode == 'missing': path.unlink()\n" + "    elif mode == 'symlink':\n" + "        other = path.with_suffix('.saved'); path.rename(other); path.symlink_to(other.name)\n" + "    elif mode == 'future': os.utime(path, (time.time() + 60, time.time() + 60))\n" + "    elif mode == 'parse': path.write_text('{invalid')\n" + "    else:\n" + "        value = json.loads(path.read_text())\n" + "        if mode == 'identity': value['context']['sha'] = 'b' * 40\n" + "        if mode == 'duplicate': value['tasks'] *= 2\n" + "        if mode == 'skipped': value['tasks'][0]['status'] = 'skipped'\n" + "        if mode == 'failed': value['tasks'][0]['exit_code'] = 1\n" + "        path.write_text(json.dumps(value))\n" + "sys.exit(result.returncode)\n")
             wrapper.chmod(0o755)
             for mode in ("missing", "identity", "duplicate", "skipped", "failed", "parse", "symlink", "future"):
                 shutil.rmtree(reports)
