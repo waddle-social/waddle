@@ -54,7 +54,7 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
             &shared_role,
             PlacementMode::SharedPool,
             &holder_a,
-            80,
+            300,
         )
         .await
         .expect("claim A");
@@ -73,8 +73,8 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
         .expect("write fence A");
     trace1.emit_tenant_write("cell-a", "t-expiry", &holder_a, lease_a.generation);
 
-    // Wait past authoritative DB TTL (80ms).
-    tokio::time::sleep(Duration::from_millis(140)).await;
+    // Wait past authoritative DB TTL (300ms).
+    tokio::time::sleep(Duration::from_millis(420)).await;
 
     assert!(matches!(
         lease_store
@@ -193,7 +193,7 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
             &shared_role,
             PlacementMode::SharedPool,
             &holder_a,
-            80,
+            300,
         )
         .await
         .expect("claim part A");
@@ -209,7 +209,7 @@ async fn run_all_seven_placement_scenarios<L: PlacementLeaseStore + 'static, S: 
         .expect("open part A");
 
     // Cell A partitioned; lease expires; Cell B claims gen=2 and opens storage.
-    tokio::time::sleep(Duration::from_millis(140)).await;
+    tokio::time::sleep(Duration::from_millis(420)).await;
     let part_b = lease_store
         .claim(
             &t_part,
