@@ -172,8 +172,8 @@ jobs:
     - name: Setup cuenv (release)
       run: |-
         set -euo pipefail
-        cuenv_version="0.77.0"
-        if [ "$cuenv_version" != "0.77.0" ]; then
+        cuenv_version="0.77.1"
+        if [ "$cuenv_version" != "0.77.1" ]; then
           echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
           exit 1
         fi
@@ -181,15 +181,15 @@ jobs:
         case "$cuenv_platform" in
           Darwin-arm64|Darwin-aarch64)
             cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="bdb3413abdea0c5617ed5a9ec3c10c5813dd6a3b8233305e81c53d76d5236647"
+            cuenv_sha256="9672bad1d62c3390c84bb5fc209b3dabb8b5fb140dc3d4f37f106808da742097"
             ;;
           Linux-aarch64|Linux-arm64)
             cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="fde68bff3e2adc383d25bc64530b0c72b53fab32181da97af99dbed52e7a6814"
+            cuenv_sha256="715d11f172013f115c8ba4c06c0ad9f5987ed5750a050e575f4a51fa541c3e3e"
             ;;
           Linux-x86_64|Linux-amd64)
             cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="d7a35a14778316c65ff725bd3c1bd776ea1610b09f02cc20badc588110899085"
+            cuenv_sha256="ebbd618ab47cec51a8cdd6ec723584317c9f0e9ab8c776a8c86ac0abbcdd7fa7"
             ;;
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
@@ -209,7 +209,7 @@ jobs:
           *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
         esac
         chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.77.0" ]; then
+        if [ "$("$cuenv_download" --version)" != "cuenv 0.77.1" ]; then
           echo "Downloaded cuenv version differs from the pinned release" >&2
           exit 1
         fi

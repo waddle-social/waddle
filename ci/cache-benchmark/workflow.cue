@@ -254,6 +254,23 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 workflow: {
 	name: "waddle-ci-cache-benchmark"
 	on: {
+		push: {
+			branches: ["main"]
+			paths: [
+				"ci/cache-benchmark/**",
+				"ci/contributors/cache.cue",
+				"ci/contributors/cuenv.cue",
+				"ci/cache/**",
+				"operator/env.cue",
+				"operator/Cargo.lock",
+				"flake.nix",
+				"flake.lock",
+				"cuenv.lock",
+				"env.cue",
+				"cue.mod/module.cue",
+				".github/workflows/waddle-ci-cache-benchmark.yml",
+			]
+		}
 		workflow_dispatch: inputs: scope: {
 			description: "Compare all providers, or retry only the Namespace seed/warm pair"
 			type: "choice"
@@ -264,11 +281,14 @@ workflow: {
 	}
 	permissions: {}
 	concurrency: {
-		group: "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
+		group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}"
 		"cancel-in-progress": true
 	}
 	jobs: {
+		"bazel-seed": #BazelJob & {_phase: "seed"}
+		"bazel-restore": #BazelJob & {_phase: "restore"}
 		"normal-ci": {
+			if: "${{ github.event_name == 'workflow_dispatch' }}"
 			permissions: {contents: "read", actions: "read"}
 			name: "Wait for normal CI before cache qualification"
 			"runs-on": "ubuntu-24.04"
@@ -298,7 +318,7 @@ workflow: {
 			permissions: {contents: "read", actions: "read"}
 			name: "Cache qualification report"
 			needs: ["existing", "seed", "warm", "h3-seed", "h3-warm"]
-			if: "${{ !cancelled() }}"
+			if: "${{ !cancelled() && github.event_name == 'workflow_dispatch' }}"
 			"runs-on": "ubuntu-24.04"
 			"timeout-minutes": 5
 			steps: [

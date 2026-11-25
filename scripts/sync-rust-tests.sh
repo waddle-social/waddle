@@ -13,7 +13,7 @@ workflow="$repo_root/.github/workflows/waddle-server-rusttests.yml"
 generated="$(mktemp)"
 trap 'rm -f "$generated"' EXIT
 
-# The workflow is evaluated through server/env.cue, which imports cuenv 0.77.0's
+# The workflow is evaluated through server/env.cue, which imports cuenv 0.77.1's
 # v0.18.0 schema (see the cue pin in flake.nix). Refuse any other language
 # version rather than failing with an unrelated-looking evaluation error.
 required_cue=v0.18.0

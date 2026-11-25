@@ -1006,7 +1006,7 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
-          # cuenv 0.77.0's CUE schema declares language version v0.18.0.
+          # cuenv 0.77.1's CUE schema declares language version v0.18.0.
           # Verified cue v0.18.0-rc.4 evaluates `cue vet .` in server/ (~4s),
           # resolving the 0.17.1 hang (#1763). Covers the CLI only; the cuengine
           # crate is pinned separately in server/Cargo.lock.
@@ -1119,9 +1119,32 @@
             '';
           };
 
+          operator =
+            let
+              toolchain = pkgs.rust-bin.fromRustupToolchainFile ./operator/rust-toolchain.toml;
+              vendor = (crane.mkLib pkgs).vendorCargoDeps { cargoLock = ./operator/Cargo.lock; };
+              generateCrd = pkgs.writeShellScriptBin "waddle-operator-crd" ''
+                # Rust's bundled lld wrapper resolves /proc/self/exe, which is
+                # unavailable inside the network-isolated cuenv Linux sandbox.
+                exec ${toolchain}/bin/cargo run --config ${vendor}/config.toml \
+                  --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C", "linker-features=-lld"]' \
+                  --offline --locked -p waddle-operator -- crd
+              '';
+            in
+            pkgs.mkShell {
+              shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
+              packages = [
+                toolchain
+                generateCrd
+                pkgs.cargo-nextest
+                pkgs.python3
+              ];
+            };
+
           # Linux desktop client (apps/linux): its own shell so GTK never
           # enters the server's CI closure.
           linux = pkgs.mkShell {
+            shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
             packages = [
               rustToolchain
               pkgs.pkg-config
