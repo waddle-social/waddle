@@ -17,8 +17,7 @@ activation, not for the pre-production merge stack. Under the
 this CI-changing PR may merge only after exact-head review, successful hosted CI,
 and the existing merge queue. The later
 [CI review-gate override](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6542325475)
-removed the separate human-review prerequisite. No repository rules or runner
-settings are changed by this addition.
+removed the separate human-review prerequisite. The [repository queue policy](../infrastructure/github/README.md) can require the fast `PR smoke` check so GitHub requests merge-group CI. Heavy integration results report independently and may still be running when main advances.
 
 ## Coverage and candidate identity
 

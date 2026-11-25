@@ -5,14 +5,17 @@ import (
 	"github.com/cuenv/cuenv/schema"
 )
 
-let queue = {
-	merge_method:                      "SQUASH"
-	grouping_strategy:                 "HEADGREEN"
-	max_entries_to_build:              1
-	min_entries_to_merge:              100
-	max_entries_to_merge:              100
-	min_entries_to_merge_wait_minutes: 30
-	check_response_timeout_minutes:    180
+let policy = {
+	required_status_check: {context: "PR smoke", integration_id: 15368}
+	merge_queue: {
+		merge_method:                      "SQUASH"
+		grouping_strategy:                 "HEADGREEN"
+		max_entries_to_build:              1
+		min_entries_to_merge:              100
+		max_entries_to_merge:              100
+		min_entries_to_merge_wait_minutes: 30
+		check_response_timeout_minutes:    180
+	}
 }
 
 schema.#Project & {
@@ -22,7 +25,7 @@ schema.#Project & {
 	for operation in ["plan", "check", "apply"] {
 		tasks: (operation): schema.#Task & {
 			command:  "python3"
-			args:     ["merge_queue.py", operation, json.Marshal(queue)]
+			args:     ["merge_queue.py", operation, json.Marshal(policy)]
 			hermetic: false // Use the operator's authenticated gh session and read GitHub on every run.
 		}
 	}

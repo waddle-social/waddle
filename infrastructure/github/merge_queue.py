@@ -1,5 +1,6 @@
-"""Reconcile the merge_queue rule in Waddle's existing main ruleset."""
+"""Reconcile Waddle’s main merge queue and its ordinary PR smoke requirement."""
 
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -25,6 +26,45 @@ def api(endpoint, payload=None):
     return json.loads(result.stdout)
 
 
+def add_required_check(rules, smoke):
+    matches = [rule for rule in rules if rule["type"] == "required_status_checks"]
+    if len(matches) > 1:
+        raise ValueError("Expected at most one required_status_checks rule")
+    if not matches:
+        rule = {"type": "required_status_checks", "parameters": {
+            "strict_required_status_checks_policy": False, "required_status_checks": [],
+        }}
+        rules.append(rule)
+    else:
+        rule = matches[0]
+
+    checks = rule["parameters"]["required_status_checks"]
+    named = [check for check in checks if check["context"].casefold() == smoke["context"].casefold()]
+    if named:
+        if len(named) != 1 or named[0] != smoke:
+            raise ValueError(f"Conflicting required status check context or issuer for {smoke['context']}")
+        return False
+    checks.append(smoke)
+    return True
+
+
+def comparable(writable):
+    # GitHub returns rules, requirements and actors in server-defined order.
+    value = deepcopy(writable)
+    value["bypass_actors"].sort(key=lambda actor: json.dumps(actor, sort_keys=True))
+    value["rules"].sort(key=lambda rule: rule["type"])
+    for rule in value["rules"]:
+        if rule["type"] != "required_status_checks":
+            continue
+        parameters = rule["parameters"]
+        parameters.setdefault("do_not_enforce_on_create", False)
+        parameters.setdefault("strict_required_status_checks_policy", False)
+        for check in parameters["required_status_checks"]:
+            check.setdefault("integration_id", None)
+        parameters["required_status_checks"].sort(key=lambda check: json.dumps(check, sort_keys=True))
+    return value
+
+
 def plan(live, desired):
     if (live["id"], live["source_type"], live["source"], live["name"], live["target"], live["enforcement"]) != (
         RULESET_ID, "Repository", REPO, "main", "branch", "active",
@@ -37,25 +77,30 @@ def plan(live, desired):
     if any(not {"type"} <= r.keys() <= {"type", "parameters"} for r in rules):
         raise ValueError("Unexpected fields in ruleset rules")
     queues = [r for r in rules if r["type"] == "merge_queue"]
-    if len(queues) != 1 or queues[0].get("parameters", {}).keys() != desired.keys():
+    queue = desired["merge_queue"]
+    smoke = desired["required_status_check"]
+    if len(queues) != 1 or queues[0].get("parameters", {}).keys() != queue.keys():
         raise ValueError("Expected a single merge_queue rule with the declared parameter names")
     current = queues[0]["parameters"]
-    body = {k: live[k] for k in WRITABLE}
-    body["rules"] = [{**r, "parameters": desired} if r["type"] == "merge_queue" else r for r in rules]
-    fingerprint = json.dumps([live, desired], sort_keys=True, separators=(",", ":"))
-    return current, body, hashlib.sha256(fingerprint.encode()).hexdigest()
+    body = deepcopy({k: live[k] for k in WRITABLE})
+    next(r for r in body["rules"] if r["type"] == "merge_queue")["parameters"] = queue
+    changes = [f"{key}: {current[key]} -> {value}" for key, value in queue.items() if current[key] != value]
+    if add_required_check(body["rules"], smoke):
+        changes.append(f"Require {smoke['context']} from GitHub App {smoke['integration_id']}")
+    fingerprint = json.dumps([{**live, **comparable({k: live[k] for k in WRITABLE})}, desired],
+                             sort_keys=True, separators=(",", ":"))
+    return changes, body, hashlib.sha256(fingerprint.encode()).hexdigest()
 
 
 def reconcile(mode, desired, reviewed):
     if api(f"repos/{REPO}")["default_branch"] != "main":
         raise ValueError("Default branch has changed")
-    current, body, fingerprint = plan(api(ENDPOINT), desired)
-    if current == desired:
+    changes, body, fingerprint = plan(api(ENDPOINT), desired)
+    if not changes:
         print("The main merge queue matches the declared policy.")
         return 0
-    for key, value in desired.items():
-        if current[key] != value:
-            print(f"{key}: {current[key]} -> {value}")
+    for change in changes:
+        print(change)
     if mode == "check":
         return 1
     if mode == "plan":
@@ -66,7 +111,7 @@ def reconcile(mode, desired, reviewed):
     api(ENDPOINT, body)
     after = api(ENDPOINT)
     plan(after, desired)
-    if any(after[k] != body[k] for k in WRITABLE):
+    if comparable({k: after[k] for k in WRITABLE}) != comparable(body):
         raise ValueError("Ruleset readback differs from the reviewed update; inspect ruleset history")
     print("Applied and verified the main merge queue policy.")
     return 0

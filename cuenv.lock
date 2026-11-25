@@ -31,6 +31,12 @@ flake = ".."
 digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
 lockfile = "design/../flake.lock"
 
+[runtimes."infrastructure/github"]
+type = "nix"
+flake = "../.."
+digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+lockfile = "infrastructure/github/../../flake.lock"
+
 [runtimes."infrastructure/waddle.cloud"]
 type = "nix"
 flake = "../.."

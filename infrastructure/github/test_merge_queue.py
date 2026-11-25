@@ -1,3 +1,4 @@
+from copy import deepcopy
 import unittest
 from unittest.mock import patch
 
@@ -6,7 +7,8 @@ from merge_queue import REPO, RULESET_ID, plan, reconcile
 
 class MergeQueueTest(unittest.TestCase):
     def setUp(self):
-        self.desired = {"min_entries_to_merge_wait_minutes": 30}
+        self.smoke = {"context": "PR smoke", "integration_id": 15368}
+        self.desired = {"merge_queue": {"min_entries_to_merge_wait_minutes": 30}, "required_status_check": self.smoke}
         self.status_check = {"type": "required_status_checks", "parameters": {
             "required_status_checks": [{"context": "CI", "integration_id": 15368}],
             "strict_required_status_checks_policy": False,
@@ -21,13 +23,36 @@ class MergeQueueTest(unittest.TestCase):
             }}],
         }
 
-    def test_only_changes_queue(self):
+    def test_preserves_other_requirements_and_rules(self):
         _, body, _ = plan(self.live, self.desired)
         self.assertEqual(body, {
             "name": "main", "target": "branch", "conditions": self.live["conditions"],
             "enforcement": "active", "bypass_actors": self.live["bypass_actors"],
-            "rules": [self.status_check, {"type": "merge_queue", "parameters": self.desired}],
+            "rules": [
+                {"type": "required_status_checks", "parameters": {
+                    **self.status_check["parameters"],
+                    "required_status_checks": [self.status_check["parameters"]["required_status_checks"][0], self.smoke],
+                }},
+                {"type": "merge_queue", "parameters": self.desired["merge_queue"]},
+            ],
         })
+
+    def test_creates_non_strict_rule_and_preserves_existing_strict_policy(self):
+        _, body, _ = plan({**self.live, "rules": [self.live["rules"][1]]}, self.desired)
+        self.assertEqual(body["rules"][-1], {"type": "required_status_checks", "parameters": {
+            "required_status_checks": [self.smoke], "strict_required_status_checks_policy": False,
+        }})
+        self.status_check["parameters"]["strict_required_status_checks_policy"] = True
+        _, existing, _ = plan(self.live, self.desired)
+        self.assertTrue(existing["rules"][0]["parameters"]["strict_required_status_checks_policy"])
+
+    def test_refuses_conflicting_issuers_and_duplicate_status_rules(self):
+        for other in [None, 42]:
+            with self.subTest(issuer=other), self.assertRaisesRegex(ValueError, "Conflicting"):
+                self.status_check["parameters"]["required_status_checks"] = [{**self.smoke, "integration_id": other}]
+                plan(self.live, self.desired)
+        with self.assertRaisesRegex(ValueError, "at most one"):
+            plan({**self.live, "rules": [*self.live["rules"], self.status_check]}, self.desired)
 
     def test_refuses_incomplete_or_unexpected_responses(self):
         queue = self.live["rules"][1]
@@ -54,7 +79,11 @@ class MergeQueueTest(unittest.TestCase):
     @patch("merge_queue.api")
     def test_checks_fresh_readback_and_is_idempotent(self, api):
         _, expected, reviewed = plan(self.live, self.desired)
-        applied = {**self.live, **expected}
+        applied = deepcopy({**self.live, **expected})
+        applied["rules"].reverse()
+        status = applied["rules"][-1]["parameters"]
+        status["required_status_checks"].reverse()
+        status["do_not_enforce_on_create"] = False
         repo = {"default_branch": "main"}
         api.side_effect = [repo, self.live, {}, applied, repo, applied]
         self.assertEqual(reconcile("apply", self.desired, reviewed), 0)
