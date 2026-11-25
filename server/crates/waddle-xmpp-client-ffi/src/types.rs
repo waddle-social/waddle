@@ -574,7 +574,7 @@ pub struct WaddleArchivedMessage {
     pub reply_fallback_end: Option<u32>,
     /// XEP-0394 markup spans of the inner message.
     pub markup_spans: Vec<WaddleMarkupSpan>,
-    /// XEP-0372 broadcast mention URI, when present.
+    /// XEP-0513 room-wide mention (`everyone` or `here`), when present.
     pub broadcast_mention: Option<String>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
