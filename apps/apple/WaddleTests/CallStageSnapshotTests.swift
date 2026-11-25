@@ -308,13 +308,15 @@ final class CallStageSnapshotTests: XCTestCase {
     private func assertBar(
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, hasMedia: Bool = true, isHandRaised: Bool? = nil,
         viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split,
-        isSharingScreen: Bool? = nil, testName: String = #function, line: UInt = #line
+        isSharingScreen: Bool? = nil, chatUnread: Int? = nil, showsChat: Bool = false,
+        testName: String = #function, line: UInt = #line
     ) {
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallControlBar(
                 isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn, hasMedia: hasMedia, isHandRaised: isHandRaised,
-                viewMode: viewMode, size: size, isSharingScreen: isSharingScreen, actions: Self.actions
+                viewMode: viewMode, size: size, isSharingScreen: isSharingScreen, chatUnread: chatUnread,
+                showsChat: showsChat, actions: Self.actions
             )
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
@@ -323,6 +325,15 @@ final class CallStageSnapshotTests: XCTestCase {
             testName: testName,
             line: line
         )
+    }
+
+    /// A room's call with messages in its chat that nobody here has looked at.
+    func testControlBarWithUnreadCallChat() {
+        assertBar(isHandRaised: false, size: .expanded, chatUnread: 3)
+    }
+
+    func testControlBarWithTheCallChatOpen() {
+        assertBar(isHandRaised: false, size: .expanded, chatUnread: 0, showsChat: true)
     }
 
     func testControlBarDirect() {

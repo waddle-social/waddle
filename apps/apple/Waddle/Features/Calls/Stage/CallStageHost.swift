@@ -163,6 +163,7 @@ struct CallStageHost: View {
             subtitle = CallStageSubtitle.room(others: rows.count { !$0.isSelf })
         }
         let memory = model.stage(of: call.sid)
+        let chat = Chat(of: call.kind, session: session, navigation: navigation)
         let rows = memory.showsParticipants ? CallParticipantRows.make(
             tiles: tiles,
             audio: (media?.participants ?? []).map {
@@ -189,12 +190,18 @@ struct CallStageHost: View {
             checkingIssues: checkingIssues,
             connection: media?.connectionQuality,
             isSharingScreen: media.flatMap { $0.canShareScreen ? $0.isScreenShareOn || $0.isScreenShareStarting : nil },
+            chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
+            showsChat: chat?.isOpen ?? false,
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
             tileSource: model.tileSource,
-            actions: actions(for: call.sid)
+            actions: actions(for: call.sid, chat: chat)
         )
+        // What is in front of the person while the chat is open has been seen.
+        .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
+            model.update(call.sid) { $0.sawChat(upTo: newest) }
+        }
         .callPushToTalk(
             hasMedia: call.status != .connecting, isMicrophoneOn: media?.isMicrophoneOn ?? false,
             coversConversation: memory.size != .split,
@@ -223,7 +230,29 @@ struct CallStageHost: View {
     /// A stage narrower than this gives the panel the tiles' place.
     private static let widthForTilesAndPanel: CGFloat = 720
 
-    private func actions(for sid: String) -> CallStageActions {
+    /// The chat of a room's call: the thread its announcement heads, with
+    /// the messages of it that are loaded. A call of two has none here yet.
+    private struct Chat {
+        let conversation: ConversationID
+        let thread: String
+        let replies: [TimelineItem]
+        /// The thread is the one open beside the conversation.
+        let isOpen: Bool
+
+        @MainActor
+        init?(of kind: Call.Kind, session: SessionCoordinator, navigation: NavigationModel) {
+            guard case .room = kind, case .inGroup(let call) = session.calls.state else { return nil }
+            let conversation = ConversationID.room(call.room)
+            let timeline = session.timelines.timeline(for: conversation)
+            guard let thread = CallChat.thread(in: timeline.items) else { return nil }
+            self.conversation = conversation
+            self.thread = thread
+            replies = timeline.threadReplies(threadID: thread)
+            isOpen = navigation.selection == conversation && navigation.inspector == .thread(rootID: thread)
+        }
+    }
+
+    private func actions(for sid: String, chat: Chat?) -> CallStageActions {
         let commands = CallCommands(calls: session.calls, media: media)
         return CallStageActions(
             toggleMicrophone: commands.toggleMicrophone,
@@ -236,6 +265,20 @@ struct CallStageHost: View {
             setVolume: { [media] identity, gain in media?.setVolume(gain, of: identity) },
             resetVolumes: { [media] in media?.resetVolumes() },
             openSettings: { showsSettings = true },
+            toggleChat: { [model, navigation] in
+                guard let chat else { return }
+                if chat.isOpen {
+                    navigation.inspector = nil
+                    return
+                }
+                model.update(sid) {
+                    // The chat opens beside the conversation, which a stage
+                    // that fills the pane covers: the stage makes room.
+                    $0.size = .split
+                    $0.sawChat(upTo: chat.replies.last?.id)
+                }
+                navigation.openThread(chat.thread, in: chat.conversation, usesInspector: true)
+            },
             retryMediaIssue: { [media, session] kind in
                 // For the call the notice is about, while it is still a call.
                 guard let media, !checkingIssues.contains(kind), session.calls.state.sid == sid,

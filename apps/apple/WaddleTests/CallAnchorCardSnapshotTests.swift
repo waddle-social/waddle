@@ -9,10 +9,12 @@ import XCTest
 final class CallAnchorCardSnapshotTests: XCTestCase {
     private let anchor = CallThreadAnchor(kind: .room, hasVideo: false)
 
-    private func assertCard(_ card: CallAnchorCard, width: CGFloat = 520, testName: String = #function, line: UInt = #line) {
+    private func assertCard(
+        _ card: CallAnchorCard, chatLink: String? = nil, width: CGFloat = 520, testName: String = #function, line: UInt = #line
+    ) {
         assertHuddleSnapshot(
             precision: 0.97,
-            of: CallAnchorCardView(card: card, time: "14:32") { /* nothing to join */ }
+            of: CallAnchorCardView(card: card, time: "14:32", chatLink: chatLink) { /* nothing to join */ }
                 .frame(width: width, alignment: .leading),
             width: width + 2 * Theme.Spacing.l,
             testName: testName,
@@ -49,6 +51,20 @@ final class CallAnchorCardSnapshotTests: XCTestCase {
     /// The longest title with the longest button, where they cannot share a line.
     func testBusyWithAVideoCallInANarrowConversation() {
         assertCard(live(["Ada", "Linus"], video: true, busy: true, canJoin: false), width: 300)
+    }
+
+    func testALiveCallWithMessagesInItsChat() {
+        assertCard(live(["Ada", "Linus"]), chatLink: CallChat.linkTitle(messages: 4))
+    }
+
+    func testAnEndedCallWithItsChat() {
+        assertCard(
+            CallAnchorCard.make(
+                anchor: anchor, said: "ada started a call", ended: CallThreadEnded(anchorID: "o1", duration: 754), live: nil,
+                isNewest: true
+            ),
+            chatLink: CallChat.linkTitle(messages: 1)
+        )
     }
 
     func testALiveCallInANarrowConversation() {

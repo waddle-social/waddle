@@ -14,6 +14,8 @@ struct CallStageActions {
     var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
     var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
     /// Tries a device the call could not use again, or puts its notice away for this call.
+    /// Opens the call's chat beside the conversation, or puts it away.
+    var toggleChat: @MainActor () -> Void = { /* a call with no chat */ }
     var retryMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to retry */ }
     var dismissMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to dismiss */ }
     /// Opens the system's settings where a device is allowed.
@@ -42,6 +44,9 @@ struct CallControlBar: View {
     var showsParticipants = false
     /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
     var isSharingScreen: Bool?
+    /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
+    var chatUnread: Int?
+    var showsChat = false
     let actions: CallStageActions
 
     var body: some View {
@@ -101,6 +106,18 @@ struct CallControlBar: View {
             )
             .accessibilityAddTraits(isSharingScreen ? .isSelected : [])
             .disabled(!hasMedia)
+        }
+        // Unread messages, like a share in progress, keep their button whatever the width:
+        // a count nobody can see is no count, and an open chat must be one click from closed.
+        if let chatUnread, !extrasInMenu || chatUnread > 0 || showsChat {
+            CallControlButton(
+                title: CallChat.buttonTitle(unread: chatUnread, isOpen: showsChat), symbol: "bubble.left",
+                tone: showsChat ? .chosen : .plain, action: actions.toggleChat
+            )
+            .overlay(alignment: .topTrailing) {
+                if !showsChat, let badge = CallChat.badge(chatUnread) { CallControlBadge(text: badge) }
+            }
+            .accessibilityAddTraits(showsChat ? .isSelected : [])
         }
         if !extrasInMenu {
             CallControlButton(
@@ -182,6 +199,9 @@ struct CallControlBar: View {
                     Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
                 }
                 Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+                if let chatUnread, chatUnread == 0, !showsChat {
+                    Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
+                }
             }
             if withViewChoice {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
@@ -227,6 +247,30 @@ struct CallControlBar: View {
 }
 
 /// A round, glyph-only call control (web `huddleCtl`).
+/// A count on the corner of a round control: messages not yet seen.
+struct CallControlBadge: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .huddleText(Theme.Typography.caption.weight(700).sized(WaddleTokens.FontSize.xs))
+            .monospacedDigit()
+            .foregroundStyle(Theme.Colors.actionFg)
+            .padding(.horizontal, WaddleTokens.Spacing.s1)
+            .frame(minWidth: Metrics.side, minHeight: Metrics.side)
+            .background(Capsule().fill(Theme.Colors.action))
+            .offset(x: Metrics.overhang, y: -Metrics.overhang)
+            // The button's own title says the count.
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+    }
+
+    private enum Metrics {
+        static let side: CGFloat = 18
+        static let overhang: CGFloat = 4
+    }
+}
+
 struct CallControlButton: View {
     enum Tone {
         case plain
