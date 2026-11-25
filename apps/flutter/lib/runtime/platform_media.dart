@@ -9,6 +9,7 @@ import 'call_screen_share.dart';
 import 'call_camera.dart';
 import 'call_audio_mixer.dart';
 import 'call_quality.dart';
+import 'call_microphone.dart';
 import 'call_window.dart';
 import 'call_connectivity_stub.dart'
     if (dart.library.io) 'call_connectivity_io.dart';
@@ -22,6 +23,7 @@ abstract class CallMedia extends ChangeNotifier {
     List<Map<String, dynamic>> iceServices,
   );
   Future<void> disconnect();
+  void gateMicrophone() {}
   Future<void> microphone(bool enabled);
   Future<void> camera(bool enabled);
   Future<void> speaker(bool enabled);
@@ -31,6 +33,9 @@ abstract class CallMedia extends ChangeNotifier {
   Future<Map<String, dynamic>> quality() async => const {};
   Future<void> setVoiceProcessing(String key, bool value) =>
       throw UnsupportedError('Microphone processing is unavailable.');
+  void prepareMicrophoneFilter(MicrophoneFilter filter) {}
+  Future<void> setMicrophoneFilter(MicrophoneFilter filter) =>
+      throw UnsupportedError('Microphone filters are unavailable.');
   Future<void> changeBackground(String name, Uint8List? bytes);
   Future<List<Map<String, dynamic>>> devices();
   Future<void> selectDevice(String kind, String id);
@@ -81,6 +86,8 @@ class LiveKitCallMedia extends CallMedia {
   final _sharing = CallScreenShare();
   String? _cameraDevice;
   NativeCallCamera? _nativeCamera;
+  NativeCallMicrophone? _nativeMicrophone;
+  MicrophoneFilter _preferredFilter = MicrophoneFilter.off;
   CallAudioMixer? _mixer;
   CallQuality _quality = CallQuality();
   bool _speaker = false;
@@ -150,6 +157,9 @@ class LiveKitCallMedia extends CallMedia {
         dynacast: true,
         // Server mute/unmute must retain the processor attached to this track.
         // A local user turning off the camera explicitly unpublishes it.
+        defaultAudioCaptureOptions: lk.AudioCaptureOptions(
+          stopAudioCaptureOnMute: !NativeCallCamera.supported,
+        ),
         defaultCameraCaptureOptions: lk.CameraCaptureOptions(
           stopCameraCaptureOnMute: !NativeCallCamera.supported,
         ),
@@ -158,6 +168,11 @@ class LiveKitCallMedia extends CallMedia {
     _room = next;
     if (NativeCallCamera.supported) {
       _nativeCamera = NativeCallCamera(next);
+      _nativeMicrophone = NativeCallMicrophone(
+        next,
+        _quality,
+        _preferredFilter,
+      );
       _mixer = CallAudioMixer();
     }
     _cameraDevice = null;
@@ -177,16 +192,22 @@ class LiveKitCallMedia extends CallMedia {
           if (id != null) await _sharing.release(next, trackId: id);
         }
       })
-      ..on<lk.RoomReconnectingEvent>((_) {
+      ..on<lk.RoomReconnectingEvent>((_) async {
         if (_room == next) {
           _state = 'reconnecting';
           notifyListeners();
+          await _nativeMicrophone?.fullReconnect();
         }
       })
-      ..on<lk.RoomReconnectedEvent>((_) {
+      ..on<lk.RoomReconnectedEvent>((_) async {
         if (_room == next) {
           _state = 'connected';
-          notifyListeners();
+          try {
+            await _nativeMicrophone?.reconnected();
+          } catch (_) {
+            if (_room == next) _error = 'The microphone could not resume.';
+          }
+          if (_room == next) notifyListeners();
         }
       })
       ..on<lk.RoomDisconnectedEvent>((_) {
@@ -281,6 +302,8 @@ class LiveKitCallMedia extends CallMedia {
     final restoreWindow = _window.active(false);
     final retiringCamera = _nativeCamera?.retire();
     _nativeCamera = null;
+    _nativeMicrophone?.retire();
+    _nativeMicrophone = null;
     _mixer = null;
     final retiringQuality = _quality;
     _quality = CallQuality();
@@ -338,6 +361,12 @@ class LiveKitCallMedia extends CallMedia {
       return;
     }
     final native = _nativeCamera;
+    final microphone = _nativeMicrophone;
+    if (!camera && microphone != null) {
+      await microphone.enable(enabled);
+      if (epoch == _epoch && _room == room) notifyListeners();
+      return;
+    }
     if (camera && native != null) {
       await native.setEnabled(enabled);
       if (epoch == _epoch && _room == room) notifyListeners();
@@ -402,7 +431,36 @@ class LiveKitCallMedia extends CallMedia {
   @override
   Future<Map<String, dynamic>> quality() async {
     final room = _room ?? (throw StateError('The call ended.'));
-    return _quality.sample(room);
+    final data = await _quality.sample(room);
+    final microphone = _nativeMicrophone;
+    return {
+      ...data,
+      if (microphone != null) ...{
+        'noiseFilter': microphone.filter.name,
+        'canChangeFilter': microphone.canChange,
+      },
+    };
+  }
+
+  @override
+  void prepareMicrophoneFilter(MicrophoneFilter filter) =>
+      _preferredFilter = filter;
+
+  @override
+  Future<void> setMicrophoneFilter(MicrophoneFilter filter) async {
+    final mic =
+        _nativeMicrophone ??
+        (throw StateError('Microphone filters are unavailable.'));
+    await _quality.microphoneChange(() async {
+      if (!identical(mic, _nativeMicrophone)) {
+        throw StateError('The call ended.');
+      }
+      await mic.changeFilter(filter);
+      if (!identical(mic, _nativeMicrophone)) {
+        throw StateError('The call ended.');
+      }
+      _preferredFilter = filter;
+    });
   }
 
   @override
@@ -413,13 +471,21 @@ class LiveKitCallMedia extends CallMedia {
       () => identical(_room, room),
       key,
       value,
+      replaceCapture: _nativeMicrophone?.changeProcessing,
     );
   }
+
+  @override
+  void gateMicrophone() => _nativeMicrophone?.gate();
 
   @override
   Future<void> microphone(bool enabled) async {
     final room =
         _room ?? (throw StateError('The call media is not connected.'));
+    if (_nativeMicrophone != null) {
+      await _capture(room, enabled, camera: false);
+      return;
+    }
     await _quality.microphoneChange(() async {
       if (_room != room) throw StateError('The call ended.');
       await _capture(room, enabled, camera: false);
@@ -523,7 +589,9 @@ class LiveKitCallMedia extends CallMedia {
             'selected':
                 device.deviceId ==
                 switch (device.kind) {
-                  'audioinput' => room.selectedAudioInputDeviceId,
+                  'audioinput' =>
+                    _nativeMicrophone?.device ??
+                        room.selectedAudioInputDeviceId,
                   'audiooutput' => room.selectedAudioOutputDeviceId,
                   _ =>
                     _nativeCamera?.device ??
@@ -547,7 +615,12 @@ class LiveKitCallMedia extends CallMedia {
       case 'audioinput':
         await _quality.microphoneChange(() async {
           if (_room != room) throw StateError('The call ended.');
-          await room.setAudioInputDevice(device);
+          final mic = _nativeMicrophone;
+          if (mic != null) {
+            await mic.changeInput(id);
+          } else {
+            await room.setAudioInputDevice(device);
+          }
         });
       case 'audiooutput':
         await room.setAudioOutputDevice(device);
