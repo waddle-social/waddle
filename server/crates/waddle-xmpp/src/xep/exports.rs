@@ -313,7 +313,10 @@ pub use super::xep0433::{
     build_search_form_response, build_search_request, build_search_response,
     build_search_response_with_rsm, is_search_form_request, is_search_request,
     parse_search_request, parse_search_results, parse_search_rsm_response, ChannelResult,
-    SearchRequest, Searchable, FIELD_QUERY, NS_CHANNEL_SEARCH, NS_CHANNEL_SEARCH_PARAMS,
+    SearchRequest, SearchRequestError, SearchScope, Searchable, SortKey, FIELD_KEY, FIELD_QUERY,
+    FIELD_SEARCH_IN_ADDRESS, FIELD_SEARCH_IN_DESCRIPTION, FIELD_SEARCH_IN_NAME, FIELD_TYPES,
+    NS_CHANNEL_SEARCH, NS_CHANNEL_SEARCH_ERROR, NS_CHANNEL_SEARCH_ORDER, NS_CHANNEL_SEARCH_PARAMS,
+    SERVICE_TYPE_MUC, SORT_KEY_ADDRESS, SORT_KEY_NUSERS,
 };
 
 pub use super::xep0449::{

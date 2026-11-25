@@ -64,7 +64,8 @@ use waddle_xmpp::xep::{
     is_last_activity_query, is_search_form_request, is_search_request, is_time_query,
     is_version_query, parse_command_from_iq, parse_moderation_iq, parse_search_request,
     AdHocCommandCondition, ChannelResult, Command, CommandError, CommandStatus, RsmRequest,
-    RsmResponse, Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+    RsmResponse, SearchRequestError, Searchable, SortKey, SpaceAffiliation, Xep0359StanzaId,
+    NODE_COMMANDS, NS_CHANNEL_SEARCH, SERVICE_TYPE_MUC,
 };
 use waddle_xmpp::{
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
@@ -200,10 +201,10 @@ pub use test_helpers::handle_iq;
 // IQ-error constructors without each having to re-import the
 // `errors` submodule directly.
 pub(super) use errors::{
-    bad_format_iq_error, bad_request_iq_error, conflict_iq_error, feature_not_implemented_iq_error,
-    forbidden_iq_error, internal_server_error_iq_error, item_not_found_iq_error,
-    jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error, not_authorized_iq_error,
-    service_unavailable_iq_error,
+    bad_format_iq_error, bad_request_iq_error, channel_search_iq_error, conflict_iq_error,
+    feature_not_implemented_iq_error, forbidden_iq_error, internal_server_error_iq_error,
+    item_not_found_iq_error, jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error,
+    not_authorized_iq_error, service_unavailable_iq_error,
 };
 use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
