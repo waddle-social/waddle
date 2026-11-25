@@ -6,6 +6,52 @@ import 'package:waddle_flutter/features/community.dart';
 
 void main() {
   testWidgets(
+    'the attendance filter uses this account’s RSVP and offers the series export',
+    (tester) async {
+      final date = calendarDayString(DateTime.now());
+      final bridge =
+          WaddleBridge(
+            events: const Stream.empty(),
+            commandInvoker: (_, _) async => [
+              for (final item in {
+                'Picnic': 'ACCEPTED',
+                'Concert': 'TENTATIVE',
+                'Meeting': 'DECLINED',
+              }.entries)
+                {
+                  'id': item.key,
+                  'uid': item.key,
+                  'summary': item.key,
+                  'dtstart': {'kind': 'date', 'date': date},
+                  'icalendar': 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n',
+                  'responses': {'alice@example.test': item.value},
+                },
+            ],
+          )..acceptEvent({
+            'topic': 'session',
+            'data': {'jid': 'alice@example.test'},
+          });
+      addTearDown(bridge.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CommunityScreen(
+            bridge: bridge,
+            section: CommunitySection.events,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Going or maybe'));
+      await tester.tap(find.text('Going or maybe'));
+      await tester.pumpAndSettle();
+      expect(find.text('Meeting'), findsNothing);
+      await tester.ensureVisible(find.text('Concert'));
+      await tester.tap(find.text('Concert'));
+      await tester.pumpAndSettle();
+      expect(find.text('Export event (.ics)'), findsOneWidget);
+    },
+  );
+  testWidgets(
     'editing an occurrence sends its original date and just the changed fields',
     (tester) async {
       final date = calendarDayString(DateTime.now());

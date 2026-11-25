@@ -154,6 +154,9 @@ class PlatformFileService {
 
   Future<dynamic> invoke(String method, Map<String, dynamic> args) async {
     switch (method) {
+      case 'file.pickCameraBackground':
+        final picked = await _pick(type: FileType.image);
+        return picked?['bytes'];
       case 'file.pickFeedPicture':
         final generation = context.generation;
         final picture = await _pick(type: FileType.image);
@@ -667,6 +670,7 @@ class _DownloadAttempt {
 Future<Map<String, dynamic>> processImage(
   Uint8List bytes, {
   bool square = false,
+  bool rgba = false,
 }) async {
   if (bytes.length > maxAttachmentBytes) {
     throw StateError('This image is too large.');
@@ -683,6 +687,17 @@ Future<Map<String, dynamic>> processImage(
       targetHeight: max(1, (descriptor.height * scale).round()),
     );
     image = (await codec.getNextFrame()).image;
+    if (rgba) {
+      final data = await image.toByteData(
+        format: ui.ImageByteFormat.rawStraightRgba,
+      );
+      if (data == null) throw StateError('This image could not be read.');
+      return {
+        'rgba': Uint8List.sublistView(data),
+        'width': image.width,
+        'height': image.height,
+      };
+    }
     final png = await image.toByteData(format: ui.ImageByteFormat.png);
     if (png == null) {
       throw StateError('This image could not be read.');

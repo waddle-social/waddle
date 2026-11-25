@@ -6,6 +6,7 @@ use uuid::Uuid;
 use waddle_xmpp_client::pubsub::{
     build_pubsub_items_iq, build_pubsub_publish_iq, parse_pubsub_items_result,
 };
+use waddle_xmpp_core::icalendar::calendar_text;
 use waddle_xmpp_core::xcal::{
     build_vcalendar_with_event, build_vcalendar_with_item, parse_vcalendar_item, Attendee,
     CalendarDateValue, CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL,
@@ -31,6 +32,9 @@ pub struct WaddleRrule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaddleVEvent {
+    /// A portable calendar for the scheduled master and its recurrence exceptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icalendar: Option<String>,
     pub id: String,
     pub uid: String,
     pub summary: String,
@@ -388,6 +392,7 @@ impl WaddleVEvent {
     pub fn from_vevent(item_id: &str, event: VEvent) -> Self {
         Self {
             id: item_id.to_string(),
+            icalendar: None,
             uid: event.uid,
             summary: event.summary,
             description: event.description,
@@ -630,7 +635,13 @@ pub fn parse_events_items_result(iq: &Element) -> Vec<WaddleVEvent> {
         // synthetic id `<item-id>::override::<typed-recurrence-id>`
         // so the chat can address them individually without losing
         // the master/override correlation (preserved via `uid`).
-        flattened.push(WaddleVEvent::from_vevent(item_id, parsed.master));
+        let export = parsed
+            .master
+            .dtstart
+            .map(|_| calendar_text([(&parsed, Utc::now())]));
+        let mut master = WaddleVEvent::from_vevent(item_id, parsed.master);
+        master.icalendar = export;
+        flattened.push(master);
         for ov in parsed.overrides {
             let synthetic = ov
                 .recurrence_id

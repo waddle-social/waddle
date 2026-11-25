@@ -1,6 +1,10 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../bridge.dart';
+import '../runtime/platform_file_access.dart';
 import 'calendar_editor.dart';
 import 'calendar_occurrences.dart';
 import 'trip_plan.dart';
@@ -24,6 +28,7 @@ class EventCalendar extends StatefulWidget {
 class _EventCalendarState extends State<EventCalendar> {
   DateTime _selected = DateUtils.dateOnly(DateTime.now());
   bool _dayOnly = false;
+  bool _attendingOnly = false;
 
   Future<void> _edit(EventData row, {required bool occurrence}) async {
     final input = await showDialog<EventData>(
@@ -142,6 +147,28 @@ class _EventCalendarState extends State<EventCalendar> {
               ),
           ],
         ),
+        if (row['master']?['icalendar'] case final String calendar)
+          TextButton.icon(
+            icon: const Icon(Icons.event_outlined),
+            label: Text(
+              recurring ? 'Export series (.ics)' : 'Export event (.ics)',
+            ),
+            onPressed: widget.busy
+                ? null
+                : () => widget.run(() async {
+                    final owner = widget.bridge.generation;
+                    await openPrivateFile(
+                      Uint8List.fromList(utf8.encode(calendar)),
+                      'event.ics',
+                      'text/calendar',
+                      validate: () {
+                        if (!mounted || owner != widget.bridge.generation) {
+                          throw StateError('The account changed.');
+                        }
+                      },
+                    );
+                  }),
+          ),
         if (workspace is String && workspace.isNotEmpty)
           TextButton.icon(
             icon: const Icon(Icons.map_outlined),
@@ -198,7 +225,13 @@ class _EventCalendarState extends State<EventCalendar> {
         ? DateTime(from.year, from.month, from.day + 1)
         : DateTime(from.year, from.month + 1);
     final rows = calendarOccurrences(
-      widget.events,
+      _attendingOnly
+          ? widget.events.where((event) {
+              final response =
+                  event['responses']?[widget.bridge.session['jid']];
+              return response == 'ACCEPTED' || response == 'TENTATIVE';
+            }).toList()
+          : widget.events,
       from,
       to,
       includeUndated: !_dayOnly,
@@ -227,6 +260,13 @@ class _EventCalendarState extends State<EventCalendar> {
             selected: {_dayOnly},
             onSelectionChanged: (values) =>
                 setState(() => _dayOnly = values.single),
+          ),
+        ),
+        Center(
+          child: FilterChip(
+            label: const Text('Going or maybe'),
+            selected: _attendingOnly,
+            onSelected: (value) => setState(() => _attendingOnly = value),
           ),
         ),
         if (rows.isEmpty)

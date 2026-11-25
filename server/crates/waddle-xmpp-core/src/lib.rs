@@ -9,6 +9,7 @@ pub mod disco;
 pub mod domain;
 pub mod error;
 pub mod event_planning;
+pub mod icalendar;
 pub mod link_preview;
 pub mod mam;
 pub mod occupancy_session;
