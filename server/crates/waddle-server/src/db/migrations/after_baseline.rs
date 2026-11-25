@@ -95,6 +95,9 @@ pub const PUBSUB_ROSTER_GROUPS_VERSION: i64 = 2027;
 /// Version of the migration that brings the PostgreSQL PubSub store to
 /// schema version 10 (`pubsub_nodes.item_expire`).
 pub const PUBSUB_ITEM_EXPIRE_VERSION: i64 = 2028;
+/// Version of the migration that creates the verified XEP-0115 entity
+/// capabilities every replica shares.
+pub const ENTITY_CAPS_VERSION: i64 = 2029;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -351,6 +354,12 @@ pub fn all() -> Vec<Migration> {
                 "../../../sql/migrations/2028_pubsub_item_expire.postgres.sql"
             ),
         },
+        Migration {
+            version: ENTITY_CAPS_VERSION,
+            description: "entity caps".to_owned(),
+            sql_sqlite: include_str!("../../../sql/migrations/2029_entity_caps.sqlite.sql"),
+            sql_postgres: include_str!("../../../sql/migrations/2029_entity_caps.postgres.sql"),
+        },
     ]
 }
 
@@ -586,7 +595,7 @@ mod tests {
     use super::super::BASELINE_VERSION;
     use super::{
         all, ACCOUNT_LAST_ACTIVITY_VERSION, ACCOUNT_SESSION_ENDINGS_VERSION,
-        CHANNEL_FEDERATED_VERSION, HOST_GRANT_AUTHORITY_VERSION,
+        CHANNEL_FEDERATED_VERSION, ENTITY_CAPS_VERSION, HOST_GRANT_AUTHORITY_VERSION,
         HOST_GRANT_RESTORE_INCARNATION_VERSION, HOST_GRANT_REVOCATION_FENCE_VERSION,
         HOST_GRANT_SPACES_VERSION, HOST_GRANT_SPACE_BOOKMARK_VERSIONS_VERSION,
         HOST_GRANT_SPACE_CONFIGURATION_VERSION, HOST_GRANT_SPACE_DELETIONS_VERSION,
@@ -642,6 +651,7 @@ mod tests {
                 XMPP_OAUTH_GRANTS_VERSION,
                 PUBSUB_ROSTER_GROUPS_VERSION,
                 PUBSUB_ITEM_EXPIRE_VERSION,
+                ENTITY_CAPS_VERSION,
             ]
         );
     }

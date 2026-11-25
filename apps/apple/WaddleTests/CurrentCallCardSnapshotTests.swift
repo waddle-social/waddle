@@ -39,14 +39,14 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
         assertCard(CurrentCallCard(
             title: "priya",
             summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
-            isMicrophoneOn: true, isCameraOn: true, actions: Self.actions
+            devices: .init(isMicrophoneOn: true, isCameraOn: true, isSharingScreen: false), actions: Self.actions
         ))
     }
 
     func testRoomCallMuted() {
         assertCard(CurrentCallCard(
             title: "#design", summary: CallCardSummary.line(status: .connected, kind: .room(count: 4)),
-            isMicrophoneOn: false, isCameraOn: false, actions: Self.actions
+            devices: .init(isMicrophoneOn: false, isCameraOn: false, isSharingScreen: false), actions: Self.actions
         ))
     }
 
@@ -54,7 +54,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
         assertCard(CurrentCallCard(
             title: "release-train with a long name",
             summary: CallCardSummary.line(status: .connecting, kind: .room(count: 1)),
-            isConnected: false, hasMedia: false, actions: Self.actions
+            isConnected: false, devices: .init(hasMedia: false, isSharingScreen: false), actions: Self.actions
         ))
     }
 
@@ -63,7 +63,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
         assertCard(
             CurrentCallCard(
                 title: "#design", summary: CallCardSummary.line(status: .connected, kind: .room(count: 4)),
-                isMicrophoneOn: true, actions: Self.actions
+                devices: .init(isMicrophoneOn: true, isSharingScreen: false), actions: Self.actions
             ),
             sidebar: Self.narrowestSidebar
         )
@@ -73,7 +73,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
         assertCard(CurrentCallCard(
             title: "priya",
             summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
-            isMicrophoneOn: true,
+            devices: .init(isMicrophoneOn: true, isSharingScreen: false),
             notice: CallMediaIssues.line(for: CallMediaIssues.Report(isCameraBlocked: true)), actions: Self.actions
         ))
     }
@@ -81,7 +81,7 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
     func testWhileSharingTheScreen() {
         assertCard(CurrentCallCard(
             title: "#design", summary: CallCardSummary.line(status: .connected, kind: .room(count: 4)),
-            isMicrophoneOn: true, isSharingScreen: true, actions: Self.actions
+            devices: .init(isMicrophoneOn: true, isSharingScreen: true), actions: Self.actions
         ))
     }
 }

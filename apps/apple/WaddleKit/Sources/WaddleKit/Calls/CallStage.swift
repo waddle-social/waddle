@@ -1,6 +1,35 @@
 /// How the media session is doing, as the UI needs it.
 public enum CallMediaPhase: Hashable, Sendable { case idle, connecting, connected, reconnecting }
 
+/// How a call in session is doing, as every surface that shows one says
+/// it: the stage, the sidebar's card and the docks. The one place the
+/// media phase is read as a status.
+public enum CallSessionStatus: Hashable, Sendable, CaseIterable {
+    case connecting, connected, reconnecting
+
+    /// Media is idle for a moment after a session is established, while
+    /// the store fetches ICE servers: idle there still reads as connecting.
+    public init(_ phase: CallMediaPhase) {
+        switch phase {
+        case .idle, .connecting: self = .connecting
+        case .connected: self = .connected
+        case .reconnecting: self = .reconnecting
+        }
+    }
+
+    /// Media has connected, even if it is reconnecting now: the devices can be switched.
+    public var hasMedia: Bool { self != .connecting }
+
+    /// What a screen reader is told when the status changes.
+    public var announcement: String {
+        switch self {
+        case .connecting: "Connecting"
+        case .connected: "Call connected"
+        case .reconnecting: "Reconnecting"
+        }
+    }
+}
+
 /// What the call surface shows. Derived, never stored.
 public enum CallStage: Hashable, Sendable {
     /// Ringing here.
@@ -43,22 +72,22 @@ public extension CallStage {
         case .outgoing(let call):
             self = .calling(to: call.to, media: call.media)
         case .active(let call):
-            switch media {
-            case .idle, .connecting: self = .connecting(peer: call.peer.bare, media: call.media)
-            case .connected: self = .inCall(peer: call.peer.bare, media: call.media)
-            case .reconnecting: self = .reconnecting(peer: call.peer.bare, media: call.media)
-            }
+            self = Self.inSession(with: call.peer.bare, media: call.media, status: CallSessionStatus(media))
         // The dedicated group surface is #2495; the existing dock can end this call.
         case .joiningGroup(let call):
             self = .connecting(peer: call.room, media: call.media)
         case .inGroup(let call):
-            switch media {
-            case .idle, .connecting: self = .connecting(peer: call.room, media: call.media)
-            case .connected: self = .inCall(peer: call.room, media: call.media)
-            case .reconnecting: self = .reconnecting(peer: call.room, media: call.media)
-            }
+            self = Self.inSession(with: call.room, media: call.media, status: CallSessionStatus(media))
         case .ended(_, let reason):
             self = .ended(reason)
+        }
+    }
+
+    private static func inSession(with peer: BareJID, media: CallMedia, status: CallSessionStatus) -> CallStage {
+        switch status {
+        case .connecting: .connecting(peer: peer, media: media)
+        case .connected: .inCall(peer: peer, media: media)
+        case .reconnecting: .reconnecting(peer: peer, media: media)
         }
     }
 }

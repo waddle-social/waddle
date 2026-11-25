@@ -32,62 +32,62 @@ struct CallStageActions {
 /// that ends our part of the call, "Hang up" in a room too, as on the web. When they do not fit one row the pill
 /// takes a row of its own.
 struct CallControlBar: View {
-    var isMicrophoneOn = false
-    var isCameraOn = false
-    /// The devices can be switched: media has connected.
-    var hasMedia = true
-    /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
-    var isHandRaised: Bool?
-    var viewMode = CallStagePresentation.ViewMode.gallery
-    var isSelfViewHidden = false
-    var size = CallSurface.Size.split
-    /// Off while something else on screen has a use for Escape.
-    var escapeStepsDown = true
-    var showsParticipants = false
-    /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
-    var isSharingScreen: Bool?
-    /// The messages of the call's chat not yet seen; `nil` for a call with no chat to offer.
-    var chatUnread: Int?
-    var showsChat = false
-    /// Media has connected: there is a call to react in.
-    var canReact = false
+    var controls = CallControls()
     let actions: CallStageActions
 
+    private var isMicrophoneOn: Bool { controls.devices.isMicrophoneOn }
+    private var isCameraOn: Bool { controls.devices.isCameraOn }
+    private var hasMedia: Bool { controls.devices.hasMedia }
+    private var isHandRaised: Bool? { controls.isHandRaised }
+    private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
+    private var isSelfViewHidden: Bool { controls.isSelfViewHidden }
+    private var size: CallSurface.Size { controls.size }
+    private var escapeStepsDown: Bool { controls.escapeStepsDown }
+    private var showsParticipants: Bool { controls.showsParticipants }
+    private var isSharingScreen: Bool? { controls.devices.isSharingScreen }
+    private var chatUnread: Int? { controls.chatUnread }
+    private var showsChat: Bool { controls.showsChat }
+    private var canReact: Bool { controls.canReact }
+
     var body: some View {
+        // Widest first; the bar takes the first that fits (`CallControlBarLayout`).
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: Theme.Spacing.s) {
-                toggles
-                endButton
-            }
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles }
-                endButton
-            }
-            // The 400 pt column of a room's call: the view choice moves into More.
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
-                endButton
-            }
-            // One button too many for that column: reacting goes into More before sharing and the list of people do.
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, reactInMenu: true) }
-                endButton
-            }
-            // Narrower still, or with every button there is: sharing and the list of people go there too.
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
-                endButton
-            }
+            row(.oneRow)
+            row(.twoRows)
+            row(.viewChoiceInMenu)
+            row(.reactionsInMenu)
+            row(.extrasInMenu)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Call controls"))
     }
 
-    private var toggles: some View { toggles(viewChoiceInMenu: false) }
+    @ViewBuilder
+    private func row(_ layout: CallControlBarLayout) -> some View {
+        if layout.stacksEndButton {
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(layout) }
+                endButton
+            }
+        } else {
+            HStack(spacing: Theme.Spacing.s) {
+                toggles(layout)
+                endButton
+            }
+        }
+    }
+
+    private func isInBar(_ control: CallControlBarLayout.Control, _ layout: CallControlBarLayout) -> Bool {
+        layout.place(of: control, for: controls) == .bar
+    }
+
+    private func isInMenu(_ control: CallControlBarLayout.Control, _ layout: CallControlBarLayout) -> Bool {
+        layout.place(of: control, for: controls) == .menu
+    }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool, reactInMenu: Bool = false, extrasInMenu: Bool = false) -> some View {
+    private func toggles(_ layout: CallControlBarLayout) -> some View {
         CallControlButton(
             title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
             tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
@@ -98,7 +98,7 @@ struct CallControlBar: View {
             tone: isCameraOn || !hasMedia ? .plain : .chosen, action: actions.toggleCamera
         )
         .disabled(!hasMedia)
-        if !viewChoiceInMenu { viewSwitch }
+        if isInBar(.viewChoice, layout) { viewSwitch }
         if let isHandRaised {
             CallControlButton(
                 title: isHandRaised ? "Lower hand" : "Raise hand", symbol: "hand.raised",
@@ -107,7 +107,7 @@ struct CallControlBar: View {
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        if let isSharingScreen, !extrasInMenu || isSharingScreen {
+        if let isSharingScreen, isInBar(.screenShare, layout) {
             // A share in progress keeps its button whatever the width: stopping it must be one click away.
             CallControlButton(
                 title: isSharingScreen ? "Stop sharing" : "Share screen", symbol: "rectangle.inset.filled.and.person.filled",
@@ -118,7 +118,7 @@ struct CallControlBar: View {
         }
         // Unread messages, like a share in progress, keep their button whatever the width:
         // a count nobody can see is no count, and an open chat must be one click from closed.
-        if let chatUnread, !extrasInMenu || chatUnread > 0 || showsChat {
+        if let chatUnread, isInBar(.chat, layout) {
             CallControlButton(
                 title: CallChat.buttonTitle(unread: chatUnread, isOpen: showsChat), symbol: "bubble.left",
                 tone: showsChat ? .chosen : .plain, action: actions.toggleChat
@@ -128,8 +128,8 @@ struct CallControlBar: View {
             }
             .accessibilityAddTraits(showsChat ? .isSelected : [])
         }
-        if canReact, !extrasInMenu, !reactInMenu { reactMenu }
-        if !extrasInMenu {
+        if isInBar(.react, layout) { reactMenu }
+        if isInBar(.participants, layout) {
             CallControlButton(
                 title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
                 tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
@@ -137,7 +137,7 @@ struct CallControlBar: View {
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
         }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu, withReact: reactInMenu || extrasInMenu)
+        more(layout)
     }
 
     // MARK: - Split, expanded, full screen
@@ -225,21 +225,21 @@ struct CallControlBar: View {
         }
     }
 
-    private func more(withViewChoice: Bool, withExtras: Bool = false, withReact: Bool = false) -> some View {
+    private func more(_ layout: CallControlBarLayout) -> some View {
         Menu {
-            if withExtras {
-                if isSharingScreen == false {
-                    Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
-                }
-                Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
-                if let chatUnread, chatUnread == 0, !showsChat {
-                    Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
-                }
+            if isInMenu(.screenShare, layout) {
+                Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
             }
-            if withReact, canReact {
+            if isInMenu(.participants, layout) {
+                Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+            }
+            if isInMenu(.chat, layout) {
+                Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: actions.toggleChat)
+            }
+            if isInMenu(.react, layout) {
                 Menu("React") { reactionChoices }
             }
-            if withViewChoice {
+            if isInMenu(.viewChoice, layout) {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
                     Text("Speaker view").tag(CallStagePresentation.ViewMode.speaker)
