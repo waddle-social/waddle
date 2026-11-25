@@ -56,15 +56,28 @@ impl WaddleClient {
         .await
         .map_err(error)
     }
-    pub async fn fetch_saved_remote_spaces(&self) -> Result<Vec<WaddleSavedSpace>, WaddleError> {
-        let owner = self.remote_owner()?;
+    async fn published_remote_spaces(
+        &self,
+        owner: &BareJid,
+    ) -> Result<Vec<WaddleSavedSpace>, WaddleError> {
         match self.community_iq(prefs::list_iq()).await {
-            Ok(result) => prefs::parse(&result, &owner).ok_or(WaddleError::MalformedResponse),
+            Ok(result) => prefs::parse(&result, owner).ok_or(WaddleError::MalformedResponse),
             Err(WaddleError::Stanza { condition, .. }) if condition == "item-not-found" => {
                 Ok(vec![])
             }
             Err(e) => Err(e),
         }
+    }
+    pub async fn fetch_saved_remote_spaces(&self) -> Result<Vec<WaddleSavedSpace>, WaddleError> {
+        let owner = self.remote_owner()?;
+        let entries = self.published_remote_spaces(&owner).await?;
+        Ok(waddle_xmpp_client_community::remote_legacy::migrate(
+            |iq| self.community_iq(iq),
+            || self.published_remote_spaces(&owner),
+            &owner,
+            entries,
+        )
+        .await)
     }
     pub async fn update_saved_remote_space(
         &self,

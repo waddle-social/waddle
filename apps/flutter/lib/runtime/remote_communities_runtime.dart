@@ -9,6 +9,12 @@ class _RoomPresenceWait {
 
 extension RemoteCommunitiesRuntime on SurfaceRuntime {
   void remoteDisconnected() {
+    _remoteEpoch++;
+    _remoteRenewed = false;
+    _remoteRead = null;
+    _remoteSubscriptionIds.clear();
+    _remoteRenewalStatus.clear();
+    _remoteRenewals.clear();
     _remoteNicks.clear();
     _remoteOffers.clear();
     for (final wait in _remotePresence.values) {
@@ -66,7 +72,7 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
   Future<List<Map<String, dynamic>>> _savedSpaces() async {
     List<Map<String, dynamic>> rows;
     try {
-      rows = runtimeRows(await _rpc('fetch_saved_remote_spaces'));
+      rows = await _readPrivateSpaces();
     } on AccountChanged {
       rethrow;
     } catch (_) {
@@ -77,11 +83,22 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
       for (final r in rows) r['address'] as String: r,
       ..._remoteUnsaved,
     };
-    return entries.values.toList();
+    return [
+      for (final e in entries.entries)
+        {
+          ...e.value,
+          if (_remoteRenewalStatus[e.key] != null)
+            'status': _remoteRenewalStatus[e.key],
+          if (_unfollowIntents.containsKey(e.key)) 'stopping': true,
+        },
+    ];
   }
 
   Future<dynamic> _remote(String method, Map<String, dynamic> args) async {
-    if (method == 'remote.saved') return _savedSpaces();
+    if (method == 'remote.saved') {
+      final saved = await _savedSpaces();
+      return saved;
+    }
     final address = _required(args, 'address');
     if (method == 'remote.lookup') {
       final row = runtimeMap(
@@ -103,6 +120,8 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
     final operation = Object();
     _remoteBusy[address] = operation;
     try {
+      await _remoteRenewals[address];
+      requireGeneration(context, _owner);
       final offer = _remoteOffers[address];
       if (offer?['kind'] == 'room') {
         return await _changeRemoteRoom(method, address, offer!);
@@ -143,6 +162,20 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
       if (!follow && (method != 'remote.unsubscribe' || existing == null)) {
         throw ArgumentError('No saved subscription to remove.');
       }
+      if (!follow) {
+        final intent = {
+          'revision': existing?['revision'],
+          'subid': _remoteSubscriptionIds[address] ?? existing?['subid'],
+          'hostDone': false,
+          'preferenceDone': false,
+        };
+        final epoch = _remoteEpoch;
+        await _setUnfollowIntent(address, intent);
+        _requireRemoteSession(epoch);
+        return {
+          'message': await _finishUnfollow(address, intent, existing, epoch),
+        };
+      }
       final result = runtimeMap(
         await _rpc('change_remote_subscription', {
           'address': address,
@@ -162,6 +195,9 @@ extension RemoteCommunitiesRuntime on SurfaceRuntime {
         'name': offer?['name'] ?? existing?['name'],
         'revision': null,
       };
+      if (_unfollowIntents.containsKey(address))
+        await _setUnfollowIntent(address, null);
+      _remoteRenewalStatus.remove(address);
       _remoteUnsaved[address] = {...pref, 'unsaved': true};
       final message = switch (state) {
         'pending' => 'The host is reviewing your subscription.',

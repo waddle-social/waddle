@@ -11,6 +11,7 @@ part 'admin_runtime.dart';
 part 'community_runtime.dart';
 part 'extension_routes_runtime.dart';
 part 'remote_communities_runtime.dart';
+part 'remote_subscriptions.dart';
 
 /// Presentation commands are translated into the shared Rust client's typed
 /// verbs. Dart retains only account-fenced caches and UI projections.
@@ -43,6 +44,12 @@ class SurfaceRuntime {
   final _remoteUnsaved = <String, Map<String, dynamic>>{};
   final _remoteBusy = <String, Object>{};
   final _remotePresence = <String, _RoomPresenceWait>{};
+  int _remoteEpoch = 0;
+  bool _remoteRenewed = false;
+  Future<List<Map<String, dynamic>>>? _remoteRead;
+  final _remoteRenewals = <String, Future<void>>{};
+  final _remoteSubscriptionIds = <String, String>{};
+  final _remoteRenewalStatus = <String, String>{};
   final _remoteNicks = <String, String>{};
   final _roomRoutes = <String, Map<String, dynamic>>{};
   int _routeListRevision = 0;

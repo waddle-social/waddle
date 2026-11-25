@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use waddle_xmpp_client::pubsub;
 
-const JOINED: &str = "urn:waddle:joined-spaces:0";
+pub(crate) const JOINED: &str = "urn:waddle:joined-spaces:0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaddleSavedSpace {
@@ -20,6 +20,20 @@ pub struct WaddleSavedSpace {
     pub revision: Option<String>,
 }
 
+pub(crate) fn preference(entry: &Element) -> Option<WaddleSavedSpace> {
+    if !entry.is("space", JOINED) {
+        return None;
+    }
+    let a = Address::from_parts(entry.attr("service")?, Some(entry.attr("node")?))?;
+    let follow = matches!(entry.attr("follow"), Some("true" | "1"));
+    Some(WaddleSavedSpace {
+        address: a.text(),
+        name: entry.attr("name").map(str::to_owned),
+        follow,
+        subid: entry.attr("subid").filter(|_| follow).map(str::to_owned),
+        revision: entry.attr("rev").map(str::to_owned),
+    })
+}
 pub fn list_iq() -> Element {
     pubsub::build_pubsub_items_iq(&id(), None, JOINED, Some(LIMIT))
 }
@@ -34,20 +48,8 @@ pub fn parse(result: &Element, own: &BareJid) -> Option<Vec<WaddleSavedSpace>> {
         items(result, JOINED)?
             .into_iter()
             .filter_map(|item| {
-                let entry = item.payload("space", JOINED)?;
-                let a = Address::from_parts(entry.attr("service")?, Some(entry.attr("node")?))?;
-                let address = a.text();
-                if address != item.id || !seen.insert(address.clone()) {
-                    return None;
-                }
-                let follow = matches!(entry.attr("follow"), Some("true" | "1"));
-                Some(WaddleSavedSpace {
-                    address,
-                    name: entry.attr("name").map(str::to_owned),
-                    follow,
-                    subid: entry.attr("subid").filter(|_| follow).map(str::to_owned),
-                    revision: entry.attr("rev").map(str::to_owned),
-                })
+                let entry = preference(item.payload("space", JOINED)?)?;
+                (entry.address == item.id && seen.insert(item.id)).then_some(entry)
             })
             .take(LIMIT as usize)
             .collect(),

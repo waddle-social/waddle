@@ -102,7 +102,11 @@ class _RemoteCommunitiesState extends State<RemoteCommunitiesScreen> {
     final name = entry['name'] as String?;
     return ListTile(
       title: Text(name ?? address),
-      subtitle: name == null ? null : Text(address),
+      subtitle: entry['status'] is String
+          ? Text("$address\n${entry['status']}")
+          : name == null
+          ? null
+          : Text(address),
       trailing: saved
           ? PopupMenuButton<String>(
               enabled: !_busy,

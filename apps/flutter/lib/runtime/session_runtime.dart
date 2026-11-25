@@ -675,6 +675,7 @@ class SessionRuntime implements RuntimeContext {
           return;
         }
         _requireEventOwner(captured, source, epoch);
+        unawaited(surfaces.renewRemoteSubscriptions());
         await conversations.onEvent(normalized);
         _requireEventOwner(captured, source, epoch);
         await refreshHome();

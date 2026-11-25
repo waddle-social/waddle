@@ -22,4 +22,5 @@ fn invalid_input(reason: impl Into<String>) -> InvalidInput {
 pub mod remote_address;
 pub mod remote_bookmark;
 pub mod remote_community;
+pub mod remote_legacy;
 pub mod remote_preferences;

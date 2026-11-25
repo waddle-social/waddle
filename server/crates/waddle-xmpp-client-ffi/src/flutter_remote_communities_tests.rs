@@ -202,3 +202,82 @@ async fn xep0223_private_pref_and_xep0402_leave_do_not_share_occupancy() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn xep0049_partial_copy_preserves_document_and_an_authoritative_pep_unfollow_survives_retry()
+{
+    use waddle_xmpp_client_community::remote_legacy;
+    let own: BareJid = OWN.parse().unwrap();
+    let legacy="<query xmlns='jabber:iq:private'><spaces xmlns='urn:waddle:joined-spaces:0'><space service='spaces.remote.test' node='disabled' follow='true'/><space service='spaces.remote.test' node='music' follow='true'/><space service='spaces.remote.test' node='last' follow='true'/></spaces></query>";
+    let stored = RefCell::new(vec![WaddleSavedSpace {
+        address: "xmpp:spaces.remote.test?;node=disabled".into(),
+        follow: false,
+        revision: Some("off".into()),
+        subid: None,
+        name: None,
+    }]);
+    let cleared = std::cell::Cell::new(false);
+    let fail = std::cell::Cell::new(true);
+    let send = |iq: Element| {
+        assert!(iq.attr("to").is_none());
+        let result = if iq.get_child("query", "jabber:iq:private").is_some() {
+            if iq.attr("type") == Some("set") {
+                cleared.set(true);
+                assert_eq!(stored.borrow().len(), 3);
+            }
+            Ok(reply(OWN, legacy))
+        } else {
+            let item = iq
+                .get_child("pubsub", PS)
+                .unwrap()
+                .get_child("publish", PS)
+                .unwrap()
+                .get_child("item", PS)
+                .unwrap();
+            let address = item.attr("id").unwrap();
+            assert!(
+                !address.ends_with("disabled"),
+                "an existing PEP unfollow must never be overwritten"
+            );
+            if address.ends_with("last") && fail.get() {
+                Err(())
+            } else {
+                stored.borrow_mut().push(WaddleSavedSpace {
+                    address: address.into(),
+                    follow: true,
+                    revision: Some("copied".into()),
+                    subid: None,
+                    name: None,
+                });
+                Ok(reply(OWN, ""))
+            }
+        };
+        ready(result)
+    };
+    let read = || ready(Ok::<_, ()>(stored.borrow().clone()));
+    let before = stored.borrow().clone();
+    let first = remote_legacy::migrate(send, read, &own, before).await;
+    assert!(!cleared.get());
+    assert_eq!(first.len(), 2);
+    assert!(!first[0].follow);
+    fail.set(false);
+    let before = stored.borrow().clone();
+    let final_list = remote_legacy::migrate(send, read, &own, before).await;
+    assert!(cleared.get());
+    assert_eq!(final_list.len(), 3);
+    assert!(!final_list[0].follow);
+}
+
+#[tokio::test]
+async fn xep0049_rejects_another_accounts_document_before_pep_write_or_clear() {
+    use waddle_xmpp_client_community::remote_legacy;
+    let own: BareJid = OWN.parse().unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result=remote_legacy::migrate(|iq|{
+        calls.set(calls.get()+1);
+        assert_eq!(iq.attr("type"),Some("get"));
+        ready(Ok::<_,()>(reply("other@home.test","<query xmlns='jabber:iq:private'><spaces xmlns='urn:waddle:joined-spaces:0'><space service='example.org' node='bad' follow='true'/></spaces></query>")))
+    },||ready(Ok(vec![])),&own,vec![]).await;
+    assert!(result.is_empty());
+    assert_eq!(calls.get(), 1);
+}

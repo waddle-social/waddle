@@ -64,12 +64,26 @@ impl WaddleClient {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let own = owner(&inner.borrow())?;
-            let entries = match send_iq_command_stanza_aware(inner, prefs::list_iq()).await? {
-                Ok(result) => prefs::parse(&result, &own)
-                    .ok_or_else(|| js_error("Unexpected saved Spaces reply"))?,
-                Err(e) if e.condition == "item-not-found" => vec![],
-                Err(e) => return Err(js_error(e.to_string())),
+            let load = || {
+                let inner = inner.clone();
+                let own = &own;
+                async move {
+                    match send_iq_command_stanza_aware(inner, prefs::list_iq()).await? {
+                        Ok(result) => prefs::parse(&result, own)
+                            .ok_or_else(|| js_error("Unexpected saved Spaces reply")),
+                        Err(e) if e.condition == "item-not-found" => Ok(vec![]),
+                        Err(e) => Err(js_error(e.to_string())),
+                    }
+                }
             };
+            let entries = load().await?;
+            let entries = waddle_xmpp_client_community::remote_legacy::migrate(
+                |iq| send_iq_command(inner.clone(), iq),
+                load,
+                &own,
+                entries,
+            )
+            .await;
             to_js_value(&entries)
         })
     }
