@@ -575,8 +575,15 @@ public final class SessionCoordinator {
                 case .left(let room), .destroyed(let room), .joinFailed(let room, _):
                     // Out of the room, so out of earshot of its call.
                     calls.groupPresence.clearRoom(room)
-                case .contact, .occupant, .joined, .ignored:
+                case .contact, .occupant, .ignored:
                     calls.handleGroupPresence(wirePresence)
+                case .joined(let room):
+                    calls.handleGroupPresence(wirePresence)
+                    // Back in the room of a call that went on without the
+                    // stream: the room is told again that we are in it.
+                    if calls.state.isInGroupCall(in: room) {
+                        Task { await self.calls.readvertiseGroupCall(in: room) }
+                    }
                 }
             }
             refreshRoomBotsIfUndeclared(by: wirePresence)

@@ -99,6 +99,47 @@ import Testing
         await coordinator.stop()
     }
 
+    /// The call's media goes on while the stream is replaced, but the room we come back into has forgotten we are in its call.
+    @Test func comingBackIntoTheRoomOfOurCallSaysWeAreStillInIt() async throws {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.start()
+        let joining = Task { await coordinator.calls.joinGroupCall(in: groupRoom, media: callAudio, nick: "alice") }
+        await eventually { port.callSends.contains(.groupPresence(groupRoom, "alice", .init(state: .preparing))) }
+        let sid = try #require(coordinator.calls.state.sid)
+        port.emit(.presence(ownPresence(groupCall: .init(isPreparing: true, media: nil))))
+        await eventually { port.callSends.contains(.groupInitiate(groupRoom, callOwn, sid, false)) }
+        port.emit(.call(CallEvent(from: JID(parsing: "calls.waddle.test/mixer")!, sid: sid,
+            kind: .sessionAccept(join: groupJoin, media: callAudio))))
+        #expect(await joining.value)
+        #expect(await coordinator.calls.setHandRaised(true))
+
+        port.emit(.disconnected)
+        await eventually { coordinator.calls.groupPresence.participants.isEmpty }
+        port.callSends = []
+        // The join of the new stream: our own presence, with no call in it.
+        port.emit(.presence(ownPresence(groupCall: nil)))
+        await eventually { !port.callSends.isEmpty }
+        #expect(port.callSends == [
+            .groupPresence(groupRoom, "alice", .init(state: .active(video: false), isHandRaised: true)),
+        ])
+        await coordinator.stop()
+    }
+
+    @Test func joiningARoomWeAreInNoCallOfSaysNothingAboutCalls() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.start()
+        port.emit(.presence(ownPresence(groupCall: nil)))
+        await eventually { coordinator.presence.joinedRooms.contains(groupRoom) }
+        for _ in 0..<5 { await Task.yield() }
+        #expect(port.callSends.isEmpty)
+        await coordinator.stop()
+    }
+
+    private func ownPresence(groupCall: GroupCallMarker?) -> WirePresence {
+        WirePresence(from: JID(parsing: "room@muc.waddle.test/alice")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]), groupCall: groupCall)
+    }
+
     @Test func stopForgetsRoomCallPresence() async {
         let (coordinator, port) = session(handlesCalls: true)
         coordinator.start()
