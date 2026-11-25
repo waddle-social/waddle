@@ -144,15 +144,14 @@ A poisoned-ambient regression checks this per invocation. The separate real-even
 fixture explicitly supplies its own merge-group identity. This test isolation
 does not override the real workflow execution context.
 
-The existing server `checkCiDrift` and the integration planner check graph parity.
-Adding or changing a source PR lane without regenerating fails those checks.
-Fast PR workflows run directly on pull requests. The queue graph runs the
-affected fast and expensive checks once for the combined candidate. The main
-ruleset has no required status check, so the queue does not wait for it. The planner's own contracts (`integration-ci.test.ts`,
-`test_integration_ci_project.py`, `test_cuenv_bootstrap.py`) also run in the
-server `checkCiDrift` task, which pull requests run. Omitting
-FlakeHub cache can increase compile and download time; no verification commands,
-runner resources, or assertions are removed. The original cuenv reporter only uses
+On a PR that edits the workflow graph, the smoke job checks generated workflow
+parity and runs the planner contracts. The merge-group planner also checks the
+cuenv adapter and bootstrap contracts. Server `checkCiDrift` runs as part of
+the deeper project verification. With the repository queue policy applied, the
+queue waits for `PR smoke`. The combined candidate's integration results
+report separately. Several expensive jobs can overlap after their smoke checks
+finish. Integration runners omit the FlakeHub OIDC cache setup, which can
+increase compile and download time. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
 warnings in `crates/ci/src/executor/reporting.rs` of cuenv (CLI 0.81.1). Generated
 integration jobs rely on Actions job results rather than those notifications.
