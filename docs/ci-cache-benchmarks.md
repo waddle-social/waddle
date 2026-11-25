@@ -348,6 +348,8 @@ Test these architectural options separately:
 - Crane per-package source closures and artifacts: unchanged independent crates
   should retain derivation identities. Tests, Clippy and protocol coverage must
   remain complete; dependency features must match the workspace build.
+  Implemented as workspace member layers; see
+  [ci-performance.md](ci-performance.md#workspace-member-layers-2026-11).
 - Native Cargo target caching with content-validated mtime restoration, under
   the same pinned Nix toolchain. Deno and Warp use native Cargo cache patterns;
   a persistent `/nix` store does not test that architecture. Validate actual

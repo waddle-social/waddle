@@ -554,7 +554,8 @@ The `default` pipeline now has eight gates instead of thirteen:
 | `fmt` | 32-core builder | nothing | `cargo fmt --check` |
 | `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
 | `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
-| `mainClippy`, `mainTest` | profile | `fmt` | the namespace clippy and test tasks |
+| `mainClippy` | profile | `fmt` | the Nix Clippy check that merge groups build (`nixClippy`) |
+| `mainTest` | profile | `fmt` | the default-feature Nix test check (`test`, `waddle-server-default-test`) |
 | `mainDoctest` | profile | `fmt` | the Nix doctest check that pull requests build (`nixDoctest`) |
 | `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
 | `publishContainerImage` | profile | every job above | publication |
@@ -589,6 +590,9 @@ crates for about 8 minutes to run 18 doctests; the Nix check takes its
 dependencies from the shared artifact and is a cache hit when a pull request
 already checked the same tree.
 
+The measurements below describe the namespace `test` task, which `test` and
+`mainTest` ran until 2026-11-25; both now build the `waddle-server-default-test`
+Nix check (see [Workspace member layers](#workspace-member-layers-2026-11)).
 The namespace `test` task sets `CARGO_INCREMENTAL=0`. Its build is bounded by
 one compiler process: `waddle-server` compiled with its unit tests takes about
 7 minutes on a 4 vCPU runner and runs to the end of the build, after the plain
@@ -658,3 +662,57 @@ vCPU-minutes for Namespace Linux shapes (`nscloud-*-NxM` uses N;
 `namespace-profile-linux-x86` uses `--profile-vcpu`, default 8) and plain
 minutes for macOS. GitHub-hosted minutes are listed but weighted 0. Cancelled
 and failed jobs count. Shares are of weighted units, not dollars.
+
+## Workspace member layers (2026-11)
+
+Every Rust lane took third-party dependencies from a cached Crane artifact but
+recompiled all 16 workspace members whenever any source file changed. On
+25 November an
+[11-file `waddle-server` change](https://github.com/waddle-social/waddle/commit/960163dfd309fadeee65ba1571ecab944afbaac9)
+recompiled every member in the test archive:
+[573.96 s](https://github.com/waddle-social/waddle/actions/runs/45670527959/job/139423534813)
+against [581.54 s](https://github.com/waddle-social/waddle/actions/runs/45668740045/job/139397915555)
+for its parent, with the same dependency output restored from FlakeHub. `mainTest` and `mainClippy`
+were worse: they ran Cargo in an empty sandbox, and the default-feature suite
+compiled all 675 packages with one job (30 minutes) for every change.
+
+`mkMemberLayers` in `flake.nix` adds two cached layers between the dependency
+artifact and each lane. The base layer compiles every member except
+`waddle-xmpp` and `waddle-server`; the second adds `waddle-xmpp`. Of 395 recent
+commits that touched Rust sources, 181 changed only `waddle-server` and at least 112 more
+changed `waddle-xmpp` without a base crate. A layer runs its lane's own compile
+command over Crane's dependency stub source with the layer's members restored
+from separate store paths, so a `waddle-server` edit leaves both layer
+derivations unchanged and the lane compiles only `waddle-server`. A change to a
+base crate rebuilds both layers, as dependents must.
+
+| Lane | Layers built with | Dependency artifact |
+| --- | --- | --- |
+| Test archive (`nixTestLocal`) | its nextest arguments, mold, no self RPATH | `waddle-server-check-deps` |
+| `nixClippy`, `mainClippy` | `cargo clippy` with the lane's lints | `waddle-server-check-deps` |
+| `nixDoctest`, `mainDoctest` | `cargo test --doc` | `waddle-server-check-deps` |
+| `nixXmppServerTests` | its nextest arguments and mold | `waddle-server-test-deps` |
+| `test`, `mainTest` (new Nix check) | `cargo nextest run --all-targets`, `test` profile | new default-feature artifact |
+
+Cargo reuses a layer only when the fingerprint matches, so each layer receives
+the lane's arguments from one shared definition. Freshness compares source
+mtimes, which Nix sets to the same value for every file; reuse is sound because
+a layer's inputs contain every file its members compile from, and a member that
+reads anything else fails to build in the layer. Stubbed members carry Crane's
+store-path build script and never match the real crates. The production test
+archive checks Cargo's JSON messages with `scripts/check_member_layer_reuse.py`
+and fails if a member other than `waddle-server` was compiled. The benchmark
+archives in `ci/runner-benchmark` still compile every member from the
+dependency artifact, so their timings remain comparable with earlier runs.
+
+The default-feature check keeps that suite's `test` profile (debug assertions
+and overflow checks on), its `--all-targets` selection and one Cargo job for
+the 16 GB profile runner. It runs with the same test environment and fixture
+files as the other Nix test lanes. Pull requests, merge groups and `main` now
+build the same derivation, so `main` reuses a result the merge group built for
+the same tree. The namespace project's `test` and `clippy` tasks remain for
+manual runs.
+
+The new dependency artifact compiles once on its first run and after any
+`Cargo.lock` or toolchain change. Layer derivations are uploaded with the other
+outputs; their restore and compression cost has not yet been measured in CI.

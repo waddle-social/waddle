@@ -13,6 +13,7 @@ export PYTHONDONTWRITEBYTECODE=1
 python3 ../tests/ci-timings-test.py
 for contract in \
   test_check_nextest_shards \
+  test_check_member_layer_reuse \
   test_nextest_archive_transfer \
   test_build_nextest_archive \
   test_plan_nextest_binary_shards \

@@ -978,10 +978,16 @@ schema.#Project & {
 			inputs: _namespaceRustTaskInputs
 		}
 
+		// The default-feature, no-Postgres suite as a Nix check. Third-party
+		// dependencies and unchanged workspace member layers come from cached
+		// artifacts, so a server-only change compiles one crate instead of
+		// all 675 packages, and main reuses the result a merge group built
+		// for the same tree. The namespace project's `test` task runs the
+		// same selection with plain Cargo.
 		test: schema.#Task & {
 			hermetic: false
-			command:  "bash"
-			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace test"]
+			command:  "nix"
+			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-default-test"]
 			inputs: _namespaceRustTaskInputs
 		}
 
@@ -1021,10 +1027,16 @@ schema.#Project & {
 		// expression of the default pipeline keys on that dependency, and
 		// declaring it on the shared tasks would add an fmt job to every
 		// pull-request pipeline that lists them.
+		//
+		// mainClippy builds the Nix Clippy check that merge groups build: the
+		// same workspace, features, lints and structure scripts, with
+		// dependencies and unchanged workspace members from cached artifacts
+		// rather than an empty target directory. It keeps the namespace
+		// task's inputs, which define this pipeline's triggers.
 		mainClippy: schema.#Task & {
 			hermetic: false
-			command:  tasks.clippy.command
-			args:     tasks.clippy.args
+			command:  tasks.nixClippy.command
+			args:     tasks.nixClippy.args
 			inputs:   tasks.clippy.inputs
 			dependsOn: [tasks.fmt]
 		}

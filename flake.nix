@@ -86,6 +86,104 @@
           export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
           exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
         '';
+      # Nextest arguments of the all-features test archive. Its member
+      # layers compile with exactly these, so Cargo finds their units fresh.
+      # Cargo tracks the per-package overrides explicitly for the two largest
+      # workspace crates; third-party dependency profiles stay unchanged.
+      archiveNextestArgs = ''--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests --config profile.ci-test.package.waddle-server.opt-level=0 --config profile.ci-test.package.waddle-xmpp.opt-level=0'';
+      # The default-feature XMPP server lane: `test-support` adds no
+      # dependencies; it exposes test fixtures and in-server test seams, so
+      # the public suites gated on it run here too (#1777).
+      xmppServerNextestArgs = ''--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests --config profile.ci-test.package.waddle-server.opt-level=0 --config profile.ci-test.package.waddle-xmpp.opt-level=0'';
+      # Server-relative paths that member layers compile from real sources.
+      # waddle-server changes most often (181 of 395 recent Rust commits
+      # touched only it) and waddle-xmpp next, so each gets its own layer
+      # boundary. Every other path keeps Crane's dependency-only stub.
+      memberLayerPaths = rec {
+        base = [
+          "Cargo.toml"
+          ".config/nextest.toml"
+          "wit"
+          "experiments/native-fixture"
+          "extensions"
+          "crates/waddle-client-session"
+          "crates/waddle-ecdysis"
+          "crates/waddle-extensions"
+          "crates/waddle-sfu"
+          "crates/waddle-ws-test-support"
+          "crates/waddle-xmpp-client"
+          "crates/waddle-xmpp-client-ffi"
+          "crates/waddle-xmpp-client-wasm"
+          "crates/waddle-xmpp-core"
+        ];
+        xmpp = base ++ [ "crates/waddle-xmpp" ];
+      };
+      # Crane builds third-party dependencies once, but a lane that consumes
+      # only that artifact recompiles all 16 workspace members whenever any
+      # source file changes. Member layers sit between the two: a layer is
+      # the lane's own compile command run over Crane's dependency stub
+      # source, with the listed members restored to their real files. Each
+      # real path is a separate store path, so editing waddle-server leaves
+      # both layers' derivations unchanged and a lane compiles only
+      # waddle-server on top of them.
+      #
+      # Cargo decides freshness by fingerprint and source mtime. Nix gives
+      # every source file the same mtime, so reuse is only sound because a
+      # layer's inputs contain every file its real members compile from: a
+      # member reading a file outside these paths fails to build in the
+      # layer rather than reusing stale output. Stubbed members carry
+      # Crane's store-path build script, so their stub units never match
+      # the real crates and are always rebuilt by the consumer.
+      #
+      # `args` and `buildPhaseCargoCommand` must match the consuming lane's
+      # environment and compile command exactly; any difference changes
+      # Cargo fingerprints and silently turns the layers into extra work.
+      mkMemberLayers =
+        {
+          craneLib,
+          lib,
+          pname,
+          args,
+          cargoArtifacts,
+          buildPhaseCargoCommand,
+        }:
+        let
+          realPath =
+            rel:
+            let
+              source = builtins.path {
+                path = ./server + "/${rel}";
+                name = "waddle-member-${lib.strings.sanitizeDerivationName rel}";
+              };
+            in
+            ''
+              rm -rf "$out/${rel}"
+              mkdir -p "$(dirname "$out/${rel}")"
+              cp -R ${source} "$out/${rel}"
+              chmod -R u+w "$out/${rel}"
+            '';
+          mkLayer =
+            name: paths: previous:
+            craneLib.mkCargoDerivation (
+              builtins.removeAttrs args [ "cargoArtifacts" ]
+              // {
+                pname = "${pname}-${name}";
+                src = craneLib.mkDummySrc {
+                  inherit (args) src;
+                  extraDummyScript = patchedDependenciesDummyScript + lib.concatMapStrings realPath paths;
+                };
+                # Vendor from the real source, as buildDepsOnly does, so
+                # evaluation never reads the stub source derivation.
+                cargoVendorDir = craneLib.vendorCargoDeps { inherit (args) src; };
+                cargoArtifacts = previous;
+                inherit buildPhaseCargoCommand;
+                doCheck = false;
+                doInstallCargoArtifacts = true;
+              }
+            );
+          base = mkLayer "members-base" memberLayerPaths.base cargoArtifacts;
+        in
+        mkLayer "members-xmpp" memberLayerPaths.xmpp base;
     in
     {
       packages = forAllSystems (
@@ -154,8 +252,18 @@
           # Opt in to a 64 GB builder; the ordinary check keeps one Cargo job.
           # Build portable archives once. Four isolated Nix sandboxes run
           # them on disjoint eight-CPU sets on the same 32-core builder.
-          mkServerTestArchive = lane: self.checks.${system}.waddle-server-test.overrideAttrs (old: {
+          mkServerTestArchive = lane: self.checks.${system}.waddle-server-test.overrideAttrs (old: let
+            # Production reuses the member layers and compiles only
+            # waddle-server when that is all that changed. Benchmark lanes
+            # keep compiling every member, so their timings stay comparable.
+            useMemberLayers = (lane.benchmarkName or "") == "";
+          in {
             pname = "waddle-server-test-archive";
+            cargoArtifacts =
+              if useMemberLayers then
+                self.checks.${system}.waddle-server-test-archive-members
+              else
+                old.cargoArtifacts;
             outputs = [
               "out"
               "shard1"
@@ -184,15 +292,16 @@
                 echo "WADDLE_CI_METRIC phase=compile linker=mold version=${pkgs.mold.version}"
               ''}
               mkdir -p "$out/ci-performance"
-              # Keep third-party dependencies and production profiles unchanged.
-              # Cargo tracks these overrides explicitly for the two largest
-              # workspace crates; every build/list/archive call shares them.
-              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests
-                --config profile.ci-test.package.waddle-server.opt-level=0
-                --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+              # Every build/list/archive call shares the member layers' arguments.
+              nextest_args=(${archiveNextestArgs})
               echo "WADDLE_CI_METRIC phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
               ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run "''${nextest_args[@]}" --no-run --timings
+                  cargo nextest run "''${nextest_args[@]}" --no-run --timings \
+                    --cargo-message-format json-render-diagnostics > "$TMPDIR/compile-messages.jsonl"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_member_layer_reuse.py} \
+                  "$TMPDIR/compile-messages.jsonl" --root "$PWD" \
+                  ${lib.optionalString (!useMemberLayers) "--report-only"} \
+                  --rebuild-allowed crates/waddle-server
                 # This is the visible cgroup's lifetime peak, which can
                 # include dependency preparation; it is not a phase RSS.
                 if [ -r /sys/fs/cgroup/memory.peak ]; then
@@ -805,6 +914,102 @@
               doCheck = false;
             }
           );
+          # Test lanes link workspace members with mold; Cargo fingerprints
+          # the wrapper, so member layers must set it exactly as the lane does.
+          testLinkerSetup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export RUSTC_WORKSPACE_WRAPPER=${mkTestRustcWrapper pkgs}
+          '';
+          clippyCargoArgs = "--locked --workspace --all-features";
+          clippyExtraArgs = "--all-targets -- -D warnings";
+          doctestCargoArgs = "--locked --workspace --all-features";
+          doctestExtraArgs = "--doc";
+          clippyMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-clippy";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = baseArgs // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+              nativeBuildInputs = baseArgs.nativeBuildInputs ++ [ craneLib.clippy ];
+            };
+            buildPhaseCargoCommand = "cargoWithProfile clippy ${clippyCargoArgs} ${clippyExtraArgs}";
+          };
+          # Running the layer also runs the stubbed members' doctests; only
+          # a change to a layer's members repeats that work.
+          doctestMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-doctest";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = testArgs // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+            };
+            buildPhaseCargoCommand = "cargoWithProfile test ${doctestCargoArgs} ${doctestExtraArgs}";
+          };
+          xmppServerMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-xmpp-server-tests";
+            cargoArtifacts = serverTestArtifacts;
+            # The lane's environment, including PostgreSQL on PATH; its
+            # database starts in preCheck, which the layers never run.
+            args = builtins.removeAttrs serverPostgresTestArgs [ "preCheck" ] // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+              nativeBuildInputs = serverPostgresTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''
+              ${testLinkerSetup}
+              cargo nextest run ${xmppServerNextestArgs} --no-run
+            '';
+          };
+          # The default-feature suite main publishes behind (`mainTest`). It
+          # keeps that lane's `test` profile, so debug assertions and overflow
+          # checks stay on; the all-features shards build with `ci-test`.
+          defaultTestCargoArgs = "--locked --workspace";
+          defaultTestNextestArgs = "--profile ci --all-targets";
+          defaultTestArgs = serverTestArgs // {
+            CARGO_PROFILE = "test";
+            # The main profile runner has 16 GB; one waddle-server test
+            # compile can use most of it.
+            CARGO_BUILD_JOBS = "1";
+          };
+          defaultTestArtifacts = craneLib.buildDepsOnly (
+            baseArgs
+            // {
+              CARGO_PROFILE = "test";
+              cargoExtraArgs = defaultTestCargoArgs;
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
+          defaultTestMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-default-test";
+            cargoArtifacts = defaultTestArtifacts;
+            args = defaultTestArgs // {
+              nativeBuildInputs = defaultTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''cargo nextest run --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs} --no-run'';
+          };
+          # The production test archive's environment (packages
+          # mkServerTestArchive): no PostgreSQL, no self RPATH, mold.
+          archiveMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-test-archive";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = serverTestArgs // {
+              CARGO_PROFILE = "ci-test";
+              # The production lane's job count on the same 64 GB builder.
+              CARGO_BUILD_JOBS = "4";
+              NIX_NO_SELF_RPATH = "1";
+              nativeBuildInputs = serverTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''
+              ${testLinkerSetup}
+              cargo nextest run ${archiveNextestArgs} --no-run
+            '';
+          };
         in
         {
           # Keep reusable dependency artifacts and vendored sources exposed
@@ -825,9 +1030,9 @@
               CARGO_PROFILE = "ci-test";
               # The server library and its test build each need several GiB.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = workspaceAllFeaturesArtifacts;
-              cargoExtraArgs = "--locked --workspace --all-features";
-              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+              cargoArtifacts = clippyMemberArtifacts;
+              cargoExtraArgs = clippyCargoArgs;
+              cargoClippyExtraArgs = clippyExtraArgs;
               preBuild = baseArgs.preBuild + ''
                 ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
                 ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
@@ -865,6 +1070,21 @@
               CARGO_BUILD_JOBS = "1";
             }
           );
+          # Default features, all targets, no PostgreSQL: Postgres-backed
+          # tests return early and `clustering` tests are not compiled. About
+          # 180 `not(feature = ...)` sites compile only here; the all-features
+          # shards cover the rest. Replaces an uncached Cargo build that
+          # compiled all 675 packages for every source change.
+          waddle-server-default-test = craneLib.cargoNextest (
+            defaultTestArgs
+            // {
+              pname = "waddle-server-default-test";
+              doInstallCargoArtifacts = false;
+              cargoArtifacts = defaultTestMemberArtifacts;
+              cargoExtraArgs = defaultTestCargoArgs;
+              cargoNextestExtraArgs = defaultTestNextestArgs;
+            }
+          );
           waddle-server-doctest = craneLib.cargoTest (
             testArgs
             // {
@@ -873,9 +1093,9 @@
               CARGO_PROFILE = "ci-test";
               # Keep one rustc job on 16 GB runners to avoid OOM.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = workspaceAllFeaturesArtifacts;
-              cargoExtraArgs = "--locked --workspace --all-features";
-              cargoTestExtraArgs = "--doc";
+              cargoArtifacts = doctestMemberArtifacts;
+              cargoExtraArgs = doctestCargoArgs;
+              cargoTestExtraArgs = doctestExtraArgs;
             }
           );
           waddle-server-ci-build = craneLib.cargoBuild (
@@ -950,7 +1170,7 @@
               CARGO_PROFILE = "ci-test";
               # Keep one rustc job on 16 GB GitHub runners to avoid OOM.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = serverTestArtifacts;
+              cargoArtifacts = xmppServerMemberArtifacts;
               cargoExtraArgs = "--locked --package waddle-server --features test-support";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
               checkPhase = ''
@@ -961,12 +1181,7 @@
                 ''}
                 # Match the archive's compiler improvements while retaining
                 # this lane's default-feature coverage and dependency cache.
-                # `test-support` adds no dependencies; it exposes test fixtures and
-                # in-server test seams, so the public suites gated on it run here
-                # too (#1777).
-                nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests
-                  --config profile.ci-test.package.waddle-server.opt-level=0
-                  --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+                nextest_args=(${xmppServerNextestArgs})
                 echo "WADDLE_CI_METRIC lane=xmpp-server phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC lane=xmpp-server phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   cargo nextest run "''${nextest_args[@]}" --no-run --timings
@@ -998,6 +1213,11 @@
               cargoNextestExtraArgs = "--profile ci --tests";
             }
           );
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Workspace members other than waddle-server, compiled for the
+          # production test archive (packages mkServerTestArchive).
+          waddle-server-test-archive-members = archiveMemberArtifacts;
         }
       );
 
