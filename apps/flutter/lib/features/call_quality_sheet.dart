@@ -3,7 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../bridge.dart';
-import '../runtime/call_quality.dart' show voiceProcessingLabels;
+import '../runtime/call_quality.dart'
+    show MicrophoneFilter, voiceProcessingLabels;
 
 Future<void> showCallQuality(
   BuildContext context,
@@ -80,17 +81,16 @@ class _CallQualitySheetState extends State<_CallQualitySheet> {
     }
   }
 
-  Future<void> _set(String key, bool enabled) async {
+  Future<void> _change(String command, Map<String, dynamic> args) async {
     if (!_current || _changing) return;
     setState(() {
       _changing = true;
       _error = null;
     });
     try {
-      await widget.bridge.invokeQuiet('call.voiceProcessing', {
+      await widget.bridge.invokeQuiet(command, {
         'expectedSid': widget.sid,
-        'key': key,
-        'enabled': enabled,
+        ...args,
       });
     } catch (error) {
       if (_current) setState(() => _error = WaddleBridge.describeError(error));
@@ -119,9 +119,34 @@ class _CallQualitySheetState extends State<_CallQualitySheet> {
                   title: Text(entry.value),
                   value: voice[entry.key] as bool,
                   onChanged: _data['canChangeVoice'] == true && !_changing
-                      ? (value) => _set(entry.key, value)
+                      ? (value) => _change('call.voiceProcessing', {
+                          'key': entry.key,
+                          'enabled': value,
+                        })
                       : null,
                 ),
+            if (_data['noiseFilter'] case final String model)
+              ListTile(
+                title: const Text('Microphone noise filter'),
+                subtitle: DropdownButton<String>(
+                  isExpanded: true,
+                  value: model,
+                  items: [
+                    for (final filter in MicrophoneFilter.values)
+                      DropdownMenuItem(
+                        value: filter.name,
+                        child: Text(filter.label),
+                      ),
+                  ],
+                  onChanged: _data['canChangeFilter'] == true && !_changing
+                      ? (value) {
+                          if (value != null) {
+                            _change('call.noiseFilter', {'model': value});
+                          }
+                        }
+                      : null,
+                ),
+              ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),

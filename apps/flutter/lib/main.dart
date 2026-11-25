@@ -21,10 +21,8 @@ Future<void> main(List<String> arguments) async {
       'nnnoiseless': 'assets/licenses/nnnoiseless-BSD.txt',
     };
     for (final notice in notices.entries) {
-      yield LicenseEntryWithLineBreaks(
-        [notice.key],
-        await rootBundle.loadString(notice.value),
-      );
+      final text = await rootBundle.loadString(notice.value);
+      yield LicenseEntryWithLineBreaks([notice.key], text);
     }
   });
   await _launch(headless: arguments.contains('--unifiedpush-bg'));

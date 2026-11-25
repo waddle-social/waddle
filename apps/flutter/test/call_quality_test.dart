@@ -44,6 +44,7 @@ void main() {
     'voice settings target the current room and stop polling after a call change',
     (tester) async {
       var reads = 0;
+      var model = 'off';
       final changes = <Map<String, dynamic>>[];
       final bridge =
           WaddleBridge(
@@ -59,8 +60,11 @@ void main() {
                     'noiseSuppression': true,
                   },
                   'canChangeVoice': true,
+                  'noiseFilter': model,
+                  'canChangeFilter': true,
                 };
               }
+              if (name == 'call.noiseFilter') model = args['model'] as String;
               changes.add(args);
             },
           )..acceptEvent({
@@ -90,6 +94,12 @@ void main() {
         'key': 'echoCancellation',
         'enabled': false,
       });
+      await tester.tap(find.text('Off'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('DTLN').last);
+      await tester.pumpAndSettle();
+      expect(changes.last, {'expectedSid': 'alpha', 'model': 'dtln'});
+      expect(find.text('DTLN'), findsOneWidget);
       bridge.acceptEvent({
         'topic': 'call',
         'generation': 2,

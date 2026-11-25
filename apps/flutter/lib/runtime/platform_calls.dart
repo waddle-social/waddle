@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'call_quality.dart' show MicrophoneFilter;
 import 'context.dart';
 import 'platform_media.dart';
 
@@ -231,6 +232,7 @@ class PlatformCallService {
         return null;
       case 'call.quality':
       case 'call.voiceProcessing':
+      case 'call.noiseFilter':
         if (_phase != 'active') throw StateError('The call is not active.');
         final epoch = _epoch, generation = context.generation, sid = _sid;
         if (method == 'call.quality') {
@@ -238,10 +240,18 @@ class PlatformCallService {
           _guard(epoch, generation, sid);
           return quality;
         }
-        await media.setVoiceProcessing(
-          args['key'] as String,
-          args['enabled'] as bool,
-        );
+        if (method == 'call.noiseFilter') {
+          final model = MicrophoneFilter.values.byName(args['model'] as String);
+          await media.setMicrophoneFilter(model);
+          _guard(epoch, generation, sid);
+          context.persistent['microphoneFilter'] = model.name;
+          await context.persist();
+        } else {
+          await media.setVoiceProcessing(
+            args['key'] as String,
+            args['enabled'] as bool,
+          );
+        }
         _guard(epoch, generation, sid);
         return null;
       case 'call.devices':
@@ -753,6 +763,13 @@ class PlatformCallService {
     try {
       await _startForeground(epoch, generation, sid, video: _video);
       _guard(epoch, generation, sid);
+      final saved = context.persistent['microphoneFilter'];
+      media.prepareMicrophoneFilter(
+        MicrophoneFilter.values
+                .where((model) => model.name == saved)
+                .firstOrNull ??
+            MicrophoneFilter.off,
+      );
       await media.connect(join, _video, runtimeRows(ice));
       _guard(epoch, generation, sid);
       if (_group) {
@@ -791,6 +808,7 @@ class PlatformCallService {
       return Future.value();
     }
     final token = _talkHold = held ? Object() : null;
+    if (!held) media.gateMicrophone();
     Future<void>? presence;
     final result = _talkTransition.then((_) async {
       if (!_current(epoch, generation, sid) || _phase != 'active') return;

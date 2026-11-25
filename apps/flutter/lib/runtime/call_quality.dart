@@ -2,6 +2,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 
+enum MicrophoneFilter {
+  off('Off'),
+  rnnoise('RNNoise'),
+  dtln('DTLN');
+
+  const MicrophoneFilter(this.label);
+  final String label;
+}
+
 const voiceProcessingLabels = {
   'echoCancellation': 'Echo cancellation',
   'noiseSuppression': 'Noise suppression',
@@ -36,8 +45,9 @@ class CallQuality {
     lk.Room room,
     bool Function() current,
     String key,
-    bool value,
-  ) => microphoneChange(() async {
+    bool value, {
+    Future<void> Function(lk.AudioCaptureOptions, String, bool)? replaceCapture,
+  }) => microphoneChange(() async {
     if (!current() || !voiceProcessingLabels.containsKey(key)) {
       throw StateError('The microphone setting is unavailable.');
     }
@@ -54,19 +64,10 @@ class CallQuality {
       autoGainControl: key == 'autoGainControl' ? value : null,
     );
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-      // Desktop WebRTC exposes the actual AEC/NS/AGC state when it creates the source.
-      // Restart only the microphone on its existing sender and retain its input device.
-      try {
-        await track.restartTrack(next);
-        if (current() && track.mediaStreamTrack.getSettings()[key] != value) {
-          throw StateError('The microphone did not apply this setting.');
-        }
-      } catch (_) {
-        if (current()) await track.restartTrack(old);
-        rethrow;
-      } finally {
-        if (!current()) await track.stop();
+      if (replaceCapture == null) {
+        throw StateError('The microphone is unavailable.');
       }
+      await replaceCapture(next, key, value);
     } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       // The pinned Android SDK applies these options to the active native sender.
       // ignore: experimental_member_use

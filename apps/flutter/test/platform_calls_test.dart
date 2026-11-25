@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:waddle_flutter/runtime/context.dart';
+import 'package:waddle_flutter/runtime/call_quality.dart';
 import 'package:waddle_flutter/runtime/platform_calls.dart';
 import 'package:waddle_flutter/runtime/platform_media.dart';
 import 'platform_test_context.dart';
@@ -12,6 +13,21 @@ class FakeMedia extends CallMedia {
   int connects = 0, disconnects = 0;
   bool sharing = false, denyScreen = false;
   final microphoneChanges = <bool>[];
+  Future<void>? pendingMicrophone;
+  int microphoneGates = 0;
+
+  @override
+  void gateMicrophone() => microphoneGates++;
+  MicrophoneFilter filter = MicrophoneFilter.off;
+
+  @override
+  void prepareMicrophoneFilter(MicrophoneFilter value) => filter = value;
+
+  @override
+  Future<void> setMicrophoneFilter(MicrophoneFilter value) async {
+    filter = value;
+  }
+
   String? device, background;
   (String, double)? volume;
   @override
@@ -38,6 +54,7 @@ class FakeMedia extends CallMedia {
   @override
   Future<void> microphone(bool enabled) async {
     microphoneChanges.add(enabled);
+    if (enabled) await pendingMicrophone;
   }
 
   @override
@@ -151,6 +168,74 @@ void main() {
       expect(media.microphoneChanges, [true, false]);
     },
   );
+  test(
+    'a call restores the account filter and ignores changes for an old call',
+    () async {
+      final context = TestRuntimeContext(), media = FakeMedia();
+      context.persistent['microphoneFilter'] = 'rnnoise';
+      final service = PlatformCallService(
+        context,
+        media: media,
+        requestCapture: (_) async {},
+      );
+      addTearDown(service.dispose);
+      service.onEvent(proposal('filtered'));
+      await settle();
+      await service.invoke('call.accept', {'expectedSid': 'filtered'});
+      service.onEvent(grantEvent('filtered'));
+      await settle();
+      expect(media.filter, MicrophoneFilter.rnnoise);
+      await expectLater(
+        service.invoke('call.noiseFilter', {
+          'expectedSid': 'old',
+          'model': 'off',
+        }),
+        throwsStateError,
+      );
+      expect(context.persistent['microphoneFilter'], 'rnnoise');
+      await service.invoke('call.noiseFilter', {
+        'expectedSid': 'filtered',
+        'model': 'dtln',
+      });
+      expect(media.filter, MicrophoneFilter.dtln);
+      expect(context.persistent['microphoneFilter'], 'dtln');
+    },
+  );
+
+  test(
+    'push-to-talk release gates a microphone that is still opening',
+    () async {
+      final context = TestRuntimeContext(), media = FakeMedia();
+      final service = PlatformCallService(
+        context,
+        media: media,
+        requestCapture: (_) async {},
+      );
+      addTearDown(service.dispose);
+      service.onEvent(proposal('opening'));
+      await settle();
+      await service.invoke('call.accept', {'expectedSid': 'opening'});
+      service.onEvent(grantEvent('opening'));
+      await settle();
+      final open = Completer<void>();
+      media.pendingMicrophone = open.future;
+      final press = service.invoke('call.talk', {
+        'expectedSid': 'opening',
+        'held': true,
+      });
+      await settle();
+      expect(media.microphoneChanges, [true]);
+      final release = service.invoke('call.talk', {
+        'expectedSid': 'opening',
+        'held': false,
+      });
+      expect(media.microphoneGates, 1);
+      open.complete();
+      await Future.wait([press, release]);
+      expect(media.microphoneChanges, [true, false]);
+    },
+  );
+
   test('push-to-talk mutes locally while group presence is pending', () async {
     const room = 'room@muc.example.test', sid = 'cached-sid';
     final context = TestRuntimeContext(), media = FakeMedia();
