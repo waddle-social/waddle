@@ -11,10 +11,7 @@ struct CallMediaNotice: View {
     let issues: [CallMediaIssue]
     /// The kinds being tried again now: their button says so and waits.
     var checking: Set<CallMediaIssue.Kind> = []
-    let retry: @MainActor (CallMediaIssue.Kind) -> Void
-    /// Opens the system's settings where the device is allowed.
-    var openSettings: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nowhere to open */ }
-    let dismiss: @MainActor (CallMediaIssue.Kind) -> Void
+    let perform: @MainActor (CallStageAction) -> Void
 
     var body: some View {
         VStack(spacing: Theme.Spacing.xs) {
@@ -70,12 +67,12 @@ struct CallMediaNotice: View {
         let isChecking = checking.contains(issue.kind)
         return HStack(spacing: Theme.Spacing.s) {
             if issue.opensSettings {
-                Button("Open Settings") { openSettings(issue.kind) }
+                Button("Open Settings") { perform(.openSystemSettings(issue.kind)) }
                     .buttonStyle(.huddle(size: .small))
                     .fixedSize()
                     .accessibilityLabel(Text("Open Settings for the \(issue.deviceName)"))
             }
-            Button(isChecking ? "Checking…" : issue.retryTitle) { retry(issue.kind) }
+            Button(isChecking ? "Checking…" : issue.retryTitle) { perform(.retry(issue.kind)) }
                 .buttonStyle(.huddle(size: .small))
                 .fixedSize()
                 .disabled(isChecking)
@@ -84,7 +81,7 @@ struct CallMediaNotice: View {
     }
 
     private func dismissButton(_ issue: CallMediaIssue) -> some View {
-        Button { dismiss(issue.kind) } label: {
+        Button { perform(.dismissIssue(issue.kind)) } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.Colors.fgMuted)

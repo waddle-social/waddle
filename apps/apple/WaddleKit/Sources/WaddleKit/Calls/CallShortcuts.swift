@@ -25,6 +25,16 @@ public enum CallShortcut: CaseIterable, Equatable, Sendable {
         }
     }
 
+    public func action(size: CallSurface.Size) -> CallStageAction {
+        switch self {
+        case .microphone: .toggleMicrophone
+        case .camera: .toggleCamera
+        case .screenShare: .toggleScreenShare
+        case .hand: .toggleHand
+        case .stepUp: .setSize(size.steppedUp)
+        }
+    }
+
     /// The keys that do something on a stage as it is now; the others are
     /// left alone, for whatever else may want them.
     public static func available(for controls: CallControls) -> [CallShortcut] {
