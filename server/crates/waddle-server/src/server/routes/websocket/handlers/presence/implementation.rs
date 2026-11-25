@@ -271,7 +271,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
         }
 
         #[cfg(feature = "clustering")]
-        if !muc_update::is_muc_join_presence(&presence) {
+        if !muc_update::is_plain_muc_join_presence(&presence) {
             if let Some(origin) = context.ordered_relay_origin.as_ref() {
                 if let Some(addressing) =
                     context.state.deps.app_state.clustering_claims.addressing()
