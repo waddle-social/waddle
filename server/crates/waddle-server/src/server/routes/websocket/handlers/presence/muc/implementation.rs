@@ -2498,9 +2498,9 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
 
         // XEP-0045 §7.2.15 historical room subject. The typed builder
         // produces the conformant envelope: nick-form `from` + `<delay/>`
-        // + XEP-0421 `<occupant-id/>` when a setter is known, or bare-from
-        // empty `<subject/>` for a never-set room (matching the established
-        // resolution of XEP-0421 §3 vs §7.2.15 on never-set rooms).
+        // + XEP-0421 `<occupant-id/>` of the setter, or bare-from empty
+        // `<subject/>` carrying the room's own occupant-id for a never-set
+        // room.
         let subject_msg = build_subject_message(
             room_jid,
             sender_jid,

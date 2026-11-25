@@ -1940,6 +1940,87 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
 }
 
 #[tokio::test]
+async fn xep_0421_tombstones_keep_the_original_authors_occupant_id() {
+    // XEP-0421 §Business Rules: the occupant-id MUST be attached to every
+    // message a MUC sends, archived tombstones included (XEP-0425 tombstone
+    // example). The original row's occupant-id survives the replacement for
+    // the retracted message and for each of its XEP-0308 corrections; the
+    // real-JID item does not.
+    use waddle_xmpp_core::mam::{
+        ArchivedOccupantId, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
+        RichMessageId,
+    };
+
+    let storage = create_test_storage().await;
+    let archive = bare("room@conference.example.com");
+    let archive_jid = jid("room@conference.example.com");
+    let occupant = ArchivedOccupantId::try_new("author-occupant-id").expect("occupant id");
+    let original = ArchivedMessage {
+        id: "oid-original".to_string(),
+        body: Some("secret".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "oid-wire",
+            archive_jid.clone(),
+        )),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        rich: Some(ArchivedRichMessage {
+            occupant_id: Some(occupant.clone()),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    let correction = ArchivedMessage {
+        id: "oid-correction".to_string(),
+        body: Some("secret fixed".to_string()),
+        stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
+            "oid-fix",
+            archive_jid.clone(),
+        )),
+        message_type: xmpp_parsers::message::MessageType::Groupchat,
+        rich: Some(ArchivedRichMessage {
+            payload: Some(ArchivedRichPayload::Correction {
+                replaces_id: RichMessageId::try_new("oid-wire").expect("rich id"),
+            }),
+            occupant_id: Some(occupant.clone()),
+            ..ArchivedRichMessage::default()
+        }),
+        ..ArchivedMessage::for_test(archive_alice(&archive), archive_jid.clone())
+    };
+    storage.store_message(&archive, &original).await.unwrap();
+    storage.store_message(&archive, &correction).await.unwrap();
+
+    let tombstone = ArchivedTombstone {
+        retraction_id: Some(RichMessageId::try_new("retract-oid").expect("rich id")),
+        stamp: Utc::now(),
+        moderation: None,
+        reason: None,
+        replaces_id: None,
+        sender_scope: None,
+    };
+    assert!(storage
+        .replace_with_tombstone("oid-original", tombstone)
+        .await
+        .unwrap());
+
+    for id in ["oid-original", "oid-correction"] {
+        let rich = storage
+            .get_message(id)
+            .await
+            .unwrap()
+            .expect("tombstone row")
+            .rich
+            .expect("tombstone rich payload");
+        assert!(rich.is_tombstoned(), "{id} is tombstoned");
+        assert_eq!(
+            rich.occupant_id.as_ref(),
+            Some(&occupant),
+            "{id} tombstone keeps the author's occupant-id"
+        );
+        assert!(rich.muc_sender.is_none(), "{id} tombstone drops real JID");
+    }
+}
+
+#[tokio::test]
 async fn xep_0313_sqlx_archive_returns_messages_in_commit_order() {
     // XEP-0313 archive order follows commits independently of timestamps and IDs.
     let storage = create_test_storage().await;

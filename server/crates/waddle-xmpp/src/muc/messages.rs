@@ -12,7 +12,9 @@ use super::room::RoomConfig;
 use super::SubjectState;
 use crate::xep::xep0085::{self, ChatStateCarrier};
 use crate::xep::xep0203;
-use crate::xep::xep0421::{generate_occupant_id, set_occupant_id_on_message, OccupantIdSecret};
+use crate::xep::xep0421::{
+    generate_occupant_id, generate_room_occupant_id, set_occupant_id_on_message, OccupantIdSecret,
+};
 use crate::XmppError;
 
 /// Represents a parsed MUC message ready for routing.
@@ -287,12 +289,9 @@ pub fn create_broadcast_message(
 ///
 /// `state == None` ("never set"): bare-from groupchat message with an
 /// empty `<subject/>` element, no `<delay/>`, no `<occupant-id/>`.
-/// XEP-0421 §3 nominally requires occupant-id on every emitted
-/// message, but the derivation is keyed on the setter's real bare JID
-/// (XEP-0421 §3) — for a never-set room there is no setter input and
-/// the two MUSTs cannot both be satisfied. Established servers
-/// (Prosody, ejabberd, MongooseIM, Openfire) resolve this by
-/// satisfying §7.2.15 and omitting occupant-id; we mirror that.
+/// XEP-0421 §Business Rules requires occupant-id on every message a MUC
+/// sends. For a never-set room there is no setter, so the message carries
+/// the room's own identifier ([`generate_room_occupant_id`]).
 ///
 /// `state == Some(SubjectState{..})` (set or explicitly cleared): nick-form
 /// `from='room/setter_nick'` (per the §7.2.15 example), one
@@ -321,6 +320,11 @@ pub fn build_subject_message(
             msg.from = Some(Jid::from(room_jid.clone()));
             msg.subjects
                 .insert(xmpp_parsers::message::Lang::new(), String::new());
+            // XEP-0421 §Business Rules: every message a MUC sends carries
+            // an occupant-id. No occupant ever set the subject, so the
+            // room's own identifier stands in.
+            let occupant_id = generate_room_occupant_id(room_jid, secret);
+            set_occupant_id_on_message(&mut msg, &occupant_id);
         }
         Some(state) => {
             let from = room_jid

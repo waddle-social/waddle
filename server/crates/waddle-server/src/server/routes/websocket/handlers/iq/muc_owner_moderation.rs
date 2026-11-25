@@ -1966,6 +1966,31 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .into();
             }
         };
+        // XEP-0424 §Business rules: a retraction that refers to a correction
+        // retracts the original message and all of its corrections, so a
+        // moderated correction resolves to its original; the broadcast, the
+        // archived event and the tombstone all name that original.
+        let moderated_target =
+            match crate::server::routes::interpret::correction_target::resolve_correction_original(
+                &state.deps.protocol.mam_storage,
+                &room_jid,
+                moderated_target,
+            )
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to resolve moderation target");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                    .into();
+                }
+            };
+        let target_message_id = moderated_target.id.clone();
 
         let moderator_nick = context
             .nick
@@ -1983,11 +2008,18 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         );
         let mut moderation = build_moderation_result_message(
             Some(jid::Jid::from(room_jid.clone())),
-            &request.target_id,
+            &target_message_id,
             &moderated_by,
             Some(moderator_occupant_id.as_str()),
             request.reason.as_deref(),
         );
+        // XEP-0421 §Business Rules: the moderation notice is a message the
+        // MUC itself sends, so it carries the room's own occupant-id.
+        let room_occupant_id = waddle_xmpp::xep::xep0421::generate_room_occupant_id(
+            &room_jid,
+            &state.deps.occupant_id_secret,
+        );
+        waddle_xmpp::xep::xep0421::set_occupant_id_on_message(&mut moderation, &room_occupant_id);
         let archive_id = uuid::Uuid::now_v7().to_string();
         let room_jid_full = jid::Jid::from(room_jid.clone());
         add_stanza_id_xep0359(
@@ -1996,7 +2028,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         );
 
         if let (Some(target_id), Ok(moderator_jid)) = (
-            RichMessageId::try_new(request.target_id.clone()),
+            RichMessageId::try_new(target_message_id.clone()),
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
@@ -2031,9 +2063,11 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                     references: Vec::new(),
                     mentions: Vec::new(),
                     subjects: Default::default(),
-                    // Room-authored moderation event row: no occupant
-                    // sender to identify.
-                    occupant_id: None,
+                    // Room-authored moderation event row: the room's own
+                    // occupant-id (XEP-0421 §Business Rules).
+                    occupant_id: waddle_xmpp_core::mam::ArchivedOccupantId::try_new(
+                        room_occupant_id.as_str(),
+                    ),
                     muc_sender: None,
                 }),
                 nickname_generation: None,
@@ -2045,7 +2079,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .store_message(&room_jid, &archived)
                 .await
             {
-                warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
+                warn!(room = %room_jid, target = %target_message_id, error = %error, "Failed to archive moderation event");
             }
 
             // XEP-0425 §"the archiving service MAY replace the
@@ -2057,7 +2091,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .deps
                 .protocol
                 .mam_storage
-                .get_message(&request.target_id)
+                .get_message(&target_message_id)
                 .await;
             match original_lookup {
                 Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
@@ -2074,7 +2108,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         stamp: stamp_time,
                         moderation: Some(ArchivedModeration {
                             target_id: waddle_xmpp::mam::RichMessageId::try_new(
-                                request.target_id.clone(),
+                                target_message_id.clone(),
                             )
                             .expect("target id is non-empty here"),
                             moderated_by: moderated_by
@@ -2086,7 +2120,12 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         // Internal tombstone-retry identity only; the
                         // MAM response builders never read this field.
                         reason: None,
-                        replaces_id: None,
+                        // XEP-0425 §Tombstones: keep the <replace/> of a retracted correction.
+                        replaces_id: original
+                            .rich
+                            .as_ref()
+                            .and_then(|rich| rich.correction_replaces_id())
+                            .cloned(),
                         sender_scope: original
                             .rich
                             .as_ref()
@@ -2112,13 +2151,13 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         }
                         Ok(false) => warn!(
                             room = %room_jid,
-                            target = %request.target_id,
+                            target = %target_message_id,
                             "Moderation tombstone target disappeared before replacement"
                         ),
                         Err(error) => {
                             warn!(
                                 room = %room_jid,
-                                target = %request.target_id,
+                                target = %target_message_id,
                                 error = %error,
                                 "Failed to replace original with moderation tombstone"
                             );
@@ -2136,14 +2175,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                     // accidentally scrubbed (Codex P1, Copilot review
                     // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
-                    let target_id = request.target_id.as_str();
+                    let target_id = target_message_id.as_str();
                     // XEP-0425 moderation targets the room-assigned
                     // XEP-0359 stanza-id: cached reflections are
                     // matched ONLY on `<stanza-id by=room/>`, never on
                     // the client-chosen wire id (which any occupant
                     // could mint to collide with another reflection).
                     let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-                        stanza_id: request.target_id.clone(),
+                        stanza_id: target_message_id.clone(),
                         room: room_jid.clone(),
                     };
                     match state
@@ -2196,7 +2235,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 Ok(_) => {}
                 Err(error) => warn!(
                     room = %room_jid,
-                    target = %request.target_id,
+                    target = %target_message_id,
                     error = %error,
                     "Failed to look up moderation target for tombstone"
                 ),
