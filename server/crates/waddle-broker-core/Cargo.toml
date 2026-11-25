@@ -1,0 +1,24 @@
+[package]
+name = "waddle-broker-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust tenant isolation domain types, storage/authz/admission trait contracts, Verus-verified security kernels, and PObserve-paired JSONL trace verifier"
+
+[dependencies]
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3.27"
+tokio = { workspace = true }
+turso = { version = "0.8.4", default-features = false, features = ["fts"] }
+
+[lints]
+workspace = true
