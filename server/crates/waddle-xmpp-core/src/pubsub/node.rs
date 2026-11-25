@@ -360,6 +360,13 @@ impl NodeConfig {
     /// outcasts via `can_publish`. Distinct from `spaces_public()`
     /// (Publisher publish-model) which the owner-only stories and
     /// calendar nodes keep.
+    ///
+    /// XEP-0472 §"Base profile" says `pubsub#send_last_published_item`
+    /// SHOULD be `never`, which this node follows. It also says
+    /// `pubsub#deliver_payloads` SHOULD be `false`; Waddle deliberately keeps
+    /// `true` (a permitted SHOULD deviation) because the feed UI renders
+    /// notifications straight from the event payload instead of issuing a
+    /// follow-up items query per post.
     #[must_use]
     pub fn community_feed() -> Self {
         Self {
@@ -371,7 +378,7 @@ impl NodeConfig {
             deliver_payloads: true,
             notify_retract: true,
             notify_delete: true,
-            send_last_published_item: SendLastPublishedItem::OnSub,
+            send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
             item_expire: None,
         }
@@ -494,6 +501,8 @@ impl NodeConfig {
             config = Self::waddle_story_reads_defaults();
         } else if node == crate::xep0501::PUBSUB_NODE_STORIES {
             config = Self::pep_stories();
+        } else if node == super::pep::PEP_NODE_MICROBLOG {
+            config = Self::microblog_defaults();
         }
         config
     }
@@ -512,6 +521,22 @@ impl NodeConfig {
     #[must_use]
     pub fn pins_whitelist_access(node: &str) -> bool {
         Self::pep_for_node(node).access_model == AccessModel::Whitelist
+    }
+
+    /// Defaults for the XEP-0277 microblog PEP node.
+    ///
+    /// XEP-0277 §"Microblog node configuration": `pubsub#notify_retract`
+    /// MUST be true, `pubsub#max_items` SHOULD be increased from the default,
+    /// and `pubsub#send_last_published_item` SHOULD be `never`. The node keeps
+    /// every post (`max`), like the XEP-0472 base profile it builds on.
+    #[must_use]
+    pub fn microblog_defaults() -> Self {
+        Self {
+            max_items: u32::MAX,
+            notify_retract: true,
+            send_last_published_item: SendLastPublishedItem::Never,
+            ..Self::pep_default()
+        }
     }
 
     /// Defaults for the Waddle story-reads PEP node.
@@ -990,12 +1015,32 @@ mod tests {
         assert_eq!(config.node_type, Some(PubSubNodeType::PubsubSocialFeed));
         assert!(config.persist_items);
         assert!(config.deliver_payloads);
+        assert_eq!(config.max_items, u32::MAX);
+        assert!(config.notify_retract);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
         // Differs from spaces_public() only on publish-model: the feed
         // is member-postable, spaces nodes are Publisher-gated.
         assert_eq!(
             NodeConfig::spaces_public().publish_model,
             PublishModel::Publishers
         );
+    }
+
+    #[test]
+    fn microblog_node_follows_the_xep0277_recommendations() {
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_MICROBLOG);
+        assert_eq!(config, NodeConfig::microblog_defaults());
+        assert!(config.notify_retract);
+        assert_eq!(config.max_items, u32::MAX);
+        assert_ne!(config.max_items, NodeConfig::pep_default().max_items);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+        assert_eq!(config.access_model, AccessModel::Presence);
     }
 
     #[test]
