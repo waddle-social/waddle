@@ -511,18 +511,26 @@ const SQLITE_COMPAT_PLACEMENT_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS tenan
 /// so all 7 lease/fencing tests run unconditionally on hosts without PostgreSQL.
 pub struct SqliteCompatPlacementLeaseStore {
     pool: SqlitePool,
+    /// Serializes SQLite write CAS transactions (mirroring `BEGIN IMMEDIATE`
+    /// so concurrent `BEGIN DEFERRED` readers never deadlock on write upgrade).
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl SqliteCompatPlacementLeaseStore {
     pub async fn new_in_memory() -> Result<Self, LeaseError> {
-        let pool = SqlitePool::connect("sqlite::memory:")
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
             .await
             .map_err(|err| LeaseError::Backend(format!("sqlite connect: {err}")))?;
         sqlx::query(SQLITE_COMPAT_PLACEMENT_SCHEMA)
             .execute(&pool)
             .await
             .map_err(|err| LeaseError::Backend(format!("sqlite placement DDL: {err}")))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            write_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
     pub async fn mark_draining(
@@ -724,6 +732,7 @@ impl PlacementLeaseStore for SqliteCompatPlacementLeaseStore {
         if !spiffe_matches_cell_role(&holder.spiffe_id, role, mode) {
             return Err(LeaseError::HolderMismatch(tenant.clone()));
         }
+        let _guard = self.write_lock.lock().await;
         let now_ms = self.db_now_ms().await?;
         let expires_at_ms = now_ms.saturating_add(ttl_i64);
 
