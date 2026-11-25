@@ -2,6 +2,7 @@
 //! providers, durable destruction ledger, IdP intent verification, and
 //! client-sealed enrollment.
 
+pub mod authz;
 pub mod custody;
 pub mod envelope;
 pub mod error;
@@ -12,6 +13,19 @@ pub mod ledger;
 pub mod sealed_enrollment;
 pub mod secret;
 
+pub use authz::local::LocalPermissionBackend;
+pub use authz::openfga::{
+    parse_openfga_consistency, InProcessOpenFgaServer, OpenFgaCheckWireRequest, OpenFgaConfig,
+    OpenFgaConsistency, OpenFgaPermissionBackend, OpenFgaTupleKey, RecordedOpenFgaRequest,
+};
+pub use authz::openfga_model::{
+    openfga_authorization_model_json, openfga_module_grant_object, openfga_store_grant_object,
+    OPENFGA_CHAT_MODULE_DSL, OPENFGA_INFERENCE_MODULE_DSL, OPENFGA_SCHEMA_VERSION,
+};
+pub use authz::{
+    enforce_module_write, enforce_object_module_write, evaluate_permission_in_memory,
+    object_type_module, AuthzCallerRole,
+};
 pub use custody::{
     BrokerCustodyService, CredentialLifecycleStatus, CredentialReceipt, EnrollCredentialInput,
     RestoreReopenReport,

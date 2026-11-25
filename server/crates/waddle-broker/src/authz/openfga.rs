@@ -1,0 +1,956 @@
+//! OpenFGA `PermissionBackend` implementation with per-tenant stores,
+//! pinned immutable `authorization_model_id`s, Modular Models (`schema 1.2`),
+//! mandatory `HIGHER_CONSISTENCY`, and rejection of caller-supplied `contextual_tuples`.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use uuid::Uuid;
+use waddle_broker_core::identity::TenantId;
+use waddle_broker_core::permission::{
+    AuthzConsistency, AuthzModule, AuthzObject, AuthzRelation, AuthzSubject, AuthzTuple,
+    CheckDecision, CheckRequest, PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
+};
+
+use crate::authz::openfga_model::{
+    decode_openfga_object, decode_openfga_subject, encode_openfga_object, encode_openfga_subject,
+    openfga_authorization_model_json, openfga_module_grant_object, openfga_store_grant_object,
+    OPENFGA_SCHEMA_VERSION,
+};
+use crate::authz::{
+    enforce_module_write, enforce_object_module_write, evaluate_permission_in_memory,
+    AuthzCallerRole,
+};
+
+/// OpenFGA wire consistency enum. Only `HIGHER_CONSISTENCY` is representable;
+/// `MINIMIZE_LATENCY` and `UNSPECIFIED` are prohibited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OpenFgaConsistency {
+    #[serde(rename = "HIGHER_CONSISTENCY")]
+    HigherConsistency,
+}
+
+/// Validates a raw OpenFGA consistency string, rejecting `MINIMIZE_LATENCY`,
+/// `UNSPECIFIED`, or any value other than `HIGHER_CONSISTENCY`.
+pub fn parse_openfga_consistency(raw: &str) -> Result<OpenFgaConsistency, PermissionBackendError> {
+    match raw {
+        "HIGHER_CONSISTENCY" => Ok(OpenFgaConsistency::HigherConsistency),
+        other => Err(PermissionBackendError::Backend(format!(
+            "prohibited OpenFGA consistency value: {other} (only HIGHER_CONSISTENCY is allowed)"
+        ))),
+    }
+}
+
+/// Configuration for [`OpenFgaPermissionBackend`].
+#[derive(Debug, Clone)]
+pub struct OpenFgaConfig {
+    pub endpoint: String,
+    pub bearer_token: Option<String>,
+    pub caller_role: AuthzCallerRole,
+    pub pinned_model_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFgaTupleKey {
+    pub user: String,
+    pub relation: String,
+    pub object: String,
+}
+
+impl OpenFgaTupleKey {
+    pub fn from_tuple(tuple: &AuthzTuple) -> Self {
+        Self {
+            user: encode_openfga_subject(&tuple.subject),
+            relation: tuple.relation.as_str().to_owned(),
+            object: encode_openfga_object(&tuple.object),
+        }
+    }
+
+    pub fn to_tuple(&self) -> Result<AuthzTuple, PermissionBackendError> {
+        Ok(AuthzTuple {
+            object: decode_openfga_object(&self.object)?,
+            relation: AuthzRelation::new(self.relation.clone()),
+            subject: decode_openfga_subject(&self.user)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenFgaCheckWireRequest {
+    pub authorization_model_id: String,
+    pub tuple_key: OpenFgaTupleKey,
+    pub consistency: OpenFgaConsistency,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaCheckWireResponse {
+    allowed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaCreateStoreResponse {
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaWriteModelResponse {
+    authorization_model_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaReadTupleEntry {
+    key: OpenFgaTupleKey,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaReadWireResponse {
+    tuples: Vec<OpenFgaReadTupleEntry>,
+}
+
+/// OpenFGA-backed `PermissionBackend` using one `store_id` per tenant,
+/// immutable pinned `authorization_model_id`, Modular Models (`schema 1.2`),
+/// and mandatory `HIGHER_CONSISTENCY`.
+#[derive(Debug, Clone)]
+pub struct OpenFgaPermissionBackend {
+    endpoint: String,
+    bearer_token: Option<String>,
+    caller_role: AuthzCallerRole,
+    pinned_model_version: Option<String>,
+    http: reqwest::Client,
+    stores: Arc<RwLock<HashMap<TenantId, TenantAuthzStoreRef>>>,
+}
+
+impl OpenFgaPermissionBackend {
+    pub fn new(config: OpenFgaConfig) -> Result<Self, PermissionBackendError> {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| {
+                PermissionBackendError::Backend(format!(
+                    "failed to build OpenFGA HTTP client: {err}"
+                ))
+            })?;
+        Ok(Self {
+            endpoint: config.endpoint.trim_end_matches('/').to_owned(),
+            bearer_token: config.bearer_token,
+            caller_role: config.caller_role,
+            pinned_model_version: config.pinned_model_version,
+            http,
+            stores: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    /// Returns a handle sharing the same provisioned store map under a
+    /// different [`AuthzCallerRole`].
+    pub fn with_caller_role(&self, caller_role: AuthzCallerRole) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            bearer_token: self.bearer_token.clone(),
+            caller_role,
+            pinned_model_version: self.pinned_model_version.clone(),
+            http: self.http.clone(),
+            stores: Arc::clone(&self.stores),
+        }
+    }
+
+    pub fn caller_role(&self) -> AuthzCallerRole {
+        self.caller_role
+    }
+
+    pub fn store_ref(&self, tenant: &TenantId) -> Option<TenantAuthzStoreRef> {
+        self.stores
+            .read()
+            .ok()
+            .and_then(|map| map.get(tenant).cloned())
+    }
+
+    pub fn register_store_ref(
+        &self,
+        store_ref: TenantAuthzStoreRef,
+    ) -> Result<(), PermissionBackendError> {
+        let mut stores = self.stores.write().map_err(|_| {
+            PermissionBackendError::Backend("OpenFGA store map poisoned".to_owned())
+        })?;
+        stores.insert(store_ref.tenant_id.clone(), store_ref);
+        Ok(())
+    }
+
+    /// Returns the OpenFGA Access Control module grant object (`module:<store_id>|chat`
+    /// or `module:<store_id>|inference`) for a provisioned tenant.
+    pub fn module_grant_object(
+        &self,
+        tenant: &TenantId,
+        module: AuthzModule,
+    ) -> Result<String, PermissionBackendError> {
+        let store_ref = self.require_store_ref(tenant)?;
+        Ok(openfga_module_grant_object(&store_ref.store_id, module))
+    }
+
+    /// Returns the OpenFGA Access Control store reader object (`store:<store_id>`).
+    pub fn store_grant_object(&self, tenant: &TenantId) -> Result<String, PermissionBackendError> {
+        let store_ref = self.require_store_ref(tenant)?;
+        Ok(openfga_store_grant_object(&store_ref.store_id))
+    }
+
+    /// Guarded check that rejects any non-empty caller-supplied `contextual_tuples`
+    /// BEFORE any HTTP RPC is issued.
+    pub async fn check_with_contextual_tuples(
+        &self,
+        req: &CheckRequest,
+        contextual_tuples: &[AuthzTuple],
+    ) -> Result<CheckDecision, PermissionBackendError> {
+        if !contextual_tuples.is_empty() {
+            return Err(PermissionBackendError::ContextualTuplesForbidden);
+        }
+        self.check(req).await
+    }
+
+    fn require_store_ref(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<TenantAuthzStoreRef, PermissionBackendError> {
+        let stores = self.stores.read().map_err(|_| {
+            PermissionBackendError::Backend("OpenFGA store map poisoned".to_owned())
+        })?;
+        stores
+            .get(tenant)
+            .cloned()
+            .ok_or_else(|| PermissionBackendError::StoreNotProvisioned(tenant.clone()))
+    }
+
+    fn apply_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let role_header = match self.caller_role {
+            AuthzCallerRole::Cell => "cell",
+            AuthzCallerRole::Broker => "broker",
+        };
+        builder = builder.header("X-Waddle-Caller-Role", role_header);
+        if let Some(token) = &self.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        builder
+    }
+
+    async fn send_json<Req, Resp>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Req>,
+    ) -> Result<Resp, PermissionBackendError>
+    where
+        Req: Serialize + ?Sized,
+        Resp: for<'de> Deserialize<'de>,
+    {
+        let url = format!("{}{}", self.endpoint, path);
+        let mut req = self.apply_headers(self.http.request(method, &url));
+        if let Some(payload) = body {
+            req = req.json(payload);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| PermissionBackendError::Backend(format!("OpenFGA HTTP error: {err}")))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|err| {
+            PermissionBackendError::Backend(format!("OpenFGA response read error: {err}"))
+        })?;
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(PermissionBackendError::Backend(format!(
+                "OpenFGA HTTP {status}: {text}"
+            )));
+        }
+        serde_json::from_slice(&bytes).map_err(|err| {
+            PermissionBackendError::Backend(format!("OpenFGA JSON decode error: {err}"))
+        })
+    }
+
+    async fn send_empty<Req>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Req>,
+    ) -> Result<(), PermissionBackendError>
+    where
+        Req: Serialize + ?Sized,
+    {
+        let url = format!("{}{}", self.endpoint, path);
+        let mut req = self.apply_headers(self.http.request(method, &url));
+        if let Some(payload) = body {
+            req = req.json(payload);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|err| PermissionBackendError::Backend(format!("OpenFGA HTTP error: {err}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
+            if status == reqwest::StatusCode::FORBIDDEN {
+                return Err(PermissionBackendError::ModuleWriteForbidden(
+                    AuthzModule::Inference,
+                ));
+            }
+            return Err(PermissionBackendError::Backend(format!(
+                "OpenFGA HTTP {status}: {text}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PermissionBackend for OpenFgaPermissionBackend {
+    async fn check(&self, req: &CheckRequest) -> Result<CheckDecision, PermissionBackendError> {
+        let store_ref = self.require_store_ref(&req.tenant_id)?;
+        let consistency = match req.consistency {
+            AuthzConsistency::Strong => OpenFgaConsistency::HigherConsistency,
+        };
+        let wire_req = OpenFgaCheckWireRequest {
+            authorization_model_id: store_ref.model_version.clone(),
+            tuple_key: OpenFgaTupleKey {
+                user: encode_openfga_subject(&req.subject),
+                relation: req.permission.as_str().to_owned(),
+                object: encode_openfga_object(&req.object),
+            },
+            consistency,
+        };
+        let resp: OpenFgaCheckWireResponse = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("/stores/{}/check", store_ref.store_id),
+                Some(&wire_req),
+            )
+            .await?;
+        Ok(if resp.allowed {
+            CheckDecision::Allowed
+        } else {
+            CheckDecision::Denied
+        })
+    }
+
+    async fn write_tuples(
+        &self,
+        tenant: &TenantId,
+        module: AuthzModule,
+        tuples: &[AuthzTuple],
+    ) -> Result<(), PermissionBackendError> {
+        enforce_module_write(self.caller_role, module, tuples)?;
+        if tuples.is_empty() {
+            return Ok(());
+        }
+        let store_ref = self.require_store_ref(tenant)?;
+        let keys: Vec<OpenFgaTupleKey> = tuples.iter().map(OpenFgaTupleKey::from_tuple).collect();
+        let payload = json!({
+            "authorization_model_id": store_ref.model_version,
+            "writes": { "tuple_keys": keys }
+        });
+        self.send_empty(
+            reqwest::Method::POST,
+            &format!("/stores/{}/write", store_ref.store_id),
+            Some(&payload),
+        )
+        .await
+    }
+
+    async fn delete_tuples(
+        &self,
+        tenant: &TenantId,
+        module: AuthzModule,
+        tuples: &[AuthzTuple],
+    ) -> Result<(), PermissionBackendError> {
+        enforce_module_write(self.caller_role, module, tuples)?;
+        if tuples.is_empty() {
+            return Ok(());
+        }
+        let store_ref = self.require_store_ref(tenant)?;
+        let keys: Vec<OpenFgaTupleKey> = tuples.iter().map(OpenFgaTupleKey::from_tuple).collect();
+        let payload = json!({
+            "authorization_model_id": store_ref.model_version,
+            "deletes": { "tuple_keys": keys }
+        });
+        self.send_empty(
+            reqwest::Method::POST,
+            &format!("/stores/{}/write", store_ref.store_id),
+            Some(&payload),
+        )
+        .await
+    }
+
+    async fn read_tuples(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        relation: Option<&AuthzRelation>,
+    ) -> Result<Vec<AuthzTuple>, PermissionBackendError> {
+        let store_ref = self.require_store_ref(tenant)?;
+        let mut tuple_key = serde_json::Map::new();
+        tuple_key.insert(
+            "object".to_owned(),
+            serde_json::Value::String(encode_openfga_object(object)),
+        );
+        if let Some(rel) = relation {
+            tuple_key.insert(
+                "relation".to_owned(),
+                serde_json::Value::String(rel.as_str().to_owned()),
+            );
+        }
+        let payload = json!({
+            "tuple_key": tuple_key,
+            "consistency": OpenFgaConsistency::HigherConsistency
+        });
+        let resp: OpenFgaReadWireResponse = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("/stores/{}/read", store_ref.store_id),
+                Some(&payload),
+            )
+            .await?;
+        resp.tuples
+            .iter()
+            .map(|entry| entry.key.to_tuple())
+            .collect()
+    }
+
+    async fn replace_exclusive_relation(
+        &self,
+        tenant: &TenantId,
+        module: AuthzModule,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        new_subject: &AuthzSubject,
+    ) -> Result<(), PermissionBackendError> {
+        enforce_object_module_write(self.caller_role, module, object)?;
+        let existing = self.read_tuples(tenant, object, Some(relation)).await?;
+        let new_tuple = AuthzTuple {
+            object: object.clone(),
+            relation: relation.clone(),
+            subject: new_subject.clone(),
+        };
+        let to_delete: Vec<AuthzTuple> = existing.into_iter().filter(|t| t != &new_tuple).collect();
+        if !to_delete.is_empty() {
+            self.delete_tuples(tenant, module, &to_delete).await?;
+        }
+        self.write_tuples(tenant, module, &[new_tuple]).await
+    }
+
+    async fn swap_exclusive_relation(
+        &self,
+        tenant: &TenantId,
+        module: AuthzModule,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        expected_subject: &AuthzSubject,
+        new_subject: &AuthzSubject,
+    ) -> Result<(), PermissionBackendError> {
+        enforce_object_module_write(self.caller_role, module, object)?;
+        let existing = self.read_tuples(tenant, object, Some(relation)).await?;
+        if existing.len() != 1 || existing[0].subject != *expected_subject {
+            return Err(PermissionBackendError::SwapPreconditionFailed);
+        }
+        let old_tuple = existing[0].clone();
+        let new_tuple = AuthzTuple {
+            object: object.clone(),
+            relation: relation.clone(),
+            subject: new_subject.clone(),
+        };
+        if old_tuple == new_tuple {
+            return Ok(());
+        }
+        let store_ref = self.require_store_ref(tenant)?;
+        let payload = json!({
+            "authorization_model_id": store_ref.model_version,
+            "writes": { "tuple_keys": [OpenFgaTupleKey::from_tuple(&new_tuple)] },
+            "deletes": { "tuple_keys": [OpenFgaTupleKey::from_tuple(&old_tuple)] }
+        });
+        self.send_empty(
+            reqwest::Method::POST,
+            &format!("/stores/{}/write", store_ref.store_id),
+            Some(&payload),
+        )
+        .await
+    }
+
+    async fn provision_tenant_store(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<TenantAuthzStoreRef, PermissionBackendError> {
+        if let Some(existing) = self.store_ref(tenant) {
+            return Ok(existing);
+        }
+        let create_payload = json!({
+            "name": format!("waddle-tenant-{}", tenant.as_str())
+        });
+        let created: OpenFgaCreateStoreResponse = self
+            .send_json(reqwest::Method::POST, "/stores", Some(&create_payload))
+            .await?;
+
+        let model_version = if let Some(pinned) = &self.pinned_model_version {
+            pinned.clone()
+        } else {
+            let model_payload = openfga_authorization_model_json();
+            let model_resp: OpenFgaWriteModelResponse = self
+                .send_json(
+                    reqwest::Method::POST,
+                    &format!("/stores/{}/authorization-models", created.id),
+                    Some(&model_payload),
+                )
+                .await?;
+            model_resp.authorization_model_id
+        };
+
+        let store_ref = TenantAuthzStoreRef {
+            tenant_id: tenant.clone(),
+            store_id: created.id,
+            model_version,
+        };
+        self.register_store_ref(store_ref.clone())?;
+        Ok(store_ref)
+    }
+
+    async fn delete_tenant_store(&self, tenant: &TenantId) -> Result<(), PermissionBackendError> {
+        let removed = {
+            let mut stores = self.stores.write().map_err(|_| {
+                PermissionBackendError::Backend("OpenFGA store map poisoned".to_owned())
+            })?;
+            stores.remove(tenant)
+        };
+        if let Some(store_ref) = removed {
+            self.send_empty::<serde_json::Value>(
+                reqwest::Method::DELETE,
+                &format!("/stores/{}", store_ref.store_id),
+                None,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Recorded HTTP/JSON request observed by [`InProcessOpenFgaServer`].
+#[derive(Debug, Clone)]
+pub struct RecordedOpenFgaRequest {
+    pub method: String,
+    pub path: String,
+    pub caller_role: Option<String>,
+    pub body: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default)]
+struct MockOpenFgaStore {
+    model_ids: HashSet<String>,
+    tuples: HashSet<AuthzTuple>,
+}
+
+#[derive(Debug, Default)]
+struct MockOpenFgaState {
+    stores: HashMap<String, MockOpenFgaStore>,
+    requests: Vec<RecordedOpenFgaRequest>,
+}
+
+/// Real HTTP/1.1 in-process OpenFGA server for deterministic integration,
+/// wire-contract, and parity tests without containers.
+pub struct InProcessOpenFgaServer {
+    endpoint: String,
+    state: Arc<RwLock<MockOpenFgaState>>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl InProcessOpenFgaServer {
+    pub async fn start() -> Result<Self, PermissionBackendError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|err| {
+            PermissionBackendError::Backend(format!("failed to bind mock OpenFGA server: {err}"))
+        })?;
+        let addr = listener.local_addr().map_err(|err| {
+            PermissionBackendError::Backend(format!("failed to read local addr: {err}"))
+        })?;
+        let state = Arc::new(RwLock::new(MockOpenFgaState::default()));
+        let state_clone = Arc::clone(&state);
+        let (tx, mut rx) = oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else {
+                            break;
+                        };
+                        let st = Arc::clone(&state_clone);
+                        tokio::spawn(async move {
+                            let _ = handle_http_connection(&mut stream, st).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            endpoint: format!("http://{addr}"),
+            state,
+            shutdown: Some(tx),
+        })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn recorded_requests(&self) -> Vec<RecordedOpenFgaRequest> {
+        self.state
+            .read()
+            .map(|s| s.requests.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn store_exists(&self, store_id: &str) -> bool {
+        self.state
+            .read()
+            .map(|s| s.stores.contains_key(store_id))
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for InProcessOpenFgaServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn handle_http_connection(
+    stream: &mut tokio::net::TcpStream,
+    state: Arc<RwLock<MockOpenFgaState>>,
+) -> Result<(), std::io::Error> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = find_header_end(&buf) {
+            break pos;
+        }
+        if buf.len() > 1024 * 1024 {
+            return Ok(());
+        }
+    };
+
+    let header_str = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let mut lines = header_str.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_owned();
+    let path = parts.next().unwrap_or_default().to_owned();
+
+    let mut content_length: usize = 0;
+    let mut caller_role: Option<String> = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse().unwrap_or(0);
+            } else if k.eq_ignore_ascii_case("x-waddle-caller-role") {
+                caller_role = Some(v.trim().to_owned());
+            }
+        }
+    }
+
+    let body_start = header_end + 4;
+    while buf.len() < body_start + content_length {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    let body_bytes = if content_length > 0 && buf.len() >= body_start + content_length {
+        &buf[body_start..body_start + content_length]
+    } else {
+        &[]
+    };
+    let body_json: Option<serde_json::Value> = if body_bytes.is_empty() {
+        None
+    } else {
+        serde_json::from_slice(body_bytes).ok()
+    };
+
+    let (status_code, status_text, resp_body) =
+        route_openfga_request(&state, &method, &path, caller_role, body_json);
+
+    let resp_bytes = resp_body.map(|v| v.to_string()).unwrap_or_default();
+    let response = format!(
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        resp_bytes.len(),
+        resp_bytes
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+fn route_openfga_request(
+    state: &Arc<RwLock<MockOpenFgaState>>,
+    method: &str,
+    path: &str,
+    caller_role: Option<String>,
+    body: Option<serde_json::Value>,
+) -> (u16, &'static str, Option<serde_json::Value>) {
+    let Ok(mut guard) = state.write() else {
+        return (
+            500,
+            "Internal Server Error",
+            Some(json!({"message": "lock poisoned"})),
+        );
+    };
+    guard.requests.push(RecordedOpenFgaRequest {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        caller_role: caller_role.clone(),
+        body: body.clone(),
+    });
+
+    if method == "POST" && path == "/stores" {
+        let store_id = format!("01FGA{}", Uuid::new_v4().simple());
+        guard
+            .stores
+            .insert(store_id.clone(), MockOpenFgaStore::default());
+        return (201, "Created", Some(json!({ "id": store_id })));
+    }
+
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if segments.len() == 2 && segments[0] == "stores" && method == "DELETE" {
+        let store_id = segments[1];
+        guard.stores.remove(store_id);
+        return (204, "No Content", None);
+    }
+
+    if segments.len() == 3 && segments[0] == "stores" && method == "POST" {
+        let store_id = segments[1];
+        let action = segments[2];
+        let Some(store) = guard.stores.get_mut(store_id) else {
+            return (
+                404,
+                "Not Found",
+                Some(json!({"message": "store not found"})),
+            );
+        };
+
+        match action {
+            "authorization-models" => {
+                let schema_ver = body
+                    .as_ref()
+                    .and_then(|v| v.get("schema_version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if schema_ver != OPENFGA_SCHEMA_VERSION {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "schema_version must be 1.2"})),
+                    );
+                }
+                let model_id = format!("01MOD{}", Uuid::new_v4().simple());
+                store.model_ids.insert(model_id.clone());
+                return (
+                    201,
+                    "Created",
+                    Some(json!({ "authorization_model_id": model_id })),
+                );
+            }
+            "check" => {
+                let Some(val) = body else {
+                    return (400, "Bad Request", Some(json!({"message": "missing body"})));
+                };
+                if val.get("contextual_tuples").is_some() {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "contextual_tuples prohibited"})),
+                    );
+                }
+                let consistency = val
+                    .get("consistency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if consistency != "HIGHER_CONSISTENCY" {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "HIGHER_CONSISTENCY required"})),
+                    );
+                }
+                let model_id = val
+                    .get("authorization_model_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !store.model_ids.is_empty() && !store.model_ids.contains(model_id) {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "unknown authorization_model_id"})),
+                    );
+                }
+                let Ok(tk) = serde_json::from_value::<OpenFgaTupleKey>(
+                    val.get("tuple_key")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ) else {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "invalid tuple_key"})),
+                    );
+                };
+                let Ok(object) = decode_openfga_object(&tk.object) else {
+                    return (
+                        400,
+                        "Bad Request",
+                        Some(json!({"message": "invalid object"})),
+                    );
+                };
+                let Ok(subject) = decode_openfga_subject(&tk.user) else {
+                    return (400, "Bad Request", Some(json!({"message": "invalid user"})));
+                };
+                let Ok(dummy_tenant) = TenantId::parse("mock.openfga") else {
+                    return (500, "Internal Server Error", None);
+                };
+                let req = CheckRequest {
+                    tenant_id: dummy_tenant,
+                    object,
+                    permission: AuthzRelation::new(tk.relation),
+                    subject,
+                    consistency: AuthzConsistency::Strong,
+                };
+                let allowed =
+                    evaluate_permission_in_memory(&store.tuples, &req) == CheckDecision::Allowed;
+                return (200, "OK", Some(json!({ "allowed": allowed })));
+            }
+            "write" => {
+                let Some(val) = body else {
+                    return (400, "Bad Request", Some(json!({"message": "missing body"})));
+                };
+                let role = if caller_role.as_deref() == Some("cell") {
+                    AuthzCallerRole::Cell
+                } else {
+                    AuthzCallerRole::Broker
+                };
+                let mut to_write = Vec::new();
+                if let Some(arr) = val
+                    .get("writes")
+                    .and_then(|w| w.get("tuple_keys"))
+                    .and_then(|k| k.as_array())
+                {
+                    for item in arr {
+                        let Ok(tk) = serde_json::from_value::<OpenFgaTupleKey>(item.clone()) else {
+                            return (
+                                400,
+                                "Bad Request",
+                                Some(json!({"message": "bad write tuple"})),
+                            );
+                        };
+                        let Ok(tuple) = tk.to_tuple() else {
+                            return (
+                                400,
+                                "Bad Request",
+                                Some(json!({"message": "bad tuple format"})),
+                            );
+                        };
+                        if role == AuthzCallerRole::Cell
+                            && crate::authz::object_type_module(tuple.object.object_type)
+                                == AuthzModule::Inference
+                        {
+                            return (
+                                403,
+                                "Forbidden",
+                                Some(json!({"message": "cell cannot write inference module"})),
+                            );
+                        }
+                        to_write.push(tuple);
+                    }
+                }
+                let mut to_delete = Vec::new();
+                if let Some(arr) = val
+                    .get("deletes")
+                    .and_then(|d| d.get("tuple_keys"))
+                    .and_then(|k| k.as_array())
+                {
+                    for item in arr {
+                        let Ok(tk) = serde_json::from_value::<OpenFgaTupleKey>(item.clone()) else {
+                            return (
+                                400,
+                                "Bad Request",
+                                Some(json!({"message": "bad delete tuple"})),
+                            );
+                        };
+                        let Ok(tuple) = tk.to_tuple() else {
+                            return (
+                                400,
+                                "Bad Request",
+                                Some(json!({"message": "bad tuple format"})),
+                            );
+                        };
+                        if role == AuthzCallerRole::Cell
+                            && crate::authz::object_type_module(tuple.object.object_type)
+                                == AuthzModule::Inference
+                        {
+                            return (
+                                403,
+                                "Forbidden",
+                                Some(json!({"message": "cell cannot delete inference module"})),
+                            );
+                        }
+                        to_delete.push(tuple);
+                    }
+                }
+                for t in to_delete {
+                    store.tuples.remove(&t);
+                }
+                for t in to_write {
+                    store.tuples.insert(t);
+                }
+                return (200, "OK", Some(json!({})));
+            }
+            "read" => {
+                let Some(val) = body else {
+                    return (400, "Bad Request", Some(json!({"message": "missing body"})));
+                };
+                let filter_obj = val
+                    .get("tuple_key")
+                    .and_then(|k| k.get("object"))
+                    .and_then(|v| v.as_str());
+                let filter_rel = val
+                    .get("tuple_key")
+                    .and_then(|k| k.get("relation"))
+                    .and_then(|v| v.as_str());
+                let matched: Vec<serde_json::Value> = store
+                    .tuples
+                    .iter()
+                    .filter(|t| {
+                        let obj_ok =
+                            filter_obj.is_none_or(|o| encode_openfga_object(&t.object) == o);
+                        let rel_ok = filter_rel.is_none_or(|r| t.relation.as_str() == r);
+                        obj_ok && rel_ok
+                    })
+                    .map(|t| json!({ "key": OpenFgaTupleKey::from_tuple(t) }))
+                    .collect();
+                return (200, "OK", Some(json!({ "tuples": matched })));
+            }
+            _ => {}
+        }
+    }
+
+    (404, "Not Found", Some(json!({"message": "unknown route"})))
+}
