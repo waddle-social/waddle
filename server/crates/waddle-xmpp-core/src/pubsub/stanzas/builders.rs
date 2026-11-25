@@ -437,9 +437,7 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         // unbounded node (`u32::MAX`) is rendered as `max`.
         .append(field(
             "pubsub#max_items",
-            &(config.max_items == u32::MAX)
-                .then(|| "max".to_owned())
-                .unwrap_or_else(|| config.max_items.to_string()),
+            &max_items_value(config.max_items),
         ))
         // XEP-0060 §16.4.4: seconds, or `max` for no limit.
         .append(field(
@@ -481,5 +479,15 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         to: original_iq.from().cloned(),
         id: original_iq.id().to_string(),
         payload: Some(pubsub),
+    }
+}
+
+/// XEP-0060 §16.4.4: `pubsub#max_items` is an integer or `max`; an unbounded
+/// node (`u32::MAX`) is rendered as `max`.
+fn max_items_value(max_items: u32) -> String {
+    if max_items == u32::MAX {
+        "max".to_owned()
+    } else {
+        max_items.to_string()
     }
 }
