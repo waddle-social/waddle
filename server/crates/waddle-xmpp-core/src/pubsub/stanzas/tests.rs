@@ -838,6 +838,42 @@ fn configure_form_lists_roster_groups_for_the_roster_model() {
         .all(|field| field.attr("var") != Some("pubsub#roster_groups_allowed")));
 }
 
+/// XEP-0060 §16.4.4: an unbounded node renders `pubsub#max_items` as `max`,
+/// a bounded one as its integer; the rendered value round-trips on submit.
+#[test]
+fn configure_form_renders_unbounded_max_items_as_max() {
+    let iq = iq_with_payload(
+        "cfg-get",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Get(Element::builder("query", "jabber:iq:version").build()),
+    );
+    let render = |max_items: u32| {
+        let mut config = crate::pubsub::NodeConfig::pep_default();
+        config.max_items = max_items;
+        let Iq::Result {
+            payload: Some(pubsub),
+            ..
+        } = build_pubsub_configure_form_result(&iq, "n", &config)
+        else {
+            panic!("expected result payload");
+        };
+        let form = pubsub
+            .get_child("configure", NS_PUBSUB_OWNER)
+            .and_then(|configure| configure.get_child("x", NS_XDATA))
+            .expect("configure data form")
+            .clone();
+        form.children()
+            .find(|field| field.attr("var") == Some("pubsub#max_items"))
+            .expect("max_items field")
+            .get_child("value", NS_XDATA)
+            .expect("value")
+            .text()
+    };
+    assert_eq!(render(u32::MAX), "max");
+    assert_eq!(render(200), "200");
+}
+
 /// XEP-0060 §8.1.3: unsupported access model is `not-acceptable` with the
 /// pubsub-specific `<unsupported-access-model/>`.
 #[test]

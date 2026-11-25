@@ -648,6 +648,21 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                // Moderation decision (XEP-0501 stories): a story lives on its
+                // author's own PEP node, whose owner is the account
+                // (XEP-0163 §4, XEP-0060 §4.1: only an owner or the item's
+                // publisher may retract). XEP-0060 has no moderator
+                // affiliation, XEP-0501 defines no moderation retract, and a
+                // personal story belongs to no community or space, so the
+                // permission model has no authority a retract by the server
+                // owner or a space moderator could rest on. The only
+                // XMPP-native shapes (a foreign retract honoured on a global
+                // role, or a service-granted owner affiliation on someone
+                // else's PEP node) would invent semantics and break PEP
+                // ownership, so another account's retract stays `forbidden`.
+                // Abuse is bounded by `pubsub#item_expire` (24 h default) and
+                // handled by blocking or account administration, not by
+                // editing the author's node.
                 if target_jid != user_jid {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];

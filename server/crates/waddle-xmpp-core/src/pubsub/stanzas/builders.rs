@@ -433,7 +433,14 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         form_builder = form_builder.append(groups.build());
     }
     let form = form_builder
-        .append(field("pubsub#max_items", &config.max_items.to_string()))
+        // XEP-0060 §16.4.4: `pubsub#max_items` is an integer or `max`; an
+        // unbounded node (`u32::MAX`) is rendered as `max`.
+        .append(field(
+            "pubsub#max_items",
+            &(config.max_items == u32::MAX)
+                .then(|| "max".to_owned())
+                .unwrap_or_else(|| config.max_items.to_string()),
+        ))
         // XEP-0060 §16.4.4: seconds, or `max` for no limit.
         .append(field(
             "pubsub#item_expire",
