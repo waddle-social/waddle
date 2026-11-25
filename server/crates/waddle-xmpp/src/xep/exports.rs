@@ -392,7 +392,9 @@ pub use super::xep0500::{
     SLOW_MODE_DISABLED,
 };
 
-pub use super::xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
+pub use super::xep0486::{
+    avatar_hashes, parse_room_vcard, RoomAvatarUpdate, RoomVCardError, FIELD_ROOMINFO_AVATARHASH,
+};
 
 pub use super::xep0488::{
     build_invite_request, build_invite_request_with_constraints, build_invite_response,

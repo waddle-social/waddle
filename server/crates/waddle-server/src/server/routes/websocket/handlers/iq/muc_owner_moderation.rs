@@ -2,8 +2,8 @@ use super::{
     add_stanza_id_xep0359, bad_request_iq_error, build_iq_error_xml_typed, build_iq_result_xml,
     build_moderation_result_message, build_muc_owner_config_response, chrono, debug,
     forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error, is_muc_room_jid,
-    item_not_found_iq_error, jid_malformed_iq_error, muc_owner_authorized, not_authorized_iq_error,
-    parse_moderation_iq, response_batch_from_inline_room_effect_frames, stanza_to_xml, warn,
+    item_not_found_iq_error, jid_malformed_iq_error, not_authorized_iq_error, parse_moderation_iq,
+    response_batch_from_inline_room_effect_frames, room_action_authorized, stanza_to_xml, warn,
     ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload, BareJid,
     ConnectionPhase, FullJid, GetAdminContext, GetSnapshot, IqHandlerContext, Jid, ResponseBatch,
     RichMessageId, RichText, Session, Stanza, WebSocketState, Xep0359StanzaId,
@@ -238,6 +238,15 @@ async fn wipe_destroyed_room_durable_state(
             error = %error,
             "Failed to delete outstanding invites for destroyed room"
         );
+        return Err(());
+    }
+    if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+        return Ok(false);
+    }
+    // XEP-0486: the room's avatar vCard is keyed by the room JID, which a
+    // later room of that name must not inherit.
+    if let Err(error) = super::muc_avatar::delete_room_avatar(state, room_jid).await {
+        warn!(room = %room_jid, %error, "Failed to delete avatar for destroyed room");
         return Err(());
     }
     if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
@@ -1383,41 +1392,19 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         // canonical grants' `manage` and destroyed by their `delete`, which
         // no room affiliation confers: such a room ends only when its scope
         // is retired. The room actor's affiliations decide nothing there.
-        let authorized = {
-            use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
-            let action = if has_destroy {
-                HostGrantAction::Delete
+        let authorized = room_action_authorized(
+            state,
+            &room_jid,
+            sender_jid,
+            authenticated_session,
+            evidence,
+            if has_destroy {
+                crate::permissions::host_grant::HostGrantAction::Delete
             } else {
-                HostGrantAction::Manage
-            };
-            match state
-                .deps
-                .app_state
-                .host_grants
-                .allows_as(
-                    RoomBinding::Room(&room_jid),
-                    &sender_jid.to_bare(),
-                    evidence,
-                    action,
-                )
-                .await
-            {
-                RoomGate::Unmanaged => {
-                    muc_owner_authorized(
-                        state,
-                        &room_jid,
-                        sender_jid,
-                        authenticated_session,
-                        evidence,
-                    )
-                    .await
-                }
-                RoomGate::Managed(allowed) => Ok(allowed),
-                RoomGate::Unavailable => Err(waddle_xmpp::XmppError::internal(
-                    "the host-grant authority is unavailable",
-                )),
-            }
-        };
+                crate::permissions::host_grant::HostGrantAction::Manage
+            },
+        )
+        .await;
         match authorized {
             Ok(true) => {}
             Ok(false) => {

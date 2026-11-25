@@ -22,6 +22,19 @@ pub(super) async fn handle_vcard_iq(
         )];
     };
 
+    // XEP-0486: a vCard addressed to a room's bare JID is the room's avatar.
+    if let Some(room_jid) = super::muc_avatar::vcard_room_target(iq, state) {
+        return super::muc_avatar::handle_room_vcard_iq(
+            iq,
+            state,
+            sender_jid,
+            &room_jid,
+            response_from,
+            response_to,
+        )
+        .await;
+    }
+
     // XEP-0054: the server answers for an extension bot, which has no
     // account and so no stored vCard, from its manifest profile, with the
     // avatar in-band once the server has fetched it.
