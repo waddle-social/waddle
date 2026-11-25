@@ -22,6 +22,7 @@ jid = { workspace = true }
 url = { workspace = true }
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+waddle-audio-filters = { path = "../waddle-audio-filters" }
 waddle-camera-effects = { path = "../waddle-camera-effects" }
 
 [target.'cfg(target_os = "android")'.dependencies]

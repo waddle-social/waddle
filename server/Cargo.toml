@@ -13,6 +13,7 @@ members = [
     "crates/waddle-xmpp-client-ffi",
     "crates/waddle-flutter-runtime",
     "crates/waddle-camera-effects",
+    "crates/waddle-audio-filters",
     "crates/waddle-flutter-timeline",
     "crates/waddle-xmpp-client-wasm",
     "crates/waddle-client-session",
@@ -174,7 +175,19 @@ opt-level = 0
 # roughly 5-10x; full debuginfo repeatedly exhausted local dev disks.
 debug = "line-tables-only"
 
-# Camera capture must meet its frame budget even when the UI is running in debug mode.
+# Microphone and camera processing must meet capture deadlines in debug builds.
+[profile.dev.package.waddle-audio-filters]
+opt-level = 3
+
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
 [profile.dev.package.waddle-camera-effects]
 opt-level = 3
 

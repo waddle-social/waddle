@@ -1,0 +1,17 @@
+[package]
+name = "waddle-audio-filters"
+description = "Stream-local CPU speech denoising for native microphone capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+nnnoiseless = { version = "=0.5.2", default-features = false }
+realfft = "=3.5.1"
+rten = { version = "=0.28.0", default-features = false, features = ["onnx_format"] }
+rten-tensor = "=0.28.0"
+
+[lints]
+workspace = true

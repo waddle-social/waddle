@@ -5,6 +5,10 @@
 
 mod abi;
 #[cfg(any(target_os = "linux", target_os = "android"))]
+mod audio_abi;
+#[cfg(target_os = "android")]
+mod audio_android;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod camera_abi;
 #[cfg(target_os = "android")]
 mod camera_android;
