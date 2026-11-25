@@ -577,7 +577,14 @@ async fn driver_connects_runtime_and_transport_until_ready() {
     );
 
     let sent = shared.sent_messages();
-    assert_eq!(sent.len(), 4, "expected Open, SASL-auth, Open, bind-IQ");
+    // After the bind the runtime also asks for XEP-0280 carbons, which may
+    // or may not have been written by now; that it is asked for is the
+    // runtime's own test.
+    assert!(
+        sent.len() >= 4,
+        "expected Open, SASL-auth, Open, bind-IQ, got {}",
+        sent.len()
+    );
     assert!(matches!(sent[0], TransportMessage::Open(_)));
     assert!(matches!(sent[1], TransportMessage::Element(_)));
     assert!(matches!(sent[2], TransportMessage::Open(_)));

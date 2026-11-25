@@ -1086,6 +1086,19 @@ impl XmppRuntime {
             self.flush_pending_fallback_retries(events);
         }
 
+        // XEP-0280: ask to be copied in on the account's other resources.
+        // Here and not in each host, because it is owed exactly when this
+        // runs: the server keeps the setting across a stream resumption,
+        // which does not come through here, and forgets it on a fresh bind,
+        // which does. After the XEP-0198 `<enable/>`, so that it is counted
+        // like any other stanza of the session. The answer is not waited
+        // for: an empty result, and a server that refuses leaves this
+        // resource as it was, without copies.
+        let carbons_id = self.next_carbons_stanza_id()?;
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(crate::carbons::build_carbons_enable_iq(carbons_id.as_str())),
+        )));
+
         Ok(())
     }
 
@@ -1156,6 +1169,15 @@ impl XmppRuntime {
             .checked_add(1)
             .ok_or(ClientError::RequestIdExhausted)?;
         StanzaId::try_new(format!("bind-{}", self.next_bootstrap_stanza))
+    }
+
+    /// Shares the bootstrap counter, so no two stanzas of a session's setup have one id.
+    fn next_carbons_stanza_id(&mut self) -> ClientResult<StanzaId> {
+        self.next_bootstrap_stanza = self
+            .next_bootstrap_stanza
+            .checked_add(1)
+            .ok_or(ClientError::RequestIdExhausted)?;
+        StanzaId::try_new(format!("carbons-{}", self.next_bootstrap_stanza))
     }
 
     pub(in crate::runtime) fn push_state_change(

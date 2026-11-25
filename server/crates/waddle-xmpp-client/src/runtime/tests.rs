@@ -1112,6 +1112,27 @@ fn runtime_bootstraps_auth_bind_and_ready_state() {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(binding))
             if binding.jid == FullJid::from_str("alice@example.com/macbook").unwrap()
     )));
+    // XEP-0280: a fresh bind asks for carbons, once.
+    assert_eq!(carbons_enables(&ready_events), 1);
+}
+
+/// The XEP-0280 enable IQs among the stanzas `events` ask the transport to send.
+fn carbons_enables(events: &[ClientEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| match event {
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )) => {
+                element.name() == "iq"
+                    && element.attr("type") == Some("set")
+                    && element
+                        .get_child("enable", crate::carbons::NS_CARBONS)
+                        .is_some()
+            }
+            _ => false,
+        })
+        .count()
 }
 
 #[test]
@@ -1179,6 +1200,8 @@ fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
         )))
         .unwrap();
 
+    // XEP-0280: the server kept the setting across the resumption; it is not asked for again.
+    assert_eq!(carbons_enables(&events), 0);
     assert_eq!(runtime.snapshot().phase, SessionPhase::Established);
     assert_eq!(
         runtime.snapshot().binding,
@@ -2348,6 +2371,12 @@ fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
                 TransportMessage::Element(element),
             )) if matches!(element.name(), "message" | "presence" | "iq") => Some(element.clone()),
             _ => None,
+        })
+        // The bind's own XEP-0280 enable is new on this stream, not a retry.
+        .filter(|element| {
+            element
+                .get_child("enable", crate::carbons::NS_CARBONS)
+                .is_none()
         })
         .collect::<Vec<_>>();
     assert_eq!(
