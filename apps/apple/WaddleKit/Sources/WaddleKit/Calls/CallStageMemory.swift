@@ -12,6 +12,9 @@ public struct CallStageMemory: Equatable, Sendable {
     public var dismissedMediaIssues = CallMediaIssues.Dismissals()
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
+    /// The call floats above the other windows (web Picture-in-Picture): its
+    /// picture is there, and the stage says so in the tiles' place.
+    public private(set) var isFloating = false
     /// The last message of the call's chat the person has had in front of them.
     public private(set) var chatSeenID: String?
 
@@ -27,6 +30,10 @@ public struct CallStageMemory: Equatable, Sendable {
     /// than nothing: an empty chat leaves what was seen as it was.
     public mutating func sawChat(upTo id: String?) {
         if let id { chatSeenID = id }
+    }
+
+    public mutating func toggleFloating() {
+        isFloating.toggle()
     }
 
     public mutating func togglePin(_ tile: CallStageTile.ID) {

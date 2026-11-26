@@ -33,6 +33,16 @@ struct CallControlBarLayoutTests {
         #expect(places(.chat, room) == [.bar, .bar, .bar, .bar, .menu])
     }
 
+    @Test func floatingGoesIntoTheMenuWithTheOtherExtrasUnlessTheCallFloats() {
+        var controls = room
+        #expect(places(.pictureInPicture, controls) == Array(repeating: .absent, count: 5))
+        controls.isFloating = false
+        #expect(places(.pictureInPicture, controls) == [.bar, .bar, .bar, .bar, .menu])
+        // A floating call must be one click from back on its stage.
+        controls.isFloating = true
+        #expect(places(.pictureInPicture, controls) == Array(repeating: .bar, count: 5))
+    }
+
     @Test func aHandIsNeverInTheMenu() {
         #expect(places(.hand, room) == Array(repeating: .bar, count: 5))
     }
