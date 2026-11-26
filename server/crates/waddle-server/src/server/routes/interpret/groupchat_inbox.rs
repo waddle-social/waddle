@@ -440,6 +440,7 @@ async fn insert_groupchat_notification_candidate(
     ) {
         Ok(candidate) => candidate,
         Err(NotificationOutboxError::RetractionNotNotifiable) => {
+            // A retraction completes like any rejection, without the warning.
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
         Err(error) => {

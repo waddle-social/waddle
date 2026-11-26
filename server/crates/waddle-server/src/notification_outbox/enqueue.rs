@@ -305,6 +305,7 @@ impl NotificationOutboxStore {
         stored.policy_error_count = expected.policy_error_count;
         // Candidates saved before fallback removal carried the original body.
         // Accept that exact canonical snapshot for existing custody only.
+        // Remove legacy_body once no candidate rows from before #2860 can remain.
         if &stored != expected
             && stored
                 != expected

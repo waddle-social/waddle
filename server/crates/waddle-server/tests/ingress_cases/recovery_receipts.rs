@@ -556,6 +556,81 @@ dialect_tests!(
     retraction_discharges_frozen_groupchat_candidate
 );
 
+#[cfg(feature = "test-support")]
+async fn reconcile_completed_groupchat_candidate(fixture: IngressFixture, retracts: Option<&str>) {
+    use std::sync::Arc;
+    use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
+    use waddle_server::ingress::{RecoveryPreparation, RecoverySweepOutcome};
+    use waddle_server::test_support::{
+        reconcile_groupchat_notification_recovery_for_test, websocket_state_with_ingress,
+    };
+
+    let pool = Arc::new(
+        DatabasePool::try_new(
+            DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+            PoolConfig,
+        )
+        .await
+        .expect("shared database pool"),
+    );
+    let authority = Arc::new(fixture.authority().await);
+    let state = websocket_state_with_ingress(pool, Arc::clone(&authority)).await;
+    let (_, inbox, _, recovery) =
+        commit_recovery_plan(&fixture, recovery_plan(&fixture, retracts)).await;
+    inbox
+        .mark_groupchat_notification_recovery_completed(&recovery.key)
+        .await
+        .expect("old completion without a candidate receipt");
+    assert!(matches!(
+        authority
+            .prepare_notification_recovery(&recovery)
+            .await
+            .expect("prepare completed recovery"),
+        RecoveryPreparation::Ready {
+            completed: true,
+            candidate_required: true,
+            ..
+        }
+    ));
+
+    let outcome = reconcile_groupchat_notification_recovery_for_test(&state, &recovery)
+        .await
+        .expect("reconcile completed recovery");
+    let (expected_outcome, receipts, terminal) = if retracts.is_some() {
+        (RecoverySweepOutcome::Completed, 4, 1)
+    } else {
+        (RecoverySweepOutcome::Pending, 2, 0)
+    };
+    assert_eq!(outcome, expected_outcome);
+    assert_eq!(fixture.count("notification_candidates").await, 0);
+    assert_eq!(fixture.count("notification_outbox").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, receipts);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        terminal
+    );
+    assert!(authority.drain_and_join(Duration::from_secs(5)).await);
+    drop(state);
+    fixture.close().await;
+}
+
+#[cfg(feature = "test-support")]
+dialect_tests!(
+    reconcile_completed_groupchat_retraction_sqlite,
+    reconcile_completed_groupchat_retraction_postgres,
+    reconcile_completed_groupchat_candidate,
+    Some("earlier-message")
+);
+#[cfg(feature = "test-support")]
+dialect_tests!(
+    reconcile_completed_groupchat_message_sqlite,
+    reconcile_completed_groupchat_message_postgres,
+    reconcile_completed_groupchat_candidate,
+    None
+);
+
 async fn deferred(fixture: IngressFixture, deliver: bool) {
     use waddle_server::ingress::{
         RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome,

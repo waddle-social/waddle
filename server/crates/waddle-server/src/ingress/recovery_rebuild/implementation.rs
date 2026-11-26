@@ -221,6 +221,7 @@ pub(in crate::ingress) fn rebuild(
 
 /// Discharge a pre-existing notification obligation for the retraction stanza
 /// itself while allowing recovery to deliver the archived stanza offline.
+/// Remove this function once no offline recovery rows from before #2860 can remain.
 fn offline_retraction_candidate_receipts(
     input: &RecoveryInput<'_>,
 ) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {

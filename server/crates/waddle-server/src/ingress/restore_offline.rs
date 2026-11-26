@@ -7,7 +7,6 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 
 use crate::ingress_substrate::MessageEnvelope;
-use crate::notification_outbox::NotificationOutboxError;
 use crate::server::routes::interpret::effects::delivery::{
     ExternalDeliveryEffect, PreparedOfflineNotification,
 };
@@ -149,10 +148,9 @@ pub(super) fn restore_recorded_offline_deliveries(
                     archive_stanza_id,
                 ) {
                     Ok(candidate) => PreparedOfflineNotification::Prepared(Box::new(candidate)),
-                    Err(
-                        NotificationOutboxError::SelfDirectedNotificationCandidate(_)
-                        | NotificationOutboxError::RetractionNotNotifiable,
-                    ) => PreparedOfflineNotification::Suppressed,
+                    Err(error) if error.is_not_notifiable() => {
+                        PreparedOfflineNotification::Suppressed
+                    }
                     Err(_) => PreparedOfflineNotification::RetryLater,
                 },
             ),

@@ -628,6 +628,15 @@ pub enum NotificationOutboxError {
     OutboxCoalesceContention,
 }
 
+impl NotificationOutboxError {
+    pub(crate) fn is_not_notifiable(&self) -> bool {
+        matches!(
+            self,
+            Self::SelfDirectedNotificationCandidate(_) | Self::RetractionNotNotifiable
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

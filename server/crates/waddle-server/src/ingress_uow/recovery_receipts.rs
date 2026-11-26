@@ -10,7 +10,7 @@ use waddle_xmpp::xep::xep0424::is_retraction_message;
 use super::{IngressUowError, IngressUowTransaction};
 use crate::notification_outbox::{
     selected_message_body, NotificationCandidate, NotificationCandidateInsertOutcome,
-    NotificationOutboxError, NotificationOutboxStore,
+    NotificationOutboxStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,10 +301,7 @@ fn pending_candidate_from_envelope(
         stamp,
     ) {
         Ok(candidate) => Ok(Some(candidate)),
-        Err(
-            NotificationOutboxError::SelfDirectedNotificationCandidate(_)
-            | NotificationOutboxError::RetractionNotNotifiable,
-        ) => Ok(None),
+        Err(error) if error.is_not_notifiable() => Ok(None),
         Err(_) => Err(IngressUowError::EffectIntentConflict),
     }
 }

@@ -13,7 +13,6 @@ use crate::notification_outbox::NoopDndReader;
 use crate::notification_outbox::NoopRoomPolicy;
 use crate::notification_outbox::NotificationCandidateInsertOutcome;
 use crate::notification_outbox::NotificationClass;
-use crate::notification_outbox::NotificationOutboxError;
 use crate::notification_outbox::PushEvalCaches;
 use crate::notification_outbox::PushEvalDeps;
 use crate::notification_outbox::PushEvalStage;
@@ -565,13 +564,11 @@ async fn prepare_notification_candidate_for_message(
         archive_stanza_id,
     ) {
         Ok(candidate) => candidate,
-        Err(
-            NotificationOutboxError::SelfDirectedNotificationCandidate(_)
-            | NotificationOutboxError::RetractionNotNotifiable,
-        ) => {
+        Err(error) if error.is_not_notifiable() => {
             debug!(
                 recipient = %recipient,
                 sender = %sender,
+                error = %error,
                 "XEP-0357 notification candidate skipped"
             );
             return PreparedOfflineNotification::Suppressed;

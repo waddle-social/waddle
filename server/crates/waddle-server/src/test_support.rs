@@ -2044,6 +2044,16 @@ pub fn direct_notification_candidate_from_envelope_for_test(
     )
 }
 
+/// Reconcile a single groupchat notification recovery row through the production route.
+#[cfg(feature = "test-support")]
+pub async fn reconcile_groupchat_notification_recovery_for_test(
+    state: &WebSocketState,
+    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress_uow::IngressUowError> {
+    crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, recovery)
+        .await
+}
+
 /// Run one pending-delivery notification recovery pass and return its outcome.
 #[cfg(feature = "test-support")]
 pub async fn recover_pending_notifications_for_test(state: &WebSocketState) -> (usize, bool) {

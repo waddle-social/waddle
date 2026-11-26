@@ -191,6 +191,7 @@ impl IngressAuthority {
         let candidate_required = intents.iter().any(is_candidate);
         // Older decisions could freeze a candidate for the retraction itself.
         // Confirm the canonical stanza under lock before discharging that intent.
+        // Remove this path once no groupchat recovery rows from before #2860 can remain.
         let discarded_retraction = candidate_required
             && matches!(&policy, RecoveryPolicyDecision::Suppressed)
             && CanonicalMessageRepository::load_envelope(&mut tx, recovery.message_key)
