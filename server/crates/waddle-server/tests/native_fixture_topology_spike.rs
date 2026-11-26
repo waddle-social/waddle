@@ -1358,7 +1358,7 @@ async fn f19_03_wit_streaming_first_chunk_and_midstream_cancel() {
     .expect("f19_03 trap path handle_event must complete within 3s");
     assert!(matches!(
         effects2.first(),
-        Some(waddle_extensions::ExtensionEffect::HostWarning(_))
+        Some(waddle_extensions::ExtensionEffect::HostDenial(_))
     ));
     tokio::time::timeout(Duration::from_secs(4), cancel_disconnect.notified())
         .await

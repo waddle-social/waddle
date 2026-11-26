@@ -306,12 +306,33 @@ impl WasmExtensionActor {
         waddle_id: WaddleId,
         requester: Option<xmpp_parsers::jid::BareJid>,
     ) -> Vec<ExtensionEffect> {
+        self.handle_event_for_waddle_with_chunks(event, waddle_id, requester, None)
+            .await
+    }
+
+    /// Run an event using explicit requester authority and an optional progressive
+    /// stream chunk channel. Inference failures and `Denied` errors fail closed as
+    /// [`ExtensionEffect::HostDenial`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if construction of the nonempty diagnostic violates the display-text
+    /// invariant. Test-support fixtures can also panic if their recorded-invocation
+    /// mutex was poisoned.
+    pub async fn handle_event_for_waddle_with_chunks(
+        &self,
+        event: ExtensionEvent,
+        waddle_id: WaddleId,
+        requester: Option<xmpp_parsers::jid::BareJid>,
+        chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    ) -> Vec<ExtensionEffect> {
         #[cfg(any(test, feature = "test-support"))]
         if let (Some(plugin), ExtensionEvent::MessageHook(hook)) = (&self.observer_test, &event) {
             if let Some(effects) = plugin.invoke(hook.clone()).await {
                 return effects;
             }
         }
+        let inference_invocation = is_inference_plugin(&self.manifest.id);
         let wasm_permit = match (&self.resource_controller, &self.tenant_id) {
             (Some(controller), Some(tenant_id)) => {
                 match controller.try_acquire_wasm_invocation(tenant_id, 0) {
@@ -322,13 +343,16 @@ impl WasmExtensionActor {
                             error = %err,
                             "extension invocation rejected before instantiation by tenant quota"
                         );
-                        return vec![ExtensionEffect::HostWarning(
-                            DisplayText::try_new(format!(
-                                "Extension {} resource limit exceeded",
-                                self.manifest.id
-                            ))
-                            .expect("quota warning is non-empty"),
-                        )];
+                        let text = DisplayText::try_new(format!(
+                            "Extension {} resource limit exceeded",
+                            self.manifest.id
+                        ))
+                        .expect("quota warning is non-empty");
+                        return if inference_invocation {
+                            vec![ExtensionEffect::HostDenial(text)]
+                        } else {
+                            vec![ExtensionEffect::HostWarning(text)]
+                        };
                     }
                 }
             }
@@ -352,13 +376,13 @@ impl WasmExtensionActor {
         if matches!(event, ExtensionEvent::RoomMessageObserve(_)) {
             return Vec::new();
         }
-        let inference_invocation = is_inference_plugin(&self.manifest.id);
         match self
             .extension
-            .call_handle_event_with_inference(InferenceInvocationParams {
+            .call_handle_event_with_inference_classified(InferenceInvocationParams {
                 event,
                 tools: Arc::clone(&self.host_tools),
                 inference: Arc::clone(&self.inference_host),
+                chunk_tx,
                 context,
                 config: self.config.clone(),
                 grants: self.grants.clone(),
@@ -376,16 +400,35 @@ impl WasmExtensionActor {
                         && effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
                 })
                 .collect(),
-            Err(error) => {
-                let message = format!("Extension {} failed: {error}", self.manifest.id);
-                warn!(
-                    extension = %self.manifest.id,
-                    %error,
-                    "extension handle-event failed; continuing fail-open"
-                );
-                vec![ExtensionEffect::HostWarning(
-                    DisplayText::try_new(message).expect("host warning is non-empty"),
-                )]
+            Err((failure, detail)) => {
+                let message = match detail {
+                    Some(detail) => {
+                        format!(
+                            "Extension {} failed ({failure:?}): {detail}",
+                            self.manifest.id
+                        )
+                    }
+                    None => format!("Extension {} failed: {failure:?}", self.manifest.id),
+                };
+                if inference_invocation || matches!(failure, ObservationFailure::Denied) {
+                    warn!(
+                        extension = %self.manifest.id,
+                        ?failure,
+                        "inference extension handle-event failed; failing closed"
+                    );
+                    vec![ExtensionEffect::HostDenial(
+                        DisplayText::try_new(message).expect("host denial is non-empty"),
+                    )]
+                } else {
+                    warn!(
+                        extension = %self.manifest.id,
+                        ?failure,
+                        "extension handle-event failed; continuing fail-open"
+                    );
+                    vec![ExtensionEffect::HostWarning(
+                        DisplayText::try_new(message).expect("host warning is non-empty"),
+                    )]
+                }
             }
         }
     }

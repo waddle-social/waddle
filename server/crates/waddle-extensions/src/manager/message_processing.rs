@@ -287,6 +287,9 @@ impl ExtensionManager {
                         ExtensionEffect::HostWarning(warning) => {
                             emitted_effects.push(ExtensionEffect::HostWarning(warning));
                         }
+                        ExtensionEffect::HostDenial(denial) => {
+                            emitted_effects.push(ExtensionEffect::HostDenial(denial));
+                        }
                         ExtensionEffect::Noop => {}
                     }
                 }

@@ -414,6 +414,7 @@ async fn stderr_suppression_blocks_guest_logging_and_outbound_http_for_inference
             }),
             tools: Arc::new(DenyingExtensionHostTools) as Arc<dyn ExtensionHostTools>,
             inference: Arc::new(waddle_extensions::runtime::DenyingExtensionInferenceHost),
+            chunk_tx: None,
             context: InvocationContext {
                 tenant_id: None,
                 waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
@@ -441,6 +442,7 @@ async fn stderr_suppression_blocks_guest_logging_and_outbound_http_for_inference
     let mut inf_state = HostState::from_spec(waddle_extensions::runtime::HostStateSpec {
         tools: Arc::new(DenyingExtensionHostTools),
         inference: Arc::new(waddle_extensions::runtime::DenyingExtensionInferenceHost),
+        chunk_tx: None,
         context: InvocationContext {
             tenant_id: None,
             waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
@@ -470,11 +472,9 @@ async fn stderr_suppression_blocks_guest_logging_and_outbound_http_for_inference
 #[tokio::test]
 async fn wasm_guest_inference_stream_reads_first_chunk_and_verified_terminal_usage() {
     use tokio::sync::Notify;
-    use waddle_extensions::config::RuntimeLimits;
-    use waddle_extensions::types::{
-        CommandAction, CommandInvocation, CommandNode, FullJidValue,
-    };
     use waddle_extensions::actor::WasmExtensionActor;
+    use waddle_extensions::config::RuntimeLimits;
+    use waddle_extensions::types::{CommandAction, CommandInvocation, CommandNode, FullJidValue};
 
     struct ProgressiveInferenceHost {
         first_chunk_seen: Arc<Notify>,
@@ -588,12 +588,12 @@ async fn wasm_guest_inference_stream_reads_first_chunk_and_verified_terminal_usa
 #[tokio::test]
 async fn wasm_guest_inference_stream_drop_cancels_on_epoch_trap_after_first_chunk() {
     use tokio::sync::Notify;
+    use waddle_extensions::actor::WasmExtensionActor;
     use waddle_extensions::config::RuntimeLimits;
     use waddle_extensions::types::{
-        CommandAction, CommandInvocation, CommandNode, DataFormValue, FormFieldValue,
-        FullJidValue, UiActionId,
+        CommandAction, CommandInvocation, CommandNode, DataFormValue, FormFieldValue, FullJidValue,
+        UiActionId,
     };
-    use waddle_extensions::actor::WasmExtensionActor;
 
     struct HangingHost {
         first_chunk_sent: Arc<Notify>,
@@ -675,13 +675,13 @@ async fn wasm_guest_inference_stream_drop_cancels_on_epoch_trap_after_first_chun
     let effects = actor
         .handle_event_for_waddle(event, WaddleId::try_new("acme.example").expect("waddle"))
         .await;
-    // Guest spun after receiving chunk 0 until epoch/deadline trap -> fail-open warning.
+    // Guest spun after receiving chunk 0 until epoch/deadline trap -> fail-closed denial.
     assert!(
         matches!(
             effects.first(),
-            Some(waddle_extensions::ExtensionEffect::HostWarning(_))
+            Some(waddle_extensions::ExtensionEffect::HostDenial(_))
         ),
-        "expected deadline/epoch trap HostWarning, got {effects:?}"
+        "expected deadline/epoch trap HostDenial, got {effects:?}"
     );
     let cancel_rx = host
         .cancel_rx_slot
@@ -692,5 +692,51 @@ async fn wasm_guest_inference_stream_drop_cancels_on_epoch_trap_after_first_chun
     assert!(
         *cancel_rx.borrow(),
         "dropping Store<HostState> on epoch/deadline trap must synchronously trigger InferenceStream::Drop cancel"
+    );
+}
+
+#[tokio::test]
+async fn denying_inference_host_fails_closed_with_host_denial() {
+    use waddle_extensions::actor::WasmExtensionActor;
+    use waddle_extensions::config::RuntimeLimits;
+    use waddle_extensions::types::{CommandAction, CommandInvocation, CommandNode, FullJidValue};
+
+    let runtime = WasmRuntime::try_new().expect("runtime");
+    let loaded = LoadedExtension::load(
+        &runtime,
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/inference_stream.wat"
+        )),
+    )
+    .expect("load inference_stream.wat")
+    .with_limits(RuntimeLimits::default())
+    .expect("limits");
+
+    let actor = WasmExtensionActor::initialize(loaded, "{}")
+        .await
+        .expect("init")
+        .with_grants(HashSet::from([ExtensionCapability::Commands]));
+
+    let event = ExtensionEvent::Command(CommandInvocation {
+        waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
+        room: None,
+        requester: FullJidValue::try_new("alice@acme.example/web").expect("requester"),
+        command_node: CommandNode::try_new("urn:waddle:extension:1:ai-chatbot").expect("node"),
+        session_id: None,
+        action: Some(CommandAction::Execute),
+        form: None,
+        fields: Vec::new(),
+    });
+
+    let effects = actor
+        .handle_event_for_waddle(event, WaddleId::try_new("acme.example").expect("waddle"))
+        .await;
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [waddle_extensions::ExtensionEffect::HostDenial(_)]
+        ),
+        "expected fail-closed HostDenial when DenyingExtensionInferenceHost is active, got {effects:?}"
     );
 }

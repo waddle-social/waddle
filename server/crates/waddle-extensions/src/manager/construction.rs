@@ -42,12 +42,8 @@ impl ExtensionManager {
         config: ExtensionConfig,
         host_tools: Arc<dyn ExtensionHostTools>,
     ) -> Result<Self> {
-        Self::from_config_with_hosts(
-            config,
-            host_tools,
-            Arc::new(DenyingExtensionInferenceHost),
-        )
-        .await
+        Self::from_config_with_hosts(config, host_tools, Arc::new(DenyingExtensionInferenceHost))
+            .await
     }
 
     /// Load configured components using both host tools and an explicit
@@ -265,6 +261,22 @@ impl ExtensionManager {
             })
             .collect();
         Ok(mgr)
+    }
+
+    /// Install or replace the canonical [`waddle_broker_core::identity::TenantId`]
+    /// across the manager and all loaded extension actors.
+    #[must_use]
+    pub fn with_tenant_id(mut self, tenant_id: waddle_broker_core::identity::TenantId) -> Self {
+        self.tenant_id = Some(tenant_id.clone());
+        self.actors = self
+            .actors
+            .into_iter()
+            .map(|actor| match Arc::try_unwrap(actor) {
+                Ok(inner) => Arc::new(inner.with_tenant_id(tenant_id.clone())),
+                Err(shared) => shared,
+            })
+            .collect();
+        self
     }
 
     /// Return the canonical [`waddle_broker_core::identity::TenantId`] bound to this manager, if any.

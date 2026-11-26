@@ -295,6 +295,7 @@ impl LoadedExtension {
             event,
             tools,
             inference: Arc::new(DenyingExtensionInferenceHost),
+            chunk_tx: None,
             context,
             config,
             grants,
@@ -317,6 +318,20 @@ impl LoadedExtension {
         &self,
         params: InferenceInvocationParams,
     ) -> Result<ExtensionResponse> {
+        self.call_handle_event_with_inference_classified(params)
+            .await
+            .map_err(|(failure, message)| match message {
+                Some(message) => {
+                    anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
+                }
+                None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
+            })
+    }
+
+    pub(crate) async fn call_handle_event_with_inference_classified(
+        &self,
+        params: InferenceInvocationParams,
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
         self.invoke_with_deadline(
             params.event,
             params.tools,
@@ -324,6 +339,7 @@ impl LoadedExtension {
                 context: params.context,
                 delivery: None,
                 inference: params.inference,
+                chunk_tx: params.chunk_tx,
                 tenant_memory_tracker: params.tenant_memory_tracker,
                 inference_invocation: params.inference_invocation,
             },
@@ -332,12 +348,6 @@ impl LoadedExtension {
             params.allowed_http_origins,
         )
         .await
-        .map_err(|(failure, message)| match message {
-            Some(message) => {
-                anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
-            }
-            None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
-        })
     }
 
     /// Dispatch an event in a fresh bounded store, returning a stable observation failure
@@ -363,6 +373,7 @@ impl LoadedExtension {
                 context,
                 delivery: None,
                 inference: Arc::new(DenyingExtensionInferenceHost),
+                chunk_tx: None,
                 tenant_memory_tracker: None,
                 inference_invocation: false,
             },
@@ -429,6 +440,7 @@ impl LoadedExtension {
                 context: invocation.context,
                 delivery: Some(invocation.capability),
                 inference,
+                chunk_tx: None,
                 tenant_memory_tracker,
                 inference_invocation,
             },
@@ -460,6 +472,7 @@ impl LoadedExtension {
                 context,
                 delivery: None,
                 inference,
+                chunk_tx: None,
                 tenant_memory_tracker,
                 inference_invocation,
             },
@@ -521,6 +534,7 @@ impl LoadedExtension {
             HostState::from_spec(HostStateSpec {
                 tools,
                 inference: invocation.inference,
+                chunk_tx: invocation.chunk_tx,
                 context: invocation.context,
                 config,
                 grants,
@@ -592,6 +606,8 @@ pub struct InferenceInvocationParams {
     pub tools: Arc<dyn ExtensionHostTools>,
     /// Brokered inference stream host implementation.
     pub inference: Arc<dyn ExtensionInferenceHost>,
+    /// Optional bounded channel forwarding progressive inference chunks.
+    pub chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// Invocation authority and room/tenant context.
     pub context: InvocationContext,
     /// Serialized extension configuration JSON.
@@ -611,6 +627,7 @@ struct InvocationBinding {
     context: InvocationContext,
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
     inference: Arc<dyn ExtensionInferenceHost>,
+    chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
     inference_invocation: bool,
 }

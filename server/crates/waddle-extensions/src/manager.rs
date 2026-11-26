@@ -27,7 +27,9 @@ use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::host_tools::{DenyingExtensionHostTools, ExtensionHostTools};
 use crate::oci::OciExtensionPuller;
-use crate::runtime::{DenyingExtensionInferenceHost, ExtensionInferenceHost, LoadedExtension, WasmRuntime};
+use crate::runtime::{
+    DenyingExtensionInferenceHost, ExtensionInferenceHost, LoadedExtension, WasmRuntime,
+};
 use crate::types::{
     is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
     CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,

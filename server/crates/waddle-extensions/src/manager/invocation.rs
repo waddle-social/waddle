@@ -88,7 +88,19 @@ impl ExtensionManager {
     pub async fn invoke_command_decoupled(
         &self,
         request: CommandInvocationRequest<'_>,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Vec<ExtensionEffect> {
+        self.invoke_command_decoupled_with_chunks(request, cancel_rx, None)
+            .await
+    }
+
+    /// Dispatch an extension command off the 15s stanza wedge loop with optional
+    /// progressive inference chunk delivery over `chunk_tx`.
+    pub async fn invoke_command_decoupled_with_chunks(
+        &self,
+        request: CommandInvocationRequest<'_>,
         mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+        chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     ) -> Vec<ExtensionEffect> {
         if *cancel_rx.borrow() {
             return Vec::new();
@@ -122,16 +134,21 @@ impl ExtensionManager {
             if actor.has_grant(ExtensionCapability::Commands)
                 && actor.manifest().declares_command(&command_node)
             {
-                let exec_fut = actor.handle_event_for_waddle(event, dispatch_waddle_id);
+                let exec_fut = actor.handle_event_for_waddle_with_chunks(
+                    event,
+                    dispatch_waddle_id,
+                    None,
+                    chunk_tx,
+                );
                 let timed = timeout(EXTENSION_STREAMING_COMMAND_TIMEOUT, exec_fut);
                 return tokio::select! {
                     biased;
                     _ = cancel_rx.changed() => Vec::new(),
                     res = timed => match res {
                         Ok(effects) => self.sign_effects(effects),
-                        Err(_) => vec![ExtensionEffect::HostWarning(
+                        Err(_) => vec![ExtensionEffect::HostDenial(
                             DisplayText::try_new(format!("Extension command {command_node} timed out"))
-                                .expect("timeout warning is non-empty"),
+                                .expect("timeout denial is non-empty"),
                         )],
                     },
                 };

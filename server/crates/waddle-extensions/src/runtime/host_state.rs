@@ -171,6 +171,7 @@ pub struct HostState {
     delivery: Option<Resource<DeliveryKey>>,
     tools: Arc<dyn ExtensionHostTools>,
     inference: Arc<dyn ExtensionInferenceHost>,
+    chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     context: InvocationContext,
     /// Guest configuration returned by the runtime configuration host import.
     pub config: String,
@@ -189,6 +190,8 @@ pub struct HostStateSpec {
     pub tools: Arc<dyn ExtensionHostTools>,
     /// Brokered inference stream host implementation.
     pub inference: Arc<dyn ExtensionInferenceHost>,
+    /// Optional bounded channel forwarding progressive inference chunks to the transport.
+    pub chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     /// Invocation authority and room/tenant context.
     pub context: InvocationContext,
     /// Serialized extension configuration JSON.
@@ -222,6 +225,7 @@ impl HostState {
         Self::from_spec(HostStateSpec {
             tools,
             inference: Arc::new(DenyingExtensionInferenceHost),
+            chunk_tx: None,
             context,
             config,
             grants,
@@ -254,6 +258,7 @@ impl HostState {
             delivery: None,
             tools: spec.tools,
             inference: spec.inference,
+            chunk_tx: spec.chunk_tx,
             context: spec.context,
             config: spec.config,
             grants: spec.grants,
@@ -690,7 +695,12 @@ impl HostInferenceStream for HostState {
     > {
         let stream = self.table.get_mut(&resource)?;
         match stream.next_chunk().await {
-            Ok(Some(chunk)) => Ok(Ok(Some(chunk.into()))),
+            Ok(Some(chunk)) => {
+                if let Some(chunk_tx) = &self.chunk_tx {
+                    let _ = chunk_tx.try_send(chunk.delta.clone());
+                }
+                Ok(Ok(Some(chunk.into())))
+            }
             Ok(None) => Ok(Ok(None)),
             Err(err) => Ok(Err(err.into())),
         }
