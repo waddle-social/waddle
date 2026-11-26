@@ -17,7 +17,7 @@ def measurements():
         rows[phase] = {
             "revision": "abc", "runner": phase,
             "source_before": "base", "source_after": "changed" if edited else "base",
-            "tests": {"inventory_hash": "full"}, "members": {"built": ["crates/waddle-server"]},
+            "tests": {"inventory_hash": "full", "skipped": 10}, "members": {"built": ["crates/waddle-server"]},
             "start": {
                 name: {"path": name, "present": layer_hit}
                 for name in ("dependencies", "base", "xmpp")
@@ -38,7 +38,7 @@ class SuiteTests(unittest.TestCase):
         for key, value in {
             "runner": "seed",
             "source_after": "another edit",
-            "tests": {"inventory_hash": "different"},
+            "tests": {"inventory_hash": "different", "skipped": 10},
             "members": {"built": ["crates/waddle-server", "crates/waddle-xmpp"]},
             "plan": {"built": ["waddle-server-default-test-members-base-0.1.0.drv"]},
             "compiles_by_derivation": {"waddle-server-default-test-members-xmpp": ["waddle-xmpp"]},
@@ -58,12 +58,16 @@ class SuiteTests(unittest.TestCase):
             prefix = '<testsuites><testsuite><testcase classname="waddle-server" name="existing" />'
             suffix = '</testsuite></testsuites>'
             report.write_text(prefix + suffix)
-            seed = suite.inventory(report, False)
+            summary = "Summary [ 20.001s] 1 test run: 1 passed (1 slow), 10 skipped"
+            seed = suite.inventory(report, False, summary)
+            self.assertEqual(seed["skipped"], 10)
+            with self.assertRaisesRegex(ValueError, "counts differ"):
+                suite.inventory(report, False, "Summary [ 20.001s] 2 tests run: 2 passed")
             with self.assertRaises(ValueError):
-                suite.inventory(report, True)
+                suite.inventory(report, True, summary)
             edit = f'<testcase classname="waddle-server" name="{suite.PROBE.name}"/>'
             report.write_text(prefix + edit + suffix)
-            warm = suite.inventory(report, True)
+            warm = suite.inventory(report, True, "Summary [ 0.2s] 2 tests run: 2 passed, 10 skipped")
             self.assertEqual(seed["inventory_hash"], warm["inventory_hash"])
             self.assertEqual((seed["ran"], warm["ran"]), (1, 2))
 

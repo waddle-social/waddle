@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,17 +50,23 @@ def layer_state():
     return result
 
 
-def inventory(report, edited):
+def inventory(report, edited, build_log):
     executed, failed, skipped, _ = executed_tests([report])
     if not executed or (PROBE in executed) != edited:
         raise ValueError("JUnit inventory does not match the source mutation")
     # The warmed and cold controls must execute the same binaries and tests.
     # Removing only the injected test also lets us compare with the seed.
+    # Nextest omits ignored tests from its JUnit XML. Its final console
+    # summary includes their count for the same invocation.
+    totals = re.findall(r"\bSummary\s+\[[^\n\]]+\] (\d+) tests? run: ([^\n]+)", build_log)
+    if len(totals) != 1 or int(totals[0][0]) != len(executed):
+        raise ValueError("nextest summary and JUnit executed test counts differ")
+    skipped_count = re.search(r"\b(\d+) skipped\b", totals[0][1])
     entries = [(t.binary, t.name, "ran") for t in sorted(executed - {PROBE})]
     entries.extend((t.binary, t.name, "skipped") for t in sorted(skipped))
     return {
         "ran": len(executed),
-        "skipped": len(skipped),
+        "skipped": int(skipped_count[1]) if skipped_count else 0,
         "failed": sorted(map(str, failed)),
         "flaky": sorted(map(str, flaky_tests([report]))),
         "inventory_hash": hashlib.sha256(json.dumps(entries).encode()).hexdigest(),
@@ -130,12 +137,12 @@ def probe(args):
             if len(reports) == 1:
                 with (out / "junit.xml").open("wb") as xml:
                     subprocess.run(["sudo", "cat", reports[0]], stdout=xml, check=True)
-                result["tests"] = inventory(out / "junit.xml", args.edit)
+                result["tests"] = inventory(out / "junit.xml", args.edit, log_text)
             raise ValueError(f"Nix test build exited {build.returncode}; full failures are in build.log")
         store_out = Path(result["start"]["lane"]["path"])
         for file in ("member-reuse.json", "junit.xml"):
             shutil.copyfile(store_out / file, out / file)
-        result["tests"] = inventory(out / "junit.xml", args.edit)
+        result["tests"] = inventory(out / "junit.xml", args.edit, log_text)
         result["members"] = json.loads((out / "member-reuse.json").read_text())
         if result["tests"]["failed"]:
             raise ValueError("test failures recorded in JUnit")
@@ -163,6 +170,8 @@ def validate(rows):
         errors.append("each phase must run on a distinct runner")
     if len({r["tests"]["inventory_hash"] for r in rows.values()}) != 1:
         errors.append("executed or skipped tests differ across phases")
+    if len({r["tests"]["skipped"] for r in rows.values()}) != 1:
+        errors.append("skipped test counts differ across phases")
     edited = [rows[p] for p in PHASES if p != "seed"]
     if len({r["source_after"] for r in edited}) != 1 or edited[0]["source_after"] == seed["source_after"]:
         errors.append("expected identical one-file edits in all three comparisons")
