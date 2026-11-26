@@ -1,18 +1,34 @@
 extension SessionCoordinator {
+    /// Reads the block list for this connection. A server tells only a
+    /// session that has asked, so until this succeeds the list does not
+    /// follow changes made elsewhere: it is tried again a few times. A
+    /// snapshot overtaken by a change is from before it and is not taken;
+    /// the list is asked for again.
     func loadBlockList() async {
         guard !Task.isCancelled else { return }
         let epoch = connectionEpoch
-        let version = blockList.versionBeforeFetch()
+        let before = blockList.load
         blockList.load = .loading
-        let jids = try? await port.fetchBlockList()
-        guard !Task.isCancelled, epoch == connectionEpoch else { return }
-        if let jids {
-            blockList.seed(jids, fetchedAt: version)
-            blockList.load = .loaded
-        } else {
-            blockList.load = .failed
+        for attempt in 0..<Self.blockListAttempts {
+            if attempt > 0 {
+                try? await Task.sleep(for: blockListRetryDelay * attempt)
+            }
+            let version = blockList.versionBeforeFetch()
+            let jids = try? await port.fetchBlockList()
+            guard !Task.isCancelled, epoch == connectionEpoch else {
+                // This connection is gone; the next one reads the list itself.
+                if blockList.load == .loading { blockList.load = before == .loading ? .idle : before }
+                return
+            }
+            if let jids, blockList.seed(jids, fetchedAt: version) {
+                blockList.load = .loaded
+                return
+            }
         }
+        blockList.load = .failed
     }
+
+    static let blockListAttempts = 3
 
     /// The block list as the app shows it, in the list's order.
     public var blockedEntries: [BlockedEntry] {
@@ -38,6 +54,13 @@ extension SessionCoordinator {
     }
 
     /// Removes the exact entry from the account's block list.
+    /// What blocks `person`, as the app says it; nil when nothing does.
+    public func blockedEntry(covering person: BareJID) -> BlockedEntry? {
+        blockList.entry(covering: person).map { jid in
+            BlockedEntry(jid) { directory.title(for: .direct($0)) }
+        }
+    }
+
     public func unblock(_ jid: JID) async throws {
         let epoch = connectionEpoch
         try await port.unblock([jid])

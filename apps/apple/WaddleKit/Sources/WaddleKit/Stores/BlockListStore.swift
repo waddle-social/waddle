@@ -19,19 +19,28 @@ public final class BlockListStore {
     public init() {}
 
     public func isBlocked(_ person: BareJID) -> Bool {
-        blockedJIDs.contains { jid in
-            jid.resource == nil && (jid.bare == person ||
-                (jid.bare.localpart == nil && jid.bare.domain == person.domain))
-        }
+        entry(covering: person) != nil
+    }
+
+    /// The entry that blocks `person`: their own address, or failing that
+    /// their whole server. One of their devices alone does not block them.
+    public func entry(covering person: BareJID) -> JID? {
+        let whole = blockedJIDs.filter { $0.resource == nil }
+        return whole.first { $0.bare == person }
+            ?? whole.first { $0.bare.localpart == nil && $0.bare.domain == person.domain }
     }
 
     public func versionBeforeFetch() -> Int { version }
 
-    /// Keeps changes that arrived while the snapshot was in flight.
-    public func seed(_ jids: [JID], fetchedAt: Int) {
-        guard version == fetchedAt else { return }
+    /// Takes a snapshot, unless a change arrived while it was in flight:
+    /// then it may be from before that change, and is not taken. False
+    /// says so, and the list is to be asked for again.
+    @discardableResult
+    public func seed(_ jids: [JID], fetchedAt: Int) -> Bool {
+        guard version == fetchedAt else { return false }
         var seen: Set<JID> = []
         blockedJIDs = jids.filter { seen.insert($0).inserted }
+        return true
     }
 
     public func apply(_ change: BlockListChange) {

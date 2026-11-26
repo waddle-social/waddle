@@ -200,6 +200,8 @@ public final class SessionCoordinator {
     @ObservationIgnored var profileEdits = ProfileEdits()
     @ObservationIgnored var callTeardownTimeout: Duration = .seconds(3)
     @ObservationIgnored var callActivityRetryDelay: Duration = .seconds(15)
+    /// Between tries at reading the block list; the second wait is twice the first.
+    @ObservationIgnored var blockListRetryDelay: Duration = .seconds(3)
     @ObservationIgnored var callActivityRetryTask: Task<Void, Never>?
     @ObservationIgnored var ownedCallActivity: CallActivity.Publication?
     @ObservationIgnored var activityWriteTail: Task<Void, Error>?

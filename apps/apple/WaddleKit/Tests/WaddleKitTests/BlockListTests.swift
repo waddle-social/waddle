@@ -32,22 +32,58 @@ struct BlockListTests {
         #expect(store.blockedJIDs.isEmpty)
     }
 
-    @Test func aPushDuringFetchDiscardsTheSnapshot() async {
+    /// A snapshot overtaken by a change is from before it: it is not taken, and the list is asked for again.
+    @Test func aPushDuringTheFetchHasTheListReadAgain() async {
         let port = FakePort()
         port.blockListResult = .success([person])
         port.blockListFetches.isHolding = true
         let coordinator = start(port)
+        coordinator.blockListRetryDelay = .milliseconds(1)
         await eventually { port.blockListFetches.count == 1 }
         #expect(coordinator.blockList.load == .loading)
 
         port.emit(.blockListChanged(.blocked([domain])))
         await eventually { coordinator.blockList.blockedJIDs == [domain] }
+        // What the server holds now, which the second read returns.
+        port.blockListResult = .success([person, domain])
+        port.blockListFetches.isHolding = false
         port.blockListFetches.release()
         await coordinator.readyTask?.value
 
+        #expect(port.blockListFetchCount == 2)
         #expect(coordinator.blockList.load == .loaded)
-        #expect(coordinator.blockList.blockedJIDs == [domain])
+        #expect(coordinator.blockList.blockedJIDs == [person, domain])
         await coordinator.stop()
+    }
+
+    @Test func aReadThatFailsIsTriedAgain() async {
+        let port = FakePort()
+        port.blockListResult = .failure(.timeout)
+        // Held, so the first read has taken its answer before the next one's is set.
+        port.blockListFetches.isHolding = true
+        let coordinator = start(port)
+        coordinator.blockListRetryDelay = .milliseconds(1)
+        await eventually { port.blockListFetches.count == 1 }
+        port.blockListResult = .success([person])
+        port.blockListFetches.isHolding = false
+        port.blockListFetches.release()
+        await coordinator.readyTask?.value
+        #expect(port.blockListFetchCount == 2)
+        #expect(coordinator.blockList.load == .loaded)
+        #expect(coordinator.blockList.blockedJIDs == [person])
+        await coordinator.stop()
+    }
+
+    /// Their own entry before their server's; one device of theirs is not them.
+    @Test func whatBlocksAPerson() {
+        let store = BlockListStore()
+        let device = JID(parsing: "\(person.bare)/phone")!
+        store.seed([device], fetchedAt: store.versionBeforeFetch())
+        #expect(store.entry(covering: person.bare) == nil)
+        store.apply(.blocked([JID(parsing: person.bare.domain)!]))
+        #expect(store.entry(covering: person.bare)?.bare.localpart == nil)
+        store.apply(.blocked([person]))
+        #expect(store.entry(covering: person.bare) == person)
     }
 
     @Test func fetchesOnEveryConnection() async {
@@ -158,6 +194,7 @@ struct BlockListTests {
     private func start(_ port: FakePort) -> SessionCoordinator {
         let coordinator = SessionCoordinator(
             account: me, port: port, reconnectPolicy: ReconnectPolicy(base: 0.01, cap: 0.01))
+        coordinator.blockListRetryDelay = .milliseconds(1)
         coordinator.start()
         port.emit(.connected)
         return coordinator

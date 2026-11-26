@@ -59,6 +59,29 @@ final class BlockingSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: settings(in: sample), size: Self.size)
     }
 
+    /// Blocked with their whole server, which another client did: said, with where to undo it.
+    func testSomeoneWhoseServerIsBlocked() async throws {
+        let sample = SampleSession()
+        sample.coordinator.status.connection = .online
+        blocked([SampleSession.jo.domain], in: sample)
+        try await assertScreenSnapshot(of: details(of: SampleSession.jo, in: sample), size: Self.size)
+    }
+
+    /// The list on hand could not be read again: it is shown, with a way to try.
+    func testAListThatMayBeOutOfDate() async throws {
+        let sample = SampleSession()
+        sample.coordinator.status.connection = .online
+        blocked([SampleSession.jo.description], in: sample)
+        sample.coordinator.blockList.load = .failed
+        try await assertScreenSnapshot(of: settings(in: sample), size: Self.size)
+    }
+
+    func testOfflineWithNothingRead() async throws {
+        let sample = SampleSession()
+        sample.coordinator.status.connection = .offline(retryAt: nil)
+        try await assertScreenSnapshot(of: settings(in: sample), size: Self.size)
+    }
+
     func testNobodyBlocked() async throws {
         let sample = SampleSession()
         sample.coordinator.status.connection = .online

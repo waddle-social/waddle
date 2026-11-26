@@ -36,14 +36,24 @@ public struct BlockedEntry: Hashable, Identifiable, Sendable {
 public enum BlockText {
     public static func confirmTitle(_ name: String) -> String { "Block \(name)?" }
 
+    /// What the server does: their direct messages and calls to us are
+    /// refused, and ours to them. In a room you both are in, what they say
+    /// still arrives, since the room sends it.
     public static let confirmMessage =
-        "They can't message or call you, and you can't message them, until you unblock them. They aren't told."
+        "They can't message or call you directly, and you can't message them, until you unblock them. You still see each other in rooms you share."
 
-    public static let blockedNote = "You blocked this person. They can't message or call you."
+    public static let blockedNote = "You blocked this person. They can't message or call you directly."
+
+    /// The person is blocked with their whole server, which another client did: not this person's to undo here.
+    public static func coveredNote(_ entry: BlockedEntry) -> String {
+        "\(entry.title) is blocked. Unblock them in Settings."
+    }
+
+    public static let offline = "The list loads when you're back online."
 
     public static let failed = "That didn't go through. Check your connection and try again."
 
     public static let empty = "Nobody is blocked."
 
-    public static let couldNotLoad = "The list couldn't be loaded."
+    public static let couldNotLoad = "The list couldn't be loaded, so it may be out of date."
 }

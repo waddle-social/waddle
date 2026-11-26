@@ -12,28 +12,37 @@ struct PeerBlockSection: View {
     @State private var didFail = false
 
     var body: some View {
-        let isBlocked = session.blockList.isBlocked(peer)
+        let covering = session.blockedEntry(covering: peer)
+        let isBlocked = covering != nil
+        // Blocked with their whole server: that entry is not this person's to lift from here.
+        let own = covering.flatMap { $0.jid.bare == peer ? $0 : nil }
         Section {
-            FormActionButton(
-                title: isBlocked ? "Unblock \(name)" : "Block \(name)",
-                symbol: isBlocked ? "hand.raised.slash" : "hand.raised",
-                isDestructive: !isBlocked
-            ) {
-                if isBlocked { change(to: false) } else { isConfirming = true }
+            if let covering, own == nil {
+                Text(BlockText.coveredNote(covering))
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+            } else {
+                FormActionButton(
+                    title: isBlocked ? "Unblock \(name)" : "Block \(name)",
+                    symbol: isBlocked ? "hand.raised.slash" : "hand.raised",
+                    isDestructive: !isBlocked
+                ) {
+                    if isBlocked { change(to: false) } else { isConfirming = true }
+                }
+                .disabled(isWorking || session.connection != .online)
+                .confirmationDialog(BlockText.confirmTitle(name), isPresented: $isConfirming, titleVisibility: .visible) {
+                    Button("Block", role: .destructive) { change(to: true) }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(BlockText.confirmMessage)
+                }
             }
-            .disabled(isWorking || session.connection != .online)
         } footer: {
             if didFail {
                 FormSectionFooter(BlockText.failed)
-            } else if isBlocked {
+            } else if own != nil {
                 FormSectionFooter(BlockText.blockedNote)
             }
-        }
-        .confirmationDialog(BlockText.confirmTitle(name), isPresented: $isConfirming, titleVisibility: .visible) {
-            Button("Block", role: .destructive) { change(to: true) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(BlockText.confirmMessage)
         }
     }
 

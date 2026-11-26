@@ -22,39 +22,48 @@ struct BlockedPeopleSection: View {
 
     var body: some View {
         let entries = session.blockedEntries
+        let load = session.blockList.load
+        let isOnline = session.connection == .online
         Section {
             if entries.isEmpty {
-                switch session.blockList.load {
-                case .failed:
-                    FormActionButton(title: "Try again", symbol: "arrow.clockwise") {
-                        Task { await session.reloadBlockList() }
-                    }
-                case .idle, .loading:
+                if load == .loaded {
+                    note(BlockText.empty)
+                } else if !isOnline {
+                    note(BlockText.offline)
+                } else if load != .failed {
                     ProgressView()
                         .frame(maxWidth: .infinity)
-                case .loaded:
-                    Text(BlockText.empty)
-                        .huddleText(Theme.Typography.body)
-                        .foregroundStyle(Theme.Colors.fgMuted)
                 }
             }
             ForEach(entries) { entry in
                 BlockedEntryRow(entry: entry, isWorking: working.contains(entry.jid)) {
                     unblock(entry)
                 }
-                .disabled(session.connection != .online)
+                .disabled(!isOnline)
+            }
+            // A list that could not be read does not follow changes made elsewhere, whatever it already holds.
+            if load == .failed, isOnline {
+                FormActionButton(title: "Try again", symbol: "arrow.clockwise") {
+                    Task { await session.reloadBlockList() }
+                }
             }
         } header: {
             FormSectionHeader("Blocked people")
         } footer: {
             if failed != nil {
                 FormSectionFooter(BlockText.failed)
-            } else if entries.isEmpty, session.blockList.load == .failed {
+            } else if load == .failed, isOnline {
                 FormSectionFooter(BlockText.couldNotLoad)
             } else {
                 FormSectionFooter("Block someone from their details in a direct message.")
             }
         }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .huddleText(Theme.Typography.body)
+            .foregroundStyle(Theme.Colors.fgMuted)
     }
 
     private func unblock(_ entry: BlockedEntry) {
