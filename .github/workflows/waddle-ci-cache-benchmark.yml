@@ -771,13 +771,15 @@ jobs:
           fi
           receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
           sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: |-
             accept-flake-config = true
             substituters = https://cache.nixos.org/
-            build-dir = /tmp
+            build-dir = /var/lib/nix-build
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -832,13 +834,15 @@ jobs:
           fi
           receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
           sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: |-
             accept-flake-config = true
             substituters = https://cache.nixos.org/
-            build-dir = /tmp
+            build-dir = /var/lib/nix-build
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -904,13 +908,15 @@ jobs:
           fi
           receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
           sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: |-
             accept-flake-config = true
             substituters = https://cache.nixos.org/
-            build-dir = /tmp
+            build-dir = /var/lib/nix-build
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -976,13 +982,15 @@ jobs:
           fi
           receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
           sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
       - name: Install Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: |-
             accept-flake-config = true
             substituters = https://cache.nixos.org/
-            build-dir = /tmp
+            build-dir = /var/lib/nix-build
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do

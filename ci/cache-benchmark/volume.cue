@@ -62,12 +62,18 @@ let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'na
 				"""
 		},
 		{
+			// Keep multi-GB Cargo target directories off the /nix volume. Nix
+			// refuses a world-writable build directory such as /tmp.
+			name: "Create a root-owned build directory outside the volume"
+			run:  "sudo install -d -m 0755 -o root -g root /var/lib/nix-build"
+		},
+		{
 			name: "Install Determinate Nix"
 			uses: _nix.uses
 			with: "extra-conf": """
 				accept-flake-config = true
 				substituters = https://cache.nixos.org/
-				build-dir = /tmp
+				build-dir = /var/lib/nix-build
 				"""
 		},
 		{
