@@ -382,6 +382,11 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   label: _("Load Earlier");
                   tooltip-text: _("Load earlier conversation history");
                   clicked => $on_load_earlier() swapped;
+
+                  styles [
+                    "flat",
+                    "load-earlier",
+                  ]
                 }
 
                 [end]
