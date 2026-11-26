@@ -20,3 +20,5 @@ resources:
   - kustomization-infra-teleport-core.yaml
   - kustomization-infra-teleport-postinstall.yaml
   - kustomization-infra-waddle-server.yaml
+  - kustomization-infra-waddle-operator.yaml
+  - kustomization-infra-waddle-next.yaml

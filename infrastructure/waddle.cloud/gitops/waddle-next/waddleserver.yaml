@@ -1,0 +1,106 @@
+apiVersion: waddle.social/v1alpha1
+kind: WaddleServer
+metadata:
+  name: waddle
+  namespace: waddle-next
+  labels:
+    app.kubernetes.io/part-of: waddle-next
+spec:
+  replicas: 1
+  mode: HomeServer
+  baseUrl: https://next.apps.waddle.chat
+  image:
+    repository: ghcr.io/waddle-social/waddle
+    tag: main
+    pullPolicy: IfNotPresent
+  xmpp:
+    enabled: true
+    domain: waddle.social
+    publicWebsocketUrl: wss://next.apps.waddle.chat/ws
+    nativeAuthEnabled: true
+    registrationEnabled: false
+  storage:
+    backend: Turso
+    turso:
+      dataDir: /var/lib/waddle/tenants
+      reservedFds: 256
+  authz:
+    backend: OpenFga
+    openfga:
+      serviceName: openfga
+      port: 8080
+      scheme: http
+      consistency: higher_consistency
+      authSecretRef:
+        name: openfga-auth
+        key: api-token
+  broker:
+    enabled: true
+    dataDir: /var/lib/waddle/broker
+    kms:
+      provider: Scaleway
+      scaleway:
+        baseUrl: https://api.scaleway.com
+        region: fr-par
+        projectId: da8a176b-80b5-46af-9401-44147a989863
+        authSecretRef:
+          name: scaleway-kms-secret
+          key: auth-token
+    cellSpiffeId: spiffe://waddle.social/ns/waddle-next/sa/waddle
+  extensions:
+    enabled: true
+  secrets:
+    mode: ExternalSecrets
+    externalSecrets:
+      externalSecretName: waddle-runtime-secrets
+      apiVersion: Auto
+      extraSecretRefs:
+        - waddle-livekit-config
+      apnsSecretRef:
+        secretName: waddle-apns-production
+        secretKey: WADDLE_APNS_KEY_PEM
+        teamId: 6KXCJGJ45W
+        keyId: CJR7U5CXHP
+        bundleId: p4x.waddle.social
+  clustering:
+    enabled: false
+  updateStrategy: Recreate
+  s3:
+    endpoint: https://f90cc3950ab5b356ec869fe64c867ea7.r2.cloudflarestorage.com
+    bucket: waddle-social-files
+  persistence:
+    enabled: true
+    storageClassName: openebs-mayastor
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+    mountPath: /var/lib/waddle
+    uploadSubPath: uploads
+  telemetry:
+    otlpEndpoint: http://grafana-alloy.grafana-alloy.svc.cluster.local:4317
+    otlpProtocol: grpc
+    serviceName: waddle-server
+    deploymentEnvironment: preview-next
+    tracesSampler: parentbased_traceidratio
+    tracesSamplerArg: "1.0"
+  serverOwnerLocalparts:
+    - rawkode
+    - icepuma
+    - randax
+  corsOrigins: https://waddle.chat,https://next.apps.waddle.chat,http://localhost:4321
+  extraEnv:
+    WADDLE_DEFAULT_TENANT_ID: waddle.social
+    WADDLE_PROVIDER_GITHUB_WEBHOOK_EVENT_HEADER: x-github-event
+    WADDLE_PROVIDER_GITHUB_WEBHOOK_DELIVERY_HEADER: x-github-delivery
+    WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_HEADER: x-hub-signature-256
+    WADDLE_PROVIDER_GITHUB_WEBHOOK_SIGNATURE_PREFIX: sha256=
+  service:
+    kind: ClusterIP
+    httpPort: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 4Gi
