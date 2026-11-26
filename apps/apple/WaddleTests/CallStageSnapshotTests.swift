@@ -313,7 +313,8 @@ final class CallStageSnapshotTests: XCTestCase {
     #if os(macOS)
     /// Drawn in a window: `ImageRenderer` leaves a scroll view and a slider blank.
     private func assertParticipants(
-        tiles: [CallStageTile] = roster, coverTiles: Bool, stageSize: CallSurface.Size = .expanded, size: CGSize, testName: String = #function, line: UInt = #line
+        tiles: [CallStageTile] = roster, coverTiles: Bool, stageSize: CallSurface.Size = .expanded,
+        issues: [CallMediaIssue] = [], size: CGSize, testName: String = #function, line: UInt = #line
     ) async throws {
         let status: CallSessionStatus = .connected
         let presentation = CallStagePresentation()
@@ -323,7 +324,7 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: "#design", subtitle: "3 others in call", status: status, tiles: tiles,
                 presentation: presentation, controls: controls, participants: participants, canResetVolumes: true,
-                participantsCoverTiles: coverTiles,
+                participantsCoverTiles: coverTiles, issues: issues,
                 tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             ),
             size: size, testName: testName, line: line
@@ -337,6 +338,14 @@ final class CallStageSnapshotTests: XCTestCase {
     /// Full screen with the panel open: it holds the header and controls, and stands between them.
     func testRoomFullScreenWithParticipants() async throws {
         try await assertParticipants(coverTiles: false, stageSize: .immersive, size: CGSize(width: 1000, height: 640))
+    }
+
+    /// A notice lies under the header in full screen: the panel starts below it, its close button in reach.
+    func testRoomFullScreenWithParticipantsUnderANotice() async throws {
+        try await assertParticipants(
+            coverTiles: false, stageSize: .immersive, issues: [CallMediaIssue(kind: .camera, reason: .denied)],
+            size: CGSize(width: 1000, height: 640)
+        )
     }
 
     /// The "+N more" tile stays a plain button beside the open panel.

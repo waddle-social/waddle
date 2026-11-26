@@ -48,14 +48,14 @@ private struct CallChrome: ViewModifier {
                 .allowsHitTesting(false)
             }
             .opacity(isHidden ? 0 : 1)
-            .offset(y: isHidden && !reduceMotion ? (edge == .top ? -Metrics.slip : Metrics.slip) : 0)
+            .offset(y: isHidden && !reduceMotion ? slip : 0)
             .allowsHitTesting(!isHidden)
             .callChromeMotion(value: isHidden)
     }
 
-    /// The web's `translateY(8px)`.
-    private enum Metrics {
-        static let slip: CGFloat = 8
+    /// The web's `translateY(8px)`, towards its own edge.
+    private var slip: CGFloat {
+        edge == .top ? -8 : 8
     }
 }
 

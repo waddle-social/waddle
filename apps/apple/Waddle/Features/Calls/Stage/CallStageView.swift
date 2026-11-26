@@ -56,17 +56,20 @@ struct CallStageView: View {
         controls.size == .immersive
     }
 
-    /// How tall the header and the control bar are while they lie over the tiles.
+    /// How tall the header, what lies at the top in all (the header and
+    /// any notice under it) and the control bar are while they lie over the tiles.
     @State private var chromeHeights = ChromeHeights()
 
     private struct ChromeHeights: Equatable {
         var header: CGFloat = 0
+        var top: CGFloat = 0
         var bar: CGFloat = 0
     }
 
     /// Around the tiles. In full screen they reach under the header and
     /// controls; an open participants panel holds those on screen, so
-    /// tiles and panel then stand between them (web `dockImmersiveClass`).
+    /// tiles and panel then stand between them, below any notice (web
+    /// `dockImmersiveClass`).
     private var tileInsets: EdgeInsets {
         guard overlaysChrome else {
             return EdgeInsets(
@@ -75,7 +78,7 @@ struct CallStageView: View {
         }
         let edge = Theme.Spacing.s
         guard participants != nil else { return EdgeInsets(top: edge, leading: edge, bottom: edge, trailing: edge) }
-        return EdgeInsets(top: chromeHeights.header, leading: edge, bottom: chromeHeights.bar, trailing: edge)
+        return EdgeInsets(top: chromeHeights.top, leading: edge, bottom: chromeHeights.bar, trailing: edge)
     }
 
     private var header: some View {
@@ -151,6 +154,7 @@ struct CallStageView: View {
                         .offset(y: isChromeHidden ? -chromeHeights.header + Theme.Spacing.s : 0)
                         .callChromeMotion(value: isChromeHidden)
                 }
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.top = $0 }
             }
         }
         .overlay(alignment: .bottom) {
