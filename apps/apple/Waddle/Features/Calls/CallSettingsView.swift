@@ -11,8 +11,9 @@ struct CallSettingsView: View {
     var kinds: [CallDeviceKind] = CallDeviceKind.allCases
     var audioProcessing = CallAudioProcessing()
     var setAudioProcessing: @MainActor (CallAudioProcessing) -> Void = { _ in /* a sheet without it */ }
-    var microphoneMode: CallMicrophoneMode?
-    var showMicrophoneModes: @MainActor () -> Void = { /* drawn only */ }
+    /// The system's microphone mode, which only the person can change, in the system's picker.
+    var microphoneMode = CallMicrophoneMode.standard
+    var showMicrophoneModes: @MainActor () -> Void = { /* a sheet without it */ }
     var background = CallBackground.off
     var setBackground: @MainActor (CallBackground) -> Void = { _ in /* a sheet without it */ }
     /// The call's video streams as measured; `nil` where nothing measures, which hides the section.
@@ -172,24 +173,25 @@ struct CallSettingsView: View {
             toggle("Noise suppression", \.noiseSuppression)
             toggle("Echo cancellation", \.echoCancellation)
             toggle("Automatic gain control", \.autoGainControl)
-            voiceIsolation
+            microphoneModeRow
         }
     }
 
-    private var voiceIsolation: some View {
-        let mode = microphoneMode?.title ?? "Microphone off"
-        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            FormValueRow(title: "Microphone mode", value: mode)
+    /// Shown whether or not we are muted: the microphone keeps running under a mute,
+    /// and the system's picker says so itself when it has no modes to offer.
+    private var microphoneModeRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            FormValueRow(title: "Microphone mode", value: microphoneMode.title)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Microphone mode")
-                .accessibilityValue(mode)
-            FormSectionFooter(microphoneMode == nil
-                ? "Voice Isolation removes more background noise than Noise suppression. Turn your microphone on to choose it."
-                : "Voice Isolation removes more background noise than Noise suppression. It is a system setting, chosen in the system's picker.")
-                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityValue(microphoneMode.title)
+            FormSectionFooter(
+                "Voice Isolation removes more background noise than Noise suppression. "
+                    + "It is a system setting: choose it in the system's picker while your microphone is in use."
+            )
+            .fixedSize(horizontal: false, vertical: true)
             Button("Choose microphone mode", action: showMicrophoneModes)
                 .buttonStyle(.huddle(.secondary, size: .small))
-                .disabled(microphoneMode == nil)
         }
     }
 
@@ -271,7 +273,7 @@ private struct CallSettingsContent: View {
         CallSettingsView(
             devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
             setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
-            microphoneMode: media.isMicrophoneOn ? microphoneMode : nil,
+            microphoneMode: microphoneMode,
             showMicrophoneModes: SystemMicrophoneMode.showPicker,
             background: media.background, setBackground: { media.setBackground($0) },
             videoStats: videoStats,

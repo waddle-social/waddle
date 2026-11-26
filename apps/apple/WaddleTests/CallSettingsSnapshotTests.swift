@@ -14,10 +14,10 @@ final class CallSettingsSnapshotTests: XCTestCase {
 
     private func assertSettings(
         _ devices: CallDevices, kinds: [CallDeviceKind] = CallDeviceKind.allCases, width: CGFloat = CallSettingsView.width,
-        audioProcessing: CallAudioProcessing = CallAudioProcessing(), microphoneMode: CallMicrophoneMode? = .standard,
+        audioProcessing: CallAudioProcessing = CallAudioProcessing(), microphoneMode: CallMicrophoneMode = .standard,
         background: CallBackground = .off,
         videoStats: [CallVideoStat]? = nil,
-        height: CGFloat = 620, testName: String = #function, line: UInt = #line
+        height: CGFloat = 760, testName: String = #function, line: UInt = #line
     ) async throws {
         try await assertScreenSnapshot(
             of: CallSettingsView(
@@ -48,7 +48,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
                 speakers: CallDeviceList(devices: [Self.speakers])
             ),
             audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false),
-            microphoneMode: nil, height: 600
+            microphoneMode: .wideSpectrum, height: 760
         )
     }
 
@@ -80,15 +80,15 @@ final class CallSettingsSnapshotTests: XCTestCase {
             ]
         }
         _ = tracker.update(with: readings(second: 1))
-        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 760)
+        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 900)
     }
 
     func testABlurredBackground() async throws {
-        try await assertSettings(Self.devices, background: .blur, height: 620)
+        try await assertSettings(Self.devices, background: .blur)
     }
 
     func testNoVideoToMeasure() async throws {
-        try await assertSettings(Self.devices, videoStats: [], height: 700)
+        try await assertSettings(Self.devices, videoStats: [], height: 840)
     }
 
     #if os(iOS)
@@ -99,7 +99,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
             CallDevices(cameras: CallDeviceList(devices: [
                 CallDevice(id: "front", name: "Front Camera"), CallDevice(id: "back", name: "Back Camera"),
             ])),
-            kinds: [.camera], width: 375, microphoneMode: .wideSpectrum, height: 520
+            kinds: [.camera], width: 375, microphoneMode: .wideSpectrum, height: 660
         )
     }
     #endif
