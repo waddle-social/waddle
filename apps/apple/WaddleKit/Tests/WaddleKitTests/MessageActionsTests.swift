@@ -101,7 +101,8 @@ struct MessageActionsTests {
         // An echo carries its own origin id, so others could target it, but
         // it cannot be corrected before it is sent, nor pinned: the server
         // has not seen it.
-        #expect(MessageActions.available(for: echo, in: context())
+        #expect(coordinator.pinAccess(for: echo) == .denied)
+        #expect(MessageActions.available(for: echo, in: context(pinning: coordinator.pinAccess(for: echo)))
             == reactions + [.addReaction, .reply, .startThread, .selectText, .delete])
     }
 

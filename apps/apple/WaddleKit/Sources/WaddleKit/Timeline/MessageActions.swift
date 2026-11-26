@@ -88,8 +88,7 @@ public enum MessageActions {
         if item.threadTarget(inside: context.thread) != nil {
             actions.append(context.replyCount > 0 ? .openThread : .startThread)
         }
-        // Not an echo still on its way: the server cannot pin what it has not seen, and would not say so.
-        if item.pinTargetID != nil, !item.isLocalEcho, context.pinning != .denied {
+        if item.pinTargetID != nil, context.pinning != .denied {
             actions.append(context.isPinned ? .unpin : .pin)
         }
         if hasWords(item) {

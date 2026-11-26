@@ -78,6 +78,16 @@ extension SessionCoordinator {
         }
     }
 
+    /// Whether the account may pin `item`: as its conversation allows, and
+    /// not while the message is still on its way. The server cannot pin
+    /// what it has not seen, and would not say so. In a conversation of
+    /// two our own message stays the row we made for it, so what says the
+    /// server has it is its acknowledgement.
+    public func pinAccess(for item: TimelineItem) -> PinAccess {
+        if item.isLocalEcho, deliveries.state(of: item.id) != .acknowledged { return .denied }
+        return pinAccess(in: item.conversation)
+    }
+
     /// Whether `conversation` has pins this server keeps: a room, or a
     /// conversation of two with someone on our own server. The server
     /// keeps none with a person elsewhere, and a query for them would go

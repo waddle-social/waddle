@@ -52,6 +52,32 @@ struct DirectMessagePinsTests {
         #expect(!offered().contains(.pin))
     }
 
+    /// Our own message in a conversation of two stays the row we made: nothing
+    /// comes back to replace it. It can be pinned once the server has it.
+    @Test func ourOwnMessageCanBePinnedOnceTheServerHasIt() async throws {
+        let (coordinator, port) = online()
+        let id = try #require(await coordinator.send(Draft(text: "see you there"), in: bobConversation))
+        let sending = try row(id, in: coordinator)
+        #expect(sending.isLocalEcho)
+        #expect(coordinator.pinAccess(for: sending) == .denied)
+
+        coordinator.handle(.deliveryAcked(stanzaID: id))
+        let sent = try row(id, in: coordinator)
+        #expect(coordinator.pinAccess(for: sent) == .allowed)
+        #expect(await coordinator.setPinned(true, sent))
+        #expect(port.pinWrites.map(\.targetID) == [id])
+    }
+
+    @Test func aMessageWithNoIDOfItsOwnIsPinnedByItsArchiveID() async throws {
+        let (coordinator, port) = online()
+        var message = directMessage("lunch at noon", from: bobFull, to: meBare, id: "wire-1", archiveID: "mine-1")
+        message.identity.messageID = nil
+        coordinator.route(message)
+        let item = try #require(coordinator.timelines.timeline(for: bobConversation).items.first)
+        #expect(await coordinator.setPinned(true, item))
+        #expect(port.pinWrites.map(\.targetID) == ["mine-1"])
+    }
+
     /// The server keeps no pins with a person on another server, and asking for them would go to that server.
     @Test func aConversationWithSomeoneElsewhereHasNoPins() async {
         let (coordinator, port) = online()

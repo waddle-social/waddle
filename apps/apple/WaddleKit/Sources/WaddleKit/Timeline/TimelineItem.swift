@@ -209,10 +209,11 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
 
     /// The id a pin is asked for by (`urn:waddle:pin:0`): in a room the
     /// room-assigned stanza id; in 1:1 the message's `@id`, the one id
-    /// both people have for it and the one the server names a pin by. The
-    /// server does not look a pin up by origin-id.
+    /// both people have for it and the one the server names a pin by, or
+    /// for a message that has none the archive's id, which the server
+    /// also knows it by. The server does not look a pin up by origin-id.
     public var pinTargetID: String? {
-        conversation.isRoom ? roomStanzaID : identity.messageID
+        conversation.isRoom ? roomStanzaID : identity.messageID ?? identity.stanzaID?.id
     }
 
     /// Every id a pin of this message may be named by. In 1:1 the server
