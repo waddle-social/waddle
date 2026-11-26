@@ -253,9 +253,10 @@ fn build_subject_message_never_set_emits_empty_subject_without_delay() {
         !has_delay(&msg),
         "<delay/> MAY be omitted when the subject was never set (§7.2.15)"
     );
-    assert!(
-        extract_occupant_id_from_message(&msg).is_none(),
-        "no setter means no input for the XEP-0421 HMAC; omitted, matching established servers"
+    assert_eq!(
+        extract_occupant_id_from_message(&msg),
+        Some(crate::xep::xep0421::generate_room_occupant_id(&room, &secret)),
+        "XEP-0421 §Business Rules: every MUC message carries an occupant-id; the room's own id stands in when no setter exists"
     );
 }
 

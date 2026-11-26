@@ -176,7 +176,7 @@ async fn handle_muc_join_with_occupancy_session(
     ),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;
-    handle_muc_join_real(
+    let responses = handle_muc_join_real(
         state,
         domain,
         room_jid,
@@ -189,7 +189,47 @@ async fn handle_muc_join_with_occupancy_session(
             authenticated_session,
         },
     )
-    .await
+    .await;
+    unlock_room_the_join_created(state, room_jid, &responses).await;
+    responses
+}
+
+/// A join that created its room (the creator's self-presence carries status
+/// 201) leaves the room locked until the owner asks for an instant room
+/// (XEP-0045 §10.1.1, §10.1.2). Tests that let other users join afterwards
+/// take that step here, after the creating join.
+pub(crate) async fn unlock_room_the_join_created(
+    state: &WebSocketState,
+    room_jid: &jid::BareJid,
+    responses: &[String],
+) {
+    let created = responses.iter().any(|response| {
+        response
+            .parse::<xmpp_parsers::minidom::Element>()
+            .ok()
+            .and_then(|presence| {
+                presence
+                    .get_child("x", waddle_xmpp::muc::presence::NS_MUC_USER)
+                    .map(|x| {
+                        x.children().any(|child| {
+                            child.name() == "status" && child.attr("code") == Some("201")
+                        })
+                    })
+            })
+            .unwrap_or(false)
+    });
+    if !created {
+        return;
+    }
+    if let Some(room_actor) = get_room_actor(state, room_jid).await {
+        assert!(
+            room_actor
+                .ask(waddle_xmpp::muc::room_actor::UnlockRoom)
+                .await
+                .is_ok(),
+            "the room its creator configured unlocks"
+        );
+    }
 }
 
 async fn handle_muc_leave_with_occupancy_session(

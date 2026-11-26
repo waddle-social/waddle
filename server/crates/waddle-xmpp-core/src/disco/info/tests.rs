@@ -214,6 +214,76 @@ fn test_parse_disco_info_response_retains_within_form_rejection() {
     }
 }
 
+fn form_with_field(attr_type: &str, field: Element) -> Element {
+    Element::builder("x", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), attr_type)
+        .append(field)
+        .build()
+}
+
+#[test]
+fn test_parse_disco_info_response_accepts_identical_repeated_form_type_values() {
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field(
+            "result",
+            form_type_field(&[form_type, form_type]),
+        ))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        !parsed.ill_formed,
+        "XEP-0115 §5.4 only rejects FORM_TYPE values with different character data"
+    );
+}
+
+#[test]
+fn test_parse_disco_info_response_ignores_forms_without_hidden_form_type() {
+    let non_hidden = Element::builder("field", NS_DATA_FORMS)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), "FORM_TYPE")
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append("urn:xmpp:dataforms:softwareinfo")
+                .build(),
+        )
+        .append(
+            Element::builder("value", NS_DATA_FORMS)
+                .append("urn:xmpp:dataforms:other")
+                .build(),
+        )
+        .build();
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field("result", non_hidden.clone()))
+        .append(form_with_field("result", non_hidden))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(
+        !parsed.ill_formed,
+        "forms whose FORM_TYPE is not hidden are ignored, not evaluated (§5.4 step 2.5)"
+    );
+}
+
+#[test]
+fn test_parse_disco_info_response_ignores_non_result_forms() {
+    let form_type = "urn:xmpp:dataforms:softwareinfo";
+    let query = Element::builder("query", DISCO_INFO_NS)
+        .append(form_with_field(
+            "form",
+            form_type_field(&[form_type, "urn:xmpp:dataforms:other"]),
+        ))
+        .append(form_with_field("form", form_type_field(&[form_type])))
+        .append(form_with_field("form", form_type_field(&[form_type])))
+        .build();
+
+    let parsed = parse_disco_info_response(&query).expect("parseable response");
+
+    assert!(!parsed.ill_formed);
+}
+
 #[test]
 fn test_server_features_include_core_features() {
     let features = server_features();
@@ -226,7 +296,6 @@ fn test_server_features_include_core_features() {
     assert!(!features.contains(&Feature::mam()));
     assert!(!features.contains(&Feature::mam_extended()));
     assert!(!features.contains(&Feature::fulltext_mam()));
-    assert!(!features.contains(&Feature::pep()));
     assert!(!features.contains(&Feature::avatar_metadata_notify()));
     assert!(!features.contains(&Feature::vcard4_notify()));
 }
@@ -361,18 +430,18 @@ fn test_spaces_service_features_include_xep0503_required_features() {
             "spaces service missing {feature}"
         );
     }
-    // Feed + stories live on the community service, not spaces — the
-    // spaces service MUST NOT advertise these or clients enumerate
-    // them as space members.
+    // The feed lives on the community service, not spaces — the spaces
+    // service MUST NOT advertise it or clients enumerate it as a space
+    // member. Stories live on each account's own PEP service.
     assert!(!features.contains(&Feature::social_feed()));
     assert!(!features.contains(&Feature::stories()));
 }
 
 #[test]
-fn test_community_service_features_advertise_feed_and_stories() {
+fn test_community_service_features_advertise_feed_but_not_stories() {
     let features = community_service_features();
     assert!(features.contains(&Feature::social_feed()));
-    assert!(features.contains(&Feature::stories()));
+    assert!(!features.contains(&Feature::stories()));
     assert!(features.contains(&Feature::pubsub()));
     assert!(features.contains(&Feature::disco_info()));
 }
@@ -418,6 +487,7 @@ fn test_call_feature_helpers_pin_canonical_xep_namespaces() {
         "urn:waddle:transports:livekit:0"
     );
     assert_eq!(Feature::muji().0, "urn:xmpp:jingle:muji:0");
+    assert_eq!(Feature::coin().0, "urn:xmpp:coin:1");
     assert_eq!(
         Feature::waddle_call_lifecycle().0,
         "urn:waddle:call-lifecycle:0"

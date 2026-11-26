@@ -8,7 +8,7 @@ use kameo::message::Context;
 use xmpp_parsers::presence::Presence;
 
 use super::{AdminApplyError, AdminContext, RoomActor};
-use crate::muc::admin::{is_role_change_query, AdminItem};
+use crate::muc::admin::{is_role_change_query, AdminAffiliationEntry, AdminItem};
 use crate::muc::durable::{AffiliationEntry as DurableAffiliationEntry, RoomDurableMutation};
 use crate::muc::{
     build_affiliation_change_presence, build_ban_presence, build_kick_presence,
@@ -771,7 +771,7 @@ pub struct AdminListRoleItem {
 pub enum AdminListOutcome {
     Forbidden,
     Roles(Vec<AdminListRoleItem>),
-    Affiliations(Vec<(BareJid, Affiliation)>),
+    Affiliations(Vec<AdminAffiliationEntry>),
 }
 
 /// Lightweight XEP-0045 §9 admin list query: checks authorization and reads
@@ -842,20 +842,23 @@ impl kameo::message::Message<GetAdminList> for RoomActor {
                 if !has_admin_affiliation && !member_list_get {
                     return Ok(AdminListOutcome::Forbidden);
                 }
-                let entries = if let Some(affiliation) = affiliation_filter {
-                    self.room
-                        .jids_by_affiliation(affiliation)
-                        .into_iter()
-                        .map(|jid| (jid, affiliation))
-                        .collect()
-                } else {
-                    self.room
-                        .all_affiliations()
-                        .into_iter()
-                        .map(|entry| (entry.jid, entry.affiliation))
-                        .collect()
-                };
-                Ok(AdminListOutcome::Affiliations(entries))
+                let listed: Vec<(BareJid, Affiliation)> =
+                    if let Some(affiliation) = affiliation_filter {
+                        self.room
+                            .jids_by_affiliation(affiliation)
+                            .into_iter()
+                            .map(|jid| (jid, affiliation))
+                            .collect()
+                    } else {
+                        self.room
+                            .all_affiliations()
+                            .into_iter()
+                            .map(|entry| (entry.jid, entry.affiliation))
+                            .collect()
+                    };
+                Ok(AdminListOutcome::Affiliations(
+                    self.room.affiliation_list_entries(listed),
+                ))
             }
         }
     }

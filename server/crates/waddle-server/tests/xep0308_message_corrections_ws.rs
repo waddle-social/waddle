@@ -256,6 +256,7 @@ async fn correction_from_different_occupant_returns_forbidden() {
     let (_server, mut admin, mut bob) = setup_with_bob().await;
     let room = format!("correct-forbidden-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room_as(&mut admin, &room, USERNAME).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room_as(&mut bob, &room, "bob").await;
 
     admin

@@ -111,7 +111,7 @@ extension SessionCoordinator {
         // Loaded rows only give the true count when they reach the present;
         // after a gap the server inbox count stays authoritative.
         guard history.state(of: conversation).hasLoadedLatest else { return }
-        let remaining = items[(index + 1)...].filter { !$0.isMine && $0.tombstone == nil && $0.isFeedVisible }.count
+        let remaining = items[(index + 1)...].filter { $0.countsAsUnread && $0.isFeedVisible }.count
         unread.set(remaining, for: conversation)
     }
 

@@ -24,6 +24,11 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
 
   const typingUsers = ref<string[]>([]);
   const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // XEP-0085 §5.1: chat states are only sent to a peer that has shown it
+  // supports them by sending one. Our content messages carry <active/>, so
+  // a supporting peer answers and this set fills; a peer that never does
+  // is never sent composing/paused (implicit negotiation).
+  const peersWithChatStates = new Set<string>();
   let lastChatState: "active" | "composing" | "paused" = "active";
   let composingTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -69,10 +74,15 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     onScopeDispose(() => clearTypingState());
   }
 
+  function notePeerChatState(peerJid: string) {
+    peersWithChatStates.add(peerJid);
+  }
+
   function notifyComposing(thread?: { id: string; parent?: string }) {
     const client = xmppClient.value;
     const peerJid = activePeerJid.value;
     if (!client || !peerJid || !sendChatStates.value) return;
+    if (!peersWithChatStates.has(peerJid)) return;
     const scope = conversationScope?.(peerJid) ?? "account";
     if (lastChatState !== "composing") {
       lastChatState = "composing";
@@ -89,14 +99,9 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
 
   /**
    * Internal-state reset called by useChatSend's onSendComplete after a
-   * successful send: cancels any in-flight pause timer and snaps
-   * `lastChatState` back to "active". Does NOT emit a wire `<active/>`
-   * notification — the orchestrator sends
-   * `client.sendDmChatState(peerJid, "active")` after this returns, per
-   * XEP-0085 §4.2. The split exists so the composable's in-memory
-   * debounce state stays consistent on every send while the orchestrator
-   * decides (based on the wasm-client send result) whether the
-   * wire-level `<active/>` actually fires.
+   * send: cancels any in-flight pause timer and snaps `lastChatState`
+   * back to "active". Emits nothing on the wire: the content message
+   * already carries `<active/>` (XEP-0085 §5.1).
    */
   function resetOnSend() {
     if (composingTimeout) {
@@ -112,6 +117,7 @@ export function useDmChatStates(deps: UseDmChatStatesDeps) {
     removeTypingUser,
     clearTypingState,
     notifyComposing,
+    notePeerChatState,
     resetOnSend,
   };
 }

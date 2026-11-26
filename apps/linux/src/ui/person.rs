@@ -155,6 +155,7 @@ impl WaddleWindow {
                     let open = gtk::Button::from_icon_name("external-link-symbolic");
                     open.set_valign(gtk::Align::Center);
                     open.set_tooltip_text(Some("Open Link"));
+                    super::a11y::label(&open, "Open link in the browser");
                     open.add_css_class("flat");
                     let owner = window.clone();
                     open.connect_clicked(move |_| {

@@ -3,7 +3,6 @@ package social.waddle.android.feature.conversation
 import android.app.Application
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -28,7 +27,6 @@ import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
-import social.waddle.android.theme.LocalConsistentHue
 import social.waddle.android.theme.WaddleTheme
 import java.time.Instant
 import java.time.LocalDate
@@ -106,19 +104,17 @@ class TimelineFollowTest {
 
     @Composable
     private fun Timeline() {
-        CompositionLocalProvider(LocalConsistentHue provides { 0.0 }) {
-            WaddleTheme(themeMode = ThemeMode.DAYLIGHT) {
-                TimelineList(
-                    entries = shown.value,
-                    isLoadingOlder = false,
-                    reachedHistoryStart = true,
-                    onTopReached = {},
-                    actions = MessageRowActions(),
-                    context = MessageRowContext(selfBareJid = self),
-                    today = LocalDate.of(2026, 7, 15),
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
+        WaddleTheme(themeMode = ThemeMode.DAYLIGHT) {
+            TimelineList(
+                entries = shown.value,
+                isLoadingOlder = false,
+                reachedHistoryStart = true,
+                onTopReached = {},
+                actions = MessageRowActions(),
+                context = MessageRowContext(selfBareJid = self),
+                today = LocalDate.of(2026, 7, 15),
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 

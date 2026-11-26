@@ -34,6 +34,12 @@ extension SessionCoordinator {
         if let root = timeline.item(withID: threadID) {
             return root
         }
+        // A call's announcement heads its thread without sharing its id. The
+        // feed's own copy is preferred to a fetched one: the room's word that
+        // the call ended is no part of the thread, so only the feed's has it.
+        if let anchor = timeline.items.first(where: { $0.callAnchor != nil && $0.message.thread == threadID }) {
+            return anchor
+        }
         if conversation.isRoom, let root = threadHistory.fetchedRoot(of: ThreadKey(room: conversation.jid, threadID: threadID)) {
             return root
         }
@@ -52,43 +58,6 @@ extension SessionCoordinator {
         }
         return chain.map { id in
             ThreadCrumb(threadID: id, title: threadRoot(of: id, in: conversation).map(ThreadSummary.snippet(of:)))
-        }
-    }
-
-    /// Whether the account may pin messages in `conversation`. In a room,
-    /// as web's `currentUserCanPin` decides: only in a room we are in;
-    /// owners and admins may; any occupant may where the room lets anyone
-    /// pin; unknown while the room's disco#info has not said. Unlike web,
-    /// a 1:1 conversation has no pins here.
-    public func pinAccess(in conversation: ConversationID) -> PinAccess {
-        guard conversation.isRoom, presence.joinedRooms.contains(conversation.jid),
-              let occupant = selfOccupant(in: conversation.jid) else { return .denied }
-        if occupant.affiliation == .owner || occupant.affiliation == .admin { return .allowed }
-        switch directory.channel(for: conversation.jid)?.pinPermission {
-        case .anyone: return .allowed
-        case .adminsOnly: return .denied
-        case nil: return .unknown
-        }
-    }
-
-    /// Reads who may pin in `room` again after the room said its
-    /// configuration changed (XEP-0045 §10.2.1). If the room cannot be
-    /// read, what was known may be stale, so nothing is assumed.
-    func readPinPermissionAgain(of room: BareJID) {
-        guard !isStopped, directory.channel(for: room) != nil else { return }
-        let epoch = connectionEpoch
-        Task { @MainActor [self] in
-            let read: PinPermission?
-            do {
-                read = try await port.fetchRoomPinPermission(of: room)
-            } catch {
-                read = nil
-            }
-            // Asked on a connection that has since dropped: the new
-            // connection's lookup read the room afresh.
-            guard !isStopped, epoch == connectionEpoch, let channel = directory.channel(for: room) else { return }
-            directory.upsert(channel.withPinPermission(read))
-            directoryMutations.append(.setPinPermission(room, read))
         }
     }
 

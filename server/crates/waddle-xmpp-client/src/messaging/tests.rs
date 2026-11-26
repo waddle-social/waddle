@@ -8,10 +8,10 @@ use super::{
     build_chat_state_message, build_correction_message, build_displayed_message,
     build_in_call_reaction_message, build_moderation_message, build_muc_join_presence,
     build_outbound_message, build_pinned_message, build_reaction_message, build_retraction_message,
-    build_unpinned_message, is_muc_join_presence, parse, InCallReactionEmoji,
-    InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken, MarkupSpanData,
-    MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent, MucAffiliation, MucRole,
-    ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
+    build_unpinned_message, is_muc_join_presence, parse, BroadcastMention, BroadcastSpan,
+    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken,
+    MarkupSpanData, MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent,
+    MucAffiliation, MucRole, ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
 };
 use crate::error::ClientError;
 use crate::request::StanzaId;
@@ -1287,9 +1287,10 @@ fn build_outbound_message_omits_begin_end_when_no_position() {
 }
 
 #[test]
-fn build_outbound_message_resolves_typed_mentions_to_references() {
+fn build_outbound_message_resolves_typed_mentions_to_references_and_channel_mentions() {
     // XEP-0372: a typed `@nick` only addresses someone when it travels as
-    // `<reference type='mention'/>`; receivers ignore bare body text.
+    // `<reference type='mention'/>`; XEP-0513 carries `@everyone` / `@here`
+    // as `#channel` mentions (`active='true'` for `@here`).
     let options = SendMessageOptions {
         mention_directory: Some(MentionDirectory {
             targets: vec![MentionTarget {
@@ -1304,7 +1305,7 @@ fn build_outbound_message_resolves_typed_mentions_to_references() {
     let (_, stanza) = build_outbound_message(
         "room@muc.example",
         "groupchat",
-        "@rawkode and @everyone, not @randax",
+        "@rawkode and @everyone, not @randax, ping @here",
         &options,
     )
     .unwrap();
@@ -1316,35 +1317,131 @@ fn build_outbound_message_resolves_typed_mentions_to_references() {
         .collect();
     assert_eq!(
         wire,
+        vec![[
+            Some("mention"),
+            Some("xmpp:rawkode@waddle.social"),
+            Some("0"),
+            Some("8")
+        ]]
+    );
+
+    let markup = stanza.get_child("markup", NS_MARKUP).expect("markup");
+    let channel: Vec<[Option<&str>; 4]> = markup
+        .children()
+        .filter(|span| span.is("span", NS_MARKUP))
+        .map(|span| {
+            let mention = span
+                .get_child("mention", "urn:xmpp:mentions:0")
+                .expect("xep-0513 mention");
+            assert_eq!(mention.attr("target"), None);
+            [
+                span.attr("start"),
+                span.attr("end"),
+                mention.attr("type"),
+                mention.attr("active"),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        channel,
         vec![
             [
-                Some("mention"),
-                Some("xmpp:rawkode@waddle.social"),
-                Some("0"),
-                Some("8")
+                Some("13"),
+                Some("22"),
+                Some("urn:xmpp:mentions:0#channel"),
+                None
             ],
             [
-                Some("mention"),
-                Some("xmpp:@everyone"),
-                Some("13"),
-                Some("22")
+                Some("42"),
+                Some("47"),
+                Some("urn:xmpp:mentions:0#channel"),
+                Some("true")
             ],
         ]
     );
 
     // Receivers classify the same stanza as mentioning the target and
-    // carrying a broadcast.
+    // carrying a broadcast; `@everyone` outranks `@here`.
     let MessagingEvent::Message(msg) = parse(&stanza).unwrap() else {
         panic!("expected message");
     };
     assert_eq!(
         msg.mention_uris,
+        vec!["xmpp:rawkode@waddle.social".to_string()]
+    );
+    assert_eq!(msg.broadcast_mention.as_deref(), Some("everyone"));
+    assert_eq!(
+        msg.broadcast_spans,
         vec![
-            "xmpp:rawkode@waddle.social".to_string(),
-            "xmpp:@everyone".to_string()
+            BroadcastSpan {
+                kind: BroadcastMention::Everyone,
+                begin: 13,
+                end: 22
+            },
+            BroadcastSpan {
+                kind: BroadcastMention::Here,
+                begin: 42,
+                end: 47
+            },
         ]
     );
-    assert_eq!(msg.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
+}
+
+#[test]
+fn build_outbound_message_here_alone_is_an_active_channel_mention() {
+    let options = SendMessageOptions {
+        markup_spans: vec![MarkupSpanData {
+            span_type: "bold".to_string(),
+            start: 6,
+            end: 10,
+            uri: None,
+        }],
+        mention_directory: Some(MentionDirectory {
+            targets: Vec::new(),
+            broadcasts: true,
+        }),
+        ..Default::default()
+    };
+
+    let (_, stanza) =
+        build_outbound_message("room@muc.example", "groupchat", "@here some text", &options)
+            .unwrap();
+
+    let markup = stanza.get_child("markup", NS_MARKUP).expect("one markup");
+    assert_eq!(
+        stanza
+            .children()
+            .filter(|child| child.is("markup", NS_MARKUP))
+            .count(),
+        1
+    );
+    assert_eq!(markup.children().count(), 2, "bold span plus mention span");
+    assert!(stanza
+        .children()
+        .all(|child| !child.is("reference", NS_REFERENCES)));
+    let MessagingEvent::Message(msg) = parse(&stanza).unwrap() else {
+        panic!("expected message");
+    };
+    assert_eq!(msg.broadcast_mention.as_deref(), Some("here"));
+    assert_eq!(msg.broadcast_spans.len(), 1);
+    assert_eq!(msg.broadcast_spans[0].kind, BroadcastMention::Here);
+    assert!(msg.mention_uris.is_empty());
+}
+
+#[test]
+fn inbound_xep0372_pseudo_uri_is_not_a_broadcast_mention() {
+    // `xmpp:@everyone` is not a valid XMPP URI and carries no XEP-0513
+    // semantics; it is an ordinary (unresolvable) mention reference.
+    let el: Element = "<message xmlns='jabber:client' type='groupchat' from='room@muc.example/a'>\
+         <body>@everyone</body>\
+         <reference xmlns='urn:xmpp:reference:0' type='mention' uri='xmpp:@everyone' begin='0' end='9'/>\
+         </message>"
+        .parse()
+        .unwrap();
+    let MessagingEvent::Message(msg) = parse(&el).unwrap() else {
+        panic!("expected message");
+    };
+    assert_eq!(msg.broadcast_mention, None);
 }
 
 #[test]
@@ -2768,6 +2865,21 @@ fn build_in_call_reaction_message_has_transient_carrier_shape() {
 }
 
 #[test]
+fn build_in_call_reaction_message_to_room_omits_no_copy_hint() {
+    // XEP-0334: "This hint MUST only be included on messages addressed to
+    // full JIDs"; a groupchat reaction targets the room's bare JID.
+    let recipient =
+        InCallReactionRecipient::Room("room@muc.example.com".parse().expect("bare jid"));
+    let sid = InCallSessionId::try_new("call-1").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
+    let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
+    assert_eq!(stanza.attr("to"), Some("room@muc.example.com"));
+    assert_eq!(stanza.attr("type"), Some("groupchat"));
+    assert!(stanza.get_child("no-store", NS_HINTS).is_some());
+    assert!(stanza.get_child("no-copy", NS_HINTS).is_none());
+}
+
+#[test]
 fn in_call_reaction_values_reject_empty_wire_fields() {
     assert!(InCallSessionId::try_new("").is_err());
     assert!(InCallSessionId::try_new("   ").is_err());
@@ -2962,4 +3074,135 @@ fn muc_join_presence_is_recognised_by_its_xep0045_payload() {
     assert!(!is_muc_join_presence(&available));
     let message = Element::builder("message", "jabber:client").build();
     assert!(!is_muc_join_presence(&message));
+}
+
+fn plain_shared_file(url: &str) -> SharedFile {
+    SharedFile {
+        url: url.to_string(),
+        name: None,
+        media_type: Some("image/png".to_string()),
+        size: None,
+        width: None,
+        height: None,
+        desc: None,
+        hashes: Vec::new(),
+        disposition: SharedFileDisposition::Attachment,
+        encrypted: None,
+    }
+}
+
+#[test]
+fn build_outbound_message_gives_multiple_file_sharing_differing_ids() {
+    // XEP-0447: "It MUST add an id attribute with differing values to each
+    // of these <file-sharing/> elements."
+    let options = SendMessageOptions {
+        shared_files: vec![
+            plain_shared_file("https://files.example.com/a.png"),
+            plain_shared_file("https://files.example.com/b.png"),
+        ],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "two", &options).unwrap();
+    let ids: Vec<_> = stanza
+        .children()
+        .filter(|c| c.is("file-sharing", NS_SFS))
+        .map(|c| c.attr("id").expect("id on every file-sharing").to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    // No x-oob for multi-file messages (the oob reference is single-URL).
+    assert!(stanza.get_child("x", "jabber:x:oob").is_none());
+}
+
+#[test]
+fn build_outbound_message_single_file_sharing_has_no_id() {
+    let options = SendMessageOptions {
+        shared_files: vec![plain_shared_file("https://files.example.com/a.png")],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "one", &options).unwrap();
+    let fs = stanza.get_child("file-sharing", NS_SFS).expect("sfs");
+    assert!(fs.attr("id").is_none());
+}
+
+#[test]
+fn build_outbound_message_single_unencrypted_file_adds_oob_and_fallback() {
+    // XEP-0447: adding a XEP-0066 x-oob reference is RECOMMENDED; a body that
+    // is only the URL MUST carry <fallback for='urn:xmpp:sfs:0'/>.
+    let url = "https://files.example.com/a.png";
+    let options = SendMessageOptions {
+        shared_files: vec![plain_shared_file(url)],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", url, &options).unwrap();
+    let oob = stanza.get_child("x", "jabber:x:oob").expect("x-oob");
+    assert_eq!(
+        oob.get_child("url", "jabber:x:oob").map(|e| e.text()),
+        Some(url.to_string())
+    );
+    let fallback = stanza
+        .get_child("fallback", "urn:xmpp:fallback:0")
+        .expect("fallback indicator");
+    assert_eq!(fallback.attr("for"), Some("urn:xmpp:sfs:0"));
+
+    // A caption body is real content, not fallback text.
+    let (_, captioned) =
+        build_outbound_message("alice@example.com", "chat", "look at this", &options).unwrap();
+    assert!(captioned.get_child("x", "jabber:x:oob").is_some());
+    assert!(captioned
+        .get_child("fallback", "urn:xmpp:fallback:0")
+        .is_none());
+}
+
+#[test]
+fn build_outbound_message_encrypted_file_adds_no_oob() {
+    let options = SendMessageOptions {
+        shared_files: vec![encrypted_shared_file_for_size_tests(Some(4096), 4096)],
+        ..Default::default()
+    };
+    let (_, stanza) = build_outbound_message("alice@example.com", "chat", "x", &options).unwrap();
+    assert!(stanza.get_child("x", "jabber:x:oob").is_none());
+}
+
+#[test]
+fn parse_message_ignores_sims_children_with_url_attribute() {
+    // XEP-0385 SIMS is not implemented; an arbitrary grandchild carrying a
+    // `url` attribute must never be treated as a shared file.
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <media-sharing xmlns='urn:xmpp:sims:1'>\
+             <sources><x url='https://evil.example/a'/></sources>\
+           </media-sharing>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.shared_files.is_empty());
+}
+
+#[test]
+fn parse_message_ignores_foreign_namespace_url_data_in_data_reference() {
+    let e = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <reference xmlns='urn:xmpp:reference:0' type='data' uri='https://x.example/a'>\
+             <url-data xmlns='urn:example:other' target='https://evil.example/a'/>\
+             <url>https://evil.example/b</url>\
+           </reference>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&e).unwrap() else {
+        panic!("expected Message");
+    };
+    assert!(msg.shared_files.is_empty());
+
+    let ok = el("<message xmlns='jabber:client' type='chat'>\
+           <body>hi</body>\
+           <reference xmlns='urn:xmpp:reference:0' type='data' uri='https://x.example/a'>\
+             <url-data xmlns='http://jabber.org/protocol/url-data' target='https://files.example.com/a'/>\
+           </reference>\
+         </message>");
+    let MessagingEvent::Message(msg) = parse(&ok).unwrap() else {
+        panic!("expected Message");
+    };
+    assert_eq!(msg.shared_files.len(), 1);
+    assert_eq!(msg.shared_files[0].url, "https://files.example.com/a");
 }

@@ -215,6 +215,20 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_sub
         }
     };
 
+    // A contact whose presence subscription to a local account ends loses
+    // its access to that account's PEP nodes (XEP-0163).
+    let access_ended = match request.subscription_type {
+        SubscriptionType::Unsubscribe => Some((&request.to, &request.from)),
+        SubscriptionType::Unsubscribed => Some((&request.from, &request.to)),
+        _ => None,
+    };
+    if let Some((owner, contact)) = access_ended.filter(|(owner, _)| state.serves(owner)) {
+        crate::server::routes::websocket::handlers::pubsub_fanout::revoke_lost_pep_subscriptions(
+            state, owner, contact,
+        )
+        .await;
+    }
+
     // Roster pushes are now emitted inline by `update_subscription_roster_state`
     // (see PR #336 review on cross-user lock deadlock). Only the post-roster
     // presence side effects remain here.

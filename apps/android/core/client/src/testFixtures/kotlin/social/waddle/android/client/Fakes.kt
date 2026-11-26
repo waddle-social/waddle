@@ -194,7 +194,7 @@ data class UploadSlotCall(
 )
 
 /**
- * One recorded `sendCall*` wire verb, in send order, so call-engine
+ * One recorded call wire verb, in send order, so call-engine
  * tests can assert exact sequences (e.g. the tie-break branch's
  * finish-migrated → proceed → session-terminate ordering).
  */
@@ -207,6 +207,13 @@ sealed interface RecordedCallVerb {
     ) : RecordedCallVerb
 
     data class Ringing(val peerFullJid: String, val sid: String) : RecordedCallVerb
+
+    data class InCallReaction(
+        val to: String,
+        val audience: WaddleMessageAudience,
+        val sid: String,
+        val emoji: String,
+    ) : RecordedCallVerb
 
     data class Proceed(val peerFullJid: String, val sid: String) : RecordedCallVerb
 
@@ -896,17 +903,17 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
             id = "post-test", title = post.title, body = post.body, author = null,
             publishedMs = null, link = post.link, source = null,
         )
-    override suspend fun fetchStories(communityJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
-    override suspend fun publishStory(communityJid: String, post: WaddleStoryPost): WaddleStory =
+    override suspend fun fetchStories(authorJid: String, maxItems: UInt?): List<WaddleStory> = emptyList()
+    override suspend fun publishStory(post: WaddleStoryPost): WaddleStory =
         WaddleStory(
             id = "story-test", body = post.body, mediaUrl = post.mediaUrl, mediaType = post.mediaType,
             author = null, postedMs = null, expiresMs = null,
         )
     override suspend fun fetchStoryReads(): List<WaddleStoryRead> = emptyList()
     override suspend fun publishStoryReads(reads: List<WaddleStoryRead>) = Unit
-    override suspend fun fetchStoryReactions(communityJid: String, storyId: String): WaddleStoryReactions =
+    override suspend fun fetchStoryReactions(authorJid: String, storyId: String): WaddleStoryReactions =
         WaddleStoryReactions(reactions = emptyList(), mine = emptyList())
-    override suspend fun setStoryReactions(communityJid: String, storyId: String, emojis: List<String>) = Unit
+    override suspend fun setStoryReactions(authorJid: String, storyId: String, emojis: List<String>) = Unit
     override suspend fun fetchCommunityEvents(communityJid: String): List<WaddleEvent> = emptyList()
     override suspend fun publishCommunityEvent(communityJid: String, event: WaddleEvent): WaddleEvent = event
     override suspend fun retractCommunityEvent(communityJid: String, itemId: String) = Unit
@@ -1093,6 +1100,16 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun sendCallRinging(peerFullJid: String, sid: String): Boolean {
         callVerbs += RecordedCallVerb.Ringing(peerFullJid, sid)
+        return callVerbResult
+    }
+
+    override suspend fun sendInCallReaction(
+        to: String,
+        audience: WaddleMessageAudience,
+        sid: String,
+        emoji: String,
+    ): Boolean {
+        callVerbs += RecordedCallVerb.InCallReaction(to, audience, sid, emoji)
         return callVerbResult
     }
 
@@ -1403,7 +1420,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         profileVerbFailure?.let { throw it }
     }
 
-    override suspend fun publishActivity(general: String, specific: String?, text: String?) {
+    override suspend fun publishActivity(general: String, specific: String?, text: String?, lang: String?) {
         profileVerbStall()
         profileVerbs += RecordedProfileVerb.PublishActivity(general, specific, text)
         profileVerbFailure?.let { throw it }
@@ -1561,6 +1578,10 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
+    override suspend fun fetchBlockList(): List<String> = unused()
+    override suspend fun blockJids(jids: List<String>): Unit = unused()
+    override suspend fun unblockJids(jids: List<String>): Unit = unused()
+    override suspend fun unblockAll(): Unit = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean =
         push.disable(RecordedPushDisable(pushServiceJid, node, deviceId))
 

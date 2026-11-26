@@ -9,6 +9,15 @@ use gtk::{gio, glib};
 
 use crate::ui::WaddleWindow;
 
+/// Load the Night tokens when `dark`, and nothing when light.
+fn load_night(provider: &gtk::CssProvider, dark: bool) {
+    provider.load_from_string(if dark {
+        include_str!("../data/night.css")
+    } else {
+        ""
+    });
+}
+
 mod imp {
     #[cfg_attr(
         not(test),
@@ -42,12 +51,34 @@ mod imp {
             crate::ui::apply_appearance();
             let provider = gtk::CssProvider::new();
             provider.load_from_string(include_str!("../data/style.css"));
+            // Night replaces the Daylight tokens while libadwaita is dark.
+            // GTK 4.18 has no `prefers-color-scheme` media query, so the
+            // sheet is swapped when the style manager changes.
+            let night = gtk::CssProvider::new();
+            let styles = adw::StyleManager::default();
+            load_night(&night, styles.is_dark());
+            let night_for_display = night.clone();
+            styles.connect_dark_notify(move |styles| load_night(&night, styles.is_dark()));
             if let Some(display) = gtk::gdk::Display::default() {
                 gtk::style_context_add_provider_for_display(
                     &display,
                     &provider,
                     gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
                 );
+                gtk::style_context_add_provider_for_display(
+                    &display,
+                    &night_for_display,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+                );
+                // Icons the user's icon theme lacks fall back to the copies
+                // under data/icons: found through the source tree when run from a
+                // checkout (`cargo run`, debug or release), and installed into
+                // hicolor in the Flatpak, where this path does not exist.
+                let icons = gtk::IconTheme::for_display(&display);
+                let dev_icons = concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons");
+                if std::path::Path::new(dev_icons).is_dir() {
+                    icons.add_search_path(dev_icons);
+                }
             }
         }
 
@@ -147,8 +178,10 @@ impl WaddleApplication {
             decline,
             show_call,
         ]);
-        self.set_accels_for_action("app.quit", &["<Control>q"]);
-        self.set_accels_for_action("app.preferences", &["<Control>comma"]);
+        // One table feeds these and the Keyboard Shortcuts window.
+        for (action, accel) in crate::shortcuts::bindings() {
+            self.set_accels_for_action(action, &[accel]);
+        }
     }
 
     /// The one window, made on first use. It hides on close, so it
@@ -177,5 +210,34 @@ impl WaddleApplication {
 impl Default for WaddleApplication {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    #[ignore = "requires a GTK display; run with xvfb-run and --ignored --test-threads=1"]
+    fn the_style_sheet_parses_without_errors_in_both_schemes() {
+        adw::init().expect("GTK display");
+        let sheet = [
+            include_str!("../data/style.css"),
+            include_str!("../data/night.css"),
+        ]
+        .concat();
+        let sheet = sheet.as_str();
+        for scheme in [adw::ColorScheme::ForceLight, adw::ColorScheme::ForceDark] {
+            adw::StyleManager::default().set_color_scheme(scheme);
+            let errors = Rc::new(RefCell::new(Vec::new()));
+            let provider = gtk::CssProvider::new();
+            let sink = errors.clone();
+            provider.connect_parsing_error(move |_, section, error| {
+                sink.borrow_mut().push(format!("{section}: {error}"));
+            });
+            provider.load_from_string(sheet);
+            assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+        }
     }
 }

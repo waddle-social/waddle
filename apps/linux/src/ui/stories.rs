@@ -45,6 +45,17 @@ pub struct StoriesState {
     viewer: Option<Viewer>,
 }
 
+impl StoriesState {
+    /// The author stamped on a listed story: its reactions live on that
+    /// account's PEP service.
+    fn author_of(&self, id: &str) -> Option<String> {
+        self.items
+            .iter()
+            .find(|story| story.id == id)
+            .and_then(|story| story.author.clone())
+    }
+}
+
 /// An open viewer.
 struct Viewer {
     dialog: adw::Dialog,
@@ -140,6 +151,7 @@ impl WaddleWindow {
         let add = gtk::Button::new();
         add.add_css_class("flat");
         add.set_tooltip_text(Some("Share a Story"));
+        super::a11y::label(&add, "Share a story");
         let circle = gtk::Box::new(gtk::Orientation::Vertical, 0);
         circle.set_halign(gtk::Align::Center);
         circle.set_valign(gtk::Align::Center);
@@ -180,13 +192,9 @@ impl WaddleWindow {
             frame.append(&picture);
             let button = gtk::Button::new();
             button.add_css_class("flat");
-            button.set_tooltip_text(Some(&format!(
-                "{name}: {}",
-                match ring.stories.len() {
-                    1 => "1 story".to_string(),
-                    count => format!("{count} stories"),
-                }
-            )));
+            let phrase = super::a11y::story_phrase(&name, ring.stories.len(), ring.unseen);
+            button.set_tooltip_text(Some(&phrase));
+            super::a11y::label(&button, &phrase);
             button.set_child(Some(&item_column(&frame, &name)));
             let author = ring.author.clone();
             button.connect_clicked({
@@ -261,6 +269,7 @@ impl WaddleWindow {
             .tooltip_text("Pause (Space)")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&pause, "Pause story");
         pause.add_css_class("flat");
         pause.add_css_class("circular");
         let close = gtk::Button::builder()
@@ -268,6 +277,7 @@ impl WaddleWindow {
             .tooltip_text("Close")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&close, "Close story viewer");
         close.add_css_class("flat");
         close.add_css_class("circular");
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -353,6 +363,7 @@ impl WaddleWindow {
             .valign(gtk::Align::Start)
             .popover(&chooser)
             .build();
+        super::a11y::label(&more, "More reactions");
         more.add_css_class("flat");
         more.add_css_class("circular");
         let reaction_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -554,11 +565,9 @@ impl WaddleWindow {
             if !author.is_empty() {
                 self.watch_avatar(&viewer.avatar, &author);
             }
-            viewer.who.set_label(&format!(
-                "<span foreground=\"{}\" weight=\"bold\">{}</span>",
-                nick_color::hex(&author),
-                glib::markup_escape_text(&name)
-            ));
+            viewer
+                .who
+                .set_label(&nick_color::markup(&author, &name, true));
             viewer.when.set_label(
                 &story
                     .posted_ms
@@ -794,10 +803,11 @@ impl WaddleWindow {
         if !imp.feed.borrow_mut().stories.asked.insert(id.to_string()) {
             return;
         }
+        let author = imp.feed.borrow().stories.author_of(id);
         let (window, session, id) = (self.clone(), session.clone(), id.to_string());
         let generation = imp.generation.get();
         glib::spawn_future_local(async move {
-            let result = session.story_reactions(id.clone()).await;
+            let result = session.story_reactions(author, id.clone()).await;
             if window.imp().generation.get() != generation {
                 return;
             }
@@ -898,12 +908,15 @@ impl WaddleWindow {
             return;
         }
         let (window, generation) = (self.clone(), imp.generation.get());
+        let author = imp.feed.borrow().stories.author_of(&id);
         glib::spawn_future_local(async move {
             loop {
                 let Some(sent) = window.imp().feed.borrow_mut().stories.writes.next(&id) else {
                     break;
                 };
-                let result = session.set_story_reactions(id.clone(), sent.clone()).await;
+                let result = session
+                    .set_story_reactions(author.clone(), id.clone(), sent.clone())
+                    .await;
                 if window.imp().generation.get() != generation {
                     return;
                 }
@@ -1169,6 +1182,7 @@ fn edge_button(icon: &str, tooltip: &str, side: gtk::Align) -> gtk::Button {
         .margin_start(8)
         .margin_end(8)
         .build();
+    super::a11y::label(&button, tooltip);
     button.add_css_class("osd");
     button.add_css_class("circular");
     button

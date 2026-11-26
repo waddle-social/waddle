@@ -741,6 +741,7 @@ async fn invite_quota_recovers_generated_notification(
             &invite.inviter,
             &invite.invitee,
             &inbound_invite,
+            &crate::ingress::test_support::fixture_occupant_id_secret(),
         );
     let Effect::External(ExternalEffect::RouteToPeer(route)) = &mut submission.plan.plan[0].effect
     else {
@@ -845,6 +846,7 @@ async fn invite_quota_recovers_generated_notification(
         .collect();
     tx.commit().await.expect("snapshot committed");
     assert_eq!(pending.len(), 2, "only route and fallback need recovery");
+    let secret = crate::ingress::test_support::fixture_occupant_id_secret();
     let rebuild = |recorded: &[IngressEffectIntent],
                    pending: &[IngressEffectIntent],
                    blocked: &[jid::BareJid]| {
@@ -864,6 +866,7 @@ async fn invite_quota_recovers_generated_notification(
             host_owned_resources: vec![],
             departed_occupants: vec![],
             blocked_recipients: blocked,
+            occupant_id_secret: Some(&secret),
         })
         .expect("rebuild generated invitation")
     };

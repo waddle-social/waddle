@@ -1,9 +1,10 @@
 use minidom::Element;
 use waddle_xmpp_client::messaging::{
-    build_finish, build_finish_migrated, build_finish_with_reason, build_proceed, build_propose,
-    build_reject, build_reject_with_options, build_retract, build_retract_with_options,
-    build_ringing, build_session_accept, build_session_initiate, build_session_terminate,
-    CallMedia, JingleReason, SessionId, TieBreak,
+    build_finish, build_finish_migrated, build_finish_with_reason, build_in_call_reaction_message,
+    build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
+    build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
+    build_session_terminate, CallMedia, InCallReactionEmoji, InCallReactionRecipient,
+    InCallSessionId, JingleReason, SessionId, TieBreak,
 };
 use waddle_xmpp_client::xep::xep0215::{
     build_extdisco_services_iq, parse_external_services, ExternalService, ExternalServiceTransport,
@@ -19,6 +20,7 @@ use crate::stanza::{iq_set, message_with_jmi};
 use crate::{
     WaddleCallSessionTerminateOutcome, WaddleClient, WaddleError, WaddleExternalService,
     WaddleExternalServiceTransport, WaddleExternalServiceType, WaddleJingleReason,
+    WaddleMessageAudience,
 };
 
 // ── Pure factories and classifiers ───────────────────────────────────────────
@@ -27,6 +29,15 @@ use crate::{
 // functions so the dedicated XEP test suite (`calls_tests.rs`) can pin
 // the exact stanzas the FFI emits without a live connection — same
 // pattern as `messaging_verbs.rs`.
+
+/// Build an ephemeral in-call emoji reaction for a direct chat or room.
+pub(crate) fn in_call_reaction_stanza(
+    recipient: &InCallReactionRecipient,
+    sid: &InCallSessionId,
+    emoji: &InCallReactionEmoji,
+) -> Element {
+    build_in_call_reaction_message(recipient, sid, emoji)
+}
 
 /// Build the XEP-0166 §7.4 session-terminate `<iq type='set'>` shared
 /// by `send_call_session_terminate` and its outcome-reporting twin, so
@@ -152,6 +163,39 @@ impl WaddleClient {
         };
         let stanza = message_with_jmi(&peer.into(), build_ringing(&sid));
         self.send_stanza_or_error(stanza, "send_call_ringing").await
+    }
+
+    /// Send an ephemeral emoji reaction for a call session. Direct reactions
+    /// target the peer's full JID, and MUC reactions target the room's bare JID.
+    pub async fn send_in_call_reaction(
+        &self,
+        to: String,
+        audience: WaddleMessageAudience,
+        sid: String,
+        emoji: String,
+    ) -> bool {
+        let op = "send_in_call_reaction";
+        let recipient = match audience {
+            WaddleMessageAudience::Direct => self
+                .parse_full_jid(&to, op)
+                .map(InCallReactionRecipient::Direct),
+            WaddleMessageAudience::Muc => self
+                .parse_bare_jid(&to, op)
+                .map(InCallReactionRecipient::Room),
+        };
+        let Some(recipient) = recipient else {
+            return false;
+        };
+        let Ok(sid) = InCallSessionId::try_new(sid) else {
+            self.emit_error(format!("{op} failed: session id must not be blank"));
+            return false;
+        };
+        let Ok(emoji) = InCallReactionEmoji::try_new(emoji) else {
+            self.emit_error(format!("{op} failed: reaction emoji must not be blank"));
+            return false;
+        };
+        let stanza = in_call_reaction_stanza(&recipient, &sid, &emoji);
+        self.send_stanza_or_error(stanza, op).await
     }
 
     /// Send a XEP-0353 §5.1.3 `<reject/>` to the originator's full JID.

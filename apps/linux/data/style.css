@@ -1,26 +1,120 @@
-/* Waddle teal, as on the web and phones (chat/src/styles/tokens.css). */
+/* Polar Huddle, Waddle's shared design tokens. The values are the semantic
+ * colours of design/src/preset.ts as the generated Apple and Android token
+ * files resolve them (apps/apple/Waddle/Design/WaddleTokens.swift): Daylight
+ * is the default, Night (night.css) replaces it when libadwaita is dark (the
+ * Preferences appearance setting drives that through AdwStyleManager). Components use the named --wd-* variables; the
+ * libadwaita palette variables below map the toolkit's own widgets onto them. */
 :root {
-  --accent-bg-color: #0b7a6f;
-  --accent-fg-color: #ffffff;
-  --accent-color: #0b7a6f;
+  --wd-bg: #f8fafd;
+  --wd-bg-rail: #ffffff;
+  --wd-surface: #ffffff;
+  --wd-surface-2: #edf0f4;
+  --wd-surface-3: #ffffff;
+  --wd-surface-code: #edf0f4;
+  --wd-border-soft: #dbe0e6;
+  --wd-border: #c8ced6;
+  --wd-border-strong: #737d88;
+  --wd-fg: #060f19;
+  --wd-fg-muted: #38424e;
+  --wd-fg-soft: #525c67;
+  --wd-action: #0f4376;
+  --wd-action-hover: #062c50;
+  --wd-action-fg: #ffffff;
+  --wd-action-text: #6b4c00;
+  --wd-action-subtle: #ffeed0;
+  --wd-live: #007176;
+  --wd-live-hover: #005256;
+  --wd-live-fg: #ffffff;
+  --wd-live-text: #005256;
+  --wd-live-subtle: #ebfafb;
+  --wd-danger: #d33944;
+  --wd-danger-hover: #aa1d2c;
+  --wd-danger-fg: #ffffff;
+  --wd-danger-text: #aa1d2c;
+  --wd-danger-subtle: #fff4f3;
+  --wd-warning: #e77412;
+  --wd-warning-text: #924500;
+  --wd-success: #0a924b;
+  --wd-success-text: #017137;
+  --wd-info: #397dc4;
+  --wd-info-text: #205f9f;
+  --wd-focus: #397dc4;
+  --wd-presence-available: #0a924b;
+  --wd-presence-away: #bb8800;
+  --wd-presence-dnd: #d33944;
+  --wd-presence-offline: #737d88;
+  /* Gold is the neck patch: "this is for you" (unread, mentions). */
+  --wd-gold: #ffc139;
+  --wd-gold-fg: #060f19;
+  --wd-gold-text: #6b4c00;
+  --wd-gold-subtle: #ffeed0;
+  /* Avatar tints; the same in both themes. */
+  --wd-avatar-1: #ffe0a9;
+  --wd-avatar-2: #c4dfff;
+  --wd-avatar-3: #dbe0e6;
+  --wd-avatar-4: #b4eef1;
+  --wd-avatar-5: #ffcfcc;
+  --wd-avatar-6: #bceac7;
+  --wd-avatar-fg: #060f19;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --accent-color: #6fd3c7;
-  }
+/* libadwaita's palette, mapped onto the tokens so stock widgets follow. */
+:root {
+  --accent-bg-color: var(--wd-action);
+  --accent-fg-color: var(--wd-action-fg);
+  --accent-color: var(--wd-action-text);
+  --destructive-bg-color: var(--wd-danger);
+  --destructive-fg-color: var(--wd-danger-fg);
+  --destructive-color: var(--wd-danger-text);
+  --success-bg-color: var(--wd-success);
+  --success-color: var(--wd-success-text);
+  --warning-bg-color: var(--wd-warning);
+  --warning-color: var(--wd-warning-text);
+  --error-bg-color: var(--wd-danger);
+  --error-color: var(--wd-danger-text);
+  --window-bg-color: var(--wd-bg);
+  --window-fg-color: var(--wd-fg);
+  --view-bg-color: var(--wd-bg);
+  --view-fg-color: var(--wd-fg);
+  --headerbar-bg-color: var(--wd-bg-rail);
+  --headerbar-fg-color: var(--wd-fg);
+  --sidebar-bg-color: var(--wd-bg-rail);
+  --sidebar-fg-color: var(--wd-fg);
+  --card-bg-color: var(--wd-surface);
+  --card-fg-color: var(--wd-fg);
+  --dialog-bg-color: var(--wd-surface);
+  --dialog-fg-color: var(--wd-fg);
+  --popover-bg-color: var(--wd-surface-2);
+  --popover-fg-color: var(--wd-fg);
+}
+
+/* Polar Huddle type (src/fonts.rs installs the files). The system families
+ * follow, so the app still reads well if the files could not be installed. */
+window {
+  font-family: "Atkinson Hyperlegible Next", system-ui, sans-serif;
+}
+
+.title-1, .title-2, .title-3, .title-4, .large-title,
+headerbar .title, .section-heading, .waddle-message .sender {
+  font-family: "Bricolage Grotesque", "Atkinson Hyperlegible Next", system-ui, sans-serif;
+}
+
+.monospace, .keycap, textview.code {
+  font-family: "Atkinson Hyperlegible Mono", ui-monospace, monospace;
 }
 
 /* Avatar tints: DJB2 over the name picks one (src/ui/avatar.rs). */
 /* Adw.Avatar draws in an inner `avatar` node that carries its own colour. */
 .waddle-avatar avatar {
   background-image: none;
-  color: #0b1219;
+  color: var(--wd-avatar-fg);
 }
-.waddle-avatar.tint-0 avatar { background-color: #d6f3ef; }
-.waddle-avatar.tint-1 avatar { background-color: #ffe3cd; }
-.waddle-avatar.tint-2 avatar { background-color: #e3e8f7; }
-.waddle-avatar.tint-3 avatar { background-color: #c9d4dc; }
+.waddle-avatar.tint-0 avatar { background-color: var(--wd-avatar-1); }
+.waddle-avatar.tint-1 avatar { background-color: var(--wd-avatar-2); }
+.waddle-avatar.tint-2 avatar { background-color: var(--wd-avatar-3); }
+.waddle-avatar.tint-3 avatar { background-color: var(--wd-avatar-4); }
+.waddle-avatar.tint-4 avatar { background-color: var(--wd-avatar-5); }
+.waddle-avatar.tint-5 avatar { background-color: var(--wd-avatar-6); }
 
 /* Sidebar */
 .conversation .room-tile {
@@ -38,10 +132,44 @@
   min-height: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  background-color: var(--accent-bg-color);
-  color: var(--accent-fg-color);
+  background-color: var(--wd-gold);
+  color: var(--wd-gold-fg);
   font-size: 0.8em;
   font-weight: 700;
+}
+
+/* Header bars sit flat on the rail and page colours with a soft rule. */
+headerbar {
+  box-shadow: none;
+  border-bottom: 1px solid var(--wd-border-soft);
+}
+
+/* Sidebar rows: rounded, with a gold or navy bar on the open one. */
+.navigation-sidebar > row {
+  margin: 1px 8px;
+  border-radius: 8px;
+}
+
+.navigation-sidebar > row:selected,
+.navigation-sidebar > row:selected:hover {
+  background-color: var(--wd-surface-2);
+  color: var(--wd-fg);
+  box-shadow: inset 3px 0 0 var(--wd-action);
+}
+
+.section-heading {
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--wd-fg-soft);
+}
+
+/* "Load Earlier" is a quiet link, not a primary pill in the header. */
+headerbar button.load-earlier {
+  color: var(--wd-action-text);
+  background: none;
+  box-shadow: none;
+  font-weight: 600;
 }
 
 /* Timeline */
@@ -106,7 +234,7 @@
 }
 
 .waddle-message .sender {
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .waddle-message .gutter-time {
@@ -120,6 +248,23 @@
 
 .waddle-message .body {
   line-height: 1.4;
+}
+
+/* "Reply in Thread" shows on hover or keyboard focus, not under every
+ * message; it stays reachable by Tab and from the message menu. */
+.waddle-message .thread-link {
+  min-height: 0;
+  margin: 0 0 0 -8px;
+  padding: 0 8px;
+  color: var(--wd-action-text);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.timeline > row:hover .thread-link,
+.timeline > row:focus-within .thread-link,
+.waddle-message .thread-link:focus {
+  opacity: 1;
 }
 
 .waddle-message .body link {
@@ -162,6 +307,7 @@ button.reaction:hover {
 }
 
 button.reaction:checked {
+  font-weight: 700;
   border-color: alpha(var(--accent-bg-color), 0.4);
   background-color: alpha(var(--accent-bg-color), 0.14);
   color: inherit;
@@ -185,6 +331,13 @@ button.link-card:hover {
 .composer {
   padding: 4px 4px 4px 8px;
   border-radius: 14px;
+  background-color: var(--wd-surface);
+  border: 1px solid var(--wd-border-soft);
+  box-shadow: none;
+}
+
+.composer:focus-within {
+  border-color: var(--wd-focus);
 }
 
 .composer .composer-entry,
@@ -226,8 +379,8 @@ button.link-card:hover {
   min-height: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  border: 1px solid var(--accent-color);
-  color: var(--accent-color);
+  border: 1px solid var(--wd-gold-text);
+  color: var(--wd-gold-text);
   font-size: 0.8em;
   font-weight: 700;
 }
@@ -237,10 +390,11 @@ button.link-card:hover {
   padding: 12px;
 }
 
+/* Unseen is a thick ring, seen a hairline: the state shows without colour. */
 .story-ring {
   padding: 3px;
   border-radius: 999px;
-  border: 2px solid transparent;
+  border: 3px solid transparent;
 }
 
 .story-ring.story-unseen {
@@ -248,10 +402,23 @@ button.link-card:hover {
 }
 
 .story-ring.story-seen {
-  border-color: alpha(currentColor, 0.25);
+  border-width: 1px;
+  padding: 5px;
+  border-color: alpha(currentColor, 0.35);
 }
 
 .story-add {
   border-radius: 999px;
   background-color: alpha(currentColor, 0.08);
+}
+
+/* A shortcut's keys in the Keyboard Shortcuts window. */
+.keycap {
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--wd-border);
+  background-color: var(--wd-surface-2);
+  color: var(--wd-fg);
+  font-family: monospace;
+  font-size: 0.9em;
 }

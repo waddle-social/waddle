@@ -637,6 +637,17 @@ CREATE TABLE dnd_projection_source_version (
     CONSTRAINT dnd_projection_source_version_id_check CHECK ((id = 1))
 );
 
+CREATE TABLE entity_caps (
+    hash text NOT NULL,
+    ver text NOT NULL,
+    info text NOT NULL,
+    verified_at_ms bigint NOT NULL,
+    CONSTRAINT entity_caps_pkey PRIMARY KEY (hash, ver),
+    CONSTRAINT entity_caps_hash CHECK ((octet_length(hash) BETWEEN 1 AND 32)),
+    CONSTRAINT entity_caps_info CHECK ((octet_length(info) BETWEEN 1 AND 65536)),
+    CONSTRAINT entity_caps_ver CHECK ((octet_length(ver) BETWEEN 1 AND 256))
+);
+
 CREATE TABLE extension_bot_rooms (
     room_jid text NOT NULL,
     plugin_id text NOT NULL,
@@ -1415,6 +1426,8 @@ CREATE TABLE pubsub_nodes (
     notify_delete integer NOT NULL,
     send_last_published_item text NOT NULL,
     created_at_ms bigint NOT NULL,
+    roster_groups_allowed text,
+    item_expire bigint,
     CONSTRAINT pubsub_nodes_pkey PRIMARY KEY (owner_jid, node_name)
 );
 
@@ -1803,6 +1816,17 @@ CREATE TABLE xmpp_auth_codes (
     payload text NOT NULL,
     expires_at_ms bigint NOT NULL,
     CONSTRAINT xmpp_auth_codes_pkey PRIMARY KEY (code)
+);
+
+CREATE TABLE xmpp_oauth_grants (
+    grant_id text NOT NULL,
+    session_id text NOT NULL,
+    user_jid text NOT NULL,
+    scope text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    CONSTRAINT xmpp_oauth_grants_pkey PRIMARY KEY (grant_id),
+    CONSTRAINT xmpp_oauth_grants_session_id_key UNIQUE (session_id),
+    CONSTRAINT xmpp_oauth_grants_grant_id CHECK ((octet_length(grant_id) BETWEEN 1 AND 128))
 );
 
 CREATE TABLE xmpp_occupancy_authority (
@@ -2459,6 +2483,8 @@ CREATE INDEX idx_channels_position ON channels USING btree ("position");
 
 CREATE INDEX idx_device_auth_expires_at ON device_auth USING btree (expires_at_ms);
 
+CREATE INDEX idx_entity_caps_verified_at ON entity_caps USING btree (verified_at_ms);
+
 CREATE INDEX idx_groupchat_notification_recovery_completed_prune ON groupchat_notification_recovery USING btree (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) WHERE (completed_at_ms IS NOT NULL);
 
 CREATE INDEX idx_groupchat_notification_recovery_pending ON groupchat_notification_recovery USING btree (created_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id) WHERE (completed_at_ms IS NULL);
@@ -2632,6 +2658,8 @@ CREATE INDEX idx_webhook_deliveries_done_prune ON webhook_deliveries USING btree
 
 CREATE INDEX idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes USING btree (expires_at_ms);
 
+CREATE INDEX idx_xmpp_oauth_grants_user_jid ON xmpp_oauth_grants USING btree (user_jid);
+
 CREATE INDEX ingress_archive_dispatch_effect ON ingress_archive_dispatch USING btree (message_key, kind, semantic_identity_hash);
 
 CREATE INDEX ingress_archive_dispatch_pending ON ingress_archive_dispatch USING btree (archive_jid, pending_row_id) WHERE (pending_row_id <> ''::text);
@@ -2756,7 +2784,7 @@ INSERT INTO host_grant_authority (singleton, incarnation)
 VALUES (true, replace(gen_random_uuid()::text, '-', ''));
 
 INSERT INTO pubsub_schema_version (version)
-VALUES (8);
+VALUES (10);
 
 CREATE FUNCTION pubsub_runtime_attach_lock()
  RETURNS void

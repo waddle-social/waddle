@@ -86,6 +86,7 @@ impl DrainAuthority {
                     state.deps.app_state.db_pool.global(),
                     stanza.expect("matched typed stanza"),
                     &reference,
+                    Some(&state.deps.occupant_id_secret),
                 );
                 // W1.6c seam: a canonical-read outage at detach.
                 #[cfg(feature = "test-support")]

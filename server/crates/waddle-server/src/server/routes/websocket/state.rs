@@ -1395,7 +1395,7 @@ pub struct XmppServiceDomains {
     pub extensions: String,
     pub push: String,
     /// Hosts community-wide pubsub features that are NOT space-bookmark
-    /// nodes (XEP-0472 social feed, XEP-0501 stories). Kept distinct
+    /// nodes (XEP-0472 social feed, xCal events). Kept distinct
     /// from `spaces` so the spaces disco#items enumeration only
     /// surfaces actual community spaces.
     pub community: String,
@@ -1500,6 +1500,9 @@ pub struct WebSocketState {
     /// The rooms this replica's MUC service may list, read at most once at
     /// a time for each audience of its `disco#items`.
     pub(crate) room_listings: super::handlers::iq::RoomListings,
+    /// The room of each Muji Jingle session this replica accepted from a
+    /// client, so a plain `session-terminate` resolves to it.
+    pub(crate) muji_session_rooms: super::handlers::iq::MujiSessionRooms,
     /// Explicit SASL2 negotiation switch for isolated protocol fixtures.
     /// Production builds cannot set this field, and test fixtures default it
     /// off unless they opt into the dedicated SASL2 helper.
@@ -1972,7 +1975,7 @@ pub(crate) struct WsConnState {
     pub(super) durable_sm: super::stream_management::DurableSmLink,
     /// The XEP-0198 and XEP-0386 requests of the SASL2 `<authenticate/>` in
     /// progress, kept across a mechanism's challenge.
-    pub(super) sasl2_inline_requests: waddle_xmpp_core::xep0388_inline::Sasl2InlineRequests,
+    pub(super) sasl2_inline_requests: super::sasl::Sasl2InlineExchange,
     /// A SASL2 `<success/>` whose inline results are not all known yet.
     pub(super) sasl2_success: Option<super::sasl::PendingSasl2Success>,
     /// Inbound text frames pulled off the socket by the mid-batch ack

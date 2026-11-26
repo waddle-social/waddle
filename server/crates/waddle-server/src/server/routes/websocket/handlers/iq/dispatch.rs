@@ -15,6 +15,7 @@ use super::handle_roster_iq;
 use super::handle_sans_io_iq;
 use super::is_muc_admin_iq;
 
+use super::handle_client_access_iq;
 use super::route_full_jid_iq;
 use super::warn;
 use super::ConnectionPhase;
@@ -35,7 +36,6 @@ use super::{
 use super::{handle_channel_search_iq, handle_user_search_iq};
 use super::{handle_command_iq, CommandTargets};
 use super::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
-use super::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use super::{handle_pin_query_iq, is_pin_query_iq};
 use super::{handle_private_storage_iq, handle_vcard_iq};
 use super::{is_last_activity_query, is_search_request};
@@ -332,6 +332,16 @@ pub async fn handle_iq_with_conn_state(
         || waddle_xmpp::xep::xep0054::is_vcard_set(&iq)
     {
         handle_vcard_iq(&iq, state, phase.bound_jid(), response_from, response_to).await
+    } else if waddle_xmpp::xep::xep0494::is_cam_query(&iq) {
+        handle_client_access_iq(
+            &iq,
+            state,
+            phase.bound_jid(),
+            authenticated_session,
+            response_from,
+            response_to,
+        )
+        .await
     } else if is_last_activity_query(&iq) {
         handle_last_activity_iq(
             &iq,
@@ -467,18 +477,6 @@ pub async fn handle_iq_with_conn_state(
         return handle_pin_query_iq(&iq, state, phase.bound_jid(), response_from, response_to)
             .await
             .into();
-    }
-
-    if is_mentions_permissions_iq(&iq, muc_domain) {
-        return handle_mentions_permissions_iq(
-            &iq,
-            state,
-            phase.bound_jid(),
-            response_from,
-            response_to,
-        )
-        .await
-        .into();
     }
 
     let muc_owner_or_moderation =

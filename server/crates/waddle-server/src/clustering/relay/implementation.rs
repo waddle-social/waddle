@@ -108,6 +108,7 @@ pub(in crate::clustering::relay) enum RelayDispatchKind {
     AccountBinding,
     ExtensionRoomSend,
     MucAdminQuery,
+    MucVoiceForm,
     RemoteRoomRequest,
     SpaceBookmarkPublication,
     SpaceDeletion,
@@ -135,6 +136,7 @@ impl RelayDispatchKind {
             Self::AccountBinding => "account_binding",
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
+            Self::MucVoiceForm => "muc_voice_form",
             Self::RemoteRoomRequest => "remote_room_request",
             Self::SpaceBookmarkPublication => "space_bookmark_publication",
             Self::SpaceDeletion => "space_deletion",
@@ -1317,7 +1319,7 @@ pub enum RelayMucAdminQueryReply {
     NotOwner,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.muc_admin_query.v1")]
+#[kameo::remote_message("waddle.clustering.relay.muc_admin_query.v2")]
 impl Message<RelayMucAdminQuery> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayMucAdminQueryReply>;
 
@@ -1333,6 +1335,55 @@ impl Message<RelayMucAdminQuery> for RelayActor {
             ctx,
             span,
             async move { bridge.muc_admin_query_local(msg).await },
+        )
+    }
+}
+
+/// A XEP-0045 voice request (§7.13) or approval (§8.6) a session sent to a
+/// room whose `RoomActor` the receiver owns. The room decides it where the
+/// actor lives, so a session on any other replica carries the form there
+/// instead of finding no room.
+///
+/// It is a new message id: the ordered-relay envelope is untouched, so the
+/// room's ordered lane never sees it, and a peer that predates the id
+/// answers `UnknownMessage` before any handler runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayMucVoiceForm {
+    pub room: jid::BareJid,
+    /// The sender's bound full JID, stamped by the origin.
+    pub sender: jid::FullJid,
+    /// The `muc#request` message the session sent to the room.
+    pub message: RemoteStanza,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayMucVoiceFormReply {
+    /// The owner decided the form. The stanzas are what the room answers
+    /// the sender with (a refusal, or the sender's copy of a role change);
+    /// the origin writes them to the sender's session.
+    Handled(Vec<RemoteStanza>),
+    /// The receiver has no live local `RoomActor` for the room; nothing ran.
+    NotOwner,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.muc_voice_form.v1")]
+impl Message<RelayMucVoiceForm> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayMucVoiceFormReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayMucVoiceForm,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::MucVoiceForm, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.room));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(
+            ctx,
+            span,
+            async move { bridge.muc_voice_form_local(msg).await },
         )
     }
 }
@@ -2971,6 +3022,30 @@ impl RelayHandle {
                     }
                     Err(error) => Err(send_error(error)),
                 }
+            } => result,
+        }
+    }
+
+    /// Carry a voice form to the room owner. The owner may have changed a
+    /// role by the time the ask fails, so the ask is made once; a reply of
+    /// [`RelayMucVoiceFormReply::NotOwner`] says nothing ran.
+    pub(crate) async fn muc_voice_form(
+        &mut self,
+        mut message: RelayMucVoiceForm,
+    ) -> Result<RelayMucVoiceFormReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                    .map_err(send_error)
             } => result,
         }
     }

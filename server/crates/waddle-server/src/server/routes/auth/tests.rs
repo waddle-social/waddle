@@ -350,6 +350,7 @@ async fn callback_refuses_xmpp_flow_without_safe_redirect_or_pkce() {
                 client_redirect_uri: redirect.to_string(),
                 client_state: None,
                 client_code_challenge: code_challenge,
+                scopes: vec![waddle_xmpp::xep::xep0493::OAuthScope::ClientNormal],
             },
         )
         .await;
@@ -459,4 +460,124 @@ async fn unknown_session_error_does_not_carry_the_presented_id() {
         .expect_err("unknown session");
 
     assert!(!format!("{error} {error:?}").contains("presented-bearer-credential"));
+}
+
+const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+// base64url(SHA-256(PKCE_VERIFIER)), RFC 7636 Appendix B.
+const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).expect("JSON body")
+}
+
+/// XEP-0493 § OAuth Scopes: the server MUST support `xmpp:client:normal`,
+/// and it is the scope the metadata names.
+#[tokio::test]
+async fn xmpp_oauth_metadata_advertises_client_normal() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    let response = crate::server::routes::xmpp_oauth::router(auth_state)
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/oauth-authorization-server")
+                .body(Body::empty())
+                .expect("metadata request"),
+        )
+        .await
+        .expect("metadata response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = json_body(response).await;
+    assert_eq!(
+        json["scopes_supported"],
+        serde_json::json!(["xmpp:client:normal"])
+    );
+    assert_eq!(
+        json["code_challenge_methods_supported"],
+        serde_json::json!(["S256"])
+    );
+}
+
+/// RFC 6749 §4.1.2.1: with a valid redirect URI an unsupported scope is
+/// reported by redirecting to it with `error=invalid_scope` and the state.
+#[tokio::test]
+async fn xmpp_authorize_redirects_an_unsupported_scope_to_the_client() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    let response = crate::server::routes::xmpp_oauth::router(auth_state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/auth/xmpp/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcb\
+                     &code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256\
+                     &scope=xmpp%3Aclient%3Anormal%20admin&state=abc"
+                ))
+                .body(Body::empty())
+                .expect("authorize request"),
+        )
+        .await
+        .expect("authorize response");
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        response.headers().get(header::LOCATION).unwrap(),
+        "http://127.0.0.1:9000/cb?error=invalid_scope&state=abc"
+    );
+}
+
+/// The token response reports the granted scope, and the exchange records a
+/// grant the owner can list and revoke.
+#[tokio::test]
+async fn xmpp_token_exchange_reports_the_scope_and_records_a_grant() {
+    use crate::auth::oauth_grants::OAuthGrantStore;
+    use waddle_xmpp::xep::xep0493::OAuthScope;
+
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    let session = Session::new("alice@example.com", "alice", "alice");
+    auth_state
+        .session_manager
+        .create_session(&session)
+        .await
+        .unwrap();
+    auth_state
+        .auth_handshake
+        .insert_xmpp_code(
+            "code-1",
+            &super::XmppAuthCode {
+                session_id: session.id.clone(),
+                redirect_uri: "http://127.0.0.1:9000/cb".to_string(),
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                scopes: vec![OAuthScope::ClientNormal],
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let response = crate::server::routes::xmpp_oauth::router(auth_state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/xmpp/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=authorization_code&code=code-1\
+                     &redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcb&code_verifier={PKCE_VERIFIER}"
+                )))
+                .expect("token request"),
+        )
+        .await
+        .expect("token response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = json_body(response).await;
+    assert_eq!(json["scope"], "xmpp:client:normal");
+    assert_eq!(json["token_type"], "Bearer");
+    assert_eq!(json["access_token"], session.id);
+
+    let grants = OAuthGrantStore::new(&auth_state.session_manager)
+        .list("alice@example.com")
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].scopes, vec![OAuthScope::ClientNormal]);
 }

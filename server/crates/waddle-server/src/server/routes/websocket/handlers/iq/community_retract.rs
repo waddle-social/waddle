@@ -1,12 +1,8 @@
 use super::community_publish::community_member_publisher;
-use super::story_attachments::{
-    cleanup_story_attachment_state, handle_story_attachment_retract, is_story_attachment_node,
-};
 use super::{
     build_pubsub_error, build_pubsub_success, iq_to_xml, spaces_node_mutation_allowed, warn,
     BareJid, PubSubError, WebSocketState,
 };
-use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn handle_community_retract(
@@ -18,19 +14,7 @@ pub(super) async fn handle_community_retract(
     principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
     let session = principal.map(ResolvedPrincipal::session);
-    if is_story_attachment_node(node, community_domain) {
-        return handle_story_attachment_retract(
-            iq,
-            state,
-            community_domain,
-            node,
-            item_id,
-            session,
-        )
-        .await;
-    }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
@@ -38,9 +22,7 @@ pub(super) async fn handle_community_retract(
     let Ok(community_jid) = community_domain.parse::<BareJid>() else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-    {
+    if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
         match spaces_node_mutation_allowed(
             state,
             session.map(ResolvedPrincipal::from_authenticated_session),
@@ -106,28 +88,6 @@ pub(super) async fn handle_community_retract(
         .await
     {
         Ok(true) => {
-            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
-                pubsub_fanout::fan_out_retract(
-                    state,
-                    pubsub_fanout::FanOutRetractRequest {
-                        owner: &community_jid,
-                        node,
-                        item_id,
-                    },
-                )
-                .await;
-                if let Err(error) =
-                    cleanup_story_attachment_state(state, &community_jid, community_domain, item_id)
-                        .await
-                {
-                    warn!(
-                        node,
-                        item_id,
-                        error = ?error,
-                        "Failed to clean story attachment state after accepted story retract"
-                    );
-                }
-            }
             vec![iq_to_xml(build_pubsub_success(iq))]
         }
         Ok(false) => vec![iq_to_xml(build_pubsub_error(iq, PubSubError::ItemNotFound))],
@@ -142,7 +102,7 @@ pub(super) async fn handle_community_retract(
 }
 
 /// Refuse to let `entity` retract an open community item published by a
-/// different member. Feed and story nodes are member-postable, but item
+/// different member. The feed node is member-postable, but item
 /// deletion remains owner-admin or original-publisher only.
 async fn community_item_retract_error(
     state: &WebSocketState,

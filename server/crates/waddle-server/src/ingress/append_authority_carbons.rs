@@ -94,12 +94,28 @@ pub(super) async fn authorize(
     let (envelope, intents) = CarbonReceiptRepository::load_authority(db, obligation.message_key)
         .await
         .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
-    let sender = envelope
+    let offered_sender = envelope
         .message()
         .from
         .as_ref()
         .map(jid::Jid::to_bare)
         .ok_or(AppendAuthorityRejection::CanonicalSenderMissing)?;
+    // A committed denial's `<received/>` carbon forwards the error bounce, whose
+    // originator is the addressee the offered message never reached.
+    let bounce = match carbon.kind {
+        CarbonKind::Received => {
+            crate::ingress::rejection::recorded_bounce(envelope.message(), &intents)
+        }
+        CarbonKind::Sent => None,
+    };
+    let sender = match &bounce {
+        Some(bounce) => bounce
+            .from
+            .as_ref()
+            .map(jid::Jid::to_bare)
+            .ok_or(AppendAuthorityRejection::CanonicalSenderMissing)?,
+        None => offered_sender,
+    };
     if sender != obligation.sender_bare {
         return Err(AppendAuthorityRejection::CanonicalSenderMismatch);
     }
@@ -133,7 +149,15 @@ pub(super) async fn authorize(
     if !authorized {
         return Err(AppendAuthorityRejection::CarbonObligationMismatch);
     }
+    if let Some(bounce) = bounce {
+        return if super::same_message_content(&bounce, &carbon.inner) {
+            Ok(())
+        } else {
+            Err(AppendAuthorityRejection::CarbonObligationMismatch)
+        };
+    }
     let mut expected = envelope.message().clone();
+    crate::ingress::recorded::withhold_sender_archive_stamp(&mut expected, &carbon.owner);
     let mut archived_owner = false;
     for intent in &intents {
         if let IngressEffectIntent::ArchiveAuthoritative {

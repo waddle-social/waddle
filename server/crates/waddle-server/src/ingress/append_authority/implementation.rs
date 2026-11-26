@@ -100,6 +100,8 @@ impl std::fmt::Debug for AppendAuthority {
 #[cfg(feature = "clustering")]
 pub(crate) struct DeferredAppendAuthority {
     pub(in crate::ingress::append_authority) db: Database,
+    pub(in crate::ingress::append_authority) occupant_id_secret:
+        waddle_xmpp::xep::xep0421::OccupantIdSecret,
     pub(in crate::ingress::append_authority) obligation:
         super::super::identity::IngressAppendObligationRef,
     pub(in crate::ingress::append_authority) result:
@@ -110,10 +112,12 @@ pub(crate) struct DeferredAppendAuthority {
 impl DeferredAppendAuthority {
     pub(crate) fn new(
         db: Database,
+        occupant_id_secret: waddle_xmpp::xep::xep0421::OccupantIdSecret,
         obligation: super::super::identity::IngressAppendObligationRef,
     ) -> Self {
         Self {
             db,
+            occupant_id_secret,
             obligation,
             result: tokio::sync::OnceCell::new(),
         }
@@ -146,9 +150,13 @@ impl AppendAuthority {
                     // Keep canonical decoding state off the caller's future:
                     // unoptimized interpreter futures must fit the default stack.
                     Box::pin(async {
-                        let result =
-                            check_canonical_obligation(&deferred.db, stanza, &deferred.obligation)
-                                .await;
+                        let result = check_canonical_obligation(
+                            &deferred.db,
+                            stanza,
+                            &deferred.obligation,
+                            Some(&deferred.occupant_id_secret),
+                        )
+                        .await;
                         if let Err(reason) = &result {
                             record_authorization_failure(reason, &deferred.obligation.sender_bare);
                         }
@@ -228,6 +236,7 @@ pub(crate) async fn check_canonical_obligation(
     db: &Database,
     stanza: &Stanza,
     obligation: &super::super::identity::IngressAppendObligationRef,
+    occupant_id_secret: Option<&waddle_xmpp::xep::xep0421::OccupantIdSecret>,
 ) -> Result<(), AppendAuthorityRejection> {
     #[cfg(all(test, feature = "clustering"))]
     canonical_reads::record();
@@ -251,7 +260,7 @@ pub(crate) async fn check_canonical_obligation(
     } else if obligation.receipt.kind.to_storage() == IngressEffectKind::RouteDirect.storage_tag() {
         tokio::time::timeout(
             AUTHORIZATION_READ_TIMEOUT,
-            authorize_direct_sender(db, stanza, obligation),
+            authorize_direct_sender(db, stanza, obligation, occupant_id_secret),
         )
         .await
         .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)??;
@@ -279,6 +288,7 @@ pub(in crate::ingress::append_authority) async fn authorize_direct_sender(
     db: &Database,
     stanza: &Stanza,
     obligation: &super::super::identity::IngressAppendObligationRef,
+    occupant_id_secret: Option<&waddle_xmpp::xep::xep0421::OccupantIdSecret>,
 ) -> Result<(), AppendAuthorityRejection> {
     let (envelope, intents) = CarbonReceiptRepository::load_authority(db, obligation.message_key)
         .await
@@ -310,6 +320,7 @@ pub(in crate::ingress::append_authority) async fn authorize_direct_sender(
         &envelope,
         &intents,
         &obligation.receipt,
+        occupant_id_secret,
     )
     .map_err(|_| AppendAuthorityRejection::StanzaSenderMismatch)?;
     if let Some(expected) = expected {

@@ -31,4 +31,28 @@ import Testing
         #expect(grid.rows == rows)
         #expect(grid.capacity == columns * rows)
     }
+
+    /// An iPhone's tile area upright (about 360 by 560) and on its side (about 730 by 230).
+    @Test(arguments: [
+        (1, 360, 560, 1, 1),
+        (2, 360, 560, 1, 2),
+        (3, 360, 560, 2, 2),
+        (4, 360, 560, 2, 2),
+        (6, 360, 560, 2, 3),
+        // Eight upright need more height than a phone has under its header: six cells, the last "+N more".
+        (9, 360, 560, 2, 3),
+        (9, 360, 640, 2, 4),
+        (2, 730, 230, 2, 1),
+        (3, 730, 230, 3, 1),
+        (4, 730, 230, 4, 1),
+        (9, 730, 230, 4, 1),
+        (4, 280, 280, 1, 1),
+    ])
+    func aPhoneStandsItsTilesCloser(count: Int, width: Int, height: Int, columns: Int, rows: Int) {
+        let grid = CallGrid.make(
+            tileCount: count, size: CGSize(width: CGFloat(width), height: CGFloat(height)), density: .phone
+        )
+        #expect(grid.columns == columns)
+        #expect(grid.rows == rows)
+    }
 }

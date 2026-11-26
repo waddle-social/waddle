@@ -158,3 +158,23 @@ import Testing
         #expect(CallClock.string(for: .milliseconds(59_999)) == "0:59")
     }
 }
+
+struct CallSessionStatusTests {
+    @Test(arguments: [
+        (CallMediaPhase.idle, CallSessionStatus.connecting), (.connecting, .connecting), (.connected, .connected),
+        (.reconnecting, .reconnecting),
+    ])
+    func theMediaPhaseIsReadAsAStatusInOnePlace(_ phase: CallMediaPhase, _ status: CallSessionStatus) {
+        #expect(CallSessionStatus(phase) == status)
+    }
+
+    @Test func theDevicesCanBeSwitchedOnceMediaHasConnected() {
+        #expect(!CallSessionStatus.connecting.hasMedia)
+        #expect(CallSessionStatus.connected.hasMedia)
+        #expect(CallSessionStatus.reconnecting.hasMedia, "a call that is reconnecting has had media")
+    }
+
+    @Test func eachStatusIsSaid() {
+        #expect(CallSessionStatus.allCases.map(\.announcement) == ["Connecting", "Call connected", "Reconnecting"])
+    }
+}

@@ -924,10 +924,10 @@ async fn broadcast_presence_to_subscribers(
 ///   the in-flight ver. If the outbound write fails (resource just
 ///   went offline / channel closed) the pending entry is immediately
 ///   evicted so the in-memory pending map cannot leak.
-/// - Cache miss with unsupported `hash` (e.g. `sha-256`): per §5.4
-///   step 2 the server MUST NOT cache. We additionally skip the
-///   round-trip entirely — fan-out will treat this resource as
-///   "caps unknown" until it next advertises with a supported algo.
+/// - Unsupported `hash` (e.g. `sha-256`): per §5.4 step 2 the same
+///   disco#info request is sent, but the reply is not validated or
+///   globally cached; the resolver associates it only with this
+///   full JID.
 async fn resolve_caps_for_presence(
     state: &WebSocketState,
     sender_jid: &FullJid,
@@ -938,16 +938,17 @@ async fn resolve_caps_for_presence(
     };
     let resolver = &state.deps.protocol.caps_resolver;
     let cache_key = waddle_xmpp::xep::xep0115::CapsCacheKey::from_caps(&caps);
-    if resolver.cache().contains(&cache_key) {
+    // This process's cache, then the entries every replica shares: another
+    // replica may have verified this `(hash, ver)` already.
+    if resolver
+        .shared(state.deps.app_state.db_pool.entity_caps(), &cache_key)
+        .await
+        .is_some()
+    {
         resolver.record_resource(sender_jid, cache_key);
         return;
     }
-    if !crate::server::caps_resolution::is_supported_hash(&caps.hash) {
-        debug!(
-            jid = %sender_jid,
-            hash = %caps.hash,
-            "Skipping caps resolution: advertised hash algorithm not implemented (XEP-0115 §5.4 step 2)"
-        );
+    if resolver.has_resource_only(sender_jid, &cache_key) {
         return;
     }
     // Dedup in-flight resolutions per (full_jid, hash, ver). Without

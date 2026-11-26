@@ -32,6 +32,7 @@ protocol FFIMessageFields {
     var replyFallbackEnd: UInt32? { get }
     var markupSpans: [WaddleMarkupSpan] { get }
     var broadcastMention: String? { get }
+    var broadcastSpans: [WaddleBroadcastSpan] { get }
     var references: [WaddleReference] { get }
     var forumPostKind: WaddleForumPostKind? { get }
     var forumTitle: String? { get }
@@ -40,6 +41,8 @@ protocol FFIMessageFields {
     var mucUser: Bool { get }
     var sharedFiles: [WaddleSharedFile] { get }
     var linkPreviews: [WaddleLinkPreview] { get }
+    var callThread: WaddleCallThreadAnchor? { get }
+    var callThreadEnded: WaddleCallThreadEnded? { get }
 }
 
 extension WaddleMessage: FFIMessageFields {}
@@ -62,6 +65,7 @@ extension FFIInbound {
         wire.displayedMarkerRequested = message.displayedMarkerRequested
         wire.displayedMarkerID = message.displayedMarkerId
         wire.pinEvent = message.pinEvent.map(pinEvent)
+        wire.inCallReaction = message.inCallReaction.map { InCallReaction(sid: $0.sid, emoji: $0.emoji) }
         wire.displayedCursors = message.mdsDisplayed.map { $0.compactMap(displayedCursor) }
         return wire
     }
@@ -90,7 +94,7 @@ extension FFIInbound {
     static func wireMessage(fields: some FFIMessageFields, source: WireMessage.Source) -> WireMessage? {
         let from = jid(fields.from)
         guard fields.from == nil || from != nil else { return nil }
-        return WireMessage(
+        var wire = WireMessage(
             source: source,
             type: MessageType(wire: fields.messageType),
             from: from,
@@ -111,6 +115,7 @@ extension FFIInbound {
             markupSpans: fields.markupSpans.compactMap(markupSpan),
             references: fields.references.map(reference),
             broadcastMention: fields.broadcastMention,
+            broadcastSpans: fields.broadcastSpans.compactMap(broadcastSpan),
             forumPostKind: fields.forumPostKind.map(forumPostKind),
             forumTitle: fields.forumTitle,
             isSticker: fields.isSticker,
@@ -118,6 +123,29 @@ extension FFIInbound {
             sharedFiles: fields.sharedFiles.compactMap(sharedFile),
             linkPreviews: fields.linkPreviews.compactMap(linkPreview),
             isMucUser: fields.mucUser
+        )
+        wire.callThread = fields.callThread.flatMap(callThreadAnchor)
+        wire.callThreadEnded = fields.callThreadEnded.map(callThreadEnded)
+        return wire
+    }
+
+    /// `urn:waddle:call-thread:0`. A kind this build does not know is no anchor.
+    static func callThreadAnchor(_ anchor: WaddleCallThreadAnchor) -> CallThreadAnchor? {
+        let kind: CallThreadAnchor.Kind
+        switch anchor.kind {
+        case "muc": kind = .room
+        case "dm": kind = .direct
+        default: return nil
+        }
+        return CallThreadAnchor(
+            kind: kind, hasVideo: anchor.media.contains("video"), initiator: jid(anchor.initiator)?.bare,
+            started: date(anchor.started)
+        )
+    }
+
+    static func callThreadEnded(_ ended: WaddleCallThreadEnded) -> CallThreadEnded {
+        CallThreadEnded(
+            anchorID: ended.anchorId, ended: date(ended.ended), duration: CallThreadEnded.seconds(iso: ended.duration)
         )
     }
 

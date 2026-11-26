@@ -57,4 +57,12 @@ class MediaViewerZoomTest {
         assertEquals(VIEWER_DOUBLE_TAP_SCALE, zoomed.scale, 0f)
         assertEquals(ViewerTransform(), zoomed.toggled(viewport, tap))
     }
+
+    @Test
+    fun `lift-off events with an unspecified centroid leave the transform untouched`() {
+        val zoomed = ViewerTransform(3f, Offset(120f, -80f))
+        assertEquals(zoomed, zoomed.transformed(viewport, Offset.Unspecified, Offset.Zero, 1f))
+        assertEquals(zoomed, zoomed.transformed(viewport, centre, Offset.Unspecified, 1f))
+        assertEquals(zoomed, zoomed.transformed(viewport, centre, Offset.Zero, Float.NaN))
+    }
 }

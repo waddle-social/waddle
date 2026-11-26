@@ -98,6 +98,11 @@ public final class TimelineStore {
     @discardableResult
     public func ingest(_ message: WireMessage, route: MessageRoute, receivedAt: Date = Date()) -> TimelineIngestResult {
         let conversation = route.conversation
+        // In a conversation of two a notice that something was pinned is
+        // never a row, though it has a body: live it changes the pins, and
+        // the list is read whole when the conversation opens. A room's
+        // notice in its history stays a row, as on web.
+        if message.pinEvent != nil, !conversation.isRoom { return .ignored }
         if let mutation = MessageMutation.of(message, isMine: route.isMine) {
             apply(mutation, in: conversation, timestamp: message.timestamp)
             return .mutation
@@ -401,6 +406,10 @@ public final class TimelineStore {
                     && item.identity.originID == fastening.targetOriginID
                     && item.conversation.jid == fastening.targetStanzaBy
             }
+            if case .callEnded = mutation {
+                // The fastening names the id the room itself gave its announcement.
+                return item.callAnchor != nil && item.identity.originID == target
+            }
             return item.roomStanzaID == target
         }
         return item.id == target || item.identity.all.contains(target)
@@ -474,6 +483,7 @@ public final class TimelineStore {
             item.isEdited = true
             item.message.markupSpans = correction.markupSpans
             item.message.references = correction.references
+            item.message.broadcastSpans = correction.broadcastSpans
             // Offsets now follow the correction's wire body, whose fallback
             // (if any) replaces the original's.
             item.message.reply = item.message.reply.map {
@@ -487,6 +497,7 @@ public final class TimelineStore {
         item.reactions = aggregate(state.reactionsBySender, isGroupchat: item.conversation.isRoom)
         // Scores annotate content; a removed message shows none.
         item.safetyScores = state.tombstone == nil ? state.safetyScores : nil
+        item.callEnded = state.callEnded
         return item
     }
 
@@ -574,6 +585,8 @@ private struct MutationState: Hashable {
     var safetyScores: SafetyScores?
     var safetyScoresRank: Rank?
     var safetyScoresRevisionID: String?
+    var callEnded: CallThreadEnded?
+    var callEndedRank: Rank?
 }
 
 private struct Entry: Hashable {
@@ -661,6 +674,15 @@ private struct Entry: Hashable {
             next.mutations.safetyScores = fastening.scores
             next.mutations.safetyScoresRank = ranked.rank
             next.mutations.safetyScoresRevisionID = fastening.sourceRevisionID
+        case let .callEnded(_, from, ended):
+            // Only the room (its bare JID) announces a call and its end; an
+            // occupant claiming either is a spoof.
+            guard from.resource == nil, from.bare == conversation.jid, item.callAnchor != nil else { return self }
+            if let current = mutations.callEndedRank, current > ranked.rank {
+                return self
+            }
+            next.mutations.callEnded = ended
+            next.mutations.callEndedRank = ranked.rank
         }
         return next
     }

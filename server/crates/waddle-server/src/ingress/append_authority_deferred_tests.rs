@@ -32,7 +32,10 @@ async fn deferred_authority_reads_once(fixture: IngressFixture) {
     message.to = Some(recipient.into());
     let stanza = Stanza::Message(message);
 
-    let context = authorized.clone().into_deferred_context(fixture.db.clone());
+    let context = authorized.clone().into_deferred_context(
+        fixture.db.clone(),
+        crate::ingress::test_support::fixture_occupant_id_secret(),
+    );
     assert_eq!(canonical_reads::count(), 0, "construction never reads");
     let forwarded = context.clone();
     context
@@ -47,7 +50,10 @@ async fn deferred_authority_reads_once(fixture: IngressFixture) {
 
     let mut absent = authorized;
     absent.message_key = waddle_xmpp::ingress::MessageKey::new();
-    let context = absent.into_deferred_context(fixture.db.clone());
+    let context = absent.into_deferred_context(
+        fixture.db.clone(),
+        crate::ingress::test_support::fixture_occupant_id_secret(),
+    );
     let fallback = context.clone();
     assert!(context.ensure_verified(&stanza).await.is_err());
     assert!(

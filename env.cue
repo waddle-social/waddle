@@ -15,7 +15,20 @@ config: ci: cuenv: {
 
 runtime: type: "nix"
 
-hooks: onEnter: nix: xNix.#NixFlake
+// The shell hook and cuenv task runtime must select the same development shell.
+if runtime.output == _|_ {
+	hooks: onEnter: nix: xNix.#NixFlake
+}
+if runtime.output != _|_ {
+	hooks: onEnter: nix: schema.#ExecHook & {
+		order:     10
+		propagate: false
+		command:   "nix"
+		args: ["print-dev-env", "\(runtime.flake)#\(runtime.output)"]
+		source: true
+		inputs: ["\(runtime.flake)/flake.nix", "\(runtime.flake)/flake.lock"]
+	}
+}
 
 formatters: rust: {
 	edition: "2021"

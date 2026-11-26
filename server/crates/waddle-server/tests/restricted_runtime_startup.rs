@@ -1773,6 +1773,7 @@ async fn exercise_muc(admin: &mut WsXmppClient, alice: &mut WsXmppClient) {
     };
     send_element(admin, muc_presence(&format!("{room}/owner"), false)).await;
     collect_until(admin, "room creation", joined).await;
+    waddle_ws_test_support::iq::unlock_created_room(admin, &room).await;
     send_element(alice, muc_presence(&format!("{room}/alice"), false)).await;
     collect_until(alice, "room join", joined).await;
 

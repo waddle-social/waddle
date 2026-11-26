@@ -14,9 +14,10 @@
 //! </message>
 //! ```
 //!
-//! In presence:
+//! In a subscription request (the nickname MUST NOT be included in presence
+//! broadcasts):
 //! ```xml
-//! <presence from='romeo@example.com'>
+//! <presence from='romeo@example.com' to='juliet@example.com' type='subscribe'>
 //!   <nick xmlns='http://jabber.org/protocol/nick'>Romeo Montague</nick>
 //! </presence>
 //! ```
@@ -24,7 +25,6 @@
 //! ## Use Cases
 //!
 //! - Display a human-friendly name instead of a bare JID
-//! - Included in MUC presence for room occupant display
 //! - Published via PEP for contact list display
 //! - Included in message stanzas for first-contact identification
 

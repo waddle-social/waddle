@@ -30,7 +30,7 @@ use thiserror::Error;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
 use crate::disco::Feature;
-use crate::xep0388::{Sasl2Authenticate, Sasl2InlineFeatures, Sasl2Success};
+use crate::xep0388::{Sasl2Authenticate, Sasl2InlineFeatures, Sasl2Success, NS_SASL2};
 
 /// Stream Management namespace from XEP-0198.
 pub const NS_SM: &str = "urn:xmpp:sm:3";
@@ -531,6 +531,29 @@ impl Sasl2InlineOffer {
             features.push(bind2.to_element());
         }
         Sasl2InlineFeatures { features }
+    }
+}
+
+/// The `id` of the SASL2 `<user-agent/>`: a UUID v4 that identifies one
+/// client installation across sessions (XEP-0388, "Authentication request").
+///
+/// XEP-0386 uses it to find the client's earlier sessions. It is never
+/// exposed to other entities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UserAgentId(uuid::Uuid);
+
+impl UserAgentId {
+    /// The identifier a `<user-agent/>` of `request` carries, if it carries
+    /// one that is a UUID v4. A missing or malformed `id` identifies no
+    /// client: the attribute is only RECOMMENDED.
+    #[must_use]
+    pub fn from_authenticate(request: &Sasl2Authenticate) -> Option<Self> {
+        let user_agent = request
+            .additional_children()
+            .iter()
+            .find(|child| child.is("user-agent", NS_SASL2))?;
+        let id = uuid::Uuid::parse_str(user_agent.attr("id")?).ok()?;
+        (id.get_version() == Some(uuid::Version::Random)).then_some(Self(id))
     }
 }
 

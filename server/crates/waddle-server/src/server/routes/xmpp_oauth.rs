@@ -2,6 +2,7 @@
 
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
+use crate::auth::oauth_grants::OAuthGrantStore;
 use crate::auth::redirect::{PkceS256Challenge, RedirectError, XmppClientRedirectUri};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -13,15 +14,13 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use waddle_xmpp::telemetry::attributes::AuthStage;
+use waddle_xmpp::xep::xep0493::{parse_scope_request, scope_value, OAuthScope, DISCOVERY_PATH};
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {
     Router::new()
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(oauth_discovery_handler),
-        )
+        .route(DISCOVERY_PATH, get(oauth_discovery_handler))
         .route("/api/auth/xmpp/authorize", get(xmpp_authorize_handler))
         .route("/api/auth/xmpp/token", post(xmpp_token_handler))
         .with_state(auth_state)
@@ -48,7 +47,10 @@ pub async fn oauth_discovery_handler(State(state): State<Arc<AuthState>>) -> imp
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec!["authorization_code".to_string()],
         code_challenge_methods_supported: vec!["S256".to_string()],
-        scopes_supported: vec!["xmpp".to_string()],
+        scopes_supported: OAuthScope::SUPPORTED
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
         token_endpoint_auth_methods_supported: vec!["none".to_string()],
     };
 
@@ -68,6 +70,10 @@ pub struct XmppAuthorizeQuery {
     pub code_challenge_method: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
+    /// Space-delimited scopes (RFC 6749 §3.3). Defaults to
+    /// `xmpp:client:normal`, the scope XEP-0493 requires servers to support.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -106,6 +112,21 @@ pub async fn xmpp_authorize_handler(
     ) {
         Ok(challenge) => challenge,
         Err(err) => return invalid_authorization_request(&err),
+    };
+
+    // RFC 6749 §4.1.2.1: with a valid redirect URI, an unsupported scope is
+    // reported to the client by redirecting to it.
+    let scopes = match parse_scope_request(params.scope.as_deref()) {
+        Ok(scopes) => scopes,
+        Err(_) => {
+            record_auth_failure("unknown", None, AuthFailure::AuthorizationMalformed);
+            return Redirect::temporary(
+                redirect
+                    .with_error("invalid_scope", params.state.as_deref())
+                    .as_str(),
+            )
+            .into_response();
+        }
     };
 
     let provider_id = match params.provider {
@@ -147,6 +168,7 @@ pub async fn xmpp_authorize_handler(
                 client_redirect_uri: redirect.as_str().to_string(),
                 client_state: params.state,
                 client_code_challenge: Some(code_challenge.as_str().to_string()),
+                scopes,
             },
         )
         .await
@@ -326,6 +348,28 @@ pub async fn xmpp_token_handler(
         }
     };
 
+    // The owner can list and revoke this authorization (XEP-0494) through
+    // the grant recorded here.
+    if let Err(err) = OAuthGrantStore::new(&state.session_manager)
+        .create(&session.id, &session.user_jid, &code.scopes)
+        .await
+    {
+        warn!(error = %err, "Failed to record XMPP OAuth grant");
+        record_auth_failure(
+            "waddle",
+            None,
+            AuthFailure::from_error(AuthStage::TokenExchange, &err),
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                "server_error",
+                "Could not record the authorization",
+            )),
+        )
+            .into_response();
+    }
+
     debug!(
         user_jid = %session.user_jid,
         username = %session.username,
@@ -339,7 +383,7 @@ pub async fn xmpp_token_handler(
             access_token: session.id,
             token_type: "Bearer".to_string(),
             expires_in: 3600,
-            scope: "xmpp".to_string(),
+            scope: scope_value(&code.scopes),
         }),
     )
         .into_response()

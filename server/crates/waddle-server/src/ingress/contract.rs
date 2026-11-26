@@ -260,6 +260,15 @@ impl IngressAuthority {
         self.gc.trigger();
     }
 
+    /// Bind the secret room-authored stanzas derive their XEP-0421 occupant-id
+    /// from, so reconstructed invitations equal the ones the room relayed.
+    pub fn bind_occupant_id_secret(
+        &self,
+        secret: waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    ) -> bool {
+        self.uow.bind_occupant_id_secret(secret)
+    }
+
     /// Bind the boot-created environment without retaining the WebSocket state.
     pub fn bind_recovery_environment(&self, environment: Weak<dyn RecoveryEnvironment>) {
         self.recovery.bind(environment);

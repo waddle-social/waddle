@@ -372,6 +372,14 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         .await;
     }
     drop(remote_lock);
+    // Removing the item or moving it between groups can end the contact's
+    // access to the account's PEP nodes (XEP-0163).
+    crate::server::routes::websocket::handlers::pubsub_fanout::revoke_lost_pep_subscriptions(
+        state,
+        user_jid,
+        &requested.jid,
+    )
+    .await;
     frames.push(iq_to_xml(build_roster_result_empty(iq)));
     frames
 }

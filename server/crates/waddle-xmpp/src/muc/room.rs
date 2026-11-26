@@ -275,6 +275,11 @@ pub struct MucRoom {
     /// session lowers its hand and unmutes, leaves the call (`<muji/>`
     /// cleared), or leaves the room.
     pub(super) in_call_state: HashMap<String, HashMap<FullJid, InCallPresenceState>>,
+    /// XEP-0045 §10.1.1 "locked" state: a room its first occupant created
+    /// through presence admits only an owner until that owner submits an
+    /// initial configuration (§10.1.2, §10.1.3). In-memory only: a room
+    /// restored on another incarnation is an established room.
+    locked: bool,
 }
 
 /// Result of applying one session's Muji presence update.
@@ -329,7 +334,32 @@ impl MucRoom {
             pinned_entries: Vec::new(),
             muji_state: HashMap::new(),
             in_call_state: HashMap::new(),
+            locked: false,
         }
+    }
+
+    /// Whether the room is locked awaiting its owner's initial
+    /// configuration (XEP-0045 §10.1.1).
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Lock the room until its owner configures it (XEP-0045 §10.1.1).
+    pub fn lock_for_initial_configuration(&mut self) {
+        self.locked = true;
+    }
+
+    /// Unlock the room once the owner's initial configuration, or a request
+    /// for an instant room, arrived (XEP-0045 §10.1.2, §10.1.3).
+    pub fn unlock(&mut self) {
+        self.locked = false;
+    }
+
+    /// Whether an empty room stays registered. A locked room does not: when
+    /// its owner leaves before configuring it, the service destroys it
+    /// (XEP-0045 §10.1.3).
+    pub fn retained_when_empty(&self) -> bool {
+        self.config.persistent && !self.locked
     }
 
     /// Apply a `<muji xmlns='urn:xmpp:jingle:muji:0'/>` presence update
@@ -809,6 +839,33 @@ impl MucRoom {
         self.occupants
             .values()
             .any(|o| o.real_jid.to_bare() == *bare_jid)
+    }
+
+    /// Attach the current room nick to each affiliated JID for a muc#admin
+    /// affiliation list (XEP-0045 §9.5: SHOULD include `nick` except for an
+    /// outcast). Waddle stores no reserved nicks, so only a joined user has one.
+    pub fn affiliation_list_entries(
+        &self,
+        listed: Vec<(BareJid, Affiliation)>,
+    ) -> Vec<super::AdminAffiliationEntry> {
+        listed
+            .into_iter()
+            .map(|(jid, affiliation)| {
+                let nick = (affiliation != Affiliation::Outcast)
+                    .then(|| {
+                        self.occupants
+                            .values()
+                            .find(|o| o.real_jid.to_bare() == jid)
+                            .map(|o| o.nick.clone())
+                    })
+                    .flatten();
+                super::AdminAffiliationEntry {
+                    jid,
+                    affiliation,
+                    nick,
+                }
+            })
+            .collect()
     }
 
     /// All pinned entries, newest pin first.

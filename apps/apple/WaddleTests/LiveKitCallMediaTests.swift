@@ -22,6 +22,17 @@ final class LiveKitCallMediaTests: XCTestCase {
         return defaults
     }
 
+    func testTheBackgroundIsTheRoomUntilChosenAndIsKept() {
+        let defaults = makeDefaults()
+        let media = LiveKitCallMediaController(defaults: defaults)
+        XCTAssertEqual(media.background, .off)
+        // With no call there is no camera to give it to: it is kept for the next.
+        media.setBackground(.blur)
+        XCTAssertEqual(LiveKitCallMediaController(defaults: defaults).background, .blur)
+        media.setBackground(.off)
+        XCTAssertEqual(LiveKitCallMediaController(defaults: defaults).background, .off)
+    }
+
     func testAudioProcessingIsAllOnUntilChosenAndIsKept() async {
         let defaults = makeDefaults()
         let media = LiveKitCallMediaController(defaults: defaults)
@@ -84,17 +95,7 @@ final class LiveKitCallMediaTests: XCTestCase {
         XCTAssertNil(last.devices.cameras.preferred)
     }
 
-    private func testSFU() throws -> TestSFU {
-        let environment = ProcessInfo.processInfo.environment
-        guard let url = environment["WADDLE_LIVEKIT_TEST_URL"], !url.isEmpty else {
-            throw XCTSkip("WADDLE_LIVEKIT_TEST_URL is not set")
-        }
-        return TestSFU(
-            url: url,
-            key: environment["WADDLE_LIVEKIT_TEST_KEY"] ?? "devkey",
-            secret: environment["WADDLE_LIVEKIT_TEST_SECRET"] ?? "secret"
-        )
-    }
+    private func testSFU() throws -> TestSFU { try .fromEnvironment() }
 
     func testIdleMediaHasNoRosterOrVideo() {
         let media = makeController()
@@ -440,48 +441,5 @@ final class LiveKitCallMediaTests: XCTestCase {
         await media.disconnect()
         try await Task.sleep(for: .seconds(1))
         XCTAssertEqual(failures, 0)
-    }
-}
-
-/// Mints the tokens Waddle's server would issue, and administers rooms.
-private struct TestSFU {
-    let url: String
-    let key: String
-    let secret: String
-
-    func join(room: String, identity: String) -> CallJoin {
-        CallJoin(url: url, room: room, identity: identity, token: token(subject: identity, grant: ["roomJoin": true, "room": room]))
-    }
-
-    func deleteRoom(_ room: String) async throws {
-        var components = URLComponents(string: url)!
-        components.scheme = components.scheme == "wss" ? "https" : "http"
-        components.path = "/twirp/livekit.RoomService/DeleteRoom"
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(token(subject: "admin", grant: ["roomCreate": true]))", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["room": room])
-        let (_, response) = try await URLSession.shared.data(for: request)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-    }
-
-    private func token(subject: String, grant: [String: Any]) -> String {
-        let now = Int(Date().timeIntervalSince1970)
-        let header = segment(["alg": "HS256", "typ": "JWT"])
-        let payload = segment(["iss": key, "sub": subject, "nbf": now - 10, "exp": now + 600, "video": grant])
-        let signature = HMAC<SHA256>.authenticationCode(for: Data("\(header).\(payload)".utf8), using: SymmetricKey(data: Data(secret.utf8)))
-        return "\(header).\(payload).\(base64URL(Data(signature)))"
-    }
-
-    private func segment(_ object: [String: Any]) -> String {
-        base64URL((try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data())
-    }
-
-    private func base64URL(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 }

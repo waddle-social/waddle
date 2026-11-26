@@ -254,21 +254,43 @@ let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 workflow: {
 	name: "waddle-ci-cache-benchmark"
 	on: {
+		push: {
+			branches: ["main"]
+			paths: [
+				"ci/cache-benchmark/**",
+				"ci/contributors/cache.cue",
+				"ci/contributors/cuenv.cue",
+				"ci/cache/**",
+				"operator/env.cue",
+				"operator/Cargo.lock",
+				"flake.nix",
+				"flake.lock",
+				"cuenv.lock",
+				"env.cue",
+				"cue.mod/module.cue",
+				".github/workflows/waddle-ci-cache-benchmark.yml",
+			]
+		}
 		workflow_dispatch: inputs: scope: {
-			description: "Compare all providers, or retry only the Namespace seed/warm pair"
+			description: "Compare Nix caches, retry Namespace, qualify a Cargo target volume, or measure Namespace-only Nix volume reuse"
 			type: "choice"
 			default: "all"
 			required: true
-			options: ["all", "namespace"]
+			options: ["all", "namespace", "cargo", "namespace-volume", "namespace-test-volume", "test-layer-artifact"]
 		}
 	}
 	permissions: {}
 	concurrency: {
-		group: "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
+		group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume' || inputs.scope == 'namespace-test-volume' || inputs.scope == 'test-layer-artifact') && format('-{0}', inputs.scope) || '' }}"
 		"cancel-in-progress": true
 	}
 	jobs: {
+		"cargo-seed": #CargoVolumeJob & {_phase: "seed"}
+		"cargo-restore": #CargoVolumeJob & {_phase: "restore"}
+		"bazel-seed": #BazelJob & {_phase: "seed"}
+		"bazel-restore": #BazelJob & {_phase: "restore"}
 		"normal-ci": {
+			if: "${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' && inputs.scope != 'test-layer-artifact' }}"
 			permissions: {contents: "read", actions: "read"}
 			name: "Wait for normal CI before cache qualification"
 			"runs-on": "ubuntu-24.04"
@@ -298,7 +320,7 @@ workflow: {
 			permissions: {contents: "read", actions: "read"}
 			name: "Cache qualification report"
 			needs: ["existing", "seed", "warm", "h3-seed", "h3-warm"]
-			if: "${{ !cancelled() }}"
+			if: "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' && inputs.scope != 'test-layer-artifact' }}"
 			"runs-on": "ubuntu-24.04"
 			"timeout-minutes": 5
 			steps: [

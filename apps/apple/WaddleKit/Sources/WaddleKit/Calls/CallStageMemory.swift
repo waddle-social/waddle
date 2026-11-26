@@ -12,6 +12,13 @@ public struct CallStageMemory: Equatable, Sendable {
     public var dismissedMediaIssues = CallMediaIssues.Dismissals()
     /// Who the speaker view shows large.
     public private(set) var promotedSpeaker: String?
+    /// The call floats above the other windows (web Picture-in-Picture): its
+    /// picture is there, and the stage says so in the tiles' place.
+    public private(set) var isFloating = false
+    /// On a phone, the person opened the call from the dock: its stage covers the screen.
+    public private(set) var isOpened = false
+    /// The last message of the call's chat the person has had in front of them.
+    public private(set) var chatSeenID: String?
 
     public init() { /* A stage nobody has touched. */ }
 
@@ -21,16 +28,38 @@ public struct CallStageMemory: Equatable, Sendable {
         self.sid = sid
     }
 
+    /// The call's chat was open with `id` its newest message. Nothing newer
+    /// than nothing: an empty chat leaves what was seen as it was.
+    public mutating func sawChat(upTo id: String?) {
+        if let id { chatSeenID = id }
+    }
+
+    /// It opens with its tiles in front: a list left open on a wider screen is a sheet here, and nobody asked for one.
+    public mutating func open() {
+        isOpened = true
+        showsParticipants = false
+    }
+
+    /// Back to the dock.
+    public mutating func minimise() {
+        isOpened = false
+    }
+
+    public mutating func toggleFloating() {
+        isFloating.toggle()
+    }
+
     public mutating func togglePin(_ tile: CallStageTile.ID) {
         presentation.pinnedTileID = presentation.pinnedTileID == tile ? nil : tile
     }
 
-    /// Opening the panel from a split stage expands it, as on the web.
+    /// Opening the panel from a split stage expands it, as on the web. Over
+    /// a phone's screen the list is a sheet, and the size the stage has in a pane is left alone.
     public mutating func toggleParticipants() {
         if showsParticipants {
             showsParticipants = false
         } else {
-            size = size == .split ? .expanded : size
+            size = size == .split && !isOpened ? .expanded : size
             showsParticipants = true
         }
     }

@@ -17,7 +17,7 @@ use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 use waddle_xmpp_core::{CoreError, DirectVideoMediaType, PreviewImageMediaType};
 
-use super::mentions::MentionDirectory;
+use super::mentions::{BroadcastSpan, MentionDirectory};
 use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -384,8 +384,11 @@ pub struct InboundMessage {
     pub shared_files: Vec<SharedFile>,
     /// Preview metadata attached to message URLs.
     pub link_previews: Vec<LinkPreviewData>,
-    /// Room-wide or channel-wide mention classification.
+    /// Room-wide mention carried by an XEP-0513 `#channel` mention:
+    /// `everyone`, or `here` when the mention is `active='true'`.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of every XEP-0513 `#channel` mention, in wire order.
+    pub broadcast_spans: Vec<BroadcastSpan>,
     /// URIs identifying the targets of explicit mentions.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references attached to this message. Populated for *every*
@@ -1113,7 +1116,8 @@ pub struct SendMessageOptions {
     /// XEP-0372 references such as mentions.
     pub references: Vec<ReferenceData>,
     /// Resolve plain-text `@label` tokens in the body to XEP-0372 mention
-    /// references at build time. Ranges already covered by `references`,
+    /// references (members) and XEP-0513 `#channel` mentions (`@everyone`,
+    /// `@here`) at build time. Ranges already covered by `references`,
     /// the reply fallback and code markup are left alone. `None` resolves
     /// nothing.
     pub mention_directory: Option<MentionDirectory>,
@@ -1125,6 +1129,10 @@ pub struct SendMessageOptions {
     /// XEP-0333 `<markable/>` request for displayed markers on this
     /// outbound chat/groupchat message.
     pub request_displayed_marker: bool,
+    /// XEP-0085 §5.1: attach `<active/>` to this content message so the
+    /// recipient can negotiate chat states implicitly. Callers set it only
+    /// while the user's chat-state preference allows sending notifications.
+    pub chat_state_active: bool,
     /// XEP-0045 §7.5: this message is a MUC private message addressed to
     /// an occupant JID. The builder appends an
     /// `<x xmlns='http://jabber.org/protocol/muc#user'/>` element so the
@@ -1173,6 +1181,17 @@ impl fmt::Display for InvalidLinkPreviewToken {
 }
 
 impl std::error::Error for InvalidLinkPreviewToken {}
+
+impl SendMessageOptions {
+    /// Options that resolve typed `@label` tokens through `directory`.
+    #[must_use]
+    pub fn with_mention_directory(directory: MentionDirectory) -> Self {
+        Self {
+            mention_directory: Some(directory),
+            ..Self::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Formatting kind and Unicode-character range parsed from a rich message payload.

@@ -218,6 +218,30 @@ pub fn stamp_feed_entry_author(elem: &Element, author: &str) -> Element {
     stamped
 }
 
+/// Return a copy of a feed Atom `<entry/>` carrying an `xmpp:` alternate link.
+///
+/// XEP-0472 §"Publishing a Post": clients do not compute the
+/// `<link rel='alternate' href='xmpp:…?;node=…;item=…'/>` pointing at the
+/// item, and "These things SHOULD be inserted at server side". An entry that
+/// already has an `xmpp:` alternate link is returned unchanged; `href` is the
+/// ready-built XMPP URI of the item.
+#[must_use]
+pub fn ensure_feed_entry_xmpp_link(elem: &Element, href: &str) -> Element {
+    let mut entry = elem.clone();
+    let has_xmpp_link = entry.children().any(|child| {
+        child.name() == "link"
+            && child.ns() == NS_ATOM
+            && child.attr("rel").is_none_or(|rel| rel == "alternate")
+            && child
+                .attr("href")
+                .is_some_and(|existing| existing.starts_with("xmpp:"))
+    });
+    if !has_xmpp_link {
+        entry.append_child(build_atom_link(href, Some("alternate"), None));
+    }
+    entry
+}
+
 fn atom_child_text(elem: &Element, name: &str) -> Option<String> {
     elem.children()
         .find(|c| c.name() == name && c.ns() == NS_ATOM)
@@ -416,6 +440,31 @@ mod tests {
             .filter(|c| c.name() == "author" && c.ns() == NS_ATOM)
             .count();
         assert_eq!(authors, 1);
+    }
+
+    #[test]
+    fn ensure_feed_entry_xmpp_link_adds_once() {
+        let entry = FeedEntry::new("p-1", "Body").with_title("T");
+        let elem = build_feed_entry_element(&entry);
+        let href = "xmpp:community.example.com?;node=n;item=p-1";
+        let linked = ensure_feed_entry_xmpp_link(&elem, href);
+        assert_eq!(linked.children().filter(|c| c.name() == "link").count(), 1);
+        assert_eq!(
+            atom_link_href(&linked, Some("alternate")).as_deref(),
+            Some(href)
+        );
+        let again = ensure_feed_entry_xmpp_link(&linked, "xmpp:other?;node=n;item=x");
+        assert_eq!(again, linked);
+    }
+
+    #[test]
+    fn ensure_feed_entry_xmpp_link_keeps_http_alternate() {
+        let entry = FeedEntry::new("p-1", "Body")
+            .with_title("T")
+            .with_link("https://example.com/p/1");
+        let elem = build_feed_entry_element(&entry);
+        let linked = ensure_feed_entry_xmpp_link(&elem, "xmpp:s?;node=n;item=p-1");
+        assert_eq!(linked.children().filter(|c| c.name() == "link").count(), 2);
     }
 
     #[test]

@@ -17,6 +17,7 @@ part of the closure: no lane runs these crates' tests.
 """
 
 from pathlib import Path
+import json
 import re
 import subprocess
 import tomllib
@@ -183,6 +184,19 @@ class ExplicitInputListsTest(unittest.TestCase):
                     self.assertEqual([], stale, "listed files that are not tracked")
 
 
+class QueueScopeTest(unittest.TestCase):
+    def test_nix_queue_jobs_cover_the_server_check_fileset(self):
+        scopes = json.loads((ROOT / "ci/rust-tests/queue-paths.json").read_text())
+        expected = (ROOT / "flake.nix").read_text().split(
+            "serverCheckFiles = lib.fileset.unions [", 1
+        )[1].split("];", 1)[0]
+        entries = [line.strip().removeprefix("./") for line in expected.splitlines() if line.strip()]
+        self.assertTrue(all(path.startswith("server/") for path in entries))
+        files = covered(entries, FILES)
+        self.assertTrue(files)
+        self.assertEqual([], sorted(files - covered(scopes["waddle-server-queuechecks"], FILES)))
+
+
 class CargoConfigTest(unittest.TestCase):
     def test_tracked_cargo_config_is_an_input(self):
         # A ModuleFiles path that matches nothing is a hard error, so these
@@ -277,8 +291,6 @@ def lane_lists():
     return {
         "android _ffiInputs": (
             cue_list("apps/android/env.cue", r"let _ffiInputs ="), ffi_roots, WORKSPACE_FILES),
-        "apple pullrequest": (
-            workflow_paths(".github/workflows/waddle-apple-pullrequest.yml"), ffi_roots, WORKSPACE_FILES),
         "apple default": (
             workflow_paths(".github/workflows/waddle-apple-default.yml"), ffi_roots, WORKSPACE_FILES),
         "chat _WasmSourceInputs": (

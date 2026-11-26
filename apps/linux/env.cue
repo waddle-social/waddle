@@ -32,10 +32,12 @@ schema.#Project & {
 	runtime: {
 		type:   "nix"
 		flake:  "../.."
-		output: "devShells.x86_64-linux.linux"
+		output: "linux"
 	}
 
 	cache: remote: wc.#NamespaceRemoteCache
+	contexts: nixSandbox: schema.#TaskFilter & {name: "validateData"}
+	env: context: nixSandbox: wc.#NixSandboxScratch
 
 	ci: providers: ["github"]
 	ci: contributors: [
@@ -65,11 +67,15 @@ schema.#Project & {
 			"tasks": [tasks.fmt, tasks.clippy, tasks.test, tasks.validateData]
 		}
 		pullRequest: {
-			when: {
-				pullRequest: true
-			}
+			when: manual: true
+			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {contents: "read", "id-token": "write"}
-			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.clippy, tasks.test, tasks.validateData]
+			"tasks": [tasks.checkCiDrift, tasks.fmt, tasks.validateData]
+		}
+		queueChecks: {
+			when: manual: true
+			provider: github: permissions: {contents: "read", "id-token": "write"}
+			"tasks": [tasks.clippy, tasks.test]
 		}
 	}
 
@@ -77,7 +83,7 @@ schema.#Project & {
 		checkCiDrift: schema.#Task & {
 			command: "cuenv"
 			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-linux-default.yml", ".github/workflows/waddle-linux-pullrequest.yml"]}]
+			inputs: ["env.cue", schema.#ModuleFiles & {paths: [".github/workflows/waddle-linux-default.yml", ".github/workflows/waddle-linux-pullrequest.yml", ".github/workflows/waddle-linux-queuechecks.yml"]}]
 		}
 
 		fmt: schema.#Task & {
@@ -106,7 +112,7 @@ schema.#Project & {
 			args: ["-c", "desktop-file-validate data/social.waddle.Waddle.desktop && appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml"]
 			cache: mode: "read-write"
 			hermetic: sandbox: "auto"
-			inputs: ["data/**"]
+			inputs: ["data/**", schema.#ModuleFiles & {paths: ["ci/cache/nix-shell-hook.sh"]}]
 		}
 	}
 }

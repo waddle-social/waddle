@@ -70,6 +70,8 @@ public struct WireMessage: Hashable, Sendable {
     public var markupSpans: [MarkupSpan]
     public var references: [Reference]
     public var broadcastMention: String?
+    /// Body ranges of the XEP-0513 `#channel` mentions.
+    public var broadcastSpans: [BroadcastSpan]
     public var forumPostKind: ForumPostKind?
     public var forumTitle: String?
     public var isSticker: Bool
@@ -89,6 +91,14 @@ public struct WireMessage: Hashable, Sendable {
     /// invite/decline. Never a 1:1 DM, even though its type is `chat` or
     /// `normal` and its sender is a room JID.
     public var isMucUser: Bool
+    /// `urn:waddle:call-thread:0`: this message is where a call began.
+    /// Unverified here; `TimelineItem.callAnchor` checks who sent it.
+    public var callThread: CallThreadAnchor?
+    /// The call an anchor began is over (a XEP-0422 fastening, unverified here).
+    public var callThreadEnded: CallThreadEnded?
+    /// `urn:waddle:in-call:0`: an emoji for everyone in a call to see for a
+    /// moment. Live only, and no part of any timeline.
+    public var inCallReaction: InCallReaction?
 
     public init(
         source: Source = .live,
@@ -114,6 +124,7 @@ public struct WireMessage: Hashable, Sendable {
         markupSpans: [MarkupSpan] = [],
         references: [Reference] = [],
         broadcastMention: String? = nil,
+        broadcastSpans: [BroadcastSpan] = [],
         forumPostKind: ForumPostKind? = nil,
         forumTitle: String? = nil,
         isSticker: Bool = false,
@@ -148,6 +159,7 @@ public struct WireMessage: Hashable, Sendable {
         self.markupSpans = markupSpans
         self.references = references
         self.broadcastMention = broadcastMention
+        self.broadcastSpans = broadcastSpans
         self.forumPostKind = forumPostKind
         self.forumTitle = forumTitle
         self.isSticker = isSticker
@@ -169,6 +181,7 @@ public struct WireMessage: Hashable, Sendable {
     /// never notify, never bump unread and never reorder recency.
     public var isMutation: Bool {
         moderation != nil || retractsID != nil || replacesID != nil || reaction != nil || safetyScores != nil
+            || callThreadEnded != nil
     }
 
     /// True when the message is a thread reply that renders only inside its

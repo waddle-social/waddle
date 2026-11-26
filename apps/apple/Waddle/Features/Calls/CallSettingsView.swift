@@ -11,6 +11,8 @@ struct CallSettingsView: View {
     var kinds: [CallDeviceKind] = CallDeviceKind.allCases
     var audioProcessing = CallAudioProcessing()
     var setAudioProcessing: @MainActor (CallAudioProcessing) -> Void = { _ in /* a sheet without it */ }
+    var background = CallBackground.off
+    var setBackground: @MainActor (CallBackground) -> Void = { _ in /* a sheet without it */ }
     /// The call's video streams as measured; `nil` where nothing measures, which hides the section.
     var videoStats: [CallVideoStat]?
     let choose: @MainActor (CallDeviceKind, String?) -> Void
@@ -30,6 +32,7 @@ struct CallSettingsView: View {
                     section(kind, devices[kind])
                     // The web lists it under the microphone; where the microphone cannot be chosen it stands alone.
                     if kind == .microphone { processing }
+                    if kind == .camera { backgroundChoice }
                 }
                 if !kinds.contains(.microphone) { processing }
                 if let videoStats { video(videoStats) }
@@ -131,6 +134,26 @@ struct CallSettingsView: View {
         }
     }
 
+    /// What stands behind us in the camera's picture (web "Background").
+    private var backgroundChoice: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Text("Background")
+                .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.sm))
+                .foregroundStyle(Theme.Colors.fg)
+            Picker("Camera background", selection: Binding(get: { background }, set: { setBackground($0) })) {
+                Text("None").tag(CallBackground.off)
+                Text("Blur").tag(CallBackground.blur)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .fixedSize()
+            Text("Done on this device: your camera's picture is not sent anywhere to be blurred.")
+                .huddleText(Theme.Typography.caption)
+                .foregroundStyle(Theme.Colors.fgMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     /// What is done to our voice before it is sent (web "Requested audio processing").
     private var processing: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -220,6 +243,7 @@ private struct CallSettingsContent: View {
         CallSettingsView(
             devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
             setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
+            background: media.background, setBackground: { media.setBackground($0) },
             videoStats: videoStats,
             choose: { kind, id in Task { await media.chooseDevice(kind, id: id) } },
             done: done

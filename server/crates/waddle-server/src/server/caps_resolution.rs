@@ -12,12 +12,22 @@
 //!   features + XEP-0128 forms) and only cache when the recomputed
 //!   hash matches the advertised `ver`.
 //! - **Unsupported `hash` value (e.g. `sha-256` advertised but server
-//!   only implements SHA-1):** XEP-0115 §5.4 step 2 forbids global
-//!   caching but does NOT forbid per-session knowledge. We currently
-//!   skip both the disco#info round-trip and the cache write; the
-//!   resource's caps are simply unknown to fan-out for that session.
+//!   only implements SHA-1):** XEP-0115 §5.4 step 2 sends the same
+//!   disco#info request but forbids validating or globally caching the
+//!   result; the discovered identities and features are associated
+//!   *only* with the generating full JID, so fan-out can still use
+//!   them for that resource until it disconnects or advertises other
+//!   caps.
 //!
 //! Cache keying is per `(hash algorithm, ver)` per XEP-0115 §6.
+//!
+//! The per-resource mapping and the pending queries are process-local: they
+//! describe the sockets this replica holds. A verified `(hash, ver)` entry is
+//! also written to the shared `entity_caps` table ([`EntityCapsStore`]), so
+//! the replica that filters a XEP-0163 publication for a contact connected
+//! elsewhere resolves that contact's caps from the `<c/>` in its replicated
+//! presence ([`CapsResolver::info_for_presence`]). The in-memory
+//! [`CapsCache`] is the read-through cache in front of the table.
 //!
 //! On disconnect, the per-resource mapping AND any in-flight pending
 //! resolution for that resource are dropped while the bounded LRU
@@ -26,8 +36,10 @@
 
 use std::sync::Arc;
 
+use crate::db::entity_caps::EntityCapsStore;
 use dashmap::DashMap;
 use jid::{FullJid, Jid};
+use tracing::warn;
 use waddle_xmpp::disco::info::{Feature, Identity, DISCO_INFO_NS};
 use waddle_xmpp::xep::xep0115::{
     compute_caps_hash_with_extensions, CachedDiscoInfo, Caps, CapsCache, CapsCacheKey,
@@ -54,6 +66,10 @@ pub enum CapsVerification {
     /// Recomputed hash matched `ver`; the result MUST be cached and
     /// the resource→ver mapping recorded.
     Match,
+    /// The advertised `hash` is not implemented here (§5.4 step 2): the
+    /// reply was not validated and was associated only with the
+    /// generating full JID, never with the global cache.
+    ResourceOnly,
     /// Recomputed hash did not match `ver`; the result MUST NOT be
     /// cached (poisoning defense, §8.1).
     Mismatch,
@@ -75,7 +91,8 @@ pub struct PendingCapsResolution {
 /// Server-side resolver for XEP-0115 entity capabilities.
 ///
 /// The `cache` is process-wide and survives individual sessions
-/// (XEP-0115 §6 — caching across sessions is RECOMMENDED).
+/// (XEP-0115 §6 — caching across sessions is RECOMMENDED); it reads
+/// through to the `entity_caps` table the replicas share.
 /// `resource_to_ver` is per-session and cleared on disconnect.
 /// `pending` tracks outstanding disco#info queries by IQ id so the
 /// inbound IQ result handler can match a reply to the original ver.
@@ -83,6 +100,10 @@ pub struct PendingCapsResolution {
 pub struct CapsResolver {
     cache: Arc<CapsCache>,
     resource_to_ver: Arc<DashMap<FullJid, CapsCacheKey>>,
+    /// Unvalidated disco#info results for resources that advertised an
+    /// unsupported `hash`, keyed by the generating full JID only
+    /// (§5.4 step 2). Never consulted for any other JID.
+    resource_only: Arc<DashMap<FullJid, (CapsCacheKey, CachedDiscoInfo)>>,
     pending: Arc<DashMap<String, PendingCapsResolution>>,
 }
 
@@ -97,6 +118,7 @@ impl CapsResolver {
         Self {
             cache,
             resource_to_ver: Arc::new(DashMap::new()),
+            resource_only: Arc::new(DashMap::new()),
             pending: Arc::new(DashMap::new()),
         }
     }
@@ -108,6 +130,7 @@ impl CapsResolver {
     /// Record that `full_jid` is advertising `(hash, ver)`. Used both
     /// on a cache hit and after a successful verification.
     pub fn record_resource(&self, full_jid: &FullJid, key: CapsCacheKey) {
+        self.resource_only.remove(full_jid);
         self.resource_to_ver.insert(full_jid.clone(), key);
     }
 
@@ -117,6 +140,7 @@ impl CapsResolver {
     /// hash-keyed cache warm.
     pub fn drop_resource(&self, full_jid: &FullJid) {
         self.resource_to_ver.remove(full_jid);
+        self.resource_only.remove(full_jid);
         self.pending.retain(|_, v| v.full_jid != *full_jid);
     }
 
@@ -126,6 +150,7 @@ impl CapsResolver {
     /// are treated as new interest (XEP-0163 last-item replay).
     pub fn forget_resource_key(&self, full_jid: &FullJid) {
         self.resource_to_ver.remove(full_jid);
+        self.resource_only.remove(full_jid);
     }
 
     /// Return the (hash, ver) advertised by `full_jid`, if any.
@@ -135,9 +160,95 @@ impl CapsResolver {
             .map(|v| v.value().clone())
     }
 
+    /// Identity+features known for `full_jid`: the globally cached,
+    /// verified entry for its advertised (hash, ver), or the
+    /// resource-only entry discovered for an unsupported hash.
+    pub fn info_for_resource(&self, full_jid: &FullJid) -> Option<CachedDiscoInfo> {
+        if let Some(key) = self.key_for_resource(full_jid) {
+            return self.cached(&key);
+        }
+        self.resource_only
+            .get(full_jid)
+            .map(|entry| entry.value().1.clone())
+    }
+
+    /// True iff `full_jid` already has resource-only caps for `key`, so
+    /// a repeated advertisement needs no second disco#info round-trip.
+    pub fn has_resource_only(&self, full_jid: &FullJid, key: &CapsCacheKey) -> bool {
+        self.resource_only
+            .get(full_jid)
+            .is_some_and(|entry| entry.value().0 == *key)
+    }
+
     /// Look up the cached identity+features for a (hash, ver) tuple.
     pub fn cached(&self, key: &CapsCacheKey) -> Option<CachedDiscoInfo> {
         self.cache.get(key)
+    }
+
+    /// The verified entry for `key`: this process's cache first, then the
+    /// store every replica shares, which fills the cache on a hit. An
+    /// unsupported hash is never in the store (XEP-0115 section 5.4 step 2),
+    /// and a store failure reads as a miss.
+    pub async fn shared(
+        &self,
+        store: &EntityCapsStore,
+        key: &CapsCacheKey,
+    ) -> Option<CachedDiscoInfo> {
+        if let Some(info) = self.cache.get(key) {
+            return Some(info);
+        }
+        if !is_supported_hash(&key.hash) {
+            return None;
+        }
+        match store.get(key).await {
+            Ok(Some(info)) => {
+                self.cache.insert(key.clone(), info.clone());
+                Some(info)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                warn!(error = %error, hash = %key.hash, "Failed to read shared entity caps");
+                None
+            }
+        }
+    }
+
+    /// Record the verified entry for `key` in the store every replica
+    /// shares. Called only after [`CapsVerification::Match`]. A failed
+    /// write leaves this replica's cache intact; another replica resolves
+    /// the key again.
+    pub async fn publish(&self, store: &EntityCapsStore, key: &CapsCacheKey) {
+        let Some(info) = self.cache.get(key) else {
+            return;
+        };
+        if let Err(error) = store
+            .put(key, &info, chrono::Utc::now().timestamp_millis())
+            .await
+        {
+            warn!(error = %error, hash = %key.hash, "Failed to record shared entity caps");
+        }
+    }
+
+    /// The identity and features of `full_jid` for notification filtering
+    /// on a replica that need not hold its socket.
+    ///
+    /// The mapping this process recorded is the fast path. Without one, the
+    /// key comes from the `<c/>` of the resource's presence, which the
+    /// account coordinator replicates, and resolves through the shared
+    /// store. A resource whose caps are not verified yet, or that
+    /// advertised an unsupported hash (known only to the replica that
+    /// queried it), has none.
+    pub async fn info_for_presence(
+        &self,
+        store: &EntityCapsStore,
+        full_jid: &FullJid,
+        presence_payloads: &[Element],
+    ) -> Option<CachedDiscoInfo> {
+        if let Some(info) = self.info_for_resource(full_jid) {
+            return Some(info);
+        }
+        let caps = extract_caps_from_payloads(presence_payloads)?;
+        self.shared(store, &CapsCacheKey::from_caps(&caps)).await
     }
 
     /// Begin tracking a pending disco#info resolution for `caps`
@@ -177,6 +288,8 @@ impl CapsResolver {
     ///
     /// - On Match, the (hash, ver) is cached and the resource→key
     ///   mapping recorded.
+    /// - On an unsupported hash, the result is recorded for the
+    ///   resource only (never in the global cache).
     /// - On Mismatch, neither side effect occurs (poisoning defense).
     /// - On IllFormed, neither side effect occurs (§5.4 step 2.4).
     ///
@@ -196,8 +309,17 @@ impl CapsResolver {
             return CapsVerification::IllFormed;
         }
         if !is_supported_hash(&pending.caps.hash) {
-            // §5.4 step 2: unsupported hash → MUST NOT cache.
-            return CapsVerification::Mismatch;
+            // §5.4 step 2: do not validate or globally cache; associate
+            // the result only with the generating entity's JID.
+            self.resource_to_ver.remove(&pending.full_jid);
+            self.resource_only.insert(
+                pending.full_jid,
+                (
+                    CapsCacheKey::from_caps(&pending.caps),
+                    CachedDiscoInfo::new(identities, features),
+                ),
+            );
+            return CapsVerification::ResourceOnly;
         }
         let recomputed = compute_caps_hash_with_extensions(&identities, &features, &extensions);
         if recomputed != pending.caps.ver {
@@ -256,12 +378,15 @@ pub fn build_caps_disco_info_query(
 
 /// Extract a `<c hash node ver/>` payload from a typed `Presence`.
 pub fn extract_caps_payload(presence: &xmpp_parsers::presence::Presence) -> Option<Caps> {
-    for child in &presence.payloads {
-        if child.name() == "c" && child.ns() == waddle_xmpp::xep::xep0115::NS_CAPS {
-            return Caps::from_element(child);
-        }
-    }
-    None
+    extract_caps_from_payloads(&presence.payloads)
+}
+
+/// Extract a `<c hash node ver/>` from the extension children of a presence.
+pub fn extract_caps_from_payloads(payloads: &[Element]) -> Option<Caps> {
+    payloads
+        .iter()
+        .find(|child| child.name() == "c" && child.ns() == waddle_xmpp::xep::xep0115::NS_CAPS)
+        .and_then(Caps::from_element)
 }
 
 #[cfg(test)]
@@ -348,16 +473,16 @@ mod tests {
     }
 
     #[test]
-    fn complete_pending_with_unsupported_hash_does_not_cache() {
-        // PR #438 adversarial review issue #1: an unsupported `hash`
-        // attribute MUST NOT be cached even if the recomputed value
-        // happens to match by accident. We always reject when the
-        // advertised hash isn't in our SUPPORTED_HASHES set.
+    fn complete_pending_with_unsupported_hash_is_resource_only() {
+        // XEP-0115 §5.4 step 2: an unsupported hash is neither validated
+        // nor globally cached; the discovered features are associated
+        // only with the generating full JID.
         let resolver = CapsResolver::default();
         let identities = sample_identities();
         let features = sample_features();
         let ver = compute_caps_hash(&identities, &features);
         let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+        let other_jid: FullJid = "alice@localhost/r2".parse().expect("jid");
         let caps = Caps {
             hash: "sha-256".to_string(),
             node: "https://example.test/caps".to_string(),
@@ -366,14 +491,26 @@ mod tests {
         resolver.begin_pending("iq-unsupp".into(), full_jid.clone(), caps);
         let pending = resolver.take_pending("iq-unsupp").expect("pending");
 
-        let outcome = resolver.complete_pending(pending, identities, features, vec![], false);
+        let outcome =
+            resolver.complete_pending(pending, identities, features.clone(), vec![], false);
 
-        assert_eq!(outcome, CapsVerification::Mismatch);
+        assert_eq!(outcome, CapsVerification::ResourceOnly);
         assert!(resolver
             .cached(&CapsCacheKey::new("sha-256", &ver))
             .is_none());
         assert!(resolver.cached(&CapsCacheKey::new("sha-1", &ver)).is_none());
         assert_eq!(resolver.key_for_resource(&full_jid), None);
+        assert_eq!(
+            resolver
+                .info_for_resource(&full_jid)
+                .expect("info")
+                .features,
+            features
+        );
+        assert!(resolver.has_resource_only(&full_jid, &CapsCacheKey::new("sha-256", &ver)));
+        assert!(resolver.info_for_resource(&other_jid).is_none());
+        resolver.drop_resource(&full_jid);
+        assert!(resolver.info_for_resource(&full_jid).is_none());
     }
 
     #[test]
@@ -468,6 +605,120 @@ mod tests {
             "drop_resource MUST not touch unrelated pending entries"
         );
         assert!(resolver.cached(&key).is_some());
+    }
+
+    async fn shared_store() -> EntityCapsStore {
+        let db = crate::db::Database::in_memory(&format!("caps-shared-{}", uuid::Uuid::new_v4()))
+            .await
+            .expect("in-memory database");
+        crate::db::MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        EntityCapsStore::new(db)
+    }
+
+    fn caps_payload(hash: &str, ver: &str) -> Vec<Element> {
+        vec![Element::builder("c", waddle_xmpp::xep::xep0115::NS_CAPS)
+            .attr(minidom::rxml::xml_ncname!("hash").to_owned(), hash)
+            .attr(
+                minidom::rxml::xml_ncname!("node").to_owned(),
+                "https://example.test/caps",
+            )
+            .attr(minidom::rxml::xml_ncname!("ver").to_owned(), ver)
+            .build()]
+    }
+
+    /// Two resolvers over one store are two replicas: the one that holds
+    /// the socket verifies and publishes, the other has no mapping for the
+    /// resource and learns its caps from the `<c/>` in the replicated
+    /// presence.
+    #[tokio::test]
+    async fn caps_verified_on_one_replica_are_known_to_another() {
+        let store = shared_store().await;
+        let holder = CapsResolver::default();
+        let publisher = CapsResolver::default();
+        let identities = sample_identities();
+        let features = sample_features();
+        let ver = compute_caps_hash(&identities, &features);
+        let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+        holder.begin_pending(
+            "iq-1".into(),
+            full_jid.clone(),
+            Caps::new("https://example.test/caps", &ver),
+        );
+        let pending = holder.take_pending("iq-1").expect("pending entry");
+        assert_eq!(
+            holder.complete_pending(pending, identities, features, vec![], false),
+            CapsVerification::Match
+        );
+        let key = CapsCacheKey::new("sha-1", &ver);
+        let payloads = caps_payload("sha-1", &ver);
+
+        // Not yet shared: the publishing replica knows nothing.
+        assert!(publisher
+            .info_for_presence(&store, &full_jid, &payloads)
+            .await
+            .is_none());
+
+        holder.publish(&store, &key).await;
+
+        let info = publisher
+            .info_for_presence(&store, &full_jid, &payloads)
+            .await
+            .expect("the shared entry resolves the resource");
+        assert!(info
+            .features
+            .iter()
+            .any(|feature| feature.0 == "http://jabber.org/protocol/disco#info"));
+        assert!(
+            publisher.cached(&key).is_some(),
+            "a store hit fills the replica's own cache"
+        );
+        assert_eq!(
+            publisher.key_for_resource(&full_jid),
+            None,
+            "the replica records no mapping for a socket it does not hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_without_usable_caps_resolves_nothing() {
+        let store = shared_store().await;
+        let resolver = CapsResolver::default();
+        let identities = sample_identities();
+        let features = sample_features();
+        let ver = compute_caps_hash(&identities, &features);
+        let key = CapsCacheKey::new("sha-1", &ver);
+        resolver
+            .cache()
+            .insert(key.clone(), CachedDiscoInfo::new(identities, features));
+        resolver.publish(&store, &key).await;
+        let other = CapsResolver::default();
+        let full_jid: FullJid = "alice@localhost/r1".parse().expect("jid");
+
+        // No `<c/>`, an unknown ver, and an unsupported hash family.
+        assert!(other
+            .info_for_presence(&store, &full_jid, &[])
+            .await
+            .is_none());
+        assert!(other
+            .info_for_presence(&store, &full_jid, &caps_payload("sha-1", "unknown"))
+            .await
+            .is_none());
+        assert!(other
+            .info_for_presence(&store, &full_jid, &caps_payload("sha-256", &ver))
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn extract_caps_from_payloads_finds_the_caps_child() {
+        let mut payloads = vec![Element::builder("idle", "urn:xmpp:idle:1").build()];
+        assert!(extract_caps_from_payloads(&payloads).is_none());
+        payloads.extend(caps_payload("sha-1", "abc"));
+        let caps = extract_caps_from_payloads(&payloads).expect("caps");
+        assert_eq!((caps.hash.as_str(), caps.ver.as_str()), ("sha-1", "abc"));
     }
 
     #[test]

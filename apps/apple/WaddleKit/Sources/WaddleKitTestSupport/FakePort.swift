@@ -12,6 +12,17 @@ final class FakePort: XmppPort {
     var holdExternalServicesFetch = false
     var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
 
+    var blockListFetchCount = 0
+    var blockListResult: Result<[JID], PortError> = .success([])
+    let blockListFetches = HeldCalls()
+    var blockRequests: [[JID]] = []
+    var unblockRequests: [[JID]] = []
+    var unblockAllCount = 0
+    var blockResult: Result<Void, PortError> = .success(())
+    var unblockResult: Result<Void, PortError> = .success(())
+    var unblockAllResult: Result<Void, PortError> = .success(())
+    let blockingWrites = HeldCalls()
+
     var callLifecycleReports: [CallLifecycleReport] = []
     var callLifecycleReportResult: CallLifecycleReportResult = .accepted
     var holdCallLifecycleReports = false
@@ -222,8 +233,20 @@ final class FakePort: XmppPort {
         return true
     }
 
-    func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool { true }
-    func fetchPins(in room: BareJID) async throws -> [PinEntry] { [] }
+    struct PinWrite: Equatable {
+        let pinned: Bool
+        let targetID: String
+        let conversation: ConversationID
+    }
+
+    var pinWrites: [PinWrite] = []
+    var pinsByConversation: [BareJID: [PinEntry]] = [:]
+
+    func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool {
+        pinWrites.append(PinWrite(pinned: pinned, targetID: targetID, conversation: conversation))
+        return true
+    }
+    func fetchPins(in room: BareJID) async throws -> [PinEntry] { pinsByConversation[room] ?? [] }
 
     /// While set, history fetches suspend until `releaseHistory()`.
     var holdsHistory = false

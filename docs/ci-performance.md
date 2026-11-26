@@ -2,14 +2,27 @@
 
 Prepared 20 September 2026. Source baseline: `main` at `c6169598d2426e483c1c7a2c062ca7f1aba352ac`. The initial plan is followed by the implementation and measurement record for PR #1801. Proposed timing budgets are acceptance targets, not measured speedups.
 
-**Latest changed-source result:** `b321fc73` passed all 11 ordinary workflows in
+**September changed-source result:** `b321fc73` passed all 11 ordinary workflows in
 **12m56s**, including queueing and cache post work. The Rust workflow took
 **12m53s** and all 10,645 selected test identities passed. This is the first
 successful measured trial under 15 minutes; the planned 20-run sample,
 dependency/toolchain stress cases and live main-publication measurement remain
 outstanding. See the final trial record below.
 
-The primary obstacle is the all-features Rust test build. The latest server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL independently took 19m42s. Both must improve to deliver the requested result.
+In the September baseline, the all-features Rust test build dominated PR feedback. The server PR workflow took 55m51s, including 34m16s compiling tests and 10m51s executing them. Rust CodeQL took 19m42s.
+
+## Current PR and merge-queue routing
+
+A pull request starts one GitHub-hosted smoke job. It checks the actual diff and runs
+short contracts for affected projects without starting Nix, Gradle, a simulator,
+or a full Cargo build. SonarCloud reports separately through its GitHub App.
+
+The merge queue runs the affected verification lanes on the combined candidate.
+Main owns Apple Swift and simulator builds, releases, deployments, and the all-features PostgreSQL publication gate. Its server publication workflow also runs the default-feature nextest suite. The queue retains that suite for fixture and CI changes that need separate candidate coverage.
+The server and Apple workflows let active main verification finish while newer pending pushes coalesce.
+The [integration workflow](integration-ci.md) describes the checks and their trust
+boundary. The [queue policy](../infrastructure/github/README.md) describes the native
+merge window and how to inspect its live settings.
 
 ## What the measurements show
 
@@ -541,7 +554,8 @@ The `default` pipeline now has eight gates instead of thirteen:
 | `fmt` | 32-core builder | nothing | `cargo fmt --check` |
 | `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
 | `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
-| `mainClippy`, `mainTest` | profile | `fmt` | the namespace clippy and test tasks |
+| `mainClippy` | profile | `fmt` | the Nix Clippy check that merge groups build (`nixClippy`) |
+| `mainTest` | profile | `fmt` | the default-feature Nix test check (`nixDefaultTest`, `waddle-server-default-test`) |
 | `mainDoctest` | profile | `fmt` | the Nix doctest check that pull requests build (`nixDoctest`) |
 | `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
 | `publishContainerImage` | profile | every job above | publication |
@@ -576,6 +590,9 @@ crates for about 8 minutes to run 18 doctests; the Nix check takes its
 dependencies from the shared artifact and is a cache hit when a pull request
 already checked the same tree.
 
+The measurements below describe the namespace `test` task, which
+`namespaceRustChecks` and `mainTest` ran until 2026-11-25; both now build the
+`waddle-server-default-test` Nix check (task `nixDefaultTest`) (see [Workspace member layers](#workspace-member-layers-2026-11)).
 The namespace `test` task sets `CARGO_INCREMENTAL=0`. Its build is bounded by
 one compiler process: `waddle-server` compiled with its unit tests takes about
 7 minutes on a 4 vCPU runner and runs to the end of the build, after the plain
@@ -601,7 +618,8 @@ Each separate job spent about 75 seconds on Nix, cache and cuenv setup before
 its command started, and a server pull request held eight of the 20 concurrent
 GitHub job slots for these checks.
 
-`namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
+`namespaceRustChecks` keeps the default-feature suite on pull requests (since
+2026-11-25 as the `nixDefaultTest` job): it is the only pull-request
 lane that builds the default features, and it is a publish gate on `main`.
 On `main`, `roomChildContract`, `spaceFanoutContract` and
 `xmppServerCompliance` use GitHub runners, so they no longer take Namespace
@@ -619,7 +637,7 @@ builder) no longer has a `pull_request` trigger, and `waddle-integration` no
 longer contains it.
 
 - **On pull requests:** the per-project `pullRequest` pipelines (server Nix
-  lanes, `namespaceRustChecks` `test`, chat, apps, website, design, colony,
+  lanes, `namespaceRustChecks` `nixDefaultTest`, chat, apps, website, design, colony,
   infrastructure) and `checkCiDrift`.
 - **After merge:** the same shards run as `nixTestLocal` in the server `default`
   pipeline. It gates image publishing, including every test in
@@ -645,3 +663,140 @@ vCPU-minutes for Namespace Linux shapes (`nscloud-*-NxM` uses N;
 `namespace-profile-linux-x86` uses `--profile-vcpu`, default 8) and plain
 minutes for macOS. GitHub-hosted minutes are listed but weighted 0. Cancelled
 and failed jobs count. Shares are of weighted units, not dollars.
+
+## Workspace member layers (2026-11)
+
+Every Rust lane took third-party dependencies from a cached Crane artifact but
+recompiled all 16 workspace members whenever any source file changed. On
+25 November an
+[11-file `waddle-server` change](https://github.com/waddle-social/waddle/commit/960163dfd309fadeee65ba1571ecab944afbaac9)
+recompiled every member in the test archive:
+[573.96 s](https://github.com/waddle-social/waddle/actions/runs/45670527959/job/139423534813)
+against [581.54 s](https://github.com/waddle-social/waddle/actions/runs/45668740045/job/139397915555)
+for its parent, with the same dependency output restored from FlakeHub. `mainTest` and `mainClippy`
+were worse: they ran Cargo in an empty sandbox, and the default-feature suite
+compiled all 675 packages with one job (30 minutes) for every change.
+
+`mkMemberLayers` in `flake.nix` adds two cached layers between the dependency
+artifact and each lane. The base layer compiles every member except
+`waddle-xmpp` and `waddle-server`; the second adds `waddle-xmpp`. Of 395 recent
+commits that touched Rust sources, 181 changed only `waddle-server` and at least 112 more
+changed `waddle-xmpp` without a base crate. A layer runs its lane's own compile
+command over Crane's dependency stub source with the layer's members restored
+from separate store paths, so a `waddle-server` edit leaves both layer
+derivations unchanged and the lane compiles only `waddle-server`. A change to a
+base crate rebuilds both layers, as dependents must.
+
+| Lane | Layers built with | Dependency artifact |
+| --- | --- | --- |
+| Test archive (`nixTestLocal`) | its nextest arguments, mold, no self RPATH | `waddle-server-check-deps` |
+| `nixClippy`, `mainClippy` | `cargo clippy` with the lane's lints | `waddle-server-check-deps` |
+| `nixDoctest`, `mainDoctest` | `cargo test --doc` | `waddle-server-check-deps` |
+| `nixXmppServerTests` | its nextest arguments and mold | `waddle-server-test-deps` |
+| `nixDefaultTest`, `mainTest` (new Nix check) | `cargo nextest run --all-targets`, `test` profile | new default-feature artifact |
+
+Cargo reuses a layer only when the fingerprint matches, so each layer receives
+the lane's arguments from one shared definition. Freshness compares source
+mtimes, which Nix sets to the same value for every file; reuse is sound because
+a layer's inputs contain every file its members compile from, and a member that
+reads anything else fails to build in the layer. Stubbed members carry Crane's
+store-path build script and never match the real crates. The production test
+archive checks Cargo's JSON messages with `scripts/check_member_layer_reuse.py`
+and fails if a member other than `waddle-server` was compiled. The benchmark
+archives in `ci/runner-benchmark` still compile every member from the
+dependency artifact, so their timings remain comparable with earlier runs.
+
+The default-feature check keeps that suite's `test` profile (debug assertions
+and overflow checks on), its `--all-targets` selection and one Cargo job for
+the 16 GB profile runner. It runs with the same test environment and fixture
+files as the other Nix test lanes. Selected integration runs and `main` build
+the same derivation. A runner can substitute a prior result when the source
+inputs match and the output is available in a configured binary cache. The server `test` and `clippy` tasks still run plain Cargo
+through the namespace project, so they work locally on any host.
+
+`flake.nix` checks at evaluation time that every workspace member and every
+first-party path dependency in `server/Cargo.toml` is either in a member layer
+or `waddle-server`. A new crate must be added to `memberLayerPaths`; otherwise
+evaluation fails with that instruction rather than the archive's reuse guard
+failing later.
+
+The dependency artifact changes when its inputs change, including `Cargo.lock`
+and the toolchain. The default suite writes a Cargo freshness report for every
+workspace member and a JUnit report for the executed tests to its Nix output.
+
+### Sandboxed builds are required
+
+Cargo's identity for a workspace crate includes its absolute path. Inside the
+Nix sandbox every derivation builds in `/build/source`, so a layer and its lane
+agree. On an unprivileged Namespace runner Nix logs "auto-disabling sandboxing"
+and builds each derivation in a random directory instead; every member is then
+recompiled in every layer and in the lane. `mainDoctest` on `main` ran that way
+before this change. The server default pipeline's profile runner and the
+`namespaceRustChecks` job now request
+`namespace-profile-linux-x86;container.privileged=true`; the builder already
+ran privileged.
+
+### Namespace Nix volume measurements (2026-11-26)
+
+`waddle-ci-cache-benchmark.yml` with `scope=namespace-volume` builds the Clippy
+lane on a tagged Namespace Nix volume with `cache.nixos.org` as the only
+substituter (no FlakeHub, no Hestia), then probes it from later jobs after a
+one-line `waddle-server` edit. Each probe lands on whichever 8x16 machine
+Namespace allocates.
+
+| Run | Job | Sandbox | Volume at start | Derivations rebuilt | Lane compiled | Build |
+| --- | --- | --- | --- | --- | --- | ---: |
+| [Trial 1](https://github.com/waddle-social/waddle/actions/runs/45729048907) | seed | no | empty | all | 16 members | 22.8 min |
+| | probe, right after | no | empty | all | 16 members | 19.4 min |
+| | probe, +10 min | no | 7.7 GB, deps and layers | lane only | 16 members | 11.1 min |
+| [Trial 2](https://github.com/waddle-social/waddle/actions/runs/45738046103) | seed | yes | empty | all | waddle-server | 17.1 min |
+| | probe, right after | yes | empty | all | waddle-server | 17.1 min |
+| | probe, +10 min | yes | 7.6 GB, deps and layers | lane only | waddle-server | 9.2 min |
+
+A job that starts right after a new volume generation is committed lands on a
+machine without it, as Namespace's onboarding documentation describes; ten
+minutes later both trials found the full volume on a different machine. These
+are two samples, not a hit rate. In the Clippy lane `waddle-server` alone takes
+about 10 minutes at one Cargo job, so reusing the other members saves about a
+minute there; the larger saving is the dependency artifact and layers, about
+five minutes on this runner, which a warm volume supplies. Lanes that build
+test targets reuse more, because the other members' test binaries are a larger
+share of their work.
+
+### Default-feature suite on fresh runners (2026-11-26)
+
+The `namespace-test-volume` experiment used an unedited seed and four fresh
+16-core, 32 GB runners with the same one-file `waddle-server` test change.
+The seed reported `/nix` cached. All three probes requested its exact volume
+tag. Each received an empty store before the build.
+
+| Run | Workspace layers and deps present at start | Full job |
+| --- | --- | ---: |
+| [Cold control](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139867426289) | None | 25m 24s |
+| [Immediately after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139881129699) | None | 24m 36s |
+| [10 minutes after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139886248328) | None | 24m 48s |
+| [37 minutes after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139899701838) | None | 26m 45s |
+
+All four edited runs passed the original 13,670 tests and the added test,
+with 10 skipped. Each built the workspace layers locally and then compiled
+only `waddle-server` in the final derivation. These timings measure cold
+builds. Production Rust jobs use FlakeHub and Hestia for binary substitution.
+
+The [explicit-transfer trial](https://github.com/waddle-social/waddle/actions/runs/45821545253)
+measured the same edit on two fresh runners with identical CPU and memory.
+The seed exported the workspace layers and their dependencies in
+7s and uploaded a 4.11 GiB artifact in 24s.
+The consumer checked that the three outputs were absent, downloaded the
+artifact in 38s, verified and imported its closure in
+34s, then built the edited test output.
+
+| Fresh runner | Input layers present at build start | Nix build and tests | Full job |
+| --- | ---: | ---: | ---: |
+| [Cold](https://github.com/waddle-social/waddle/actions/runs/45821545253/job/139914791736) | 0 of 3 | 25m 22s | 25m 55s |
+| [Warm](https://github.com/waddle-social/waddle/actions/runs/45821545253/job/139928721794) | 3 of 3 | 19m 12s | 20m 50s |
+
+The warm consumer saved **5m 05s (19.6%)**, including setup,
+download, import and cleanup. Both ran the same 13,671 tests with 10 skipped.
+Only `waddle-server` compiled in the warm run. All 15 other workspace members
+were fresh. This comparison measures the combined third-party and workspace
+layers. Queue wait and the separate seed job are excluded.

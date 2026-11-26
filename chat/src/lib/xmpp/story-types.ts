@@ -84,8 +84,9 @@ export function isStoryActive(story: Story, nowMs: number = Date.now()): boolean
   return story.expiresMs > nowMs;
 }
 
-export function storyAttachmentNode(communityJid: string, storyId: string): string {
-  return `${NS_PUBSUB_ATTACHMENTS}/xmpp:${communityJid}?;node=${encodeURIComponent(STORIES_NODE)};item=${encodeURIComponent(storyId)}`;
+/** XEP-0470 attachment node of a story hosted on the PEP service of `hostJid`, the story's author. */
+export function storyAttachmentNode(hostJid: string, storyId: string): string {
+  return `${NS_PUBSUB_ATTACHMENTS}/xmpp:${hostJid}?;node=${encodeURIComponent(STORIES_NODE)};item=${encodeURIComponent(storyId)}`;
 }
 
 export function normalizeStoryReactions(emojis: Iterable<string>): string[] {

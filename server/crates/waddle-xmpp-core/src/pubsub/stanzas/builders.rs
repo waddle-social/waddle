@@ -358,6 +358,103 @@ pub fn build_pubsub_owner_subscriptions_result(
 /// as a `<x type='form'/>` data form (XEP-0060 §6.4).
 #[must_use]
 pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: &NodeConfig) -> Iq {
+    configure_form_result(original_iq, node, config, false)
+}
+
+/// As [`build_pubsub_configure_form_result`] for a Space whose service sends
+/// the XEP-0503 `pubsub#notify_sub` and `pubsub#notify_config`
+/// notifications: both options are reported as on.
+#[must_use]
+pub fn build_pubsub_space_configure_form_result(
+    original_iq: &Iq,
+    node: &str,
+    config: &NodeConfig,
+) -> Iq {
+    configure_form_result(original_iq, node, config, true)
+}
+
+/// Build the XEP-0060 §8.2.4 configuration change notification: an empty
+/// `<configuration/>` for a notification-only node, the configuration as a
+/// `result` data form for a node that delivers payloads. `space` reports the
+/// XEP-0503 notification options as on.
+#[must_use]
+pub fn build_pubsub_configuration_event(
+    from: &Jid,
+    to: &Jid,
+    node: &str,
+    config: &NodeConfig,
+    space: bool,
+) -> Message {
+    let mut configuration = Element::builder("configuration", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    if config.deliver_payloads {
+        configuration = configuration.append(node_config_form(config, "result", space));
+    }
+    let event = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(configuration.build())
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event);
+    message
+}
+
+/// Build the XEP-0060 §8.9.2 / §12.20 subscription state change notification
+/// sent to the node owners when `pubsub#notify_sub` is on.
+#[must_use]
+pub fn build_pubsub_subscription_event(
+    from: &Jid,
+    to: &Jid,
+    node: &str,
+    subscriber: &Jid,
+    state: SubscriptionState,
+    subid: Option<&SubId>,
+) -> Message {
+    let mut subscription = Element::builder("subscription", NS_PUBSUB_EVENT)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            subscriber.to_string(),
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("subscription").to_owned(),
+            state.to_string(),
+        );
+    if let Some(subid) = subid {
+        subscription = subscription.attr(
+            minidom::rxml::xml_ncname!("subid").to_owned(),
+            subid.as_str(),
+        );
+    }
+    let event = Element::builder("event", NS_PUBSUB_EVENT)
+        .append(subscription.build())
+        .build();
+    let mut message = Message::new_with_type(MessageType::Headline, Some(to.clone()));
+    message.from = Some(from.clone());
+    message.payloads.push(event);
+    message
+}
+
+fn configure_form_result(original_iq: &Iq, node: &str, config: &NodeConfig, space: bool) -> Iq {
+    let form = node_config_form(config, "form", space);
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+        .append(form)
+        .build();
+    let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
+        .append(configure)
+        .build();
+    Iq::Result {
+        from: original_iq.to().cloned(),
+        to: original_iq.from().cloned(),
+        id: original_iq.id().to_string(),
+        payload: Some(pubsub),
+    }
+}
+
+/// The XEP-0060 §16.4.4 node configuration as a data form of `form_type`
+/// (`form` or `result`).
+fn node_config_form(config: &NodeConfig, form_type: &str, space: bool) -> Element {
     fn field(var: &str, value: &str) -> Element {
         Element::builder("field", "jabber:x:data")
             .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
@@ -382,7 +479,7 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
             .build()
     }
     let mut form_builder = Element::builder("x", "jabber:x:data")
-        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), form_type)
         .append(hidden_field(
             "FORM_TYPE",
             "http://jabber.org/protocol/pubsub#node_config",
@@ -432,8 +529,20 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         }
         form_builder = form_builder.append(groups.build());
     }
-    let form = form_builder
-        .append(field("pubsub#max_items", &config.max_items.to_string()))
+    let mut form = form_builder
+        // XEP-0060 §16.4.4: `pubsub#max_items` is an integer or `max`; an
+        // unbounded node (`u32::MAX`) is rendered as `max`.
+        .append(field(
+            "pubsub#max_items",
+            &max_items_value(config.max_items),
+        ))
+        // XEP-0060 §16.4.4: seconds, or `max` for no limit.
+        .append(field(
+            "pubsub#item_expire",
+            &config
+                .item_expire
+                .map_or_else(|| "max".to_owned(), |secs| secs.to_string()),
+        ))
         .append(field(
             "pubsub#persist_items",
             if config.persist_items { "1" } else { "0" },
@@ -453,19 +562,23 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
         .append(field(
             "pubsub#send_last_published_item",
             &config.send_last_published_item.to_string(),
-        ))
-        .build();
-    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
-        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
-        .append(form)
-        .build();
-    let pubsub = Element::builder("pubsub", NS_PUBSUB_OWNER)
-        .append(configure)
-        .build();
-    Iq::Result {
-        from: original_iq.to().cloned(),
-        to: original_iq.from().cloned(),
-        id: original_iq.id().to_string(),
-        payload: Some(pubsub),
+        ));
+    // XEP-0503: a Space service notifies owners of subscription changes and
+    // subscribers of configuration changes.
+    if space {
+        form = form
+            .append(field("pubsub#notify_sub", "1"))
+            .append(field("pubsub#notify_config", "1"));
+    }
+    form.build()
+}
+
+/// XEP-0060 §16.4.4: `pubsub#max_items` is an integer or `max`; an unbounded
+/// node (`u32::MAX`) is rendered as `max`.
+fn max_items_value(max_items: u32) -> String {
+    if max_items == u32::MAX {
+        "max".to_owned()
+    } else {
+        max_items.to_string()
     }
 }

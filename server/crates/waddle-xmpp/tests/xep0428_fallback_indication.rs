@@ -80,8 +80,8 @@ fn xep_0428_for_attribute_absent_means_whole_message_per_spec() {
         "spec-conformant bare <fallback/> must parse, not be dropped"
     );
     assert!(fallbacks[0].for_ns.is_none());
-    assert!(fallbacks[0].body.is_none());
-    assert!(fallbacks[0].subject.is_none());
+    assert_eq!(fallbacks[0].body, Some(FallbackRegion::Whole));
+    assert_eq!(fallbacks[0].subject, Some(FallbackRegion::Whole));
 }
 
 #[test]
@@ -232,15 +232,63 @@ fn xep_0428_body_and_subject_can_both_be_targeted() {
 // ── Defensive parsing: malformed shapes are rejected ──────────────────────
 
 #[test]
-fn xep_0428_mixed_whole_body_plus_range_is_rejected() {
-    // Mixing `<body/>` (whole) with `<body start=… end=…/>` (range) in
-    // the same fallback indication is ambiguous; reject the whole
-    // indication rather than guess.
+fn xep_0428_whole_body_child_subsumes_range_siblings() {
+    // §2.2: "If start and end attribute are not supplied, the whole
+    // respective message element should be assumed to be there for
+    // fallback purposes." An offset-less child therefore covers the whole
+    // body regardless of sibling ranges or their order.
+    for children in [
+        "<body start='0' end='10'/><body/>",
+        "<body/><body start='0' end='10'/>",
+        "<body/><body/>",
+    ] {
+        let msg = parse_message(&format!(
+            "<message xmlns='jabber:client'>\
+                <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>{children}</fallback>\
+            </message>"
+        ));
+        let fallbacks = parse_fallbacks_from_message(&msg);
+        assert_eq!(fallbacks.len(), 1, "{children}");
+        assert_eq!(fallbacks[0].body, Some(FallbackRegion::Whole), "{children}");
+        assert!(fallbacks[0].subject.is_none());
+    }
+}
+
+#[test]
+fn xep_0428_whole_subject_child_subsumes_range_siblings() {
     let msg = parse_message(
         "<message xmlns='jabber:client'>\
             <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
-                <body start='0' end='10'/>\
+                <subject start='0' end='2'/>\
+                <subject/>\
+            </fallback>\
+        </message>",
+    );
+    let fallbacks = parse_fallbacks_from_message(&msg);
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].subject, Some(FallbackRegion::Whole));
+}
+
+#[test]
+fn xep_0428_childless_fallback_with_for_covers_body_and_subject() {
+    let msg = parse_message(
+        "<message xmlns='jabber:client'>\
+            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'/>\
+        </message>",
+    );
+    let fallbacks = parse_fallbacks_from_message(&msg);
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].body, Some(FallbackRegion::Whole));
+    assert_eq!(fallbacks[0].subject, Some(FallbackRegion::Whole));
+}
+
+#[test]
+fn xep_0428_malformed_sibling_still_rejects_when_whole_child_present() {
+    let msg = parse_message(
+        "<message xmlns='jabber:client'>\
+            <fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'>\
                 <body/>\
+                <body start='3'/>\
             </fallback>\
         </message>",
     );

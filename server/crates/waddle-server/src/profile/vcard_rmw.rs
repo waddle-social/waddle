@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn vcard4_remove_photo_keeps_other_fields() {
-        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc</uri></photo><nickname><text>Ali</text></nickname></vcard>"
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=abc</uri></photo><nickname><text>Ali</text></nickname></vcard>"
             .parse()
             .unwrap();
         let result = remove_vcard4_fields(
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn vcard4_remove_fn_keeps_photo_and_other_fields() {
-        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc</uri></photo></vcard>"
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Alice</text></fn><photo><uri>xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=abc</uri></photo></vcard>"
             .parse()
             .unwrap();
         let result = remove_vcard4_fields(
@@ -360,7 +360,7 @@ mod tests {
         let result = apply_vcard4_update(
             None,
             Some(png_ref(
-                "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=abc",
+                "xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=abc",
             )),
             Some("Alice"),
         );
@@ -368,7 +368,8 @@ mod tests {
         assert!(xml.contains("<photo"), "{xml}");
         assert!(xml.contains("<uri"), "{xml}");
         assert!(
-            xml.contains("xmpp:alice@example.com?pubsub") && xml.contains("item=abc"),
+            xml.contains("xmpp:alice@example.com?pubsub;action=retrieve")
+                && xml.contains("item=abc"),
             "vCard4 photo URI must reference the avatar-data PEP item: {xml}"
         );
         assert!(
@@ -381,13 +382,13 @@ mod tests {
 
     #[test]
     fn vcard4_replaces_photo_preserving_other_fields() {
-        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Old</text></fn><photo><uri>xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=OLD</uri></photo><nickname><text>Pal</text></nickname></vcard>"
+        let existing: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'><fn><text>Old</text></fn><photo><uri>xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=OLD</uri></photo><nickname><text>Pal</text></nickname></vcard>"
             .parse()
             .unwrap();
         let result = apply_vcard4_update(
             Some(&existing),
             Some(png_ref(
-                "xmpp:alice@example.com?pubsub;node=urn:xmpp:avatar:data;item=NEW",
+                "xmpp:alice@example.com?pubsub;action=retrieve;node=urn:xmpp:avatar:data;item=NEW",
             )),
             Some("New"),
         );

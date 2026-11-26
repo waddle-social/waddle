@@ -27,7 +27,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Finish the active simulator build while newer main pushes share a pending slot.
+  cancel-in-progress: false
 
 jobs:
   apple-xmpp-client:

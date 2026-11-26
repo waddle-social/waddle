@@ -90,7 +90,16 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             received_at: None,
             authority: crate::ingress::append_authority::AppendAuthority::Verified,
         };
-        let original = &submission.plan.sanitized_message;
+        // XEP-0313 4.1.1: a received carbon forwards the recipient's copy,
+        // which omits the sender's archive stamp.
+        let mut original_copy = submission.plan.sanitized_message.clone();
+        if kind == CarbonKind::Received {
+            waddle_xmpp_core::xep0359::remove_stanza_ids_by(
+                &mut original_copy,
+                &submission.sender.to_bare().into(),
+            );
+        }
+        let original = &original_copy;
         let carbon = wrapper(original, &owner, &target, kind);
         let reference =
             IngressAppendObligationRef::for_message(Some(&context), &carbon).expect("carbon key");
@@ -105,7 +114,7 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             reference.receipt.kind.to_storage(),
         )
         .expect("typed binding");
-        check_canonical_obligation(&fixture.db, &carbon, &reference)
+        check_canonical_obligation(&fixture.db, &carbon, &reference, None)
             .await
             .expect("frozen carbon accepted");
         let wrong_direction = match kind {
@@ -139,7 +148,7 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             wrapper(&changed_parent, &owner, &target, kind),
         ] {
             assert!(matches!(
-                check_canonical_obligation(&fixture.db, &invalid, &reference).await,
+                check_canonical_obligation(&fixture.db, &invalid, &reference, None).await,
                 Err(AppendAuthorityRejection::CarbonObligationMismatch)
             ));
         }
@@ -148,7 +157,8 @@ async fn carbon_append_authority(fixture: IngressFixture) {
             assert!(check_canonical_obligation(
                 &fixture.db,
                 &wrapper(original, &owner, &late, kind),
-                &reference
+                &reference,
+                None
             )
             .await
             .is_err());
@@ -159,9 +169,11 @@ async fn carbon_append_authority(fixture: IngressFixture) {
         );
         let mut forged = reference.clone();
         forged.receipt.semantic_identity_hash = [0; 32];
-        assert!(check_canonical_obligation(&fixture.db, &carbon, &forged)
-            .await
-            .is_err());
+        assert!(
+            check_canonical_obligation(&fixture.db, &carbon, &forged, None)
+                .await
+                .is_err()
+        );
     }
     fixture.close().await;
 }
@@ -222,6 +234,8 @@ async fn archive_free_carbon_stamps(fixture: IngressFixture) {
         let original = &submission.plan.sanitized_message;
         let mut inner = original.clone();
         if kind == CarbonKind::Received {
+            // XEP-0313 4.1.1: the recipient's copy omits the sender's stamp.
+            waddle_xmpp_core::xep0359::remove_stanza_ids_by(&mut inner, &sender.clone().into());
             add_stanza_id(
                 &mut inner,
                 &StanzaId::new("recipient-stamp", owner.clone().into()),

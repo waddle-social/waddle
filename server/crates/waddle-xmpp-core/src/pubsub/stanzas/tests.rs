@@ -1,7 +1,7 @@
 use super::{
-    build_pubsub_configure_form_result, build_pubsub_error, build_pubsub_event,
-    build_pubsub_success, is_pubsub_event, is_pubsub_iq, parse_pubsub_event, parse_pubsub_iq,
-    BareJid, Iq, Jid, PubSubError, PubSubEvent, PubSubItem, PubSubRequest,
+    build_pubsub_configuration_event, build_pubsub_configure_form_result, build_pubsub_error,
+    build_pubsub_event, build_pubsub_success, is_pubsub_event, is_pubsub_iq, parse_pubsub_event,
+    parse_pubsub_iq, BareJid, Iq, Jid, PubSubError, PubSubEvent, PubSubItem, PubSubRequest,
     PubSubUnsupportedFeature, SubscriptionState, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT,
     NS_PUBSUB_OWNER,
 };
@@ -233,6 +233,58 @@ fn parse_configure_set_keeps_partial_fields_partial() {
     }
 }
 
+fn parse_item_expire(value: &str) -> Result<Option<Option<u32>>, ()> {
+    let configure = Element::builder("configure", NS_PUBSUB_OWNER)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), "stories")
+        .append(
+            Element::builder("x", NS_XDATA)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+                .append(xdata_field("pubsub#item_expire", value))
+                .build(),
+        )
+        .build();
+    let iq = iq_with_payload(
+        "cfg-expire",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Set(pubsub_payload(NS_PUBSUB_OWNER, [configure])),
+    );
+    match parse_pubsub_iq(&iq) {
+        Ok(PubSubRequest::ConfigureNodeSet { config, .. }) => Ok(config.item_expire),
+        _ => Err(()),
+    }
+}
+
+#[test]
+fn configure_set_parses_item_expire_seconds_and_max() {
+    // XEP-0060 §16.4.4: "pubsub#item_expire ... number of seconds after
+    // which to automatically purge items" ("max" means no expiry).
+    assert_eq!(parse_item_expire("86400"), Ok(Some(Some(86_400))));
+    assert_eq!(parse_item_expire("max"), Ok(Some(None)));
+    assert_eq!(parse_item_expire("0"), Err(()));
+    assert_eq!(parse_item_expire("soon"), Err(()));
+}
+
+#[test]
+fn item_expire_patch_applies_and_clears() {
+    use crate::pubsub::{NodeConfig, NodeConfigPatch};
+
+    let stories = NodeConfig::pep_stories();
+    assert_eq!(stories.item_expire, Some(86_400));
+    let cleared = NodeConfigPatch {
+        item_expire: Some(None),
+        ..NodeConfigPatch::default()
+    }
+    .apply_to(stories.clone());
+    assert_eq!(cleared.item_expire, None);
+    let shortened = NodeConfigPatch {
+        item_expire: Some(Some(60)),
+        ..NodeConfigPatch::default()
+    }
+    .apply_to(stories);
+    assert_eq!(shortened.item_expire, Some(60));
+}
+
 #[test]
 fn parse_configure_set_accepts_typed_pubsub_type() {
     let configure = Element::builder("configure", NS_PUBSUB_OWNER)
@@ -274,7 +326,7 @@ fn configure_form_result_emits_pubsub_type_for_typed_node() {
     let result = build_pubsub_configure_form_result(
         &iq,
         "stories",
-        &crate::pubsub::NodeConfig::community_stories(),
+        &crate::pubsub::NodeConfig::pep_stories(),
     );
     let Iq::Result {
         payload: Some(pubsub),
@@ -786,6 +838,42 @@ fn configure_form_lists_roster_groups_for_the_roster_model() {
         .all(|field| field.attr("var") != Some("pubsub#roster_groups_allowed")));
 }
 
+/// XEP-0060 §16.4.4: an unbounded node renders `pubsub#max_items` as `max`,
+/// a bounded one as its integer; the rendered value round-trips on submit.
+#[test]
+fn configure_form_renders_unbounded_max_items_as_max() {
+    let iq = iq_with_payload(
+        "cfg-get",
+        Some("owner@example.com"),
+        None,
+        TestIqPayload::Get(Element::builder("query", "jabber:iq:version").build()),
+    );
+    let render = |max_items: u32| {
+        let mut config = crate::pubsub::NodeConfig::pep_default();
+        config.max_items = max_items;
+        let Iq::Result {
+            payload: Some(pubsub),
+            ..
+        } = build_pubsub_configure_form_result(&iq, "n", &config)
+        else {
+            panic!("expected result payload");
+        };
+        let form = pubsub
+            .get_child("configure", NS_PUBSUB_OWNER)
+            .and_then(|configure| configure.get_child("x", NS_XDATA))
+            .expect("configure data form")
+            .clone();
+        form.children()
+            .find(|field| field.attr("var") == Some("pubsub#max_items"))
+            .expect("max_items field")
+            .get_child("value", NS_XDATA)
+            .expect("value")
+            .text()
+    };
+    assert_eq!(render(u32::MAX), "max");
+    assert_eq!(render(200), "200");
+}
+
 /// XEP-0060 §8.1.3: unsupported access model is `not-acceptable` with the
 /// pubsub-specific `<unsupported-access-model/>`.
 #[test]
@@ -874,4 +962,35 @@ fn request_without_a_node_or_item_maps_to_the_pubsub_condition() {
         );
         assert_eq!(parse_pubsub_iq(&iq).expect_err("rejected"), expected);
     }
+}
+
+#[test]
+fn configuration_event_is_empty_for_notification_only_nodes() {
+    let service: jid::Jid = "spaces.example.test".parse().expect("service");
+    let to: jid::Jid = "alice@example.test/phone".parse().expect("recipient");
+    let mut config = crate::pubsub::NodeConfig::spaces_public();
+    config.deliver_payloads = false;
+    let message = build_pubsub_configuration_event(&service, &to, "general", &config, true);
+    let event = message.payloads.first().expect("event");
+    let configuration = event
+        .get_child("configuration", crate::pubsub::NS_PUBSUB_EVENT)
+        .expect("configuration");
+    assert_eq!(configuration.attr("node"), Some("general"));
+    assert!(configuration.children().next().is_none());
+
+    config.deliver_payloads = true;
+    let message = build_pubsub_configuration_event(&service, &to, "general", &config, true);
+    let form = message.payloads[0]
+        .get_child("configuration", crate::pubsub::NS_PUBSUB_EVENT)
+        .and_then(|c| c.get_child("x", "jabber:x:data"))
+        .expect("form");
+    assert_eq!(form.attr("type"), Some("result"));
+    assert_eq!(
+        xdata_field_value(form, "pubsub#notify_config").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        xdata_field_value(form, "pubsub#notify_sub").as_deref(),
+        Some("1")
+    );
 }

@@ -3,9 +3,10 @@ use jid::Jid;
 use waddle_xmpp_client::inbox::{InboxStreamEntry, InboxStreamEntrySource};
 use waddle_xmpp_client::mds::MdsCatchupEntry;
 use waddle_xmpp_client::messaging::{
-    self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
-    JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan, MarkupSpanData,
-    MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
+    self, CallEventKind, CallMedia, CarbonDirection, InCallSignal, InboundCallEvent,
+    InboundPresence, JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan,
+    MarkupSpanData, MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData,
+    SendMessageOptions,
 };
 use waddle_xmpp_client::pin::{PinEntry, PinEvent, PinEventAction, PinPreview};
 use waddle_xmpp_client::request::StanzaId;
@@ -20,18 +21,18 @@ use waddle_xmpp_client::{
 use crate::profile_verbs::activity_from_core;
 use crate::safety_scores::safety_scores_fastening_to_ffi;
 use crate::{
-    WaddleArchivedMessage, WaddleCallEvent, WaddleCallEventKind, WaddleCallMedia,
-    WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonDirection, WaddleChatState,
-    WaddleClientEvent, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleForumPostKind, WaddleInboxEntry, WaddleJingleReason, WaddleLinkPreview,
-    WaddleLinkPreviewImage, WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview,
-    WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo,
-    WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry,
-    WaddleMentionDirectory, WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence,
-    WaddlePackSticker, WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview,
-    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
-    WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
-    WaddleStickerPack,
+    WaddleArchivedMessage, WaddleBroadcastKind, WaddleBroadcastSpan, WaddleCallEvent,
+    WaddleCallEventKind, WaddleCallMedia, WaddleCallThreadAnchor, WaddleCallThreadEnded,
+    WaddleCarbonDirection, WaddleChatState, WaddleClientEvent, WaddleEncryptedFile,
+    WaddleEncryptedFileHash, WaddleEventListener, WaddleForumPostKind, WaddleInCallReaction,
+    WaddleInboxEntry, WaddleJingleReason, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview, WaddleLinkPreviewLookupStatus,
+    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMarkupSpan,
+    WaddleMarkupSpanType, WaddleMdsDisplayedEntry, WaddleMentionDirectory, WaddleMessage,
+    WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker, WaddlePinAction,
+    WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat,
+    WaddleReference, WaddleReferenceType, WaddleSaslCondition, WaddleSendOptions, WaddleSharedFile,
+    WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash, WaddleStickerPack,
 };
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
@@ -103,6 +104,11 @@ pub(super) fn dispatch_event(
             listener.on_event(WaddleClientEvent::ActivityChanged {
                 jid,
                 activity: activity.map(activity_from_core),
+            });
+        }
+        ClientEvent::BlockListChanged(change) => {
+            listener.on_event(WaddleClientEvent::BlockListChanged {
+                change: change.into(),
             });
         }
         ClientEvent::StatusPreferenceChanged(preference) => {
@@ -562,6 +568,20 @@ fn markup_spans_to_ffi(spans: Vec<MarkupSpan>) -> Vec<WaddleMarkupSpan> {
     spans.into_iter().filter_map(markup_span_to_ffi).collect()
 }
 
+fn broadcast_spans_to_ffi(spans: &[messaging::BroadcastSpan]) -> Vec<WaddleBroadcastSpan> {
+    spans
+        .iter()
+        .map(|span| WaddleBroadcastSpan {
+            kind: match span.kind {
+                messaging::BroadcastMention::Everyone => WaddleBroadcastKind::Everyone,
+                messaging::BroadcastMention::Here => WaddleBroadcastKind::Here,
+            },
+            start: span.begin,
+            end: span.end,
+        })
+        .collect()
+}
+
 fn reference_to_ffi(reference: ReferenceData) -> WaddleReference {
     WaddleReference {
         ref_type: reference_type_to_ffi(reference.ref_type),
@@ -856,7 +876,16 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         body: msg.body,
         subject: msg.subject,
         message_type: msg.message_type,
-        timestamp: msg.timestamp.map(|t| t.to_rfc3339()),
+        // A native host takes a time on a live message to mean the server
+        // held it while the client was away: it sorts by that time and
+        // raises no notification. The server stamps every XEP-0280 carbon
+        // with the time it made the copy, so each one would be taken for
+        // held, and would sort among rows that carry no time at all. A
+        // carbon is a message as it passes: it goes to the hosts as live.
+        timestamp: msg
+            .timestamp
+            .filter(|_| msg.carbon.is_none())
+            .map(|t| t.to_rfc3339()),
         stanza_id: msg.stanza_id.as_ref().map(ToString::to_string),
         stanza_id_by: msg.stanza_id.map(|id| id.by.to_string()),
         stanza_ids: msg
@@ -887,6 +916,7 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         parent_thread_id: msg.parent_thread_id,
         markup_spans: markup_spans_to_ffi(msg.markup_spans),
         broadcast_mention: msg.broadcast_mention,
+        broadcast_spans: broadcast_spans_to_ffi(&msg.broadcast_spans),
         mention_uris: msg.mention_uris,
         references: references_to_ffi(msg.references),
         forum_post_kind: msg
@@ -914,6 +944,13 @@ pub(crate) fn inbound_to_ffi(msg: InboundMessage) -> WaddleMessage {
         mds_displayed: msg
             .mds_displayed
             .map(|entries| entries.into_iter().map(mds_entry_to_ffi).collect()),
+        in_call_reaction: match msg.in_call {
+            Some(InCallSignal::Reaction(payload)) => Some(WaddleInCallReaction {
+                sid: payload.sid.as_str().to_string(),
+                emoji: payload.emoji.as_str().to_string(),
+            }),
+            _ => None,
+        },
     }
 }
 
@@ -1012,6 +1049,9 @@ pub(crate) fn archived_to_ffi(
             .map(|m| markup_spans_to_ffi(m.markup_spans.clone()))
             .unwrap_or_default(),
         broadcast_mention: parsed.and_then(|m| m.broadcast_mention.clone()),
+        broadcast_spans: parsed
+            .map(|m| broadcast_spans_to_ffi(&m.broadcast_spans))
+            .unwrap_or_default(),
         mention_uris: parsed.map(|m| m.mention_uris.clone()).unwrap_or_default(),
         references: parsed
             .map(|m| references_to_ffi(m.references.clone()))
@@ -1171,6 +1211,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
         })
         .collect();
     outbound_options.request_displayed_marker = opts.request_displayed_marker;
+    outbound_options.chat_state_active = opts.chat_state_active;
     outbound_options.muc_pm = opts.muc_pm;
     outbound_options.link_preview_token = opts
         .link_preview_token
@@ -1761,35 +1802,38 @@ mod tests {
     }
 
     #[test]
-    fn xep0372_references_and_broadcast_mention_survive_inbound_to_ffi() {
+    fn xep0372_references_and_xep0513_broadcast_mention_survive_inbound_to_ffi() {
         let ffi = inbound_to_ffi(parse_message(
             "<message xmlns='jabber:client' type='groupchat' from='room@conf.waddle.test/alice'>\
                <body>hi @bob and @everyone, see https://example.com</body>\
+               <markup xmlns='urn:xmpp:markup:0'>\
+                 <span start='12' end='21'>\
+                   <mention xmlns='urn:xmpp:mentions:0' type='urn:xmpp:mentions:0#channel'/>\
+                 </span>\
+               </markup>\
                <reference xmlns='urn:xmpp:reference:0' type='mention' \
                   uri='xmpp:bob@waddle.test' begin='3' end='7'/>\
-               <reference xmlns='urn:xmpp:reference:0' type='mention' \
-                  uri='xmpp:@everyone' begin='12' end='21' \
-                  anchor='@everyone'/>\
                <reference xmlns='urn:xmpp:reference:0' type='data' \
                   uri='https://example.com' begin='27' end='46'/>\
              </message>",
         ));
+        assert_eq!(ffi.mention_uris, vec!["xmpp:bob@waddle.test".to_string()]);
+        assert_eq!(ffi.broadcast_mention.as_deref(), Some("everyone"));
         assert_eq!(
-            ffi.mention_uris,
-            vec![
-                "xmpp:bob@waddle.test".to_string(),
-                "xmpp:@everyone".to_string(),
-            ]
+            ffi.broadcast_spans,
+            vec![WaddleBroadcastSpan {
+                kind: WaddleBroadcastKind::Everyone,
+                start: 12,
+                end: 21
+            }]
         );
-        assert_eq!(ffi.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
-        assert_eq!(ffi.references.len(), 3);
+        assert_eq!(ffi.references.len(), 2);
         assert_eq!(ffi.references[0].ref_type, WaddleReferenceType::Mention);
         assert_eq!(ffi.references[0].uri, "xmpp:bob@waddle.test");
         assert_eq!(ffi.references[0].begin, 3);
         assert_eq!(ffi.references[0].end, 7);
-        assert_eq!(ffi.references[1].anchor.as_deref(), Some("@everyone"));
-        assert_eq!(ffi.references[2].ref_type, WaddleReferenceType::Data);
-        assert!(ffi.references[2].anchor.is_none());
+        assert_eq!(ffi.references[1].ref_type, WaddleReferenceType::Data);
+        assert!(ffi.references[1].anchor.is_none());
     }
 
     #[test]
@@ -2111,6 +2155,34 @@ mod tests {
         assert_eq!(inbound_to_ffi(direct).carbon, None);
     }
 
+    /// The server stamps every carbon with the time it copied it
+    /// (XEP-0297 `<delay/>` on the forwarded wrapper). Hosts read a time
+    /// as "held while away", so a carbon crosses the bridge without one.
+    #[test]
+    fn xep0280_carbon_reaches_hosts_as_a_live_message() {
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-07-27T08:00:00Z")
+            .expect("test time parses")
+            .with_timezone(&chrono::Utc);
+        let stamped = |carbon: Option<CarbonDirection>| {
+            let mut message = parse_message(
+                "<message xmlns='jabber:client' type='chat' id='t1' from='bob@waddle.test/desktop'>\
+                   <body>hello</body>\
+                 </message>",
+            );
+            message.carbon = carbon;
+            message.timestamp = Some(stamp);
+            inbound_to_ffi(message).timestamp
+        };
+
+        assert_eq!(stamped(Some(CarbonDirection::Sent)), None);
+        assert_eq!(stamped(Some(CarbonDirection::Received)), None);
+        assert_eq!(
+            stamped(None).as_deref(),
+            Some("2026-07-27T08:00:00+00:00"),
+            "a message the server really held keeps its time"
+        );
+    }
+
     #[test]
     fn xep0511_link_previews_survive_inbound_to_ffi() {
         let ffi = inbound_to_ffi(parse_message(
@@ -2210,6 +2282,32 @@ mod tests {
         assert_eq!(unpin.action, WaddlePinAction::Unpinned);
         assert_eq!(unpin.reason.as_deref(), Some("retracted"));
         assert!(unpin.preview.is_none());
+    }
+
+    #[test]
+    fn in_call_reaction_survives_inbound_to_ffi() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='caller@waddle.test/phone'>\
+               <in-call xmlns='urn:waddle:in-call:0' sid='c1'><reaction emoji='👍'/></in-call>\
+             </message>",
+        ));
+        assert_eq!(
+            ffi.in_call_reaction,
+            Some(WaddleInCallReaction {
+                sid: "c1".into(),
+                emoji: "👍".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn inbound_message_without_in_call_reaction_has_no_reaction_field() {
+        let ffi = inbound_to_ffi(parse_message(
+            "<message xmlns='jabber:client' type='chat' from='caller@waddle.test/phone'>\
+               <body>Hello</body>\
+             </message>",
+        ));
+        assert_eq!(ffi.in_call_reaction, None);
     }
 
     #[test]

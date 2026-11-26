@@ -263,12 +263,6 @@ impl Feature {
         Self::new("http://jabber.org/protocol/pubsub")
     }
 
-    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#pep`.
-    #[must_use]
-    pub fn pep() -> Self {
-        Self::new("http://jabber.org/protocol/pubsub#pep")
-    }
-
     /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#auto-create`.
     #[must_use]
     pub fn pubsub_auto_create() -> Self {
@@ -601,5 +595,13 @@ impl Feature {
     #[must_use]
     pub fn muji() -> Self {
         Self::new("urn:xmpp:jingle:muji:0")
+    }
+
+    /// XEP-0298: Delivering Conference Information to Jingle
+    /// Participants (Coin). Advertised by the entity that acts as the
+    /// conference focus and emits `<conference-info isfocus='true'/>`.
+    #[must_use]
+    pub fn coin() -> Self {
+        Self::new("urn:xmpp:coin:1")
     }
 }

@@ -219,6 +219,7 @@ async fn room_assigns_distinct_stanza_ids_when_occupants_reuse_sender_ids() {
         .parse()
         .expect("valid room JID");
     join_room_as(&mut admin, &room, USERNAME).await;
+    ws_common::iq::unlock_created_room(&mut admin, room.as_str()).await;
     join_room_as(&mut alice, &room, ALICE).await;
 
     let shared_envelope_id = EnvelopeId::new("reused-client-id");
@@ -476,6 +477,80 @@ fn xep_0359_add_stanza_id_emits_required_by_attribute_per_section_3() {
         elem.attr("by"),
         Some(by.to_string().as_str()),
         "XEP-0359 §3: `by` attribute MUST be present"
+    );
+}
+
+const BOB_PASSWORD: &str = "stanza-id-bob-password";
+
+fn stanza_id_authorities(frame: &str, body: &str) -> Vec<String> {
+    let root = frame.parse::<Element>().expect("valid XML frame");
+    find_message_by_body(&root, body)
+        .unwrap_or_else(|| panic!("message with body {body:?} missing from frame: {frame}"))
+        .children()
+        .filter(|child| child.is("stanza-id", NS_SID))
+        .filter_map(|child| child.attr("by").map(str::to_owned))
+        .collect()
+}
+
+/// XEP-0313 §4.1.1: servers MUST NOT include the sender's archive `<stanza-id/>`
+/// in messages addressed to a contact, yet SHOULD include it in the forwarded
+/// message of a XEP-0280 sent carbon.
+#[tokio::test]
+async fn direct_message_recipient_copy_omits_sender_archive_stanza_id() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[("bob", BOB_PASSWORD)]);
+    let connect = |user: &'static str, password: String, resource: &'static str| {
+        let url = server.ws_url();
+        async move {
+            WsXmppClient::connect_and_auth(&url, DOMAIN, user, &password, resource)
+                .await
+                .expect("connect and auth")
+        }
+    };
+    let alice_password = server.fixed_account_password().to_string();
+    let mut phone = connect(USERNAME, alice_password.clone(), "phone").await;
+    let mut laptop = connect(USERNAME, alice_password, "laptop").await;
+    let mut bob = connect("bob", BOB_PASSWORD.to_string(), "desk").await;
+    let enabled = ws_common::iq::round_trip(
+        &mut laptop,
+        xmpp_parsers::iq::Iq::from_set("laptop-carbons", xmpp_parsers::carbons::Enable),
+    )
+    .await;
+    assert!(
+        matches!(enabled, xmpp_parsers::iq::Iq::Result { .. }),
+        "{enabled:?}"
+    );
+
+    let body = "sender archive id stays private";
+    phone
+        .send(&format!(
+            r#"<message to="bob@{DOMAIN}" type="chat" id="dm-1"><body>{body}</body></message>"#
+        ))
+        .await
+        .expect("send direct message");
+
+    let alice_bare = format!("{USERNAME}@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let delivered = bob
+        .recv_matching(|frame| frame_has_message_body(frame, body))
+        .await
+        .expect("bob receives the message");
+    assert_eq!(
+        stanza_id_authorities(&delivered, body),
+        vec![bob_bare],
+        "recipient copy carries only the recipient's own stamp: {delivered}"
+    );
+
+    let carbon = laptop
+        .recv_matching(|frame| {
+            frame.contains("urn:xmpp:carbons:2") && frame_has_message_body(frame, body)
+        })
+        .await
+        .expect("alice's other resource receives the sent carbon");
+    assert_eq!(
+        stanza_id_authorities(&carbon, body),
+        vec![alice_bare],
+        "sent carbon's forwarded message carries the sender's stamp: {carbon}"
     );
 }
 

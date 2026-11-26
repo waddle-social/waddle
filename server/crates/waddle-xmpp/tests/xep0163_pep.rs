@@ -5,8 +5,9 @@
 //! invariants live across the disco + identity + classifier
 //! surfaces:
 //!
-//! - §6 disco advertisement: `http://jabber.org/protocol/pubsub#pep`
-//!   on the user's bare-JID `disco#info`,
+//! - §6 disco advertisement: the `pubsub/pep` identity plus the supported
+//!   XEP-0060 features on the user's bare-JID `disco#info` (the XEP
+//!   defines no PEP feature var of its own),
 //! - §3 identity: `<identity category='pubsub' type='pep'/>`,
 //! - §"PEP Request" classifier: a PubSub IQ addressed to the
 //!   user's bare JID (or no `to` at all) is a PEP request; one
@@ -21,7 +22,6 @@ use waddle_xmpp::pubsub::{
     build_pep_identity, is_pep_request, is_pep_request_to, pep_features, PepHandler,
     PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA, PEP_NODE_BOOKMARKS,
 };
-use waddle_xmpp_core::disco::Feature;
 use waddle_xmpp_core::pubsub::node::AccessModel;
 use xmpp_parsers::iq::Iq;
 
@@ -30,32 +30,30 @@ const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 // ── §6 PEP disco advertisement ──────────────────────────────────────
 
 #[test]
-fn xep0163_pep_features_advertise_pubsub_pep_per_section_6() {
-    // XEP-0163 §6: "When a server supports PEP, it MUST include
-    // the `http://jabber.org/protocol/pubsub#pep` feature in its
-    // responses to service discovery information (disco#info)
-    // requests sent to the user's bare JID." Without this advert
-    // clients fall back to per-node `+notify` probing or skip
-    // PEP-driven features entirely.
+fn xep0163_pep_features_do_not_invent_a_pep_feature_var() {
+    // XEP-0163 §6 Determining Support is the `pubsub/pep` identity plus
+    // "all supported XEP-0060 features". `pubsub#pep` is defined by neither
+    // XEP-0163 nor XEP-0060, so it must not be advertised under the
+    // jabber.org/protocol/pubsub namespace.
     let feats = pep_features();
-    let target = Feature::new("http://jabber.org/protocol/pubsub#pep");
     assert!(
-        feats.iter().any(|f| f == &target),
-        "pep_features() MUST advertise `http://jabber.org/protocol/pubsub#pep` per XEP-0163 §6"
+        !feats
+            .iter()
+            .any(|f| f.0 == "http://jabber.org/protocol/pubsub#pep"),
+        "pep_features() must not advertise an undefined pubsub#pep feature"
     );
 }
 
 #[test]
 fn xep0163_pep_features_also_advertise_base_pubsub() {
-    // §3: PEP IS PubSub. The base `pubsub` feature MUST appear
-    // alongside the `pubsub#pep` profile flag so a PEP-naive
-    // pubsub client can still discover the service.
+    // §3: PEP IS PubSub. The base `pubsub` feature MUST appear so a
+    // PEP-naive pubsub client can still discover the service.
     let feats = pep_features();
     assert!(
         feats
             .iter()
             .any(|f| f.0 == "http://jabber.org/protocol/pubsub"),
-        "pep_features() MUST advertise base `pubsub` alongside the `pep` profile flag"
+        "pep_features() MUST advertise base `pubsub` "
     );
 }
 

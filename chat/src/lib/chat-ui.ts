@@ -1,7 +1,8 @@
+import { shallowRef } from "vue";
 import type { PinPermission } from "@/lib/chat-types";
 import type { SafetyScores } from "@/lib/safety-scores/types";
 import type { TimestampSource } from "@/lib/timeline-timestamps";
-import type { WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
+import type { EncryptedFileHash, WaddleEncryptedFile } from "@/lib/xmpp/extensions/encrypted-file";
 import {
   renderRichMessageHtml,
   type MarkupSpan,
@@ -39,6 +40,7 @@ export interface TimelineSharedFile {
   desc?: string;
   url: string;
   disposition: "inline" | "attachment";
+  hashes?: EncryptedFileHash[];
   encrypted?: WaddleEncryptedFile;
 }
 
@@ -440,43 +442,34 @@ export interface ChannelEditFormData {
 
 // ── XEP-0392 Consistent Color Generation ────────────────────────────
 //
-// The spec algorithm is SHA-1(UTF-8 input) → first 2 bytes → hue. The
-// browser's SubtleCrypto SHA-1 is async, which doesn't fit Vue
-// `computed` callsites (e.g. `AppAvatar`'s `bgColor`), so the chat
-// loads the Rust SHA-1 impl through wasm and calls it synchronously
-// once initialised. Until the wasm hue function is installed (early
-// during sign-in, before `AppAvatar` typically renders), a DJB2
-// fallback keeps the first paint deterministic and non-empty.
+// The spec algorithm is SHA-1(UTF-8 input) → hue angle → HSLuv
+// `hsluvToRgb`. The browser's SubtleCrypto SHA-1 is async, which doesn't
+// fit Vue `computed` callsites (e.g. `AppAvatar`'s background), so the
+// chat loads the Rust implementation through wasm and calls it
+// synchronously once initialised. Until it is installed there is no
+// colour at all: `consistentColor` returns `null` and callers render
+// their static colour, so no frame ever shows a non-spec colour.
 
-let hueImpl: (input: string) => number = djb2FallbackHue;
+type ConsistentColorBackend = (input: string, saturation: number, lightness: number) => string;
 
-/** DJB2 fallback used before the wasm SHA-1 hue is installed. */
-function djb2FallbackHue(input: string): number {
-  let h = 5381;
-  for (let i = 0; i < input.length; i++) {
-    h = ((h << 5) + h + input.charCodeAt(i)) & 0xffff;
-  }
-  return (h / 65536) * 360;
-}
+/** Reactive so computed colours re-evaluate once the backend installs. */
+const colorBackend = shallowRef<ConsistentColorBackend | null>(null);
 
-/** Install the spec-conformant hue implementation. Called at app boot
- * once the wasm module is loaded; subsequent `consistentColor` calls
- * return XEP-0392 values.
+/** Install the spec-conformant colour implementation. Called at app boot
+ * once the wasm module is loaded.
  *
  * Refuses non-function inputs so a stale wasm bundle that lacks
- * `xep0392_consistent_hue` (e.g. when wasm-pack's named re-export list
- * has fallen behind the Rust source) degrades to the DJB2 fallback
- * instead of replacing `hueImpl` with `undefined` and crashing every
- * `AppAvatar` render with "T is not a function". */
-export function setConsistentColorBackend(fn: (input: string) => number): void {
+ * `xep0392_consistent_color` degrades to the static colour instead of
+ * crashing every `AppAvatar` render. */
+export function setConsistentColorBackend(fn: ConsistentColorBackend): void {
   if (typeof fn !== "function") return;
-  hueImpl = fn;
+  colorBackend.value = fn;
 }
 
-/** Generate a CSS hsl() color string for a username/JID. */
-export function consistentColor(input: string, saturation = 65, lightness = 50): string {
-  const hue = hueImpl(input);
-  return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
+/** XEP-0392 `#rrggbb` colour for a username/JID (HSLuv saturation and
+ * lightness, 0–100), or `null` while the wasm backend is not installed. */
+export function consistentColor(input: string, saturation = 100, lightness = 45): string | null {
+  return colorBackend.value?.(input, saturation, lightness) ?? null;
 }
 
 // ── Rich Message Rendering ──────────────────────────────────────────

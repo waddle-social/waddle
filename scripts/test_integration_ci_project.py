@@ -91,11 +91,67 @@ class DiscoveryContracts(unittest.TestCase):
         config["ci"]["pipelines"]["deviceTests"] = config["ci"]["pipelines"]["pullRequest"]
         self.metadata["instances"]["apps/android"] = config
         self.assertEqual(module.verify_project(self.summary, self.metadata, self.root / "apps/android", "deviceTests")["tasks"], 1)
+        config["ci"]["pipelines"]["queueChecks"] = config["ci"]["pipelines"]["pullRequest"]
+        self.assertEqual(module.verify_project(self.summary, self.metadata, self.root / "apps/android", "queueChecks")["tasks"], 1)
+        self.summary["projects"][0]["name"] = "different-project"
+        with self.assertRaisesRegex(ValueError, "reviewed queue projects"):
+            module.verify_project(self.summary, self.metadata, self.root / "apps/android", "queueChecks")
 
     def test_mismatched_metadata_fails(self):
         self.metadata["instances"]["chat"]["name"] = "other"
         with self.assertRaises(ValueError):
             self.verify()
+
+
+class ExecutionCacheContracts(unittest.TestCase):
+    def test_only_operator_queue_gets_a_private_write_only_store(self):
+        previous = {"CUENV_CACHE": "read", "CUENV_CACHE_DIR": "/unused/shared-cache",
+                    "CUENV_REMOTE_CACHE": "https://unused.invalid", "CUENV_REMOTE_CACHE_UPLOAD": "true"}
+        private_stores = []
+        for path, project, pipeline in (("operator", "waddle-operator", "queueChecks"),
+                                        ("operator", "waddle-operator", "queueChecks"),
+                                        ("operator", "waddle-operator", "pullRequest"),
+                                        ("apps/linux", "waddle-linux", "queueChecks")):
+            def executor(command, **kwargs):
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, "head")
+                if command[1:] == ["--version"]:
+                    return subprocess.CompletedProcess(command, 0, "cuenv 0.81.1")
+                if "--help" in command:
+                    return subprocess.CompletedProcess(command, 0, "  --all   run all tasks")
+                env = kwargs["env"]
+                self.assertEqual(env["NIX_CONFIG"], "sandbox = true")
+                if path == "operator" and pipeline == "queueChecks":
+                    self.assertEqual((env["CUENV_CACHE"], env["CUENV_REMOTE_CACHE"], env["CUENV_REMOTE_CACHE_UPLOAD"]),
+                                     ("write", "", "false"))
+                    store = Path(env["CUENV_CACHE_DIR"])
+                    self.assertTrue(store.is_dir())
+                    self.assertFalse(list(store.iterdir()))
+                    if "--dry-run" in command:
+                        private_stores.append(store)
+                    else:
+                        self.assertEqual(store, private_stores[-1])
+                else:
+                    self.assertEqual(env["CUENV_CACHE"], "off")
+                    for key in ("CUENV_CACHE_DIR", "CUENV_REMOTE_CACHE", "CUENV_REMOTE_CACHE_UPLOAD"):
+                        self.assertEqual(env[key], previous[key])
+                if "--dry-run" in command:
+                    Path(command[command.index("--output") + 1]).write_text(json.dumps({
+                        "projects": [{"project": path, "pipeline": pipeline, "tasks": ["verify"]}]}))
+                    return subprocess.CompletedProcess(command, 0)
+                raise subprocess.CalledProcessError(17, command)
+
+            result = {"path": path, "project": project, "pipeline": pipeline,
+                      "task_names": ["verify"], "report_project": str(Path(path).resolve())}
+            with self.subTest(path=path, pipeline=pipeline), tempfile.TemporaryDirectory() as tmp:
+                with patch.dict(os.environ, {**previous, "NIX_CONFIG": "sandbox = true"}), \
+                     patch.object(module, "expected_context", return_value={"provider": "local", "sha": "current"}), \
+                     patch.object(module, "report_path", return_value=Path(tmp) / "report.json"), \
+                     patch.object(module.subprocess, "run", side_effect=executor), \
+                     self.assertRaises(subprocess.CalledProcessError):
+                    module.execute_pipeline(result, path)
+        self.assertEqual(len(set(private_stores)), 2)
+        self.assertTrue(all(not store.exists() for store in private_stores))
 
 
 class ReportContracts(unittest.TestCase):
@@ -161,9 +217,11 @@ class PinnedCuenvContracts(unittest.TestCase):
             (root / "env.cue").write_text(bound_inline)
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
+            shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             bound_result = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(bound_result.returncode, 0)
-            self.assertIn("named task references", bound_result.stderr)
+            self.assertIn("selected tasks differ", bound_result.stderr)
+            self.assertFalse((root / ".cuenv/reports").exists())
             (root / "env.cue").write_text(named)
             self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
             result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
@@ -250,7 +308,7 @@ class PinnedCuenvContracts(unittest.TestCase):
             # Delegate to the real CLI, then corrupt only its on-disk evidence.
             binary_dir = root / "bin"; binary_dir.mkdir()
             wrapper = binary_dir / "cuenv"
-            wrapper.write_text("#!" + sys.executable + "\n" + "import json, os, pathlib, subprocess, sys, time\n" + "result = subprocess.run([" + repr(real_cli) + "] + sys.argv[1:])\n" + "if sys.argv[1:3] == ['ci', '--all'] and result.returncode == 0:\n" + "    path = next(pathlib.Path('.cuenv/reports').rglob('*.json'))\n" + "    mode = os.environ['REPORT_TAMPER']\n" + "    if mode == 'missing': path.unlink()\n" + "    elif mode == 'symlink':\n" + "        other = path.with_suffix('.saved'); path.rename(other); path.symlink_to(other.name)\n" + "    elif mode == 'future': os.utime(path, (time.time() + 60, time.time() + 60))\n" + "    elif mode == 'parse': path.write_text('{invalid')\n" + "    else:\n" + "        value = json.loads(path.read_text())\n" + "        if mode == 'identity': value['context']['sha'] = 'b' * 40\n" + "        if mode == 'duplicate': value['tasks'] *= 2\n" + "        if mode == 'skipped': value['tasks'][0]['status'] = 'skipped'\n" + "        if mode == 'failed': value['tasks'][0]['exit_code'] = 1\n" + "        path.write_text(json.dumps(value))\n" + "sys.exit(result.returncode)\n")
+            wrapper.write_text("#!" + sys.executable + "\n" + "import json, os, pathlib, subprocess, sys, time\n" + "result = subprocess.run([" + repr(real_cli) + "] + sys.argv[1:])\n" + "if sys.argv[1:3] == ['ci', '--all'] and '--dry-run' not in sys.argv and result.returncode == 0:\n" + "    path = next(pathlib.Path('.cuenv/reports').rglob('*.json'))\n" + "    mode = os.environ['REPORT_TAMPER']\n" + "    if mode == 'missing': path.unlink()\n" + "    elif mode == 'symlink':\n" + "        other = path.with_suffix('.saved'); path.rename(other); path.symlink_to(other.name)\n" + "    elif mode == 'future': os.utime(path, (time.time() + 60, time.time() + 60))\n" + "    elif mode == 'parse': path.write_text('{invalid')\n" + "    else:\n" + "        value = json.loads(path.read_text())\n" + "        if mode == 'identity': value['context']['sha'] = 'b' * 40\n" + "        if mode == 'duplicate': value['tasks'] *= 2\n" + "        if mode == 'skipped': value['tasks'][0]['status'] = 'skipped'\n" + "        if mode == 'failed': value['tasks'][0]['exit_code'] = 1\n" + "        path.write_text(json.dumps(value))\n" + "sys.exit(result.returncode)\n")
             wrapper.chmod(0o755)
             for mode in ("missing", "identity", "duplicate", "skipped", "failed", "parse", "symlink", "future"):
                 shutil.rmtree(reports)

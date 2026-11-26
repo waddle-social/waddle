@@ -48,14 +48,34 @@ pub enum TombstoneTarget {
         /// `to` must bare-equal this JID.
         archive: jid::BareJid,
     },
+    /// Groupchat retraction cascade: a cached XEP-0308 correction of
+    /// the retracted message. XEP-0424 §Tombstones applies a retraction
+    /// to the original and each of its corrections, and XEP-0308 §Business
+    /// Rules allows a MUC correction only from the original's full JID, so
+    /// a cached reflection matches iff it carries
+    /// `<replace xmlns='urn:xmpp:message-correct:0' id=replaced_id/>` and
+    /// its `from` equals the original author's occupant JID. A cached
+    /// reflection is addressed `from` the occupant, never by a
+    /// room stanza-id, so this variant never consults `<stanza-id/>`.
+    GroupchatCorrection {
+        /// The id a correction names in `<replace id=…/>`: one of the
+        /// original's identities (room stanza-id, wire id, origin-id).
+        replaced_id: String,
+        /// The original author's occupant JID (`room@service/nick`).
+        occupant: jid::FullJid,
+        /// The room's bare JID — the conversation scope.
+        room: jid::BareJid,
+    },
 }
 
 impl TombstoneTarget {
-    /// The target message id string (room stanza-id or author wire id).
+    /// The target message id string (room stanza-id, author wire id, or
+    /// the id a correction replaces).
     pub fn id(&self) -> &str {
         match self {
             Self::Groupchat { stanza_id, .. } => stanza_id,
             Self::Direct { wire_id, .. } => wire_id,
+            Self::GroupchatCorrection { replaced_id, .. } => replaced_id,
         }
     }
 
@@ -65,6 +85,7 @@ impl TombstoneTarget {
         match self {
             Self::Groupchat { room, .. } => room,
             Self::Direct { archive, .. } => archive,
+            Self::GroupchatCorrection { room, .. } => room,
         }
     }
 
@@ -83,7 +104,13 @@ impl TombstoneTarget {
     ///      - [`Self::Direct`]: wire `id` equals `wire_id` AND the
     ///        message's `from` bare-equals `author`, OR an
     ///        archive-stamped `<stanza-id id=wire_id by=archive/>`
-    ///        child.
+    ///        child, OR a XEP-0308 correction of the target: a
+    ///        `<replace xmlns='urn:xmpp:message-correct:0' id=wire_id/>`
+    ///        child on a message whose `from` bare-equals `author`
+    ///        (XEP-0424 §Tombstones: a retraction applies to the
+    ///        original and each of its corrections). A retraction
+    ///        stanza that carries a `<replace/>` fallback is never
+    ///        treated as a correction.
     ///
     /// XEP-0359 §3 scopes `<stanza-id/>` to `urn:xmpp:sid:0`; the
     /// namespace is matched explicitly so an unrelated extension
@@ -118,8 +145,19 @@ impl TombstoneTarget {
                         .attr("from")
                         .map(|s| jid_bare_equals(s, author))
                         .unwrap_or(false);
-                wire_match || has_stanza_id_by(el, wire_id, archive)
+                wire_match
+                    || has_stanza_id_by(el, wire_id, archive)
+                    || is_correction_by(el, wire_id, author)
             }
+            Self::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                ..
+            } => is_correction_from(el, replaced_id, |from| {
+                from.parse::<jid::Jid>()
+                    .map(|from| from.try_into_full().ok().as_ref() == Some(occupant))
+                    .unwrap_or(false)
+            }),
         }
     }
 }
@@ -134,6 +172,32 @@ fn has_stanza_id_by(el: &minidom::Element, target_id: &str, by_jid: &jid::BareJi
                 .map(|by| jid_bare_equals(by, by_jid))
                 .unwrap_or(false)
     })
+}
+
+/// True iff `el` is a XEP-0308 correction of `target_id` sent by `author`:
+/// it carries `<replace xmlns='urn:xmpp:message-correct:0' id=target_id/>`,
+/// its `from` bare-equals `author`, and it is not itself a XEP-0424
+/// retraction (whose fallback may carry a `<replace/>` that MUST NOT be
+/// applied as a correction and must still be delivered).
+fn is_correction_by(el: &minidom::Element, target_id: &str, author: &jid::BareJid) -> bool {
+    is_correction_from(el, target_id, |from| jid_bare_equals(from, author))
+}
+
+/// [`is_correction_by`] with a caller-supplied author predicate over the
+/// `from` attribute (bare-JID for 1:1, full occupant JID for MUC).
+fn is_correction_from(
+    el: &minidom::Element,
+    target_id: &str,
+    from_author: impl Fn(&str) -> bool,
+) -> bool {
+    el.attr("from").is_some_and(from_author)
+        && !el
+            .children()
+            .any(|c| c.is("retract", crate::xep::xep0424::NS_MESSAGE_RETRACT))
+        && el.children().any(|c| {
+            c.is("replace", crate::xep::xep0308::NS_MESSAGE_CORRECT)
+                && c.attr("id") == Some(target_id)
+        })
 }
 
 /// Select the sequences of unacked outbound `<message/>` entries that
@@ -290,5 +354,121 @@ mod tests {
             !target.matches_message_element(&forged),
             "a stanza-id whose by= is not the archive must never match"
         );
+    }
+
+    fn correction(from: &str, to: &str, replaces: &str) -> minidom::Element {
+        format!(
+            "<message xmlns='jabber:client' from='{from}' to='{to}' id='fix-1'>\
+             <body>fixed</body>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='{replaces}'/></message>"
+        )
+        .parse()
+        .expect("valid message element")
+    }
+
+    #[test]
+    fn direct_retraction_scrubs_same_author_corrections_of_the_target() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el = correction("Alice@Example.com/web", "bob@example.com", "orig-1");
+        assert!(target.matches_message_element(&el));
+        let other_target = correction("alice@example.com/web", "bob@example.com", "orig-2");
+        assert!(!target.matches_message_element(&other_target));
+    }
+
+    #[test]
+    fn direct_retraction_never_scrubs_another_authors_replace() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el = correction("bob@example.com/web", "alice@example.com", "orig-1");
+        assert!(!target.matches_message_element(&el));
+        let mallory = correction("mallory@example.com/web", "bob@example.com", "orig-1");
+        assert!(!target.matches_message_element(&mallory));
+    }
+
+    #[test]
+    fn replace_in_a_retraction_fallback_is_not_scrubbed_as_a_correction() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let retraction: minidom::Element =
+            "<message xmlns='jabber:client' from='alice@example.com/web' to='bob@example.com' \
+             id='r1'><retract xmlns='urn:xmpp:message-retract:1' id='orig-1'/>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='orig-1'/></message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&retraction));
+    }
+
+    #[test]
+    fn replace_in_another_namespace_is_not_a_correction() {
+        let target = direct("orig-1", "alice@example.com", "bob@example.com");
+        let el: minidom::Element =
+            "<message xmlns='jabber:client' from='alice@example.com/web' to='bob@example.com' \
+             id='x'><replace xmlns='urn:example:other' id='orig-1'/></message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&el));
+    }
+
+    fn occupant_correction(from: &str, replaces: &str) -> minidom::Element {
+        format!(
+            "<message xmlns='jabber:client' from='{from}' to='bob@example.com/web' \
+             id='fix-1' type='groupchat'><body>fixed</body>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='{replaces}'/></message>"
+        )
+        .parse()
+        .expect("valid message element")
+    }
+
+    fn groupchat_correction_target() -> TombstoneTarget {
+        TombstoneTarget::GroupchatCorrection {
+            replaced_id: "orig-1".to_string(),
+            occupant: "room@conference.example.com/alice"
+                .parse()
+                .expect("occupant jid"),
+            room: bare("room@conference.example.com"),
+        }
+    }
+
+    #[test]
+    fn groupchat_retraction_scrubs_same_occupant_corrections() {
+        let target = groupchat_correction_target();
+        let el = occupant_correction("Room@Conference.EXAMPLE.com/alice", "orig-1");
+        assert!(target.matches_message_element(&el));
+        let other_id = occupant_correction("room@conference.example.com/alice", "orig-2");
+        assert!(!target.matches_message_element(&other_id));
+    }
+
+    #[test]
+    fn groupchat_retraction_never_scrubs_another_occupants_correction() {
+        let target = groupchat_correction_target();
+        // Same room and replaced id, different nick: a different occupant
+        // (XEP-0308 requires the full JID to match).
+        let mallory = occupant_correction("room@conference.example.com/mallory", "orig-1");
+        assert!(!target.matches_message_element(&mallory));
+        // The room's own bare JID is not the occupant.
+        let room = occupant_correction("room@conference.example.com", "orig-1");
+        assert!(!target.matches_message_element(&room));
+        // Same nick in another room.
+        let elsewhere = occupant_correction("other@conference.example.com/alice", "orig-1");
+        assert!(!target.matches_message_element(&elsewhere));
+    }
+
+    #[test]
+    fn groupchat_correction_target_ignores_stanza_id_and_retraction_fallbacks() {
+        let target = groupchat_correction_target();
+        let stamped: minidom::Element =
+            "<message xmlns='jabber:client' from='room@conference.example.com/alice' \
+             to='bob@example.com/web' type='groupchat'>\
+             <stanza-id xmlns='urn:xmpp:sid:0' by='room@conference.example.com' id='orig-1'/>\
+             </message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&stamped));
+        let retraction: minidom::Element =
+            "<message xmlns='jabber:client' from='room@conference.example.com/alice' \
+             to='bob@example.com/web' type='groupchat'>\
+             <retract xmlns='urn:xmpp:message-retract:1' id='orig-1'/>\
+             <replace xmlns='urn:xmpp:message-correct:0' id='orig-1'/></message>"
+                .parse()
+                .expect("valid message element");
+        assert!(!target.matches_message_element(&retraction));
     }
 }

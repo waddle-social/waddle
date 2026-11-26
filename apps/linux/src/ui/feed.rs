@@ -427,15 +427,11 @@ impl WaddleWindow {
         let who = gtk::Box::new(gtk::Orientation::Vertical, 0);
         who.set_valign(gtk::Align::Center);
         who.set_hexpand(true);
-        let color = nick_color::hex(author.unwrap_or(&name));
         let name_label = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .use_markup(true)
-            .label(format!(
-                "<span foreground=\"{color}\" weight=\"bold\">{}</span>",
-                glib::markup_escape_text(&name)
-            ))
+            .label(nick_color::markup(author.unwrap_or(&name), &name, true))
             .build();
         who.append(&name_label);
         let mut meta: Vec<String> = Vec::new();
@@ -522,6 +518,7 @@ impl WaddleWindow {
             .tooltip_text("Refresh the Feed")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&refresh, "Refresh the feed");
         refresh.add_css_class("flat");
         refresh.add_css_class("circular");
 
@@ -559,6 +556,7 @@ impl WaddleWindow {
             .tooltip_text("Add a Picture")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&attach, "Add a picture");
         attach.add_css_class("flat");
         let attached_name = gtk::Label::builder()
             .xalign(0.0)
@@ -571,6 +569,7 @@ impl WaddleWindow {
             .tooltip_text("Remove the Picture")
             .valign(gtk::Align::Center)
             .build();
+        super::a11y::label(&remove, "Remove the picture");
         remove.add_css_class("flat");
         remove.add_css_class("circular");
         let attached = gtk::Box::new(gtk::Orientation::Horizontal, 6);

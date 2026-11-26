@@ -116,7 +116,7 @@ impl Identity {
     }
 
     /// Identity for the community pubsub service that hosts the
-    /// XEP-0472 social feed and XEP-0501 stories nodes. Same shape
+    /// XEP-0472 social feed and xCal events nodes. Same shape
     /// as a generic pubsub service; the name is what shows up in a
     /// disco#items enumeration of the deployment.
     #[must_use]
@@ -296,12 +296,14 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
                 features.push(Feature::new(var));
             }
             ("x", NS_DATA_FORMS) => {
-                if has_multiple_form_types(child) {
-                    ill_formed = true;
-                } else if let Some(form_type) = caps_form_type(child) {
-                    if !seen_form_types.insert(form_type) {
-                        ill_formed = true;
+                match caps_form_type(child) {
+                    CapsForm::IllFormed => ill_formed = true,
+                    CapsForm::Valid(form_type) => {
+                        if !seen_form_types.insert(form_type) {
+                            ill_formed = true;
+                        }
                     }
+                    CapsForm::Ignored => {}
                 }
                 extensions.push(child.clone());
             }
@@ -318,50 +320,58 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
     })
 }
 
-/// XEP-0115 §5.4 step 2.4: a `<x type="result"/>` form with more than
-/// one FORM_TYPE field — or one FORM_TYPE field carrying more than
-/// one `<value/>` — is malformed. Either case invalidates the whole
-/// disco#info response.
-pub(in crate::disco::info) fn has_multiple_form_types(form: &Element) -> bool {
-    let mut form_type_fields = 0;
-    let mut form_type_values = 0;
-    for field in form.children().filter(|c| {
-        c.name() == "field" && c.ns() == NS_DATA_FORMS && c.attr("var") == Some("FORM_TYPE")
-    }) {
-        form_type_fields += 1;
-        for value in field
-            .children()
-            .filter(|c| c.name() == "value" && c.ns() == NS_DATA_FORMS)
-        {
-            form_type_values += 1;
-            let _ = value;
-        }
-    }
-    form_type_fields > 1 || form_type_values > 1
+/// How a `<x/>` form in a disco#info response participates in XEP-0115 §5.4.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::disco::info) enum CapsForm {
+    /// Not a result form, no hidden FORM_TYPE, or a valueless FORM_TYPE:
+    /// ignore the form and continue processing (§5.4 step 2.5).
+    Ignored,
+    /// More than one FORM_TYPE field, or a FORM_TYPE field carrying
+    /// `<value/>` elements with different text: the entire response is
+    /// ill-formed (§5.4 step 2.3).
+    IllFormed,
+    /// A well-formed form with this FORM_TYPE.
+    Valid(String),
 }
 
-/// Return the FORM_TYPE used by a well-formed XEP-0128 result form.
-/// Forms with an absent, non-hidden, or valueless FORM_TYPE do not
-/// participate in XEP-0115 verification and are ignored per §5.4.
-pub(in crate::disco::info) fn caps_form_type(form: &Element) -> Option<String> {
+/// Classify an XEP-0128 form for XEP-0115 §5.4. Only result forms whose
+/// FORM_TYPE is `hidden` are evaluated; repeating the same FORM_TYPE
+/// `<value/>` text inside one field is not ill-formed.
+pub(in crate::disco::info) fn caps_form_type(form: &Element) -> CapsForm {
     if form.attr("type") != Some("result") {
-        return None;
+        return CapsForm::Ignored;
     }
 
-    let field = form.children().find(|child| {
-        child.name() == "field"
-            && child.ns() == NS_DATA_FORMS
-            && child.attr("var") == Some("FORM_TYPE")
-    })?;
-    if field.attr("type") != Some("hidden") {
-        return None;
-    }
-
-    field
+    let fields: Vec<&Element> = form
         .children()
-        .find(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
+        .filter(|child| {
+            child.name() == "field"
+                && child.ns() == NS_DATA_FORMS
+                && child.attr("var") == Some("FORM_TYPE")
+        })
+        .collect();
+    if !fields
+        .iter()
+        .any(|field| field.attr("type") == Some("hidden"))
+    {
+        return CapsForm::Ignored;
+    }
+    if fields.len() > 1 {
+        return CapsForm::IllFormed;
+    }
+
+    let values: Vec<String> = fields[0]
+        .children()
+        .filter(|child| child.name() == "value" && child.ns() == NS_DATA_FORMS)
         .map(Element::text)
-        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if values.iter().any(|value| *value != values[0]) {
+        return CapsForm::IllFormed;
+    }
+    match values.into_iter().next() {
+        Some(value) if !value.trim().is_empty() => CapsForm::Valid(value),
+        _ => CapsForm::Ignored,
+    }
 }
 
 /// Build a disco#info response IQ.
@@ -589,9 +599,6 @@ pub fn community_service_features() -> Vec<Feature> {
         // XEP-0472 Pubsub Social Feed — community feed node lives
         // here at `urn:xmpp:pubsub-social-feed:1`.
         Feature::social_feed(),
-        // XEP-0501 Pubsub Stories — community stories node lives
-        // here at `urn:xmpp:pubsub-social-feed:stories:0`.
-        Feature::stories(),
         // xCal community events node — payload is iCalendar in XML
         // (`urn:ietf:params:xml:ns:xcal`) per the XSF ProtoXEP
         // "Calendaring Extensions to Publish-Subscribe".
@@ -610,6 +617,9 @@ pub fn muc_service_features() -> Vec<Feature> {
         // original `id` (enforced in the room dispatch path), so the
         // service advertises stable-id support (#1265 item 14).
         Feature::muc_stable_id(),
+        // XEP-0421 §Discovering Support: every room forces occupant
+        // identifiers on, so the service SHOULD advertise the feature too.
+        Feature::occupant_id(),
     ]
 }
 
@@ -706,29 +716,14 @@ pub fn muc_room_features(
         Feature::vcard(),
         Feature::occupant_id(),
         Feature::hats(),
-        // XEP-0513 §292 + §303: advertising `urn:xmpp:mentions:0` and
-        // `urn:xmpp:mentions:0#channel` is binding — once advertised,
-        // the room's `<query xmlns='urn:xmpp:mentions:0'/>` IQ MUST
-        // return a form with `mentions#count` + `mentions#individual`
-        // (always required) and `mentions#channel` (if and only if
-        // `#channel` is advertised). Slices 3a/3b enforce a hardcoded
-        // server policy (`mentions#count = 5`, `mentions#individual
-        // = participants`, `mentions#channel = moderators`) at T0
-        // candidate classification; slice 3c wires the §295 IQ
-        // surface so the form on the wire matches the policy in
-        // effect. Per CLAUDE.md XEP conformance hard rule, advertising
-        // the namespaces only becomes safe once the IQ form is
-        // implemented — see
-        // `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/mentions_permissions.rs`
-        // (the §295 IQ handler in the `waddle-server` crate) for the
-        // handler that backs these advertised features.
-        //
-        // TODO(#525-followup): §303 also SHOULDs that the
-        // `mentions#*` form fields be mirrored into the room's
-        // `muc#roominfo` extension form (xeps/xep-0513.xml line 303).
-        // Deferred — adding fields to muc#roominfo is a separate
-        // slice; the dedicated §295 IQ form is the primary discovery
-        // path and is conformant on its own.
+        // XEP-0513 (xep-0513.xml:92): "An entity implementing this
+        // specification MUST advertise 'urn:xmpp:mentions:0' as a XEP-0030
+        // feature. Subsequent OPTIONAL features in this document MUST also
+        // advertise support, if implemented." `#channel` is advertised
+        // because `<mention type='urn:xmpp:mentions:0#channel'/>` is
+        // handled. The current specification has no permissions query or
+        // form; group-mention abuse limits (xep-0513.xml:267) are local
+        // server policy.
         Feature::explicit_mentions(),
         Feature::channel_mentions(),
         Feature::muc_nonanonymous(),

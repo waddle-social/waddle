@@ -47,6 +47,9 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// `urn:waddle:safety-scores:1`), visible to every participant. Nil
     /// until judged, after a clear, and on removed messages.
     public var safetyScores: SafetyScores?
+    /// The call this row announced is over, as the room said (XEP-0422,
+    /// `urn:waddle:call-thread:0`).
+    public var callEnded: CallThreadEnded?
     /// Local send not yet reflected or archived.
     public var isLocalEcho: Bool
     /// When this client first saw the row. Live stanzas carry no timestamp,
@@ -119,10 +122,29 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return from.description
     }
 
-    /// Thread replies render only inside their thread.
+    /// Thread replies render only inside their thread. A call's
+    /// announcement is the head of its thread, the call's chat, though the
+    /// thread has an id of its own and not the announcement's.
     public var isFeedVisible: Bool {
         guard let thread = message.thread else { return true }
-        return identity.all.contains(thread)
+        return identity.all.contains(thread) || callAnchor != nil
+    }
+
+    /// Whether the row is one of the messages an unread count counts:
+    /// someone else's, still there, and a message. A room's announcement of
+    /// a call is a row and not a message: the server's count leaves it out,
+    /// and every place that counts rows must agree with it and with each other.
+    public var countsAsUnread: Bool {
+        !isMine && tombstone == nil && callAnchor == nil
+    }
+
+    /// The call this row announces, when the room itself posted it: the
+    /// server writes the announcement from the room's bare JID, and an
+    /// occupant who marks a message of their own as one is not believed.
+    public var callAnchor: CallThreadAnchor? {
+        guard let anchor = message.callThread, anchor.kind == .room, conversation.isRoom, message.isGroupchat,
+              let from = message.from, from.resource == nil, from.bare == conversation.jid else { return nil }
+        return anchor
     }
 
     /// The XEP-0359 stanza id the room assigned (`by` is the room). In a
@@ -185,7 +207,24 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return identity.all
     }
 
-    /// The id for reactions (XEP-0444), replies (XEP-0461) and pins: in a
+    /// The id a pin is asked for by (`urn:waddle:pin:0`): in a room the
+    /// room-assigned stanza id; in 1:1 the message's `@id`, the one id
+    /// both people have for it and the one the server names a pin by, or
+    /// for a message that has none the archive's id, which the server
+    /// also knows it by. The server does not look a pin up by origin-id.
+    public var pinTargetID: String? {
+        conversation.isRoom ? roomStanzaID : identity.messageID ?? identity.stanzaID?.id
+    }
+
+    /// Every id a pin of this message may be named by. In 1:1 the server
+    /// names it by `@id`; for a message that has none it falls back to an
+    /// archive id and then to the origin-id.
+    public var pinAliases: [String] {
+        if conversation.isRoom { return roomStanzaID.map { [$0] } ?? [] }
+        return [identity.messageID, identity.originID].compactMap(\.self) + identity.stanzaIDs.map(\.id)
+    }
+
+    /// The id for reactions (XEP-0444) and replies (XEP-0461): in a
     /// room strictly the room-assigned stanza id; in 1:1 the origin-id if
     /// present, else `@id`. Our own server's archive id never reached the
     /// peer, so it is never used in 1:1.

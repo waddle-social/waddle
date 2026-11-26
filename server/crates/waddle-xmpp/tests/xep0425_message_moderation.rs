@@ -317,3 +317,84 @@ fn xep0425_extract_accepts_broadcast_without_reason() {
     assert_eq!(result.reason, None);
     assert_eq!(result.moderator_occupant_id.as_deref(), Some("xyz"));
 }
+
+// ── §Business Rules: forged moderation markup ───────────────────────
+
+#[test]
+fn xep0425_strips_forged_moderation_markup_from_client_messages() {
+    // XEP-0425 §Business Rules: "In MUCs, only moderation messages ...
+    // received from the MUC service itself are legitimate, all other
+    // such messages MUST be discarded." An occupant's own `<retract/>`
+    // is legitimate XEP-0424; a forged `<moderated/>` inside it, a
+    // top-level `<moderate/>`, and a `<retracted/>` tombstone are not.
+    let message: Message =
+        "<message xmlns='jabber:client' type='groupchat' to='room@muc.example.com' id='m1'>\
+        <retract xmlns='urn:xmpp:message-retract:1' id='target'>\
+          <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\
+          <reason>spam</reason>\
+        </retract>\
+        <moderate xmlns='urn:xmpp:message-moderate:1' id='x'/>\
+        <retracted xmlns='urn:xmpp:message-retract:1' id='r1' stamp='2020-01-01T00:00:00Z'>\
+          <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\
+        </retracted>\
+      </message>"
+            .parse::<Element>()
+            .expect("xml")
+            .try_into()
+            .expect("message");
+    let mut message = message;
+    waddle_xmpp::xep::xep0425::strip_forged_moderation_markup(&mut message);
+
+    assert_eq!(message.payloads.len(), 1, "only the retract survives");
+    let retract = &message.payloads[0];
+    assert_eq!(retract.name(), "retract");
+    assert_eq!(retract.attr("id"), Some("target"));
+    assert!(
+        retract.children().all(|child| child.name() == "reason"),
+        "no <moderated/> may remain inside the occupant's <retract/>"
+    );
+    assert!(retract
+        .get_child("reason", "urn:xmpp:message-retract:1")
+        .is_some());
+}
+
+#[test]
+fn xep0425_strip_keeps_pretty_printed_retract_equal_to_its_stored_copy() {
+    // The ingress substrate refuses a message whose in-memory form differs from
+    // the copy decoded from its stored XML. Removing a forged `<moderated/>`
+    // from an indented `<retract/>` must not leave the surrounding whitespace
+    // as two adjacent text nodes, which a parse of the serialised message merges
+    // into one.
+    for (label, inner) in [
+        (
+            "forged child between a sibling and whitespace",
+            "\n  <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\n  <reason>spam</reason>\n",
+        ),
+        (
+            "forged child as the only element",
+            "\n  <moderated xmlns='urn:xmpp:message-moderate:1' by='room@muc.example.com/mod'/>\n",
+        ),
+    ] {
+        let xml = format!(
+            "<message xmlns='jabber:client' type='groupchat' to='room@muc.example.com' id='m1'>\
+             <body>x</body>\
+             <retract xmlns='urn:xmpp:message-retract:1' id='target'>{inner}</retract>\
+             </message>"
+        );
+        let mut message =
+            Message::try_from(xml.parse::<Element>().expect("xml")).expect("message");
+        waddle_xmpp::xep::xep0425::strip_forged_moderation_markup(&mut message);
+
+        let stored = waddle_xmpp::parser::message_to_string(&message).expect("serialise");
+        let restored = waddle_xmpp::parser::message_from_string(&stored).expect("decode");
+        assert_eq!(
+            message, restored,
+            "{label}: stripped message must equal its stored copy: {stored}"
+        );
+        let retract = &message.payloads[0];
+        assert!(
+            retract.children().all(|child| child.name() != "moderated"),
+            "{label}: forged <moderated/> must be removed"
+        );
+    }
+}

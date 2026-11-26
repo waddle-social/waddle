@@ -58,7 +58,7 @@ fn test_extract_mentioned_jids() {
     );
 }
 
-/// RFC 5122 + XEP-0372 §"Reference type 'mention'": a mention URI
+/// RFC 5122 + XEP-0372 §3.2 (Mentions): a mention URI
 /// MAY carry:
 ///
 /// - a resource (`xmpp:alice@example.com/web`);

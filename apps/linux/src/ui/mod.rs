@@ -1,3 +1,4 @@
+mod a11y;
 mod actions;
 mod admin;
 mod avatar;
@@ -29,6 +30,7 @@ mod preferences;
 mod profile;
 mod read_markers;
 mod rooms;
+mod shortcuts;
 mod status;
 mod stories;
 mod suggestions;

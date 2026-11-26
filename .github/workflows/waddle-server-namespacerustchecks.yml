@@ -3,70 +3,17 @@
 
 name: waddle-server-namespaceRustChecks
 on:
-  pull_request:
-    paths:
-    - '*.cue'
-    - .github/workflows/waddle-server-namespacerustchecks.yml
-    - .rules.cue
-    - .rules.cue/**
-    - ci/*.cue
-    - ci/contributors/*.cue
-    - ci/contributors/cache.cue
-    - ci/contributors/cache.cue/**
-    - ci/contributors/cuenv.cue
-    - ci/contributors/cuenv.cue/**
-    - ci/contributors/nix.cue
-    - ci/contributors/nix.cue/**
-    - cue.mod/**
-    - cue.mod/module.cue
-    - cue.mod/module.cue/**
-    - cuenv.lock
-    - cuenv.lock/**
-    - env.cue
-    - env.cue/**
-    - flake.lock
-    - flake.lock/**
-    - flake.nix
-    - flake.nix/**
-    - infrastructure/waddle.cloud/env.cue
-    - infrastructure/waddle.cloud/env.cue/**
-    - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml
-    - infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml/**
-    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
-    - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
-    - namespace.cue
-    - namespace.cue/**
-    - server/*.cue
-    - server/.cargo/**
-    - server/.config/nextest.toml
-    - server/.config/nextest.toml/**
-    - server/Cargo.lock
-    - server/Cargo.lock/**
-    - server/Cargo.toml
-    - server/Cargo.toml/**
-    - server/README.md
-    - server/README.md/**
-    - server/capabilities.toml
-    - server/capabilities.toml/**
-    - server/charts/waddle-server/**
-    - server/crates/**
-    - server/extensions/**
-    - server/rust-toolchain.toml
-    - server/rust-toolchain.toml/**
-    - server/scripts/**
-    - server/vendor/**
-    - server/wit/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
+  nixDefaultTest:
     permissions:
       contents: read
       id-token: write
-    name: test
-    runs-on: namespace-profile-linux-x86
+    name: nixDefaultTest
+    runs-on: namespace-profile-linux-x86;container.privileged=true
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -189,56 +136,6 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
-    - name: Setup cuenv (release)
-      run: |-
-        set -euo pipefail
-        cuenv_version="0.77.0"
-        if [ "$cuenv_version" != "0.77.0" ]; then
-          echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
-          exit 1
-        fi
-        cuenv_platform="$(uname -s)-$(uname -m)"
-        case "$cuenv_platform" in
-          Darwin-arm64|Darwin-aarch64)
-            cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="bdb3413abdea0c5617ed5a9ec3c10c5813dd6a3b8233305e81c53d76d5236647"
-            ;;
-          Linux-aarch64|Linux-arm64)
-            cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="fde68bff3e2adc383d25bc64530b0c72b53fab32181da97af99dbed52e7a6814"
-            ;;
-          Linux-x86_64|Linux-amd64)
-            cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="d7a35a14778316c65ff725bd3c1bd776ea1610b09f02cc20badc588110899085"
-            ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        if [[ ! "$cuenv_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-          echo "Missing or invalid cuenv SHA-256" >&2
-          exit 1
-        fi
-        test -d "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-        : "${GITHUB_PATH:?GITHUB_PATH is required}"
-        cuenv_download="$(mktemp "$RUNNER_TEMP/cuenv-download.XXXXXX")"
-        trap 'rm -f "$cuenv_download"' EXIT
-        cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
-        curl --proto '=https' --proto-redir '=https' -fsSL -o "$cuenv_download" "$cuenv_url"
-        case "$cuenv_platform" in
-          Darwin-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | shasum -a 256 -c - ;;
-          Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.77.0" ]; then
-          echo "Downloaded cuenv version differs from the pinned release" >&2
-          exit 1
-        fi
-        cuenv_bin="$(mktemp -d "$RUNNER_TEMP/waddle-cuenv.XXXXXX")"
-        install -m 0755 "$cuenv_download" "$cuenv_bin/cuenv"
-        printf '%s\n' "$cuenv_bin" >> "$GITHUB_PATH"
-        "$cuenv_bin/cuenv" sync vcs -p .
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Check Namespace Bazel Remote Cache
       run: |-
         set -euo pipefail
@@ -247,8 +144,8 @@ jobs:
           exit 0
         fi
         cuenv cache status || true
-    - name: test
-      run: cuenv task test --skip-dependencies
+    - name: nixDefaultTest
+      run: nix build --print-build-logs --print-out-paths --option sandbox true --option sandbox-fallback false ../#checks.x86_64-linux.waddle-server-default-test
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

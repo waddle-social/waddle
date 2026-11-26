@@ -79,6 +79,161 @@
             runHook postInstall
           '';
         };
+      # Nextest arguments of the all-features test archive. Its member
+      # layers compile with exactly these, so Cargo finds their units fresh.
+      # Cargo tracks the per-package overrides explicitly for the two largest
+      # workspace crates; third-party dependency profiles stay unchanged.
+      archiveNextestArgs = ''--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests --config profile.ci-test.package.waddle-server.opt-level=0 --config profile.ci-test.package.waddle-xmpp.opt-level=0'';
+      # The default-feature XMPP server lane: `test-support` adds no
+      # dependencies; it exposes test fixtures and in-server test seams, so
+      # the public suites gated on it run here too (#1777).
+      xmppServerNextestArgs = ''--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests --config profile.ci-test.package.waddle-server.opt-level=0 --config profile.ci-test.package.waddle-xmpp.opt-level=0'';
+      # Compile-only layers have stubbed integration targets. The production
+      # CI profile's execution filters refer to the real test binaries.
+      layerNextest = "cargo nextest run --no-run --config-file ${builtins.toFile "layer-nextest.toml" "[profile.ci]\n"}";
+      # Server-relative paths that member layers compile from real sources.
+      # waddle-server changes most often (181 of 395 recent Rust commits
+      # touched only it) and waddle-xmpp next, so each gets its own layer
+      # boundary. Every other path keeps Crane's dependency-only stub.
+      memberLayerPaths = rec {
+        base = [
+          "Cargo.toml"
+          ".config/nextest.toml"
+          "wit"
+          "experiments/native-fixture"
+          "extensions"
+          "crates/waddle-client-session"
+          "crates/waddle-ecdysis"
+          "crates/waddle-extensions"
+          "crates/waddle-sfu"
+          "crates/waddle-ws-test-support"
+          "crates/waddle-xmpp-client"
+          "crates/waddle-xmpp-client-ffi"
+          "crates/waddle-xmpp-client-wasm"
+          "crates/waddle-xmpp-core"
+        ];
+        xmpp = base ++ [ "crates/waddle-xmpp" ];
+      };
+      # Fail evaluation when a workspace member or first-party path
+      # dependency is in no member layer: the layers would stub it, every
+      # lane would recompile it, and the test archive's reuse guard would
+      # fail with a misleading fingerprint message.
+      memberLayerCoverage =
+        lib:
+        let
+          covered = memberLayerPaths.xmpp ++ [ "crates/waddle-server" ];
+          isCovered = path: lib.any (prefix: path == prefix || lib.hasPrefix "${prefix}/" path) covered;
+          normalize =
+            path:
+            lib.concatStringsSep "/" (
+              lib.foldl' (
+                parts: part:
+                if part == "." || part == "" then
+                  parts
+                else if part == ".." then
+                  lib.init parts
+                else
+                  parts ++ [ part ]
+              ) [ ] (lib.splitString "/" path)
+            );
+          manifest = dir: builtins.fromTOML (builtins.readFile (./server + "/${dir}/Cargo.toml"));
+          dependencyTables =
+            toml:
+            lib.concatMap (table: lib.attrValues (toml.${table} or { })) [
+              "dependencies"
+              "dev-dependencies"
+              "build-dependencies"
+            ]
+            ++ lib.concatMap (
+              target:
+              lib.concatMap (table: lib.attrValues (target.${table} or { })) [
+                "dependencies"
+                "dev-dependencies"
+                "build-dependencies"
+              ]
+            ) (lib.attrValues (toml.target or { }));
+          pathDependencies =
+            dir:
+            map (dependency: normalize "${dir}/${dependency.path}") (
+              lib.filter (dependency: builtins.isAttrs dependency && dependency ? path) (
+                dependencyTables (manifest dir)
+              )
+            );
+          members = (manifest ".").workspace.members;
+          required = lib.filter (path: !(lib.hasPrefix "vendor/" path)) (
+            lib.unique (members ++ lib.concatMap pathDependencies members)
+          );
+          missing = lib.filter (path: !(isCovered path)) required;
+        in
+        lib.assertMsg (missing == [ ])
+          "flake.nix memberLayerPaths is missing ${lib.concatStringsSep ", " missing}; add each to a member layer (base, or xmpp if it depends on waddle-xmpp).";
+      # Crane builds third-party dependencies once, but a lane that consumes
+      # only that artifact recompiles all 16 workspace members whenever any
+      # source file changes. Member layers sit between the two: a layer is
+      # the lane's own compile command run over Crane's dependency stub
+      # source, with the listed members restored to their real files. Each
+      # real path is a separate store path, so editing waddle-server leaves
+      # both layers' derivations unchanged and a lane compiles only
+      # waddle-server on top of them.
+      #
+      # Cargo decides freshness by fingerprint and source mtime. Nix gives
+      # every source file the same mtime, so reuse is only sound because a
+      # layer's inputs contain every file its real members compile from: a
+      # member reading a file outside these paths fails to build in the
+      # layer rather than reusing stale output. Stubbed members carry
+      # Crane's store-path build script, so their stub units never match
+      # the real crates and are always rebuilt by the consumer.
+      #
+      # `args` and `buildPhaseCargoCommand` must match the consuming lane's
+      # environment and compile command exactly; any difference changes
+      # Cargo fingerprints and silently turns the layers into extra work.
+      mkMemberLayers =
+        {
+          craneLib,
+          lib,
+          pname,
+          args,
+          cargoArtifacts,
+          buildPhaseCargoCommand,
+        }:
+        let
+          realPath =
+            rel:
+            let
+              source = builtins.path {
+                path = ./server + "/${rel}";
+                name = "waddle-member-${lib.strings.sanitizeDerivationName rel}";
+              };
+            in
+            ''
+              rm -rf "$out/${rel}"
+              mkdir -p "$(dirname "$out/${rel}")"
+              cp -R ${source} "$out/${rel}"
+              chmod -R u+w "$out/${rel}"
+            '';
+          mkLayer =
+            name: paths: previous:
+            craneLib.mkCargoDerivation (
+              builtins.removeAttrs args [ "cargoArtifacts" ]
+              // {
+                pname = "${pname}-${name}";
+                src = craneLib.mkDummySrc {
+                  inherit (args) src;
+                  extraDummyScript = patchedDependenciesDummyScript + lib.concatMapStrings realPath paths;
+                };
+                # Vendor from the real source, as buildDepsOnly does, so
+                # evaluation never reads the stub source derivation.
+                cargoVendorDir = craneLib.vendorCargoDeps { inherit (args) src; };
+                cargoArtifacts = previous;
+                inherit buildPhaseCargoCommand;
+                doCheck = false;
+                doInstallCargoArtifacts = true;
+              }
+            );
+          base = mkLayer "members-base" memberLayerPaths.base cargoArtifacts;
+        in
+        assert memberLayerCoverage lib;
+        mkLayer "members-xmpp" memberLayerPaths.xmpp base;
       mkTestRustcWrapper =
         pkgs:
         pkgs.writeShellScript "waddle-test-archive-rustc" ''
@@ -86,6 +241,138 @@
           export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
           exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
         '';
+      # Waddle for Linux (apps/linux): the GTK4 + libadwaita client, built as
+      # `packages.<system>.linux` so `nix build .#linux` and `nix run .#linux`
+      # work. It is its own Cargo workspace and reaches the shared client
+      # crates in server/ by path, so the source is those crates plus the app.
+      # fontconfig configuration that adds the Polar Huddle fonts
+      # (apps/linux/data/fonts) to the system's, for FONTCONFIG_FILE.
+      waddleFontsConf =
+        pkgs:
+        pkgs.makeFontsConf {
+          fontDirectories = [ ./apps/linux/data/fonts ];
+        };
+      mkWaddleLinux =
+        pkgs:
+        let
+          lib = pkgs.lib;
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./apps/linux/rust-toolchain.toml;
+          # libwebrtc is built against Chromium's libc++, and its C++ bridges
+          # need clang 21 or later. Setting CXX alone is not enough: stdenv's
+          # cc-wrapper hook re-exports CXX=g++ at build time, so the whole
+          # derivation uses the clang 21 stdenv.
+          craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
+            _final: _prev: { stdenvSelector = p: p.llvmPackages_21.stdenv; }
+          );
+          # The livekit crate's build script would download this prebuilt
+          # libwebrtc archive, which the sandbox forbids; LK_CUSTOM_WEBRTC
+          # points it at the unpacked copy instead. The tag is the
+          # WEBRTC_TAG of the locked webrtc-sys-build, so bump the tag and
+          # both hashes together whenever `cargo update` moves webrtc-sys.
+          webrtcTag = "webrtc-a545de4";
+          webrtcArchive =
+            {
+              "x86_64-linux" = {
+                triple = "linux-x64-release";
+                hash = "sha256-Ls5zuacqLKzXPQxirDpBTiAvN4hcPI9J3dtDwUQ6wL0=";
+              };
+              "aarch64-linux" = {
+                triple = "linux-arm64-release";
+                hash = "sha256-6H3/cUIsXLFHD2zwDsxK1pZOdGxQOYMbcga5RrXRPF8=";
+              };
+            }
+            .${pkgs.stdenv.hostPlatform.system};
+          webrtc =
+            pkgs.runCommand "livekit-libwebrtc-${webrtcTag}-${webrtcArchive.triple}"
+              {
+                nativeBuildInputs = [ pkgs.unzip ];
+                src = pkgs.fetchurl {
+                  url = "https://github.com/livekit/rust-sdks/releases/download/${webrtcTag}/webrtc-${webrtcArchive.triple}.zip";
+                  inherit (webrtcArchive) hash;
+                };
+              }
+              ''
+                unzip -q "$src" -d "$TMPDIR/unpacked"
+                mv "$TMPDIR/unpacked/${webrtcArchive.triple}" "$out"
+              '';
+          # libwebrtc opens PulseAudio and ALSA at run time, and loads the
+          # screen-capture libraries lazily.
+          runtimeLibs = [
+            pkgs.libpulseaudio
+            pkgs.alsa-lib
+            pkgs.libdrm
+            pkgs.libgbm
+            pkgs.libx11
+            pkgs.libxfixes
+            pkgs.libxdamage
+            pkgs.libxrandr
+            pkgs.libxcomposite
+            pkgs.libxext
+          ];
+        in
+        craneLib.buildPackage {
+          pname = "waddle-linux";
+          version = "0.1.0";
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./apps/linux
+              ./server/Cargo.toml
+              ./server/crates
+            ];
+          };
+          cargoLock = ./apps/linux/Cargo.lock;
+          cargoToml = ./apps/linux/Cargo.toml;
+          postUnpack = ''
+            cd "$sourceRoot/apps/linux"
+            sourceRoot="$PWD"
+          '';
+          strictDeps = true;
+          doCheck = false;
+          # No dependency-only derivation: the path dependencies outside the
+          # app's own directory do not survive Crane's source stubbing.
+          cargoArtifacts = null;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.blueprint-compiler
+            pkgs.wrapGAppsHook4
+          ];
+          buildInputs = [
+            pkgs.gtk4
+            pkgs.libadwaita
+            pkgs.gdk-pixbuf
+            pkgs.glib
+          ]
+          ++ runtimeLibs;
+          env.LK_CUSTOM_WEBRTC = "${webrtc}";
+          # The Polar Huddle fonts (SIL OFL): GTK has no @font-face, so the
+          # wrapper points fontconfig at a config that adds them to the
+          # system's. `--set-default` leaves a user's own FONTCONFIG_FILE be.
+          preFixup = ''
+            gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs})
+            gappsWrapperArgs+=(--set-default FONTCONFIG_FILE ${waddleFontsConf pkgs})
+          '';
+          postInstall = ''
+            install -Dm644 data/social.waddle.Waddle.desktop \
+              "$out/share/applications/social.waddle.Waddle.desktop"
+            install -Dm644 data/social.waddle.Waddle.metainfo.xml \
+              "$out/share/metainfo/social.waddle.Waddle.metainfo.xml"
+            install -Dm644 data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg \
+              "$out/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg"
+            install -Dm644 -t "$out/share/icons/hicolor/symbolic/actions" \
+              data/icons/hicolor/symbolic/actions/*.svg
+            install -Dm644 -t "$out/share/fonts/truetype/waddle" data/fonts/*.ttf
+          '';
+          meta = {
+            description = "Waddle for Linux: a GTK4 + libadwaita client";
+            license = lib.licenses.agpl3Plus;
+            mainProgram = "waddle-linux";
+            platforms = [
+              "x86_64-linux"
+              "aarch64-linux"
+            ];
+          };
+        };
     in
     {
       packages = forAllSystems (
@@ -154,8 +441,18 @@
           # Opt in to a 64 GB builder; the ordinary check keeps one Cargo job.
           # Build portable archives once. Four isolated Nix sandboxes run
           # them on disjoint eight-CPU sets on the same 32-core builder.
-          mkServerTestArchive = lane: self.checks.${system}.waddle-server-test.overrideAttrs (old: {
+          mkServerTestArchive = lane: self.checks.${system}.waddle-server-test.overrideAttrs (old: let
+            # Production reuses the member layers and compiles only
+            # waddle-server when that is all that changed. Benchmark lanes
+            # keep compiling every member, so their timings stay comparable.
+            useMemberLayers = (lane.benchmarkName or "") == "";
+          in {
             pname = "waddle-server-test-archive";
+            cargoArtifacts =
+              if useMemberLayers then
+                self.checks.${system}.waddle-server-test-archive-members
+              else
+                old.cargoArtifacts;
             outputs = [
               "out"
               "shard1"
@@ -184,15 +481,16 @@
                 echo "WADDLE_CI_METRIC phase=compile linker=mold version=${pkgs.mold.version}"
               ''}
               mkdir -p "$out/ci-performance"
-              # Keep third-party dependencies and production profiles unchanged.
-              # Cargo tracks these overrides explicitly for the two largest
-              # workspace crates; every build/list/archive call shares them.
-              nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --workspace --all-features --profile ci --lib --tests
-                --config profile.ci-test.package.waddle-server.opt-level=0
-                --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+              # Every build/list/archive call shares the member layers' arguments.
+              nextest_args=(${archiveNextestArgs})
               echo "WADDLE_CI_METRIC phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
               ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
-                  cargo nextest run "''${nextest_args[@]}" --no-run --timings
+                  cargo nextest run "''${nextest_args[@]}" --no-run --timings \
+                    --cargo-message-format json-render-diagnostics > "$TMPDIR/compile-messages.jsonl"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_member_layer_reuse.py} \
+                  "$TMPDIR/compile-messages.jsonl" --root "$PWD" \
+                  ${lib.optionalString (!useMemberLayers) "--report-only"} \
+                  --rebuild-allowed crates/waddle-server
                 # This is the visible cgroup's lifetime peak, which can
                 # include dependency preparation; it is not a phase RSS.
                 if [ -r /sys/fs/cgroup/memory.peak ]; then
@@ -544,7 +842,7 @@
           waddle-server-test-deps = serverTestArtifacts;
           default = waddle-server;
         }
-        // lib.optionalAttrs pkgs.stdenv.isLinux {
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           waddle-server-image-stream = image;
           # Fail before compiling if a CI runner cannot create the namespaces
           # required by the four co-located test sandboxes.
@@ -564,6 +862,9 @@
           waddle-server-test-shard-3 = mkServerTestShard 3;
           waddle-server-test-shard-4 = mkServerTestShard 4;
 
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux = mkWaddleLinux pkgs;
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           lib.concatMapAttrs (
@@ -805,6 +1106,102 @@
               doCheck = false;
             }
           );
+          # Test lanes link workspace members with mold; Cargo fingerprints
+          # the wrapper, so member layers must set it exactly as the lane does.
+          testLinkerSetup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export RUSTC_WORKSPACE_WRAPPER=${mkTestRustcWrapper pkgs}
+          '';
+          clippyCargoArgs = "--locked --workspace --all-features";
+          clippyExtraArgs = "--all-targets -- -D warnings";
+          doctestCargoArgs = "--locked --workspace --all-features";
+          doctestExtraArgs = "--doc";
+          clippyMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-clippy";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = baseArgs // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+              nativeBuildInputs = baseArgs.nativeBuildInputs ++ [ craneLib.clippy ];
+            };
+            buildPhaseCargoCommand = "cargoWithProfile clippy ${clippyCargoArgs} ${clippyExtraArgs}";
+          };
+          # Running the layer also runs the stubbed members' doctests; only
+          # a change to a layer's members repeats that work.
+          doctestMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-doctest";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = testArgs // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+            };
+            buildPhaseCargoCommand = "cargoWithProfile test ${doctestCargoArgs} ${doctestExtraArgs}";
+          };
+          xmppServerMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-xmpp-server-tests";
+            cargoArtifacts = serverTestArtifacts;
+            # The lane's environment, including PostgreSQL on PATH; its
+            # database starts in preCheck, which the layers never run.
+            args = builtins.removeAttrs serverPostgresTestArgs [ "preCheck" ] // {
+              CARGO_PROFILE = "ci-test";
+              CARGO_BUILD_JOBS = "1";
+              nativeBuildInputs = serverPostgresTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''
+              ${testLinkerSetup}
+              ${layerNextest} ${xmppServerNextestArgs}
+            '';
+          };
+          # The default-feature suite main publishes behind (`mainTest`). It
+          # keeps that lane's `test` profile, so debug assertions and overflow
+          # checks stay on; the all-features shards build with `ci-test`.
+          defaultTestCargoArgs = "--locked --workspace";
+          defaultTestNextestArgs = "--profile ci --all-targets";
+          defaultTestArgs = serverTestArgs // {
+            CARGO_PROFILE = "test";
+            # The main profile runner has 16 GB; one waddle-server test
+            # compile can use most of it.
+            CARGO_BUILD_JOBS = "1";
+          };
+          defaultTestArtifacts = craneLib.buildDepsOnly (
+            baseArgs
+            // {
+              CARGO_PROFILE = "test";
+              cargoExtraArgs = defaultTestCargoArgs;
+              cargoCheckExtraArgs = "--all-targets";
+              cargoBuildExtraArgs = "--all-targets";
+              cargoTestExtraArgs = "--all-targets --no-run";
+            }
+          );
+          defaultTestMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-default-test";
+            cargoArtifacts = defaultTestArtifacts;
+            args = defaultTestArgs // {
+              nativeBuildInputs = defaultTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''${layerNextest} --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs}'';
+          };
+          # The production test archive's environment (packages
+          # mkServerTestArchive): no PostgreSQL, no self RPATH, mold.
+          archiveMemberArtifacts = mkMemberLayers {
+            inherit craneLib lib;
+            pname = "waddle-server-test-archive";
+            cargoArtifacts = workspaceAllFeaturesArtifacts;
+            args = serverTestArgs // {
+              CARGO_PROFILE = "ci-test";
+              # The production lane's job count on the same 64 GB builder.
+              CARGO_BUILD_JOBS = "4";
+              NIX_NO_SELF_RPATH = "1";
+              nativeBuildInputs = serverTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
+            };
+            buildPhaseCargoCommand = ''
+              ${testLinkerSetup}
+              ${layerNextest} ${archiveNextestArgs}
+            '';
+          };
         in
         {
           # Keep reusable dependency artifacts and vendored sources exposed
@@ -825,9 +1222,9 @@
               CARGO_PROFILE = "ci-test";
               # The server library and its test build each need several GiB.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = workspaceAllFeaturesArtifacts;
-              cargoExtraArgs = "--locked --workspace --all-features";
-              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+              cargoArtifacts = clippyMemberArtifacts;
+              cargoExtraArgs = clippyCargoArgs;
+              cargoClippyExtraArgs = clippyExtraArgs;
               preBuild = baseArgs.preBuild + ''
                 ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
                 ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
@@ -865,6 +1262,29 @@
               CARGO_BUILD_JOBS = "1";
             }
           );
+          # Default features, all targets, no PostgreSQL: Postgres-backed
+          # tests return early and `clustering` tests are not compiled. About
+          # 180 `not(feature = ...)` sites compile only here; the all-features
+          # shards cover the rest. Replaces an uncached Cargo build that
+          # compiled all 675 packages for every source change.
+          waddle-server-default-test = craneLib.cargoNextest (
+            defaultTestArgs
+            // {
+              pname = "waddle-server-default-test";
+              doInstallCargoArtifacts = false;
+              cargoArtifacts = defaultTestMemberArtifacts;
+              checkPhase = ''
+                runHook preCheck
+                cargo nextest run --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs} \
+                  --cargo-message-format json-render-diagnostics > "$TMPDIR/compile-messages.jsonl"
+                mkdir -p "$out"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_member_layer_reuse.py} \
+                  "$TMPDIR/compile-messages.jsonl" --root "$PWD" --report-only --output "$out/member-reuse.json"
+                cp "''${CARGO_TARGET_DIR:-target}/nextest/ci/junit.xml" "$out/junit.xml"
+                runHook postCheck
+              '';
+            }
+          );
           waddle-server-doctest = craneLib.cargoTest (
             testArgs
             // {
@@ -873,9 +1293,9 @@
               CARGO_PROFILE = "ci-test";
               # Keep one rustc job on 16 GB runners to avoid OOM.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = workspaceAllFeaturesArtifacts;
-              cargoExtraArgs = "--locked --workspace --all-features";
-              cargoTestExtraArgs = "--doc";
+              cargoArtifacts = doctestMemberArtifacts;
+              cargoExtraArgs = doctestCargoArgs;
+              cargoTestExtraArgs = doctestExtraArgs;
             }
           );
           waddle-server-ci-build = craneLib.cargoBuild (
@@ -950,7 +1370,7 @@
               CARGO_PROFILE = "ci-test";
               # Keep one rustc job on 16 GB GitHub runners to avoid OOM.
               CARGO_BUILD_JOBS = "1";
-              cargoArtifacts = serverTestArtifacts;
+              cargoArtifacts = xmppServerMemberArtifacts;
               cargoExtraArgs = "--locked --package waddle-server --features test-support";
               cargoNextestExtraArgs = "--profile ci --lib --tests";
               checkPhase = ''
@@ -961,12 +1381,7 @@
                 ''}
                 # Match the archive's compiler improvements while retaining
                 # this lane's default-feature coverage and dependency cache.
-                # `test-support` adds no dependencies; it exposes test fixtures and
-                # in-server test seams, so the public suites gated on it run here
-                # too (#1777).
-                nextest_args=(--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests
-                  --config profile.ci-test.package.waddle-server.opt-level=0
-                  --config profile.ci-test.package.waddle-xmpp.opt-level=0)
+                nextest_args=(${xmppServerNextestArgs})
                 echo "WADDLE_CI_METRIC lane=xmpp-server phase=compile waddle_server_opt_level=0 waddle_xmpp_opt_level=0 dependency_profile_unchanged=true"
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC lane=xmpp-server phase=compile elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   cargo nextest run "''${nextest_args[@]}" --no-run --timings
@@ -999,6 +1414,11 @@
             }
           );
         }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Workspace members other than waddle-server, compiled for the
+          # production test archive (packages mkServerTestArchive).
+          waddle-server-test-archive-members = archiveMemberArtifacts;
+        }
       );
 
       devShells = forAllSystems (
@@ -1006,7 +1426,7 @@
         let
           pkgs = mkPkgs system;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
-          # cuenv 0.77.0's CUE schema declares language version v0.18.0.
+          # cuenv 0.81.1's CUE schema declares language version v0.18.0.
           # Verified cue v0.18.0-rc.4 evaluates `cue vet .` in server/ (~4s),
           # resolving the 0.17.1 hang (#1763). Covers the CLI only; the cuengine
           # crate is pinned separately in server/Cargo.lock.
@@ -1204,9 +1624,39 @@
             '';
           };
 
+          operator =
+            let
+              toolchain = pkgs.rust-bin.fromRustupToolchainFile ./operator/rust-toolchain.toml;
+              vendor = (crane.mkLib pkgs).vendorCargoDeps { cargoLock = ./operator/Cargo.lock; };
+              generateCrd = pkgs.writeShellScriptBin "waddle-operator-crd" ''
+                # Rust's bundled lld wrapper resolves /proc/self/exe, which is
+                # unavailable inside the network-isolated cuenv Linux sandbox.
+                exec ${toolchain}/bin/cargo run --config ${vendor}/config.toml \
+                  --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C", "linker-features=-lld"]' \
+                  --offline --locked -p waddle-operator -- crd
+              '';
+            in
+            pkgs.mkShell {
+              shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
+              packages = [
+                toolchain
+                generateCrd
+                pkgs.cargo-nextest
+                pkgs.python3
+              ];
+            };
+
           # Linux desktop client (apps/linux): its own shell so GTK never
           # enters the server's CI closure.
           linux = pkgs.mkShell {
+            shellHook =
+              builtins.readFile ./ci/cache/nix-shell-hook.sh
+              # `cargo run` is not wrapped by wrapGAppsHook4 like
+              # `nix run .#linux`, so GTK finds no icon theme or GSettings
+              # schemas unless they are on XDG_DATA_DIRS.
+              + ''
+                export XDG_DATA_DIRS="${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+              '';
             packages = [
               rustToolchain
               pkgs.pkg-config
@@ -1226,6 +1676,9 @@
               pkgs.gdk-pixbuf
             ];
             env.CXX = "${pkgs.clang_21}/bin/clang++";
+            # The Polar Huddle fonts, added to the system's. Outside nix,
+            # `cargo run` falls back to the system font.
+            env.FONTCONFIG_FILE = waddleFontsConf pkgs;
             # The toolchain's linker leaves no runtime path to the GTK
             # stack, so `cargo run` and tests that touch GTK need this to
             # find the libraries. libwebrtc opens PulseAudio and ALSA at

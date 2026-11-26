@@ -210,11 +210,8 @@ management requirements, unverified assurances, stdin bounds and rejection of
 path operands. These tests prove local contract/accounting behavior only.
 
 The standalone `operational-qualification` workflow runs these checks on
-matching pushes and on merge-group candidates without publishing. It is not part
-of the required integration aggregate: fork pull requests do not receive this
-push check in the base repository, and merge-group execution depends on the
-workflow being present in the candidate. Hosted execution remains separate
-evidence from the local results.
+matching pushes to main and on manual dispatch. The integration planner runs
+the same four read-only jobs for matching merge candidates.
 
 That workflow also compiles and runs only the guest's pure model fixtures and
 tests its archive/ELF inspector. It compiles the guest source to an object without

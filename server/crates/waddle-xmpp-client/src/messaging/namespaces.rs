@@ -1,5 +1,8 @@
 //! Namespace constants used by the messaging payload parsers and builders.
 
+/// Protocol token `urn:xmpp:blocking` for XEP-0191.
+pub use xmpp_parsers::ns::BLOCKING as NS_BLOCKING;
+
 pub(crate) const NS_DELAY: &str = "urn:xmpp:delay";
 /// `urn:xmpp:sid:0` — XEP-0359 Unique and Stable Stanza IDs. `pub` so the
 /// XEP-0115 caps advertisement references the canonical constant.
@@ -24,7 +27,8 @@ pub(crate) const NS_HINTS: &str = "urn:xmpp:hints";
 /// Protocol token `urn:waddle:in-call:0`.
 pub const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 pub(crate) const NS_HATS: &str = "urn:xmpp:hats:0";
-pub(crate) const NS_SIMS: &str = "urn:xmpp:sims:1";
+/// `jabber:x:oob` — XEP-0066 Out of Band Data.
+pub(crate) const NS_OOB: &str = "jabber:x:oob";
 pub(crate) const NS_SFS: &str = "urn:xmpp:sfs:0";
 pub(crate) const NS_FILE_METADATA: &str = "urn:xmpp:file:metadata:0";
 pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";

@@ -162,8 +162,8 @@ pub use super::xep0377::{
 };
 
 pub use waddle_xmpp_core::xep0392::{
-    apply_cvd_correction, compute_hue, generate_color, generate_color_with_params, ConsistentColor,
-    CvdCorrection, HslColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
+    compute_hue, generate_color, generate_color_with_params, hsluv_to_rgb, ConsistentColor,
+    HsluvColor, DEFAULT_LIGHTNESS, DEFAULT_SATURATION,
 };
 
 pub use super::xep0393::{
@@ -200,9 +200,9 @@ pub use super::xep0401::{AccountInvite, InviteRedeemError, InviteStore, COMMAND_
 
 pub use super::xep0421::{
     build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,
-    generate_occupant_id, is_occupant_id_element, set_occupant_id_on_message,
-    set_occupant_id_on_presence, strip_occupant_id_from_message, strip_occupant_id_from_presence,
-    OccupantId, OccupantIdCarrier, NS_OCCUPANT_ID,
+    generate_occupant_id, generate_room_occupant_id, is_occupant_id_element,
+    set_occupant_id_on_message, set_occupant_id_on_presence, strip_occupant_id_from_message,
+    strip_occupant_id_from_presence, OccupantId, OccupantIdCarrier, NS_OCCUPANT_ID,
 };
 
 pub use super::xep0424::{
@@ -277,11 +277,6 @@ pub use super::xep0447::{
     Disposition, FileSharing, FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
 };
 
-pub use super::xep0445::{
-    build_preauth_element, extract_preauth, has_preauth, is_preauth_element, PreauthToken,
-    PreauthValidation, NS_PARS,
-};
-
 pub use super::xep0446::{
     build_file_metadata_element, extract_file_metadata_from_message, has_file_metadata,
     is_file_metadata_element, parse_file_metadata_element, set_file_metadata, strip_file_metadata,
@@ -313,20 +308,16 @@ pub use super::xep0433::{
     build_search_form_response, build_search_request, build_search_response,
     build_search_response_with_rsm, is_search_form_request, is_search_request,
     parse_search_request, parse_search_results, parse_search_rsm_response, ChannelResult,
-    SearchRequest, Searchable, FIELD_QUERY, NS_CHANNEL_SEARCH, NS_CHANNEL_SEARCH_PARAMS,
+    SearchRequest, SearchRequestError, SearchScope, Searchable, SortKey, FIELD_KEY, FIELD_QUERY,
+    FIELD_SEARCH_IN_ADDRESS, FIELD_SEARCH_IN_DESCRIPTION, FIELD_SEARCH_IN_NAME, FIELD_TYPES,
+    NS_CHANNEL_SEARCH, NS_CHANNEL_SEARCH_ERROR, NS_CHANNEL_SEARCH_ORDER, NS_CHANNEL_SEARCH_PARAMS,
+    SERVICE_TYPE_MUC, SORT_KEY_ADDRESS, SORT_KEY_NUSERS,
 };
 
 pub use super::xep0449::{
     build_sticker_element, build_sticker_message, extract_sticker_ref, is_sticker_element,
     is_sticker_message, set_sticker_ref, strip_sticker_ref, Sticker, StickerCarrier, StickerPack,
     StickerRef, NS_STICKERS,
-};
-
-pub use super::xep0452::{
-    build_mention_notification_element, build_mention_notification_message,
-    extract_mention_notification, has_mention_notification, is_mention_notification_element,
-    set_mention_notification, strip_mention_notification, MentionCounter, MentionNotification,
-    MentionNotificationCarrier, NS_MENTION_NOTIFICATION,
 };
 
 pub use waddle_xmpp_core::xcal::{
@@ -391,12 +382,12 @@ pub use waddle_xmpp_core::xep0501::{
 pub use super::xep0502::{ActivityTracker, RoomActivity};
 
 pub use super::xep0500::{
-    build_roominfo_slow_mode_duration_field, parse_slow_mode_duration, SlowModeCheck,
-    SlowModeConfig, SlowModeTracker, FIELD_ROOMINFO_SLOW_MODE_DURATION, FIELD_SLOW_MODE_DURATION,
-    SLOW_MODE_DISABLED,
+    build_roominfo_slow_mode_duration_field, FIELD_ROOMINFO_SLOW_MODE_DURATION,
 };
 
-pub use super::xep0486::{extract_avatar_hash_from_presence, MucAvatar, MucAvatarCache};
+pub use super::xep0486::{
+    avatar_hashes, parse_room_vcard, RoomAvatarUpdate, RoomVCardError, FIELD_ROOMINFO_AVATARHASH,
+};
 
 pub use super::xep0488::{
     build_invite_request, build_invite_request_with_constraints, build_invite_response,
@@ -416,15 +407,13 @@ pub use super::xep0490::{
 
 pub use super::xep0513::{
     add_explicit_mention, build_mention_markup, build_mention_span, build_mentions_markup,
-    build_mentions_permissions_query, explicit_mention_names_jid, extract_explicit_mentions,
-    has_explicit_mentions, has_malformed_mention_markup, is_mention_markup,
-    is_mentions_permissions_query, mention_target_count, mention_target_count_from_parts,
-    mentions_exceed_threshold, mentions_exceed_threshold_from_parts, parse_mention_markup,
-    personal_mention_targets, reference_mention_names_jid, set_explicit_mentions,
-    strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier, ExplicitMentions,
-    MentionsPermission, MentionsPermissions, CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT,
-    FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT, FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
-    NS_WADDLE_MENTIONS, OCCUPANT_MENTION,
+    explicit_mention_names_jid, extract_explicit_mentions, has_explicit_mentions,
+    has_malformed_mention_markup, is_mention_markup, mention_target_count,
+    mention_target_count_from_parts, mentions_exceed_threshold,
+    mentions_exceed_threshold_from_parts, parse_mention_markup, personal_mention_targets,
+    reference_mention_names_jid, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
+    ExplicitMentionCarrier, ExplicitMentions, CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT,
+    NS_EXPLICIT_MENTIONS, NS_WADDLE_MENTIONS, OCCUPANT_MENTION,
 };
 
 pub use super::xep_waddle_forums::{

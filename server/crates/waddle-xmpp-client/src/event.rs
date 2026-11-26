@@ -4,13 +4,14 @@ use jid::BareJid;
 use minidom::Element;
 
 use crate::avatar::AvatarChanged;
+use crate::blocking::BlockingPush;
 use crate::bootstrap::{
     AuthenticationRequest, ResourceBindingRequest, SaslFailure, StreamFeatures,
 };
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::{InboundCallEvent, MessageRejection, MessagingEvent};
-use crate::pep::{PepItem, UserActivity};
+use crate::pep::UserActivity;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
 use crate::request::{PendingRequest, RequestCorrelation};
@@ -34,6 +35,8 @@ pub enum ClientEvent {
     Transport(TransportEvent),
     /// Typed inbound message or presence event.
     Messaging(MessagingEvent),
+    /// A trusted XEP-0191 block-list push.
+    BlockListChanged(BlockingPush),
     /// Typed inbound A/V call control event.
     Call(Box<InboundCallEvent>),
     /// Typed MAM archived message from an active history query.
@@ -47,8 +50,6 @@ pub enum ClientEvent {
     /// unsolicited headline pushes are source-marked and surfaced to
     /// application callbacks.
     InboxStreamEntry(InboxStreamEntry),
-    /// Typed PEP user-state event (mood, activity, tune).
-    PepEvent(PepItem),
     /// XEP-0060 §7.2.2.1 item retraction pushed from a pubsub/PEP
     /// node. Emitted alongside the [`ClientEvent::Messaging`] event
     /// that carried the notification. No consumer maps it yet: the

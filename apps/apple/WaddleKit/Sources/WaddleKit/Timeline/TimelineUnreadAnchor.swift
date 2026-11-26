@@ -27,6 +27,6 @@ public enum TimelineUnreadAnchor {
     }
 
     private static func counts(_ item: TimelineItem) -> Bool {
-        !item.isMine && item.tombstone == nil
+        item.countsAsUnread
     }
 }

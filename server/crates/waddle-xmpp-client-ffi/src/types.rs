@@ -95,9 +95,12 @@ pub struct WaddleMessage {
     pub parent_thread_id: Option<String>,
     /// XEP-0394 message markup spans over the body.
     pub markup_spans: Vec<WaddleMarkupSpan>,
-    /// XEP-0372 broadcast mention URI (`@everyone` / `@here`), when
-    /// one of the mention references targets the whole room.
+    /// XEP-0513 room-wide mention: `everyone`, or `here` for an
+    /// `active='true'` `#channel` mention.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of the XEP-0513 `#channel` mentions, for highlighting
+    /// the `@everyone` / `@here` tokens in place.
+    pub broadcast_spans: Vec<WaddleBroadcastSpan>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references attached to this message — every
@@ -149,6 +152,15 @@ pub struct WaddleMessage {
     /// when it is — including `Some(vec![])` for an MDS event with
     /// zero items (rare but distinct from "not an MDS event").
     pub mds_displayed: Option<Vec<WaddleMdsDisplayedEntry>>,
+    /// A `urn:waddle:in-call:0` reaction, delivered live and never archived.
+    #[uniffi(default = None)]
+    pub in_call_reaction: Option<WaddleInCallReaction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WaddleInCallReaction {
+    pub sid: String,
+    pub emoji: String,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -305,7 +317,25 @@ pub struct WaddleMarkupSpan {
     pub uri: Option<String>,
 }
 
-/// XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
+/// Which room members a XEP-0513 `#channel` mention addresses.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleBroadcastKind {
+    /// `@everyone`: every occupant.
+    Everyone,
+    /// `@here`: occupants who are currently active (`active='true'`).
+    Here,
+}
+
+/// XEP-0513 `#channel` mention over the message body. Offsets count
+/// Unicode scalar values; `end` is exclusive.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleBroadcastSpan {
+    pub kind: WaddleBroadcastKind,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// XEP-0372 §3.1 reference `type`. `Other` preserves unrecognised wire
 /// values explicitly so extension references survive the boundary
 /// instead of being silently dropped or smuggled through a bare String.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
@@ -574,8 +604,10 @@ pub struct WaddleArchivedMessage {
     pub reply_fallback_end: Option<u32>,
     /// XEP-0394 markup spans of the inner message.
     pub markup_spans: Vec<WaddleMarkupSpan>,
-    /// XEP-0372 broadcast mention URI, when present.
+    /// XEP-0513 room-wide mention (`everyone` or `here`), when present.
     pub broadcast_mention: Option<String>,
+    /// Body ranges of the inner message's XEP-0513 `#channel` mentions.
+    pub broadcast_spans: Vec<WaddleBroadcastSpan>,
     /// XEP-0372 mention URIs, flattened from `references`.
     pub mention_uris: Vec<String>,
     /// XEP-0372 references of the inner message.
@@ -942,6 +974,8 @@ pub struct WaddleSendOptions {
     pub shared_files: Vec<WaddleSharedFile>,
     pub link_preview_token: Option<String>,
     pub request_displayed_marker: bool,
+    /// XEP-0085 §5.1: attach `<active/>` to the content message.
+    pub chat_state_active: bool,
     /// XEP-0045 §7.5: mark the message as a MUC private message so
     /// the sender's other clients can classify the sent-carbon copy
     /// without knowing the room.
@@ -958,7 +992,7 @@ pub struct WaddleSendOptions {
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct WaddleMentionDirectory {
     pub targets: Vec<WaddleMentionTarget>,
-    /// Resolve `@everyone` / `@here` to broadcast mention URIs.
+    /// Resolve `@everyone` / `@here` to XEP-0513 `#channel` mentions.
     pub broadcasts: bool,
 }
 
@@ -1382,6 +1416,17 @@ pub struct WaddleExtensionFormField {
 
 // ── Callback interface ───────────────────────────────────────────────────────
 
+/// Changes announced in XEP-0191 block-list pushes.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum WaddleBlockListChange {
+    /// The listed JIDs were blocked.
+    Blocked { jids: Vec<Jid> },
+    /// The listed JIDs were unblocked.
+    Unblocked { jids: Vec<Jid> },
+    /// Every JID was unblocked.
+    UnblockedAll,
+}
+
 /// Single typed event stream surfaced to the app. New event kinds are
 /// added as enum variants, which keeps the callback protocol itself
 /// stable across FFI releases.
@@ -1436,6 +1481,8 @@ pub enum WaddleClientEvent {
         jid: BareJid,
         activity: Option<WaddleActivity>,
     },
+    /// XEP-0191 block-list push received by this session.
+    BlockListChanged { change: WaddleBlockListChange },
 }
 
 #[uniffi::export(callback_interface)]

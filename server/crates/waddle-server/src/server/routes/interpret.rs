@@ -169,6 +169,7 @@ mod direct_call_thread;
 pub(crate) fn dm_call_state_capacity() -> usize {
     direct_archive::DM_CALL_STATE_MAX_KEYS
 }
+pub(crate) mod correction_target;
 mod direct_inbox;
 mod direct_retraction;
 mod displayed_marker;
@@ -316,6 +317,7 @@ mod implementation;
 use implementation::apply_archive_id_rewrites;
 pub(crate) use implementation::broadcast_room_system_message;
 pub(crate) use implementation::capture_serialized_error_reply;
+use implementation::carbon_copy_bounce;
 pub(super) use implementation::emit_frame;
 pub use implementation::interpret;
 use implementation::interpret_with_depth;

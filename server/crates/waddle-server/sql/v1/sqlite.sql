@@ -175,6 +175,17 @@ CREATE TABLE dnd_projection_source_version (
                     current_version INTEGER NOT NULL
                 );
 
+CREATE TABLE entity_caps (
+    hash TEXT NOT NULL,
+    ver TEXT NOT NULL,
+    info TEXT NOT NULL,
+    verified_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (hash, ver),
+    CONSTRAINT entity_caps_hash CHECK (length(CAST(hash AS BLOB)) BETWEEN 1 AND 32),
+    CONSTRAINT entity_caps_ver CHECK (length(CAST(ver AS BLOB)) BETWEEN 1 AND 256),
+    CONSTRAINT entity_caps_info CHECK (length(CAST(info AS BLOB)) BETWEEN 1 AND 65536)
+);
+
 CREATE TABLE extension_bot_rooms (
     room_jid TEXT NOT NULL,
     plugin_id TEXT NOT NULL,
@@ -772,6 +783,8 @@ CREATE TABLE pubsub_nodes (
                     notify_delete INTEGER NOT NULL,
                     send_last_published_item TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL,
+                    roster_groups_allowed TEXT,
+                    item_expire INTEGER,
                     PRIMARY KEY (owner_jid, node_name)
                 );
 
@@ -1270,6 +1283,15 @@ CREATE TABLE xmpp_auth_codes (
     expires_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE xmpp_oauth_grants (
+    grant_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL UNIQUE,
+    user_jid TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    CONSTRAINT xmpp_oauth_grants_grant_id CHECK (length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 128)
+);
+
 CREATE TABLE xmpp_occupancy_authority (
     full_jid TEXT PRIMARY KEY,
     generation TEXT NOT NULL
@@ -1351,6 +1373,8 @@ CREATE INDEX idx_channel_space_links_space_node ON channel_space_links (space_no
 CREATE INDEX idx_channels_position ON channels(position);
 
 CREATE INDEX idx_device_auth_expires_at ON device_auth(expires_at_ms);
+
+CREATE INDEX idx_entity_caps_verified_at ON entity_caps (verified_at_ms);
 
 CREATE INDEX idx_extension_room_observers_tenant_plugin
     ON extension_room_observers (tenant_id, plugin_id);
@@ -1561,6 +1585,8 @@ CREATE INDEX idx_users_tenant_localpart
     ON users (tenant_id, xmpp_localpart);
 
 CREATE INDEX idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes(expires_at_ms);
+
+CREATE INDEX idx_xmpp_oauth_grants_user_jid ON xmpp_oauth_grants (user_jid);
 
 CREATE INDEX ingress_archive_dispatch_effect ON ingress_archive_dispatch (message_key, kind, semantic_identity_hash);
 

@@ -37,6 +37,20 @@ extension CallStore {
         return sent
     }
 
+    /// Says again that we are in `room`'s call, with our hand and mute as
+    /// they are, after we have come back into the room.
+    ///
+    /// A call outlives the stream it was set up on: media goes on while
+    /// the connection is replaced. But coming back into the room is a new
+    /// presence with no call in it, and the server forgets the old one's,
+    /// so everyone else would see a call still going as one we had left
+    /// (web `readvertiseMucCallPresence`).
+    @discardableResult
+    public func readvertiseGroupCall(in room: BareJID) async -> Bool {
+        guard case .inGroup(let call) = state, call.room == room else { return false }
+        return await restampGroupPresence(call, epoch: generation) ?? false
+    }
+
     /// `onFailure` runs before the queue moves on to the next presence.
     private func restampGroupPresence(
         _ target: GroupCall, epoch: Int, onFailure: (@MainActor () -> Void)? = nil

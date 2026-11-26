@@ -1,193 +1,196 @@
 //! XEP-0486: MUC Avatars
 //!
-//! Room/channel avatars for MUC. Each room can have a custom icon
-//! published via its vCard, with a hash advertised in presence.
+//! A room's avatar is a vCard-temp (XEP-0054) `PHOTO` published to the
+//! room's bare JID by a privileged entity. The room advertises the
+//! XEP-0153 SHA-1 hash of each published photo in the
+//! `muc#roominfo_avatarhash` field of its `muc#roominfo` disco#info
+//! extension form, so a client can learn of (and cache) the avatar
+//! before it joins.
 //!
-//! ## Protocol Flow
-//!
-//! 1. Room publishes vCard with PHOTO via owner
-//! 2. Room presence includes avatar hash in `<x xmlns='vcard-temp:x:update'>`
-//! 3. Clients cache avatar by hash, fetch vCard if unknown hash
-//!
-//! ## Use Cases
-//!
-//! - Custom channel icons in sidebar
-//! - Room branding in header
+//! This module holds the pure protocol logic: validating a room vCard
+//! and computing the advertised hashes. Storage, authorization and the
+//! status-104 notification live in the server.
 
-use std::collections::HashMap;
-/// Namespace for vCard avatar updates in presence.
-pub const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use minidom::Element;
 
-/// A MUC room avatar reference.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MucAvatar {
-    /// The room JID.
-    pub room_jid: String,
-    /// SHA-1 hash of the avatar image data.
-    pub photo_hash: Option<String>,
-    /// Direct URL to the avatar image (if available via HTTP).
-    pub url: Option<String>,
+use super::xep0054::NS_VCARD;
+use super::xep0153::compute_photo_hash;
+
+/// Field of the `muc#roominfo` form carrying the avatar hashes
+/// (xep-0486.xml: registry submission).
+pub const FIELD_ROOMINFO_AVATARHASH: &str = "muc#roominfo_avatarhash";
+
+/// Label the specification gives the `muc#roominfo_avatarhash` field.
+pub const LABEL_ROOMINFO_AVATARHASH: &str = "Avatar hash";
+
+/// Why a submitted room vCard cannot be published as a room avatar.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RoomVCardError {
+    /// A non-empty vCard carries no `PHOTO`, so it publishes no avatar.
+    #[error("the room vCard carries no PHOTO")]
+    NoPhoto,
+    /// A `PHOTO` lacks a `TYPE` media type or a `BINVAL` payload. A
+    /// hash cannot be computed for an external `EXTVAL` reference.
+    #[error("a PHOTO needs both a TYPE and a BINVAL")]
+    IncompletePhoto,
+    /// A `BINVAL` is not valid base64.
+    #[error("a PHOTO BINVAL is not valid base64")]
+    InvalidBinval,
 }
 
-impl MucAvatar {
-    /// Create a new MUC avatar reference.
-    pub fn new(room_jid: impl Into<String>) -> Self {
-        Self {
-            room_jid: room_jid.into(),
-            photo_hash: None,
-            url: None,
-        }
-    }
-
-    /// Set the photo hash.
-    pub fn with_hash(mut self, hash: impl Into<String>) -> Self {
-        self.photo_hash = Some(hash.into());
-        self
-    }
-
-    /// Set a direct URL.
-    pub fn with_url(mut self, url: impl Into<String>) -> Self {
-        self.url = Some(url.into());
-        self
-    }
-
-    /// Returns `true` if the room has an avatar.
-    pub fn has_avatar(&self) -> bool {
-        self.photo_hash.is_some() || self.url.is_some()
-    }
+/// What a `vcard-temp` set on a room asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomAvatarUpdate {
+    /// An empty vCard: "Setting an empty vCard unpublishes the avatar."
+    Unpublish,
+    /// Publish the vCard; its photos hash to these XEP-0153 values, in
+    /// document order.
+    Publish { hashes: Vec<String> },
 }
 
-/// Cache of room avatar hashes for efficient lookup.
-#[derive(Debug, Default)]
-pub struct MucAvatarCache {
-    avatars: HashMap<String, MucAvatar>,
+/// Classify the vCard of a `vcard-temp` set addressed to a room.
+///
+/// # Errors
+///
+/// [`RoomVCardError`] when a non-empty vCard does not describe a
+/// hashable avatar.
+pub fn parse_room_vcard(vcard: &Element) -> Result<RoomAvatarUpdate, RoomVCardError> {
+    if vcard.children().next().is_none() {
+        return Ok(RoomAvatarUpdate::Unpublish);
+    }
+    let hashes = avatar_hashes(vcard)?;
+    if hashes.is_empty() {
+        return Err(RoomVCardError::NoPhoto);
+    }
+    Ok(RoomAvatarUpdate::Publish { hashes })
 }
 
-impl MucAvatarCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Update avatar for a room.
-    pub fn set(&mut self, avatar: MucAvatar) {
-        self.avatars.insert(avatar.room_jid.clone(), avatar);
-    }
-
-    /// Get avatar for a room.
-    pub fn get(&self, room_jid: &str) -> Option<&MucAvatar> {
-        self.avatars.get(room_jid)
-    }
-
-    /// Check if a room has a known avatar.
-    pub fn has_avatar(&self, room_jid: &str) -> bool {
-        self.avatars.get(room_jid).is_some_and(|a| a.has_avatar())
-    }
-
-    /// Get the photo hash for a room.
-    pub fn photo_hash(&self, room_jid: &str) -> Option<&str> {
-        self.avatars
-            .get(room_jid)
-            .and_then(|a| a.photo_hash.as_deref())
-    }
-
-    /// Remove avatar for a room.
-    pub fn remove(&mut self, room_jid: &str) {
-        self.avatars.remove(room_jid);
-    }
-
-    /// All rooms with avatars.
-    pub fn rooms_with_avatars(&self) -> Vec<&str> {
-        self.avatars
-            .iter()
-            .filter(|(_, a)| a.has_avatar())
-            .map(|(jid, _)| jid.as_str())
-            .collect()
-    }
-}
-
-/// Extract avatar hash from a MUC presence vCard update.
-pub fn extract_avatar_hash_from_presence(payloads: &[minidom::Element]) -> Option<String> {
-    payloads
-        .iter()
-        .find(|e| e.name() == "x" && e.ns() == NS_VCARD_UPDATE)
-        .and_then(|x| x.children().find(|c| c.name() == "photo"))
-        .map(|photo| photo.text())
-        .filter(|hash| !hash.is_empty())
+/// The XEP-0153 hash of every `PHOTO` of a room vCard, in document order
+/// ("Multiple <PHOTO/> elements may be present in a vCard ... the
+/// 'muc#roominfo_avatarhash' field must contain a hash of all of them").
+///
+/// # Errors
+///
+/// [`RoomVCardError`] for a photo that cannot be hashed.
+pub fn avatar_hashes(vcard: &Element) -> Result<Vec<String>, RoomVCardError> {
+    vcard
+        .children()
+        .filter(|child| child.name() == "PHOTO" && child.ns() == NS_VCARD)
+        .map(|photo| {
+            let has_type = photo
+                .get_child("TYPE", NS_VCARD)
+                .is_some_and(|media_type| !media_type.text().trim().is_empty());
+            let binval = photo
+                .get_child("BINVAL", NS_VCARD)
+                .map(Element::text)
+                .filter(|binval| !binval.trim().is_empty());
+            let (true, Some(binval)) = (has_type, binval) else {
+                return Err(RoomVCardError::IncompletePhoto);
+            };
+            // BINVAL is commonly line-wrapped base64.
+            let compact: String = binval.chars().filter(|c| !c.is_whitespace()).collect();
+            let bytes = STANDARD
+                .decode(compact)
+                .map_err(|_| RoomVCardError::InvalidBinval)?;
+            Ok(compute_photo_hash(&bytes))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_muc_avatar_new() {
-        let a = MucAvatar::new("room@muc")
-            .with_hash("abc123")
-            .with_url("https://example.com/avatar.png");
-        assert!(a.has_avatar());
-        assert_eq!(a.photo_hash.as_deref(), Some("abc123"));
-        assert_eq!(a.url.as_deref(), Some("https://example.com/avatar.png"));
+    // xep-0486.xml's example SVG avatar and its published hash.
+    const SVG_BINVAL: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiI+CiA8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIGZpbGw9InJlZCIvPgo8L3N2Zz4K";
+
+    fn vcard(xml: &str) -> Element {
+        xml.parse().expect("valid vCard XML")
     }
 
     #[test]
-    fn test_muc_avatar_no_avatar() {
-        let a = MucAvatar::new("room@muc");
-        assert!(!a.has_avatar());
+    fn empty_vcard_unpublishes() {
+        assert_eq!(
+            parse_room_vcard(&vcard("<vCard xmlns='vcard-temp'/>")),
+            Ok(RoomAvatarUpdate::Unpublish)
+        );
     }
 
     #[test]
-    fn test_cache_set_get() {
-        let mut cache = MucAvatarCache::new();
-        cache.set(MucAvatar::new("room@muc").with_hash("abc"));
-        assert!(cache.has_avatar("room@muc"));
-        assert_eq!(cache.photo_hash("room@muc"), Some("abc"));
+    fn photo_publishes_with_its_sha1() {
+        let xml = format!(
+            "<vCard xmlns='vcard-temp'><PHOTO><TYPE>image/svg+xml</TYPE><BINVAL>{SVG_BINVAL}</BINVAL></PHOTO></vCard>"
+        );
+        let Ok(RoomAvatarUpdate::Publish { hashes }) = parse_room_vcard(&vcard(&xml)) else {
+            panic!("expected a published avatar");
+        };
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].len(), 40);
+        assert!(hashes[0].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn test_cache_miss() {
-        let cache = MucAvatarCache::new();
-        assert!(!cache.has_avatar("unknown@muc"));
-        assert_eq!(cache.photo_hash("unknown@muc"), None);
+    fn line_wrapped_binval_hashes_like_the_compact_form() {
+        let wrapped = format!("{}\n  {}", &SVG_BINVAL[..20], &SVG_BINVAL[20..]);
+        let one = format!(
+            "<vCard xmlns='vcard-temp'><PHOTO><TYPE>image/png</TYPE><BINVAL>{SVG_BINVAL}</BINVAL></PHOTO></vCard>"
+        );
+        let two = format!(
+            "<vCard xmlns='vcard-temp'><PHOTO><TYPE>image/png</TYPE><BINVAL>{wrapped}</BINVAL></PHOTO></vCard>"
+        );
+        assert_eq!(
+            avatar_hashes(&vcard(&one)),
+            avatar_hashes(&vcard(&two)),
+            "whitespace must not change the hash"
+        );
     }
 
     #[test]
-    fn test_cache_remove() {
-        let mut cache = MucAvatarCache::new();
-        cache.set(MucAvatar::new("room@muc").with_hash("abc"));
-        cache.remove("room@muc");
-        assert!(!cache.has_avatar("room@muc"));
+    fn every_photo_is_hashed_in_document_order() {
+        let xml = format!(
+            "<vCard xmlns='vcard-temp'>\
+             <PHOTO><TYPE>image/svg+xml</TYPE><BINVAL>{SVG_BINVAL}</BINVAL></PHOTO>\
+             <PHOTO><TYPE>image/png</TYPE><BINVAL>iVBORw0KGgo=</BINVAL></PHOTO>\
+             </vCard>"
+        );
+        let hashes = avatar_hashes(&vcard(&xml)).expect("hashable");
+        assert_eq!(hashes.len(), 2);
+        assert_ne!(hashes[0], hashes[1]);
     }
 
     #[test]
-    fn test_cache_rooms_with_avatars() {
-        let mut cache = MucAvatarCache::new();
-        cache.set(MucAvatar::new("a@muc").with_hash("h1"));
-        cache.set(MucAvatar::new("b@muc")); // no avatar
-        cache.set(MucAvatar::new("c@muc").with_url("url"));
-
-        let rooms = cache.rooms_with_avatars();
-        assert_eq!(rooms.len(), 2);
+    fn nonempty_vcard_without_photo_is_rejected() {
+        assert_eq!(
+            parse_room_vcard(&vcard("<vCard xmlns='vcard-temp'><FN>Garden</FN></vCard>")),
+            Err(RoomVCardError::NoPhoto)
+        );
     }
 
     #[test]
-    fn test_extract_avatar_hash() {
-        let xml = "<x xmlns='vcard-temp:x:update'><photo>abc123def</photo></x>";
-        let elem: minidom::Element = xml.parse().expect("valid");
-        let hash = extract_avatar_hash_from_presence(&[elem]);
-        assert_eq!(hash, Some("abc123def".to_owned()));
+    fn external_or_typeless_photo_is_rejected() {
+        assert_eq!(
+            avatar_hashes(&vcard(
+                "<vCard xmlns='vcard-temp'><PHOTO><EXTVAL>https://example.org/a.png</EXTVAL></PHOTO></vCard>"
+            )),
+            Err(RoomVCardError::IncompletePhoto)
+        );
+        assert_eq!(
+            avatar_hashes(&vcard(&format!(
+                "<vCard xmlns='vcard-temp'><PHOTO><BINVAL>{SVG_BINVAL}</BINVAL></PHOTO></vCard>"
+            ))),
+            Err(RoomVCardError::IncompletePhoto)
+        );
     }
 
     #[test]
-    fn test_extract_avatar_hash_empty() {
-        let xml = "<x xmlns='vcard-temp:x:update'><photo/></x>";
-        let elem: minidom::Element = xml.parse().expect("valid");
-        assert!(extract_avatar_hash_from_presence(&[elem]).is_none());
-    }
-
-    #[test]
-    fn test_extract_avatar_hash_missing() {
-        let xml = "<x xmlns='jabber:client'/>";
-        let elem: minidom::Element = xml.parse().expect("valid");
-        assert!(extract_avatar_hash_from_presence(&[elem]).is_none());
+    fn invalid_base64_is_rejected() {
+        assert_eq!(
+            avatar_hashes(&vcard(
+                "<vCard xmlns='vcard-temp'><PHOTO><TYPE>image/png</TYPE><BINVAL>***</BINVAL></PHOTO></vCard>"
+            )),
+            Err(RoomVCardError::InvalidBinval)
+        );
     }
 }

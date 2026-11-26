@@ -112,25 +112,30 @@ async fn server_disco_advertises_call_features_when_livekit_enabled() {
         .await
         .expect("disco#info");
 
+    // The bare domain is not a Jingle/RTP endpoint (1:1 sessions run
+    // between clients; the Muji responder is the `calls.<domain>`
+    // mixer), so it advertises only the domain-level call features.
+    for ns in [
+        "urn:xmpp:jingle-message:0",
+        "urn:xmpp:extdisco:2",
+        "urn:waddle:transports:livekit:0",
+        NS_WADDLE_CALL_LIFECYCLE,
+    ] {
+        assert!(
+            resp.contains(ns),
+            "disco#info must advertise {ns}; got: {resp}"
+        );
+    }
     for ns in [
         "urn:xmpp:jingle:1",
         "urn:xmpp:jingle:apps:rtp:1",
         "urn:xmpp:jingle:apps:rtp:audio",
         "urn:xmpp:jingle:apps:rtp:video",
-        "urn:xmpp:jingle-message:0",
-        "urn:xmpp:extdisco:2",
-        "urn:waddle:transports:livekit:0",
-        NS_WADDLE_CALL_LIFECYCLE,
-        // XEP-0272 (Muji) — MUC group call presence advertisement +
-        // Jingle session-initiate join surface to the SFU mixer.
-        // Backed by the Muji branch in `JingleHandler`; the legacy
-        // `urn:waddle:muc-call:0` IQ surface and `MucCallHandler`
-        // have been removed.
         "urn:xmpp:jingle:muji:0",
     ] {
         assert!(
-            resp.contains(ns),
-            "disco#info must advertise {ns}; got: {resp}"
+            !resp.contains(ns),
+            "the server domain must not advertise {ns}; got: {resp}"
         );
     }
 
@@ -220,10 +225,15 @@ async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
         resp.contains("urn:xmpp:jingle:1"),
         "mixer must advertise base Jingle feature; got: {resp}"
     );
-    assert!(
-        resp.contains("urn:waddle:transports:livekit:0"),
-        "mixer must advertise the LiveKit transport feature; got: {resp}"
-    );
+    for ns in [
+        "urn:xmpp:jingle:apps:rtp:1",
+        "urn:xmpp:jingle:apps:rtp:audio",
+        "urn:xmpp:jingle:apps:rtp:video",
+        "urn:waddle:transports:livekit:0",
+        "urn:xmpp:coin:1",
+    ] {
+        assert!(resp.contains(ns), "mixer must advertise {ns}; got: {resp}");
+    }
 }
 
 #[tokio::test]
@@ -957,6 +967,7 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
     // multi-session join: shared occupant entry, two underlying full
     // JIDs in `occupant_sessions`.
     muji_join_room(&mut web, &room, nick).await;
+    ws_common::iq::unlock_created_room(&mut web, &room).await;
     muji_join_room(&mut mobile, &room, nick).await;
 
     // Web emits a XEP-0272 §Joining content presence (active call).
@@ -1185,6 +1196,7 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
     let room = format!("forbidden-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     muji_join_room(&mut admin_web, &room, "admin").await;
+    ws_common::iq::unlock_created_room(&mut admin_web, &room).await;
     muji_join_room(&mut admin_mobile, &room, "admin").await;
 
     let active = Element::builder("presence", "jabber:client")
@@ -1407,6 +1419,7 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     let room = format!("ended-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     let nick = "admin";
     muji_join_room(&mut web, &room, nick).await;
+    ws_common::iq::unlock_created_room(&mut web, &room).await;
     muji_join_room(&mut mobile, &room, nick).await;
 
     let active = format!(
@@ -1737,6 +1750,7 @@ async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
         .expect("bob connects");
     let room = format!("grants-devoiced-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     muji_join_room(&mut alice, &room, "admin").await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     muji_join_room(&mut bob, &room, "bob").await;
 
     // Make the room moderated so the visitor role actually withholds
@@ -1786,4 +1800,119 @@ async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
         grant.can_subscribe,
         "a visitor may still listen and watch: {accept}"
     );
+}
+
+/// XEP-0272 puts `<muji/>` only on the `session-initiate`; a hangup is a
+/// plain XEP-0166 `session-terminate` naming the session by `sid`. It must
+/// unregister the caller and clear the caller's call presence from the room,
+/// exactly as a terminate carrying the room does.
+#[tokio::test]
+async fn plain_session_terminate_clears_the_callers_room_call_presence() {
+    let (_livekit_admin, server) = start_call_server(&[(BOB, BOB_PW)]).await;
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_pass,
+        "plain-term-admin",
+    )
+    .await
+    .expect("admin connects");
+    let mut bob =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, BOB, BOB_PW, "plain-term-bob")
+            .await
+            .expect("bob connects");
+    let room = create_group_dm(
+        &mut admin,
+        "plain-term-create",
+        "Plain terminate",
+        &["admin@localhost", "bob@localhost"],
+    )
+    .await;
+    muji_join_room(&mut admin, &room, "admin").await;
+    muji_join_room(&mut bob, &room, "bob").await;
+
+    let active = Element::builder("presence", "jabber:client")
+        .attr(
+            minidom::rxml::xml_ncname!("to").to_owned(),
+            format!("{room}/admin"),
+        )
+        .append(Element::builder("x", NS_MUC).build())
+        .append(
+            Element::builder("muji", NS_MUJI)
+                .append(
+                    Element::builder("content", NS_MUJI)
+                        .attr(
+                            minidom::rxml::xml_ncname!("creator").to_owned(),
+                            "initiator",
+                        )
+                        .attr(minidom::rxml::xml_ncname!("name").to_owned(), "audio")
+                        .append(
+                            Element::builder("description", "urn:xmpp:jingle:apps:rtp:1")
+                                .attr(minidom::rxml::xml_ncname!("media").to_owned(), "audio")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    admin
+        .send(&element_to_xml(active))
+        .await
+        .expect("admin advertises an active call");
+    recv_until_muji_and_anchor(&mut bob).await;
+    send_muji_session_initiate(&mut admin, &room, "plain-term-sid").await;
+
+    // A plain terminate for a session this connection never initiated is
+    // an unknown session and leaves the live call alone.
+    admin
+        .send(&plain_session_terminate("plain-term-unknown", "other-sid"))
+        .await
+        .expect("admin sends a plain terminate for an unknown session");
+    let unknown = admin
+        .recv_matching(|frame| frame_has_iq_id(frame, "plain-term-unknown"))
+        .await
+        .expect("unknown-session reply");
+    assert!(
+        unknown.contains("unknown-session"),
+        "an unknown sid is an unknown session: {unknown}"
+    );
+
+    admin
+        .send(&plain_session_terminate("plain-term-1", "plain-term-sid"))
+        .await
+        .expect("admin sends the plain terminate");
+    let ack = admin
+        .recv_matching(|frame| frame_has_iq_id(frame, "plain-term-1"))
+        .await
+        .expect("terminate reply");
+    assert!(
+        !ack.contains("<error"),
+        "a plain terminate of an active session must succeed: {ack}"
+    );
+    recv_muji_leave_reflection(&mut bob, &room, "admin").await;
+}
+
+fn plain_session_terminate(id: &str, sid: &str) -> String {
+    element_to_xml(
+        Element::builder("iq", NS_JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                format!("calls.{DOMAIN}"),
+            )
+            .append(
+                Element::builder("jingle", NS_JINGLE)
+                    .attr(
+                        minidom::rxml::xml_ncname!("action").to_owned(),
+                        "session-terminate",
+                    )
+                    .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+                    .build(),
+            )
+            .build(),
+    )
 }

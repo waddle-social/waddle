@@ -3,7 +3,7 @@ use crate::db::Transaction;
 use crate::db::Value;
 use jid::BareJid;
 use tracing::warn;
-use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
+use waddle_xmpp::pubsub::{ExpiredItem, PubSubItem, PubSubNode, PublishResult, StoredItem};
 use waddle_xmpp::xep::xep_waddle_dm_bookmarks::{is_dm_bookmarks_node, DmBookmark};
 use waddle_xmpp::XmppError;
 
@@ -575,6 +575,67 @@ impl DatabasePubSubStorage {
             )
             .await?;
         Ok(affected > 0)
+    }
+
+    /// Retract every item older than its node's `pubsub#item_expire`.
+    ///
+    /// Each removal goes through [`Self::retract_item_impl`] so nodes that
+    /// keep a derived projection clear it exactly as an explicit retract does.
+    pub(super) async fn purge_expired_items_impl(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ExpiredItem>, XmppError> {
+        /// One sweep's ceiling; the next tick takes the remainder.
+        const SWEEP_BATCH: i64 = 500;
+        let mut rows = self
+            .query(
+                r#"
+                SELECT i.owner_jid, i.node_name, i.item_id
+                FROM pubsub_items i
+                JOIN pubsub_nodes n
+                  ON n.owner_jid = i.owner_jid AND n.node_name = i.node_name
+                WHERE n.item_expire IS NOT NULL
+                  AND i.published_at_ms + n.item_expire * 1000 <= ?
+                ORDER BY i.published_at_ms
+                LIMIT ?
+                "#,
+                crate::db_params![now.timestamp_millis(), SWEEP_BATCH],
+            )
+            .await?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        {
+            let owner: String = row
+                .get(0)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let node_name: String = row
+                .get(1)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let item_id: String = row
+                .get(2)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let owner = owner.parse::<BareJid>().map_err(|error| {
+                XmppError::internal(format!("invalid PubSub owner_jid: {error}"))
+            })?;
+            candidates.push(ExpiredItem {
+                owner,
+                node_name,
+                item_id,
+            });
+        }
+        let mut removed = Vec::with_capacity(candidates.len());
+        for item in candidates {
+            if self
+                .retract_item_impl(&item.owner, &item.node_name, &item.item_id)
+                .await?
+            {
+                removed.push(item);
+            }
+        }
+        Ok(removed)
     }
 
     pub(super) async fn purge_node_impl(

@@ -100,3 +100,167 @@ async fn xep_0421_groupchat_reflection_carries_occupant_id_keyed_by_env_secret()
 
     let _ = client.close().await;
 }
+
+fn find_descendant<'a>(
+    element: &'a xmpp_parsers::minidom::Element,
+    name: &str,
+    ns: &str,
+) -> Option<&'a xmpp_parsers::minidom::Element> {
+    element.children().find_map(|child| {
+        if child.name() == name && child.ns() == ns {
+            Some(child)
+        } else {
+            find_descendant(child, name, ns)
+        }
+    })
+}
+
+fn room_occupant_id(room: &str) -> String {
+    let secret = OccupantIdSecret::try_new(HARNESS_SECRET.as_bytes().to_vec())
+        .expect("harness secret meets length floor");
+    let room: jid::BareJid = room.parse().expect("room bare jid");
+    waddle_xmpp::xep::xep0421::generate_room_occupant_id(&room, &secret)
+        .as_str()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn xep_0421_muc_service_advertises_occupant_id_because_every_room_forces_it() {
+    // XEP-0421 §Business Rules: "If occupant identifiers are force enabled
+    // for all rooms on a MUC service, it SHOULD additionally specify the
+    // 'urn:xmpp:occupant-id:0' feature on the MUC service."
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="svc-disco" to="muc.{DOMAIN}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+        ))
+        .await
+        .expect("send service disco");
+    let service = client
+        .recv_matching(|frame| frame.contains("svc-disco"))
+        .await
+        .expect("service disco result");
+    assert!(
+        service.contains("var='urn:xmpp:occupant-id:0'")
+            || service.contains(r#"var="urn:xmpp:occupant-id:0""#),
+        "MUC service must advertise urn:xmpp:occupant-id:0: {service}"
+    );
+
+    let room = format!("oid-disco-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+    client
+        .send(&format!(
+            r#"<iq type="get" id="room-disco" to="{room}"><query xmlns="http://jabber.org/protocol/disco#info"/></iq>"#
+        ))
+        .await
+        .expect("send room disco");
+    let room_disco = client
+        .recv_matching(|frame| frame.contains("room-disco"))
+        .await
+        .expect("room disco result");
+    assert!(
+        room_disco.contains("var='urn:xmpp:occupant-id:0'")
+            || room_disco.contains(r#"var="urn:xmpp:occupant-id:0""#),
+        "room must advertise urn:xmpp:occupant-id:0: {room_disco}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn xep_0421_room_authored_messages_carry_the_room_occupant_id() {
+    // XEP-0421 §Business Rules: "The <occupant-id> element MUST be attached
+    // to every message and every presence sent by a MUC." The empty subject
+    // of a never-set room and a pin notice are authored by the room itself.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("oid-room-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let expected = room_occupant_id(&room);
+
+    client
+        .send(&format!(
+            r#"<presence to="{room}/{USERNAME}"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
+        ))
+        .await
+        .expect("send join");
+    let join = client
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("join responses");
+    let subject = join
+        .iter()
+        .find(|frame| frame.contains("<subject"))
+        .expect("subject frame");
+    assert_eq!(
+        extract_occupant_id_attr(subject).as_deref(),
+        Some(expected.as_str()),
+        "never-set subject carries the room occupant-id: {subject}"
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="pin-target"><body>pin me</body></message>"#
+        ))
+        .await
+        .expect("send target");
+    let echo = client
+        .recv_matching(|frame| frame.contains("pin me"))
+        .await
+        .expect("target echo");
+    let target = ws_common::extract_attr_after(&echo, "stanza-id", "id").expect("stanza-id");
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="pin-req"><pinned xmlns="urn:waddle:pin:0" target="{target}"/></message>"#
+        ))
+        .await
+        .expect("send pin");
+    let pin = client
+        .recv_matching(|frame| frame.contains("<pin-event") && frame.contains("action='pinned'"))
+        .await
+        .expect("pin notice");
+    let element = pin.parse::<xmpp_parsers::minidom::Element>().expect("xml");
+    assert!(
+        element.attr("from").is_some_and(|from| !from.contains('/')),
+        "pin notice is authored by the bare room: {pin}"
+    );
+    assert_eq!(
+        pin.matches("<occupant-id").count(),
+        1,
+        "pin notice carries exactly one occupant-id: {pin}"
+    );
+    assert!(find_descendant(&element, "occupant-id", "urn:xmpp:occupant-id:0").is_some());
+    assert_eq!(
+        extract_occupant_id_attr(&pin).as_deref(),
+        Some(expected.as_str()),
+        "pin notice carries the room occupant-id: {pin}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="oid-mam" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("oid-mam") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    let replay = frames
+        .iter()
+        .find(|frame| frame.contains("<pin-event"))
+        .unwrap_or_else(|| panic!("MAM replays the pin notice: {frames:?}"));
+    assert_eq!(
+        replay.matches("<occupant-id").count(),
+        1,
+        "replayed pin notice carries exactly one occupant-id: {replay}"
+    );
+    assert_eq!(
+        extract_occupant_id_attr(replay).as_deref(),
+        Some(expected.as_str()),
+        "replayed pin notice keeps the room occupant-id: {replay}"
+    );
+
+    let _ = client.close().await;
+}

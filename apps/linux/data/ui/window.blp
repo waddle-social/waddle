@@ -94,6 +94,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
             Button {
               icon-name: "go-previous-symbolic";
               tooltip-text: _("Back");
+              accessibility {
+                label: _("Back to the server address");
+              }
               clicked => $on_back_to_server() swapped;
             }
           }
@@ -127,6 +130,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
             Button {
               icon-name: "go-previous-symbolic";
               tooltip-text: _("Cancel");
+              accessibility {
+                label: _("Cancel sign-in");
+              }
               clicked => $on_back_to_server() swapped;
             }
           }
@@ -185,6 +191,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 Button {
                   icon-name: "system-users-symbolic";
                   tooltip-text: _("People");
+                  accessibility {
+                    label: _("People");
+                  }
                   clicked => $on_people() swapped;
                 }
 
@@ -192,6 +201,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 MenuButton {
                   icon-name: "list-add-symbolic";
                   tooltip-text: _("New Conversation");
+                  accessibility {
+                    label: _("New conversation");
+                  }
                   menu-model: new_menu;
                 }
 
@@ -199,6 +211,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 MenuButton {
                   icon-name: "open-menu-symbolic";
                   tooltip-text: _("Main Menu");
+                  accessibility {
+                    label: _("Main menu");
+                  }
                   menu-model: primary_menu;
                   primary: true;
                 }
@@ -238,6 +253,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
 
                 child: ListBox room_list {
                   row-activated => $on_room_activated() swapped;
+                  accessibility {
+                    label: _("Conversations");
+                  }
                   margin-top: 6;
                   margin-bottom: 6;
 
@@ -319,6 +337,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "go-previous-symbolic";
                   tooltip-text: _("Back to conversation");
+                  accessibility {
+                    label: _("Back to the conversation");
+                  }
                   clicked => $on_thread_back() swapped;
                 }
 
@@ -327,6 +348,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "call-start-symbolic";
                   tooltip-text: _("Start Voice Call");
+                  accessibility {
+                    label: _("Start a voice call");
+                  }
                   action-name: "win.start-call";
                 }
 
@@ -335,6 +359,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "dialog-information-symbolic";
                   tooltip-text: _("Room Details");
+                  accessibility {
+                    label: _("Room details");
+                  }
                   action-name: "win.room-details";
                 }
 
@@ -343,6 +370,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "preferences-system-notifications-symbolic";
                   tooltip-text: _("Notifications");
+                  accessibility {
+                    label: _("Notification settings for this conversation");
+                  }
                   menu-model: notify_menu;
                 }
 
@@ -352,6 +382,11 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   label: _("Load Earlier");
                   tooltip-text: _("Load earlier conversation history");
                   clicked => $on_load_earlier() swapped;
+
+                  styles [
+                    "flat",
+                    "load-earlier",
+                  ]
                 }
 
                 [end]
@@ -359,6 +394,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "system-search-symbolic";
                   tooltip-text: _("Search Messages (Ctrl+F)");
+                  accessibility {
+                    label: _("Search messages");
+                  }
                 }
 
                 [end]
@@ -366,6 +404,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   visible: false;
                   icon-name: "view-pin-symbolic";
                   tooltip-text: _("Pinned Messages");
+                  accessibility {
+                    label: _("Pinned messages");
+                  }
                 }
               }
 
@@ -490,6 +531,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
 
                     child: ListView timeline_view {
                       single-click-activate: false;
+                      accessibility {
+                        label: _("Messages");
+                      }
 
                       styles [
                         "timeline",
@@ -527,6 +571,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   Button {
                     icon-name: "window-close-symbolic";
                     tooltip-text: _("Cancel");
+                    accessibility {
+                      label: _("Cancel reply or edit");
+                    }
                     clicked => $on_cancel_compose() swapped;
 
                     styles [
@@ -552,6 +599,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   Button {
                     icon-name: "list-add-symbolic";
                     tooltip-text: _("Add Photo, File, GIF or Sticker");
+                    accessibility {
+                      label: _("Add a photo, file, GIF or sticker");
+                    }
                     valign: center;
                     clicked => $on_attach() swapped;
 
@@ -569,6 +619,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   ToggleButton format_toggle {
                     icon-name: "format-text-bold-symbolic";
                     tooltip-text: _("Formatting");
+                    accessibility {
+                      label: _("Show formatting tools");
+                    }
                     valign: center;
                     toggled => $on_toggle_format() swapped;
 
@@ -615,6 +668,9 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   Button {
                     icon-name: "mail-send-symbolic";
                     tooltip-text: _("Send Message");
+                    accessibility {
+                      label: _("Send message");
+                    }
                     valign: center;
                     width-request: 40;
                     height-request: 40;
@@ -640,6 +696,11 @@ menu primary_menu {
     item {
       label: _("Preferences");
       action: "app.preferences";
+    }
+
+    item {
+      label: _("Keyboard Shortcuts");
+      action: "win.show-shortcuts";
     }
 
     item {

@@ -1138,7 +1138,7 @@ pub enum AdminListDenial {
 /// wire shape as a local one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdminListAnswer {
-    Affiliations(Vec<(BareJid, Affiliation)>),
+    Affiliations(Vec<waddle_xmpp::muc::AdminAffiliationEntry>),
     Roles(Vec<AdminRoleEntry>),
     Denied(AdminListDenial),
 }
@@ -1245,7 +1245,17 @@ async fn answer_host_grant_admin_list_get(
     }
     let filter = query.items.iter().find_map(|item| item.affiliation);
     match host_grant_affiliation_list(room, sender_jid, evidence, filter) {
-        Ok(list) => AdminListAnswer::Affiliations(list),
+        Ok(list) => {
+            let snapshot = match room_actor
+                .ask(GetSnapshot)
+                .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+                .await
+            {
+                Ok(snapshot) => snapshot.room,
+                Err(_) => return AdminListAnswer::Denied(AdminListDenial::Internal),
+            };
+            AdminListAnswer::Affiliations(snapshot.affiliation_list_entries(list))
+        }
         Err(_) => AdminListAnswer::Denied(AdminListDenial::Forbidden),
     }
 }
@@ -1401,7 +1411,7 @@ fn honoured_admin_context(
 /// the room with `evidence`: none for a session of this deployment, and
 /// for a remote principal the inbound S2S stream that carried the request.
 /// Every decision about the sender names that evidence.
-pub(super) async fn handle_muc_admin_iq(
+pub(in crate::server::routes::websocket::handlers) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
     state: &WebSocketState,
@@ -2313,12 +2323,7 @@ pub(super) async fn handle_muc_admin_iq(
                 // the frame write and invert the §8.2 order.
                 self_kick_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
             } else {
-                let _ = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .send_to(&recipient, Stanza::Presence(presence))
-                    .await;
+                send_room_presence(state, &room_jid, &recipient, presence).await;
             }
         } else if recipient == *sender_jid {
             moderator_frames.push(stanza_to_xml(&Stanza::Presence(presence)));
@@ -2337,17 +2342,38 @@ pub(super) async fn handle_muc_admin_iq(
         &applied.voice_changes,
     );
     for (recipient, presence) in remaining_broadcasts {
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .send_to(&recipient, Stanza::Presence(presence))
-            .await;
+        send_room_presence(state, &room_jid, &recipient, presence).await;
     }
     let mut frames = self_kick_frames;
     frames.push(result_frame);
     frames.extend(moderator_frames);
     ResponseBatch::from_frames(frames)
+}
+
+/// Deliver a room's presence to one of its occupants: straight to the
+/// connection when this node hosts it, through the cluster otherwise. The
+/// room actor may live on another node than the occupant's connection, and a
+/// local registry send alone would drop the presence of such an occupant, who
+/// would never learn of its role change or removal.
+async fn send_room_presence(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    recipient: &FullJid,
+    presence: xmpp_parsers::presence::Presence,
+) {
+    let registry = &state.deps.protocol.connection_registry;
+    let stanza = Stanza::Presence(presence);
+    if registry
+        .entry(recipient)
+        .is_some_and(|entry| entry.is_locally_hosted())
+    {
+        let _ = registry.send_to(recipient, stanza).await;
+    } else {
+        crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+            state, room_jid, recipient, stanza,
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]

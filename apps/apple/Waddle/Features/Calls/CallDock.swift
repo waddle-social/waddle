@@ -4,8 +4,8 @@ import WaddleKit
 /// The signed-in session's call dock: shows the call slot through
 /// `CallDockView`, or `GroupCallDockView` for a room's call, runs the
 /// in-call clock, and answers through the store. Absent while the slot is
-/// idle, and while the call has a stage of its own beside its conversation
-/// (`CallSurface`): one surface draws a call.
+/// idle, and while the call has a stage of its own, beside its conversation
+/// or over a phone's screen (`CallSurface`): one surface draws a call.
 struct CallDock: View {
     /// Absent where a presentation was given no session.
     @Environment(SessionCoordinator.self) private var session: SessionCoordinator?
@@ -36,7 +36,9 @@ struct CallDock: View {
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         ZStack {
             if let shown, let session {
-                clocked(shown, group: group, showsVideo: content == .call, in: session)
+                // A floating call's picture is in its window: a track keeps one renderer.
+                let floats = state.sid.flatMap { stageModel?.stage(of: $0).isFloating } ?? false
+                clocked(shown, group: group, showsVideo: content == .call && !floats, in: session)
                     .frame(maxWidth: CallDockView.maxWidth)
                     .padding(.horizontal, Theme.Spacing.m)
                     .padding(.vertical, Theme.Spacing.s)
@@ -69,6 +71,13 @@ struct CallDock: View {
         _ stage: CallStage, group: GroupCallStage?, elapsed: Duration?, video: CallDockVideo, in session: SessionCoordinator
     ) -> some View {
         let commands = CallCommands(calls: session.calls, media: media)
+        // On a phone the stage covers the screen once opened; a sheet's dock is over whatever would show it.
+        let open: (@MainActor () -> Void)? = if platform == .phone, !isInSheet, let stageModel,
+            let sid = session.calls.state.sid, session.calls.state.sessionConversation != nil {
+            { stageModel.update(sid) { $0.open() } }
+        } else {
+            nil
+        }
         if let group {
             GroupCallDockView(
                 stage: group,
@@ -84,7 +93,7 @@ struct CallDock: View {
                 announcesChanges: !isInSheet,
                 actions: GroupCallDockActions(
                     leave: commands.hangUp, toggleMicrophone: commands.toggleMicrophone,
-                    toggleCamera: commands.toggleCamera, toggleHand: commands.toggleHand
+                    toggleCamera: commands.toggleCamera, toggleHand: commands.toggleHand, open: open
                 )
             )
         } else {
@@ -101,7 +110,7 @@ struct CallDock: View {
                 actions: CallDockActions(
                     accept: commands.accept, decline: commands.decline, hangUp: commands.hangUp,
                     toggleMicrophone: commands.toggleMicrophone, toggleCamera: commands.toggleCamera,
-                    dismiss: commands.dismiss
+                    dismiss: commands.dismiss, open: open
                 )
             )
         }

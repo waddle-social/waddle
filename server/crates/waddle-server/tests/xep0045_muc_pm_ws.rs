@@ -286,6 +286,7 @@ async fn muc_pm_delivered_to_all_sessions_of_target_nick_with_canonical_shape() 
 
     let room = format!("pm-fanout-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice_web, &room, ALICE).await;
     join_room(&mut alice_mobile, &room, ALICE).await;
 
@@ -330,6 +331,7 @@ async fn muc_pm_sent_carbon_reaches_senders_other_resource() {
 
     let room = format!("pm-carbon-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin_room, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin_room, &room).await;
     let target_nick = "alice/phone";
     join_room(&mut alice, &room, target_nick).await;
 
@@ -503,6 +505,7 @@ async fn muc_pm_to_detached_resumable_occupant_replays_on_resume() {
 
     let room = format!("pm-detached-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
 
     // Alice enables XEP-0198 resumption AFTER joining, then drops
@@ -596,6 +599,7 @@ async fn muc_pm_archived_in_both_user_archives() {
 
     let room = format!("pm-mam-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
 
     let body = format!("archived-pm-{}", uuid::Uuid::new_v4());
@@ -653,6 +657,7 @@ async fn muc_pm_mam_with_full_occupant_excludes_siblings_across_pages() {
     let mut bob = connect(&server, "bob", &bob_pass, "pm-scope-bob").await;
     let room = format!("pm-scope-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, "bob").await;
 
@@ -782,6 +787,7 @@ async fn muc_pm_honors_allowpm_room_config() {
 
     let room = format!("pm-allowpm-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     set_allow_pm(&mut admin, &room, "none").await;
     join_room(&mut alice, &room, ALICE).await;
 
@@ -897,6 +903,7 @@ async fn muc_pm_private_hint_suppresses_sent_carbon() {
 
     let room = format!("pm-priv-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin_room, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin_room, &room).await;
     join_room(&mut alice, &room, ALICE).await;
 
     let body = format!("private-hint-{}", uuid::Uuid::new_v4());

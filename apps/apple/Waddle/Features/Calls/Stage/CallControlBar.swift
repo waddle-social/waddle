@@ -1,116 +1,118 @@
 import SwiftUI
 import WaddleKit
 
-/// What the controls and tiles of a call's stage do.
-struct CallStageActions {
-    let toggleMicrophone: @MainActor () -> Void
-    let toggleCamera: @MainActor () -> Void
-    let toggleHand: @MainActor () -> Void
-    let setViewMode: @MainActor (CallStagePresentation.ViewMode) -> Void
-    let toggleSelfView: @MainActor () -> Void
-    var setSize: @MainActor (CallSurface.Size) -> Void = { _ in /* a stage of one size */ }
-    var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
-    var setVolume: @MainActor (_ identity: String, _ gain: Double) -> Void = { _, _ in /* nobody to turn down */ }
-    var resetVolumes: @MainActor () -> Void = { /* nothing to reset */ }
-    var openSettings: @MainActor () -> Void = { /* a stage with no settings */ }
-    /// Tries a device the call could not use again, or puts its notice away for this call.
-    var retryMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to retry */ }
-    var dismissMediaIssue: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nothing to dismiss */ }
-    /// Opens the system's settings where a device is allowed.
-    var openSystemSettings: @MainActor (CallMediaIssue.Kind) -> Void = { _ in /* nowhere to open */ }
-    /// Starts sharing our screen, by way of the picker, or stops it.
-    var toggleScreenShare: @MainActor () -> Void = { /* a device that cannot share */ }
-    let hangUp: @MainActor () -> Void
-}
-
 /// The controls under a call's stage (web `CallControls` in the split):
 /// round glyph buttons, the gallery and speaker switch, and the red pill
 /// that ends our part of the call, "Hang up" in a room too, as on the web. When they do not fit one row the pill
 /// takes a row of its own.
 struct CallControlBar: View {
-    var isMicrophoneOn = false
-    var isCameraOn = false
-    /// The devices can be switched: media has connected.
-    var hasMedia = true
-    /// Whether our hand is up; `nil` in a call with no hands to raise, a 1:1.
-    var isHandRaised: Bool?
-    var viewMode = CallStagePresentation.ViewMode.gallery
-    var isSelfViewHidden = false
-    var size = CallSurface.Size.split
-    /// Off while something else on screen has a use for Escape.
-    var escapeStepsDown = true
-    var showsParticipants = false
-    /// Whether we are sharing our screen; `nil` where this device cannot, an iPhone or iPad.
-    var isSharingScreen: Bool?
-    let actions: CallStageActions
+    var controls = CallControls()
+    let perform: @MainActor (CallStageAction) -> Void
+
+    private var hasMedia: Bool { controls.devices.hasMedia }
+    private var isHandRaised: Bool? { controls.isHandRaised }
+    private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
+    private var isSelfViewHidden: Bool { controls.isSelfViewHidden }
+    private var size: CallSurface.Size { controls.size }
+    private var showsParticipants: Bool { controls.showsParticipants }
+    private var isSharingScreen: Bool? { controls.devices.isSharingScreen }
+    private var chatUnread: Int? { controls.chatUnread }
+    private var showsChat: Bool { controls.showsChat }
+    private var canReact: Bool { controls.canReact }
+    private var isFloating: Bool? { controls.isFloating }
+    /// Escape brings a floating call back before it steps the stage down (web #1034).
+    private var escapeStepsDown: Bool { controls.escapeStepsDown && controls.isFloating != true }
 
     var body: some View {
+        // Widest first; the bar takes the first that fits (`CallControlBarLayout`).
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: Theme.Spacing.s) {
-                toggles
-                endButton
-            }
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles }
-                endButton
-            }
-            // The 400 pt column of a room's call: the view choice moves into More.
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true) }
-                endButton
-            }
-            // Narrower still, or with every button there is: sharing and the list of people go there too.
-            VStack(spacing: Theme.Spacing.s) {
-                HStack(spacing: Theme.Spacing.s) { toggles(viewChoiceInMenu: true, extrasInMenu: true) }
-                endButton
-            }
+            row(.oneRow)
+            row(.twoRows)
+            row(.viewChoiceInMenu)
+            row(.reactionsInMenu)
+            row(.extrasInMenu)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Call controls"))
     }
 
-    private var toggles: some View { toggles(viewChoiceInMenu: false) }
+    @ViewBuilder
+    private func row(_ layout: CallControlBarLayout) -> some View {
+        if layout.stacksEndButton {
+            VStack(spacing: Theme.Spacing.s) {
+                HStack(spacing: Theme.Spacing.s) { toggles(layout) }
+                endButton
+            }
+        } else {
+            HStack(spacing: Theme.Spacing.s) {
+                toggles(layout)
+                endButton
+            }
+        }
+    }
+
+    private func isInBar(_ control: CallControlBarLayout.Control, _ layout: CallControlBarLayout) -> Bool {
+        layout.place(of: control, for: controls) == .bar
+    }
+
+    private func isInMenu(_ control: CallControlBarLayout.Control, _ layout: CallControlBarLayout) -> Bool {
+        layout.place(of: control, for: controls) == .menu
+    }
 
     @ViewBuilder
-    private func toggles(viewChoiceInMenu: Bool, extrasInMenu: Bool = false) -> some View {
-        CallControlButton(
-            title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
-            tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: actions.toggleMicrophone
-        )
-        .disabled(!hasMedia)
-        CallControlButton(
-            title: isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
-            tone: isCameraOn || !hasMedia ? .plain : .chosen, action: actions.toggleCamera
-        )
-        .disabled(!hasMedia)
-        if !viewChoiceInMenu { viewSwitch }
-        if let isHandRaised {
+    private func toggles(_ layout: CallControlBarLayout) -> some View {
+        CallDeviceButtons(devices: controls.devices, perform: perform)
+        if isInBar(.viewChoice, layout) { viewSwitch }
+        if let isHandRaised, isInBar(.hand, layout) {
             CallControlButton(
                 title: isHandRaised ? "Lower hand" : "Raise hand", symbol: "hand.raised",
-                tone: isHandRaised ? .chosen : .plain, action: actions.toggleHand
+                tone: isHandRaised ? .chosen : .plain, action: { perform(.toggleHand) }
             )
             .accessibilityAddTraits(isHandRaised ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        if let isSharingScreen, !extrasInMenu || isSharingScreen {
+        if let isSharingScreen, isInBar(.screenShare, layout) {
             // A share in progress keeps its button whatever the width: stopping it must be one click away.
             CallControlButton(
                 title: isSharingScreen ? "Stop sharing" : "Share screen", symbol: "rectangle.inset.filled.and.person.filled",
-                tone: isSharingScreen ? .chosen : .plain, action: actions.toggleScreenShare
+                tone: isSharingScreen ? .chosen : .plain, action: { perform(.toggleScreenShare) }
             )
             .accessibilityAddTraits(isSharingScreen ? .isSelected : [])
             .disabled(!hasMedia)
         }
-        if !extrasInMenu {
+        // Unread messages, like a share in progress, keep their button whatever the width:
+        // a count nobody can see is no count, and an open chat must be one click from closed.
+        if let chatUnread, isInBar(.chat, layout) {
+            CallControlButton(
+                title: CallChat.buttonTitle(unread: chatUnread, isOpen: showsChat), symbol: "bubble.left",
+                tone: showsChat ? .chosen : .plain, action: { perform(.toggleChat) }
+            )
+            .overlay(alignment: .topTrailing) {
+                if !showsChat, let badge = CallChat.badge(chatUnread) { CallControlBadge(text: badge) }
+            }
+            .accessibilityAddTraits(showsChat ? .isSelected : [])
+        }
+        if isInBar(.react, layout) { reactMenu }
+        if isInBar(.participants, layout) {
             CallControlButton(
                 title: showsParticipants ? "Hide participants" : "Participants", symbol: "person.2",
-                tone: showsParticipants ? .chosen : .plain, action: actions.toggleParticipants
+                tone: showsParticipants ? .chosen : .plain, action: { perform(.toggleParticipants) }
             )
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
         }
+        if let isFloating, isInBar(.pictureInPicture, layout) {
+            CallControlButton(
+                title: isFloating ? "Return to call" : "Picture-in-Picture", symbol: isFloating ? "pip.exit" : "pip.enter",
+                tone: isFloating ? .chosen : .plain, action: { perform(.togglePictureInPicture) }
+            )
+            .accessibilityAddTraits(isFloating ? .isSelected : [])
+            // A floating call keeps this button at every width, so Escape always has it to press.
+            // Not on a split stage: the conversation beside it has a composer whose Escape cancels a reply or an edit.
+            .keyboardShortcut(isFloating && controls.escapeStepsDown && size != .split ? .cancelAction : nil)
+        }
         sizeSteps
-        more(withViewChoice: viewChoiceInMenu, withExtras: extrasInMenu)
+        more(layout)
     }
 
     // MARK: - Split, expanded, full screen
@@ -118,14 +120,25 @@ struct CallControlBar: View {
     /// One step at a time, as on the web: split and expanded swap, and full
     /// screen is offered from expanded and offers only its way back. Escape
     /// takes the step down unless something else on screen wants it.
+    ///
+    /// A stage that covers a phone's screen has one size, and one way back to the dock.
     @ViewBuilder
     private var sizeSteps: some View {
+        if controls.minimises {
+            CallControlButton(title: "Minimise call", symbol: "chevron.down") { perform(.minimise) }
+        } else {
+            resizeSteps
+        }
+    }
+
+    @ViewBuilder
+    private var resizeSteps: some View {
         if size != .immersive {
             let isExpanded = size == .expanded
             CallControlButton(
                 title: isExpanded ? "Collapse call" : "Expand call",
                 symbol: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
-            ) { actions.setSize(isExpanded ? .split : .expanded) }
+            ) { perform(.setSize(isExpanded ? .split : .expanded)) }
             .keyboardShortcut(isExpanded && escapeStepsDown ? .cancelAction : nil)
         }
         if size != .split {
@@ -133,7 +146,7 @@ struct CallControlBar: View {
             CallControlButton(
                 title: isFullScreen ? "Exit full screen" : "Full screen",
                 symbol: isFullScreen ? "arrow.down.right.and.arrow.up.left.rectangle" : "arrow.up.left.and.arrow.down.right.rectangle"
-            ) { actions.setSize(isFullScreen ? .expanded : .immersive) }
+            ) { perform(.setSize(isFullScreen ? .expanded : .immersive)) }
             .keyboardShortcut(isFullScreen && escapeStepsDown ? .cancelAction : nil)
         }
     }
@@ -154,7 +167,7 @@ struct CallControlBar: View {
     private func viewChoice(_ mode: CallStagePresentation.ViewMode, title: String, symbol: String) -> some View {
         let isChosen = viewMode == mode
         let side = CallControlButton.side - 2 * Metrics.switchInset
-        return Button { actions.setViewMode(mode) } label: {
+        return Button { perform(.setViewMode(mode)) } label: {
             Image(systemName: symbol)
                 .font(.system(size: Metrics.switchGlyph, weight: .medium))
                 .foregroundStyle(isChosen ? Theme.Colors.fg : Theme.Colors.fgMuted)
@@ -175,24 +188,56 @@ struct CallControlBar: View {
 
     // MARK: - More
 
-    private func more(withViewChoice: Bool, withExtras: Bool = false) -> some View {
+    // MARK: - Reactions
+
+    /// The six emoji the web's picker offers, one click each.
+    private var reactMenu: some View {
         Menu {
-            if withExtras {
-                if isSharingScreen == false {
-                    Button("Share screen", action: actions.toggleScreenShare).disabled(!hasMedia)
-                }
-                Button(showsParticipants ? "Hide participants" : "Participants", action: actions.toggleParticipants)
+            reactionChoices
+        } label: {
+            CallControlButton.face(symbol: "face.smiling", tone: .plain)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(Text("React"))
+        .help("React")
+    }
+
+    private var reactionChoices: some View {
+        ForEach(CallReactionLedger.offered, id: \.self) { emoji in
+            Button(emoji) { perform(.react(emoji)) }
+        }
+    }
+
+    private func more(_ layout: CallControlBarLayout) -> some View {
+        Menu {
+            if isInMenu(.screenShare, layout) {
+                Button("Share screen", action: { perform(.toggleScreenShare) }).disabled(!hasMedia)
             }
-            if withViewChoice {
-                Picker("Stage view", selection: Binding(get: { viewMode }, set: { actions.setViewMode($0) })) {
+            if isInMenu(.participants, layout) {
+                Button(showsParticipants ? "Hide participants" : "Participants", action: { perform(.toggleParticipants) })
+            }
+            if isInMenu(.chat, layout) {
+                Button(CallChat.buttonTitle(unread: 0, isOpen: false), action: { perform(.toggleChat) })
+            }
+            if isInMenu(.react, layout) {
+                Menu("React") { reactionChoices }
+            }
+            if isInMenu(.pictureInPicture, layout) {
+                Button("Picture-in-Picture", action: { perform(.togglePictureInPicture) })
+            }
+            if isInMenu(.viewChoice, layout) {
+                Picker("Stage view", selection: Binding(get: { viewMode }, set: { perform(.setViewMode($0)) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
                     Text("Speaker view").tag(CallStagePresentation.ViewMode.speaker)
                 }
                 .pickerStyle(.inline)
             }
-            Button(isSelfViewHidden ? "Show self view" : "Hide self view", action: actions.toggleSelfView)
+            Button(isSelfViewHidden ? "Show self view" : "Hide self view", action: { perform(.toggleSelfView) })
             Divider()
-            Button("Call settings…", action: actions.openSettings)
+            Button("Call settings…", action: { perform(.openSettings) })
         } label: {
             CallControlButton.face(symbol: "ellipsis", tone: .plain)
         }
@@ -207,7 +252,7 @@ struct CallControlBar: View {
     // MARK: - End
 
     private var endButton: some View {
-        Button(action: actions.hangUp) {
+        Button(action: { perform(.hangUp) }) {
             Label("Hang up", systemImage: "phone.down")
                 .huddleText(Theme.Typography.button.weight(700))
                 .foregroundStyle(Theme.Colors.dangerFg)
@@ -226,6 +271,51 @@ struct CallControlBar: View {
     }
 }
 
+/// The microphone and the camera, wherever a call has their buttons: the
+/// stage's bar and the window a call floats in.
+struct CallDeviceButtons: View {
+    let devices: CallControls.Devices
+    let perform: @MainActor (CallStageAction) -> Void
+
+    var body: some View {
+        CallControlButton(
+            title: devices.isMicrophoneOn ? "Mute" : "Unmute", symbol: devices.isMicrophoneOn ? "mic" : "mic.slash",
+            tone: devices.isMicrophoneOn || !devices.hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
+        )
+        .disabled(!devices.hasMedia)
+        CallControlButton(
+            title: devices.isCameraOn ? "Turn camera off" : "Turn camera on",
+            symbol: devices.isCameraOn ? "video" : "video.slash",
+            tone: devices.isCameraOn || !devices.hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
+        )
+        .disabled(!devices.hasMedia)
+    }
+}
+
+/// A count on the corner of a round control: messages not yet seen.
+struct CallControlBadge: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .huddleText(Theme.Typography.caption.weight(700).sized(WaddleTokens.FontSize.xs))
+            .monospacedDigit()
+            .foregroundStyle(Theme.Colors.actionFg)
+            .padding(.horizontal, WaddleTokens.Spacing.s1)
+            .frame(minWidth: Metrics.side, minHeight: Metrics.side)
+            .background(Capsule().fill(Theme.Colors.action))
+            .offset(x: Metrics.overhang, y: -Metrics.overhang)
+            // The button's own title says the count.
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+    }
+
+    private enum Metrics {
+        static let side: CGFloat = 18
+        static let overhang: CGFloat = 4
+    }
+}
+
 /// A round, glyph-only call control (web `huddleCtl`).
 struct CallControlButton: View {
     enum Tone {
@@ -234,6 +324,8 @@ struct CallControlButton: View {
         case off
         /// A choice that is in effect: the camera off, a hand up.
         case chosen
+        /// Ends our part of the call, where there is no room for the pill that says so.
+        case end
     }
 
     let title: String
@@ -264,6 +356,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.fg
         case .off: Theme.Colors.dangerText
         case .chosen: Theme.Colors.actionText
+        case .end: Theme.Colors.dangerFg
         }
     }
 
@@ -272,6 +365,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.surface2
         case .off: Theme.Colors.danger.opacity(0.18)
         case .chosen: Theme.Colors.actionSubtle
+        case .end: Theme.Colors.danger
         }
     }
 }

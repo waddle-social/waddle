@@ -12,6 +12,17 @@ use waddle_xmpp::auth::{
 use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, DigestInput, NormalizedTarget};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
+/// The occupant-id secret every fixture unit of work is bound to, so tests
+/// that relay or rebuild invitations agree on the room's XEP-0421 id. The
+/// bytes equal `ServerConfig`'s test secret, so a fixture authority and the
+/// test WebSocket state derive the same id.
+pub fn fixture_occupant_id_secret() -> waddle_xmpp::xep::xep0421::OccupantIdSecret {
+    waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
+        b"test-occupant-id-secret-32-bytes-long".to_vec(),
+    )
+    .expect("fixture occupant-id secret")
+}
+
 /// A PostgreSQL database that one test creates and drops.
 ///
 /// Migrations and store bootstrap take database-scoped advisory locks (the
@@ -151,6 +162,7 @@ impl IngressFixture {
     ) -> Self {
         let uow =
             IngressUnitOfWork::open(db.clone(), lineage.clone()).expect("ingress unit of work");
+        uow.bind_occupant_id_secret(fixture_occupant_id_secret());
         let principal = AuthenticatedPrincipalRef::new(
             "romeo@example.com".parse().expect("sender"),
             AuthContextId::new(Uuid::new_v4()),
@@ -326,6 +338,8 @@ impl IngressFixture {
             SharedNodeIdentity::new(owner.clone()),
         )
         .expect("clustered room UoW");
+        self.uow
+            .bind_occupant_id_secret(fixture_occupant_id_secret());
         waddle_xmpp::muc::RoomClaimFenceContext::new(
             Entity::new(
                 waddle_xmpp::ownership::EntityType::RoomActor,

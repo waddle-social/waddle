@@ -1,9 +1,10 @@
 use super::OccupantIdCarrier;
 use super::{
     build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,
-    generate_occupant_id, is_occupant_id_element, set_occupant_id_on_message,
-    strip_occupant_id_from_message, Element, Message, OccupantId, OccupantIdSecret,
-    OccupantIdSecretError, Presence, NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
+    generate_occupant_id, generate_room_occupant_id, is_occupant_id_element,
+    set_occupant_id_on_message, strip_occupant_id_from_message, Element, Message, OccupantId,
+    OccupantIdSecret, OccupantIdSecretError, Presence, NS_OCCUPANT_ID,
+    OCCUPANT_ID_SECRET_MIN_BYTES,
 };
 
 use xmpp_parsers::message::MessageType;
@@ -278,11 +279,10 @@ fn xep_0421_subject_message_stamps_occupant_id_for_setter() {
 }
 
 #[test]
-fn xep_0421_subject_message_omits_occupant_id_when_no_setter_is_known() {
-    // Pins the documented spec-gap: never-set rooms emit empty
-    // <subject/> with no occupant-id, matching established servers.
-    // A future "always stamp" change would silently violate the
-    // unlinkability semantics of XEP-0421 §3 by fabricating input.
+fn xep_0421_subject_message_of_never_set_room_carries_room_occupant_id() {
+    // XEP-0421 §Business Rules: the occupant-id MUST be attached to every
+    // message a MUC sends. A never-set room has no setter, so the empty
+    // <subject/> carries the room's own id, distinct from every user id.
     use crate::muc::messages::build_subject_message;
     use jid::{BareJid, FullJid};
 
@@ -290,8 +290,10 @@ fn xep_0421_subject_message_omits_occupant_id_when_no_setter_is_known() {
     let to: FullJid = "joiner@example.com/web".parse().expect("valid full jid");
     let secret = OccupantIdSecret::for_testing(b"xep0421-subject-test".to_vec());
     let msg = build_subject_message(&room, &to, None, &secret);
-    assert!(
-        extract_occupant_id_from_message(&msg).is_none(),
-        "never-set room MUST omit occupant-id (no setter input)"
-    );
+    let id = extract_occupant_id_from_message(&msg).expect("occupant-id MUST be present");
+    assert_eq!(id, generate_room_occupant_id(&room, &secret));
+    let joiner: BareJid = "joiner@example.com".parse().expect("valid bare jid");
+    assert_ne!(id, generate_occupant_id(&joiner, &room, &secret));
+    let other: BareJid = "other@muc.example.com".parse().expect("valid bare jid");
+    assert_ne!(id, generate_room_occupant_id(&other, &secret));
 }

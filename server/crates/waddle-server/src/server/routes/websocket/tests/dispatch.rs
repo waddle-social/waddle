@@ -116,8 +116,8 @@ async fn drive_interpret_loop_runs_recipient_pass_for_peer_message() {
         "recipient-pass wire frame must carry bob's stanza-id stamp; got: {combined}"
     );
     assert!(
-        combined.contains("alice-A1"),
-        "recipient-pass wire frame must preserve alice's cross-archive stanza-id; \
+        !combined.contains("alice-A1"),
+        "recipient-pass wire frame must drop alice's archive stanza-id (XEP-0313 4.1.1); \
              got: {combined}"
     );
     assert!(
@@ -255,7 +255,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
         "drained PeerStanza replay must carry bob's recipient-side stanza-id; got: {combined}"
     );
     assert!(
-        combined.contains("alice-A1"),
-        "drained PeerStanza replay must preserve alice's cross-archive stamp; got: {combined}"
+        !combined.contains("alice-A1"),
+        "drained PeerStanza replay must drop alice's archive stamp (XEP-0313 4.1.1); got: {combined}"
     );
 }

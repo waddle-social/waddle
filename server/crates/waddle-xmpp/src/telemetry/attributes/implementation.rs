@@ -330,6 +330,8 @@ pub enum Janitor {
     DestroyCompletion,
     /// Account coordinators whose account holds no binding and is idle.
     AccountCoordinatorReaper,
+    /// Items past their node's `pubsub#item_expire` (XEP-0060 §16.4.4).
+    PubsubItemExpiry,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -354,6 +356,7 @@ impl MetricAttribute for Janitor {
             Self::LocalMucDeparture => "local_muc_departure",
             Self::DestroyCompletion => "destroy_completion",
             Self::AccountCoordinatorReaper => "account_coordinator_reaper",
+            Self::PubsubItemExpiry => "pubsub_item_expiry",
         }
     }
 }
@@ -2050,6 +2053,9 @@ pub enum MucJoinDenyReason {
     /// The session is already in the room under a different nickname
     /// (XEP-0045 §7.6, nicknames locked to identity).
     NickLocked,
+    /// The room is locked until its owner configures it (XEP-0045
+    /// §10.1.1).
+    RoomLocked,
 }
 
 impl sealed::Sealed for MucJoinDenyReason {}
@@ -2081,6 +2087,7 @@ impl MetricAttribute for MucJoinDenyReason {
             Self::RoomCreationNotPermitted => "room_creation_not_permitted",
             Self::NickConflict => "nick_conflict",
             Self::NickLocked => "nick_locked",
+            Self::RoomLocked => "room_locked",
         }
     }
 }

@@ -7,8 +7,7 @@ use super::{
     space_details_from_node, spaces_service_bare_jid, warn, Affiliation, BareJid, CheckPermission,
     CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne, DiscoItem, FullJid, GetSnapshot,
     IqHandlerContext, Jid, Object, ObjectType, Permission, Relation, RoomArchiveAccess, RsmRequest,
-    RsmResponse, Subject, SubjectType, WebSocketState, NODE_COMMANDS, PEP_NODE_AVATAR_DATA,
-    PEP_NODE_AVATAR_METADATA,
+    RsmResponse, Subject, SubjectType, WebSocketState, NODE_COMMANDS,
 };
 use crate::permissions::host_grant::{
     HostGrantAction, HostGrantGate, ManagedRoomGrants, PrincipalEvidence, RoomBinding, RoomGate,
@@ -484,16 +483,14 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         if target_to == Some(community_domain) {
-            // The community pubsub service hosts exactly two
-            // well-known nodes: the XEP-0472 feed and the XEP-0501
-            // stories node. Surface both so clients can enumerate
+            // The community pubsub service hosts the XEP-0472 feed and
+            // the xCal events node. Surface both so clients can enumerate
             // before subscribing.
             if let Some(node) = query.node.as_deref() {
-                // Only the three hosted nodes exist; each lists no sub-nodes.
+                // Only the two hosted nodes exist; each lists no sub-nodes.
                 if !matches!(
                     node,
                     waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-                        | waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
                         | waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
                 ) {
                     return vec![build_iq_error_xml_typed(
@@ -513,11 +510,6 @@ pub(super) async fn handle_disco_items_iq(
                         community_domain,
                         Some("Community Feed"),
                         Some(waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED),
-                    ),
-                    DiscoItem::new(
-                        community_domain,
-                        Some("Community Stories"),
-                        Some(waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES),
                     ),
                     DiscoItem::new(
                         community_domain,
@@ -789,6 +781,11 @@ pub(super) async fn handle_disco_items_iq(
                                 ),
                             )];
                         }
+                        // XEP-0163 §"Node Discovery": the account owner's
+                        // server MUST check the access model of each node
+                        // and return as items only those the requester is
+                        // allowed to read.
+                        let requester = phase.bound_jid().map(|jid| jid.to_bare());
                         let items = match state
                             .deps
                             .protocol
@@ -796,13 +793,34 @@ pub(super) async fn handle_disco_items_iq(
                             .list_nodes(&target_bare)
                             .await
                         {
-                            Ok(nodes) => nodes
-                                .into_iter()
-                                .filter(|node| {
-                                    node == PEP_NODE_AVATAR_DATA || node == PEP_NODE_AVATAR_METADATA
-                                })
-                                .map(|node| DiscoItem::pubsub_node(&target_bare.to_string(), &node))
-                                .collect::<Vec<_>>(),
+                            Ok(nodes) => {
+                                let contacts = crate::pubsub_authz::ContactDirectory::new(
+                                    &state.deps.app_state.db_pool,
+                                );
+                                let mut readable = Vec::new();
+                                if let Some(requester) = requester {
+                                    for node in nodes {
+                                        let decision = crate::pubsub_authz::pep_read_decision(
+                                            &state.deps.protocol.pubsub_storage,
+                                            &contacts,
+                                            &target_bare,
+                                            &node,
+                                            &requester,
+                                        )
+                                        .await;
+                                        if matches!(
+                                            decision,
+                                            Ok(crate::pubsub_authz::ReadDecision::Allowed)
+                                        ) {
+                                            readable.push(DiscoItem::pubsub_node(
+                                                &target_bare.to_string(),
+                                                &node,
+                                            ));
+                                        }
+                                    }
+                                }
+                                readable
+                            }
                             Err(error) => {
                                 warn!(target = %target_bare, error = %error, "Failed to list PEP nodes");
                                 vec![]
@@ -1982,7 +2000,9 @@ async fn instant_room(state: &WebSocketState, room_jid: BareJid) -> InstantRoom 
         Err(_) => return InstantRoom::Unknown,
     };
     let config = &snapshot.room.config;
-    if !config.public_room || config.group_dm {
+    // XEP-0045 §10.1.1: a locked room does not (yet) exist; the service
+    // listing is shared by every asker, so it is left out for all of them.
+    if snapshot.room.is_locked() || !config.public_room || config.group_dm {
         return InstantRoom::NotListed;
     }
     let name = if config.name.trim().is_empty() {

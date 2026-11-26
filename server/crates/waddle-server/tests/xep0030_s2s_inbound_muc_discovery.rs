@@ -705,6 +705,8 @@ async fn a_room_not_read_in_time_is_left_out_of_listings_that_tell_no_count() {
     hosted.catalogued_room("open", true, true, "text").await;
     let mut alice = hosted.room_creator("alice", "desk").await;
     local_join(&mut alice, ROOM, "alice").await;
+    // The room is an instant room with no catalog row; unlocking wrote one.
+    hosted.forget_catalog_row("lounge").await;
     let release = wedge_room(&hosted, ROOM).await;
 
     for id in ["t1", "t2"] {

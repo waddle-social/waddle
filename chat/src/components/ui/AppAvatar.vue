@@ -4,6 +4,8 @@ import { Avatar } from "@ark-ui/vue/avatar";
 import { css, cx } from "styled-system/css";
 import { avatar, presence as presenceRecipe } from "styled-system/recipes";
 import AppTooltip from "@/components/ui/AppTooltip.vue";
+import { consistentColor } from "@/lib/chat-ui";
+import { useConsistentColorPreference } from "@/preferences/consistent-color";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 
 const props = defineProps<{
@@ -77,6 +79,16 @@ const tint = computed(() => {
   return TINTS[hash % TINTS.length];
 });
 
+// XEP-0392 identity colour. `null` (user turned colorization off, or the
+// wasm backend is not installed yet) keeps the static tint above.
+const { colorizeIdentities } = useConsistentColorPreference();
+const identityColor = computed(() =>
+  colorizeIdentities.value ? consistentColor(props.name) : null,
+);
+const rootStyle = computed(() =>
+  identityColor.value ? { backgroundColor: identityColor.value, color: "#fff" } : undefined,
+);
+
 const rootClass = computed(() => cx(
   "app-avatar",
   avatar({ size: RECIPE_SIZE[props.size ?? "md"], tint: tint.value }),
@@ -130,7 +142,7 @@ const tooltipLabel = computed(() => {
 
 <template>
   <AppTooltip :label="tooltipLabel">
-    <Avatar.Root :class="rootClass" :data-speaking="speaking ? 'true' : undefined">
+    <Avatar.Root :class="rootClass" :style="rootStyle" :data-speaking="speaking ? 'true' : undefined">
       <Avatar.Image v-if="src" :src="src" :alt="name" :class="imageClass" />
       <Avatar.Fallback :class="fallbackClass">{{ initials }}</Avatar.Fallback>
       <span

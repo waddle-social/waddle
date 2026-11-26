@@ -29,7 +29,7 @@ pub(super) fn restore(
             discarded.push(super::super::durable::receipt_key(intent)?);
             continue;
         }
-        let (message, dependencies) = carbon_message(input, &owner);
+        let (message, dependencies) = carbon_message(input, &owner, kind);
         match intent {
             IngressEffectIntent::Carbons {
                 carbon_recipients,
@@ -76,10 +76,21 @@ pub(super) fn restore(
 fn carbon_message(
     input: &RecoveryInput<'_>,
     owner: &BareJid,
+    kind: CarbonKind,
 ) -> (xmpp_parsers::message::Message, Vec<PlanEffectDependency>) {
+    // A committed denial's `<received/>` carbon forwards the error the sender
+    // was answered with, not the offered message, and awaits no archive.
+    if kind == CarbonKind::Received {
+        if let Some(bounce) =
+            super::super::rejection::recorded_bounce(input.envelope.message(), input.recorded)
+        {
+            return (bounce, Vec::new());
+        }
+    }
     // XEP-0280 forwards the original message. In particular a sent carbon's
     // inner `to` must remain the correspondent, never the carbon owner.
     let mut message = input.envelope.message().clone();
+    crate::ingress::recorded::withhold_sender_archive_stamp(&mut message, owner);
     let mut dependencies = Vec::new();
     for intent in input.recorded {
         if let IngressEffectIntent::ArchiveAuthoritative {

@@ -16,7 +16,7 @@ RUNNER = (
     "${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' "
     "&& '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\","
     "\"namespace-features:container.privileged=true;job.priority=1\"]' "
-    "|| '[\"namespace-profile-linux-x86\"]') }}"
+    "|| '[\"namespace-profile-linux-x86;container.privileged=true\"]') }}"
 )
 # The runner expression gives the 32-core builder to every job that does not
 # wait for fmt, so exactly these two jobs may have no dependencies.
@@ -42,8 +42,8 @@ BATCHED_CHECKS = [
 ]
 # Each main-only gate runs the command of the task pull requests run.
 ALIASES = {
-    "mainClippy": "clippy",
-    "mainTest": "test",
+    "mainClippy": "nixClippy",
+    "mainTest": "nixDefaultTest",
     "mainDoctest": "nixDoctest",
     "mainBuildImageStream": "nixBuildImageStream",
     "mainBuildExtensionModules": "nixBuildExtensionModules",
@@ -120,8 +120,8 @@ def validate(workflow, tasks, helper_script):
     concurrency = workflow.get("concurrency", {})
     require(
         concurrency.get("group") == "${{ github.workflow }}-${{ github.head_ref || github.ref }}"
-        and concurrency.get("cancel-in-progress") is True,
-        "main workflow concurrency changed",
+        and concurrency.get("cancel-in-progress") is False,
+        "main must finish the active publish run and coalesce pending pushes",
     )
 
     def command(name):
@@ -249,6 +249,12 @@ class PublishGraphTests(unittest.TestCase):
 
     def test_generated_workflow_preserves_the_contract(self):
         self.check()
+
+    def test_new_push_cannot_cancel_an_active_publish_run(self):
+        workflow = copy.deepcopy(self.workflow)
+        workflow["concurrency"]["cancel-in-progress"] = True
+        with self.assertRaisesRegex(ValueError, "finish the active publish run"):
+            self.check(workflow=workflow)
 
     def test_missing_or_added_dependency_is_rejected(self):
         for source, target, add in (

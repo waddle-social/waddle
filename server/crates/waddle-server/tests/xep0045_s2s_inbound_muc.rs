@@ -918,6 +918,205 @@ async fn private_messages_are_refused_to_remote_occupants() {
     assert!(hosted.seat(ROOM, BOB).is_some(), "a refusal ended the seat");
 }
 
+const NS_XDATA: &str = "jabber:x:data";
+const FORM_TYPE_REQUEST: &str = "http://jabber.org/protocol/muc#request";
+const CAROL_OCCUPANT: &str = "lounge@muc.example.com/carol";
+
+fn form_field(var: &str, value: &str) -> Element {
+    Element::builder("field", NS_XDATA)
+        .attr(minidom::rxml::xml_ncname!("var").to_owned(), var)
+        .append(Element::builder("value", NS_XDATA).append(value).build())
+        .build()
+}
+
+/// A `muc#request` submit form (XEP-0045 §7.13, §8.6) with `fields`.
+fn voice_form(fields: &[(&str, &str)]) -> Element {
+    let mut form = Element::builder("x", NS_XDATA)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
+        .append(form_field("FORM_TYPE", FORM_TYPE_REQUEST));
+    for (var, value) in fields {
+        form = form.append(form_field(var, value));
+    }
+    form.build()
+}
+
+/// A normal message carrying `form`, as `from` sends it to `to`.
+fn voice_message(from: &str, to: &str, id: &str, form: Element) -> Message {
+    let mut message = Message::new_with_type(MessageType::Normal, Some(jid(to)));
+    message.from = Some(jid(from));
+    message.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+    message.payloads.push(form);
+    message
+}
+
+fn is_voice_approval_form(stanza: &Element) -> bool {
+    stanza.name() == "message"
+        && stanza.attr("type") != Some("error")
+        && stanza.children().any(|child| {
+            child.is("x", NS_XDATA)
+                && child.attr("type") == Some("form")
+                && child.children().any(|field| {
+                    field.attr("var") == Some("FORM_TYPE")
+                        && field
+                            .children()
+                            .any(|value| value.text() == FORM_TYPE_REQUEST)
+                })
+        })
+}
+
+fn form_value(stanza: &Element, var: &str) -> Option<String> {
+    let form = stanza.children().find(|child| child.is("x", NS_XDATA))?;
+    form.children()
+        .find(|field| field.attr("var") == Some(var))
+        .and_then(|field| field.children().next())
+        .map(Element::text)
+}
+
+#[tokio::test]
+async fn a_remote_visitors_voice_request_reaches_the_local_moderators() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let demoted = local_set(&mut alice, ROOM, "visitor-1", role_item("visitor", "bob")).await;
+    assert_eq!(demoted.attr("type"), Some("result"), "{demoted:?}");
+
+    // XEP-0045 §7.13: the visitor's form goes to the room, and §8.6 the
+    // room puts an approval form to its moderators.
+    hosted
+        .peer_sends(voice_message(
+            BOB,
+            ROOM,
+            "voice-1",
+            voice_form(&[("muc#role", "participant")]),
+        ))
+        .await;
+    let approval = local_receives(&mut alice, ARRIVES, is_voice_approval_form)
+        .await
+        .expect("the moderator's approval form");
+    assert_eq!(approval.attr("from"), Some(ROOM));
+    assert_eq!(
+        form_value(&approval, "muc#roomnick").as_deref(),
+        Some("bob")
+    );
+    assert_eq!(form_value(&approval, "muc#jid").as_deref(), Some(BOB));
+}
+
+#[tokio::test]
+async fn a_remote_occupant_that_is_no_visitor_has_no_voice_request_to_make() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    hosted
+        .peer_sends(voice_message(
+            BOB,
+            ROOM,
+            "voice-2",
+            voice_form(&[("muc#role", "participant")]),
+        ))
+        .await;
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        local_receives(&mut alice, QUIET, is_voice_approval_form)
+            .await
+            .is_none(),
+        "a participant's request reached the moderators"
+    );
+    assert_eq!(
+        hosted.count_at_peer(|stanza| stanza.attr("type") == Some("error")),
+        0,
+        "a participant's request was answered with an error"
+    );
+}
+
+#[tokio::test]
+async fn a_trusted_homes_moderator_approves_a_local_visitors_voice_request() {
+    let (hosted, mut alice, _own) = room_with_remote_occupant(RouterLimits::default(), |spec| {
+        spec.trusted_homes = vec![HOME_B];
+    })
+    .await;
+    let moderator = local_set(&mut alice, ROOM, "mod-1", role_item("moderator", "bob")).await;
+    assert_eq!(moderator.attr("type"), Some("result"), "{moderator:?}");
+    let mut carol = hosted.client("carol", "desk").await;
+    local_join(&mut carol, ROOM, "carol").await;
+    let demoted = local_set(&mut alice, ROOM, "visitor-2", role_item("visitor", "carol")).await;
+    assert_eq!(demoted.attr("type"), Some("result"), "{demoted:?}");
+
+    let request = voice_message(
+        "carol@example.com/desk",
+        ROOM,
+        "voice-3",
+        voice_form(&[("muc#role", "participant")]),
+    );
+    carol
+        .send(&String::from(&Element::from(request)))
+        .await
+        .expect("send voice request");
+    // The remote moderator is told like any other moderator.
+    let approval = hosted
+        .at_peer(|stanza| is_voice_approval_form(stanza) && stanza.attr("to") == Some(BOB))
+        .await
+        .expect("the remote moderator's approval form");
+    assert_eq!(
+        form_value(&approval, "muc#roomnick").as_deref(),
+        Some("carol")
+    );
+
+    // §8.6: it answers with the form it received, allowed.
+    hosted
+        .peer_sends(voice_message(
+            BOB,
+            ROOM,
+            "voice-4",
+            voice_form(&[
+                ("muc#role", "participant"),
+                ("muc#jid", "carol@example.com/desk"),
+                ("muc#roomnick", "carol"),
+                ("muc#request_allow", "true"),
+            ]),
+        ))
+        .await;
+    let granted = local_receives(&mut carol, ARRIVES, |stanza| {
+        presence_between(stanza, CAROL_OCCUPANT, "carol@example.com/desk")
+            && item(stanza).is_some_and(|(role, _)| role == "participant")
+    })
+    .await;
+    assert!(granted.is_some(), "carol was not granted voice");
+}
+
+#[tokio::test]
+async fn a_remote_occupant_without_moderator_standing_cannot_approve_voice() {
+    let (hosted, mut alice, _own) =
+        room_with_remote_occupant(RouterLimits::default(), no_change).await;
+    let mut carol = hosted.client("carol", "desk").await;
+    local_join(&mut carol, ROOM, "carol").await;
+    let demoted = local_set(&mut alice, ROOM, "visitor-3", role_item("visitor", "carol")).await;
+    assert_eq!(demoted.attr("type"), Some("result"), "{demoted:?}");
+
+    hosted
+        .peer_sends(voice_message(
+            BOB,
+            ROOM,
+            "voice-5",
+            voice_form(&[
+                ("muc#role", "participant"),
+                ("muc#jid", "carol@example.com/desk"),
+                ("muc#roomnick", "carol"),
+                ("muc#request_allow", "true"),
+            ]),
+        ))
+        .await;
+    let refused = hosted.answered("voice-5").await;
+    assert_eq!(refused.attr("type"), Some("error"), "{refused:?}");
+    assert_eq!(error_condition(&refused).as_deref(), Some("forbidden"));
+    assert!(
+        local_receives(&mut carol, QUIET, |stanza| {
+            presence_between(stanza, CAROL_OCCUPANT, "carol@example.com/desk")
+                && item(stanza).is_some_and(|(role, _)| role == "participant")
+        })
+        .await
+        .is_none(),
+        "an occupant without standing granted voice"
+    );
+}
+
 /// A `muc#admin` list request for `affiliation` (XEP-0045 §9.5, §9.8).
 fn affiliation_list(affiliation: &str) -> Element {
     Element::builder("query", NS_MUC_ADMIN)

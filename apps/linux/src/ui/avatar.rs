@@ -1,9 +1,9 @@
 //! Initials avatars tinted as on the web and phones: DJB2 over the display
-//! name picks one of four brand tints (see `data/style.css`).
+//! name picks one of the six Polar Huddle avatar tints (see `data/style.css`).
 
 use adw::prelude::WidgetExt;
 
-const TINTS: u32 = 4;
+const TINTS: u32 = 6;
 
 pub(super) fn avatar(size: i32) -> adw::Avatar {
     let avatar = adw::Avatar::new(size, None, true);
@@ -33,9 +33,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tints_match_the_web_palette_order() {
-        // djb2("a") = 5381 * 33 + 97 = 177670, 177670 % 4 = 2.
-        assert_eq!(tint("a"), 2);
-        assert_eq!(tint(""), 5381 % 4);
+    fn tints_follow_the_shared_hash() {
+        // djb2("a") = 5381 * 33 + 97 = 177670, 177670 % 6 = 4.
+        assert_eq!(tint("a"), 4);
+        assert_eq!(tint(""), 5381 % 6);
     }
 }

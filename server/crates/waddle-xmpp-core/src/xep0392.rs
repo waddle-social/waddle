@@ -8,49 +8,37 @@
 //! 1. Compute SHA-1 hash of the input string (UTF-8 encoded).
 //! 2. Take the first two bytes of the hash as a little-endian u16
 //!    (the second byte is the most significant one, per XEP-0392
-//!    §"Angle generation").
+//!    section "Angle generation").
 //! 3. Map to a hue angle: `hue = (value / 65536) * 360`.
-//! 4. Combine with configurable saturation and lightness to produce HSL.
+//! 4. Convert the hue to RGB with the HSLuv operation `hsluvToRgb`
+//!    (section "RGB generation"), using an implementation-chosen
+//!    saturation and lightness.
 //!
-//! ## Color Vision Deficiency Correction
-//!
-//! The spec defines optional corrections for red-green and blue-yellow
-//! deficiencies by remapping the hue range. This module supports both.
+//! The spec removed its Color Vision Deficiency correction in version
+//! 0.8.0; clients that want less colour replace it with a static colour
+//! instead (section "Accessibility Considerations").
 
 use sha1::{Digest, Sha1};
 
-/// Default saturation percentage for generated colors.
+/// Default saturation (0-100) for generated colors.
 pub const DEFAULT_SATURATION: f64 = 100.0;
 
-/// Default lightness percentage for generated colors.
+/// Default lightness (0-100) for generated colors.
 pub const DEFAULT_LIGHTNESS: f64 = 50.0;
 
-/// Color vision deficiency correction mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CvdCorrection {
-    /// No correction (full 360° hue range).
-    None,
-    /// Red-green deficiency (deuteranopia/protanopia).
-    /// Maps hue to two safe ranges: blue and yellow.
-    RedGreen,
-    /// Blue-yellow deficiency (tritanopia).
-    /// Maps hue to two safe ranges: red and cyan.
-    BlueYellow,
-}
-
-/// An HSL color value.
+/// An HSLuv color value.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HslColor {
-    /// Hue angle in degrees (0.0–360.0).
+pub struct HsluvColor {
+    /// Hue angle in degrees (0.0-360.0).
     pub hue: f64,
-    /// Saturation percentage (0.0–100.0).
+    /// Saturation (0.0-100.0).
     pub saturation: f64,
-    /// Lightness percentage (0.0–100.0).
+    /// Lightness (0.0-100.0).
     pub lightness: f64,
 }
 
-impl HslColor {
-    /// Create a new HSL color.
+impl HsluvColor {
+    /// Create a new HSLuv color.
     #[must_use]
     pub fn new(hue: f64, saturation: f64, lightness: f64) -> Self {
         Self {
@@ -60,36 +48,32 @@ impl HslColor {
         }
     }
 
-    /// Convert to a CSS `hsl()` string.
+    /// Convert to RGB tuple (0-255 each) with `hsluvToRgb`.
     #[must_use]
-    pub fn to_css(&self) -> String {
-        format!(
-            "hsl({:.0}, {:.0}%, {:.0}%)",
-            self.hue, self.saturation, self.lightness
-        )
+    pub fn to_rgb(&self) -> (u8, u8, u8) {
+        let (r, g, b) = hsluv_to_rgb(self.hue, self.saturation, self.lightness);
+        (to_byte(r), to_byte(g), to_byte(b))
     }
 
     /// Convert to an RGB hex string (e.g., `#ff8040`).
     #[must_use]
     pub fn to_hex(&self) -> String {
-        let (r, g, b) = hsl_to_rgb(self.hue, self.saturation / 100.0, self.lightness / 100.0);
-        format!("#{:02x}{:02x}{:02x}", r, g, b)
+        let (r, g, b) = self.to_rgb();
+        format!("#{r:02x}{g:02x}{b:02x}")
     }
+}
 
-    /// Convert to RGB tuple (0–255 each).
-    #[must_use]
-    pub fn to_rgb(&self) -> (u8, u8, u8) {
-        hsl_to_rgb(self.hue, self.saturation / 100.0, self.lightness / 100.0)
-    }
+fn to_byte(channel: f64) -> u8 {
+    (channel * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 /// Compute the consistent hue angle for an input string.
 ///
 /// This is the core XEP-0392 algorithm:
 /// 1. SHA-1 hash the input
-/// 2. Take first 2 bytes as little-endian u16 (XEP-0392 §"Angle
+/// 2. Take first 2 bytes as little-endian u16 (XEP-0392 "Angle
 ///    generation": "with the second byte being the most significant one")
-/// 3. Map to 0.0–360.0 hue range
+/// 3. Map to 0.0-360.0 hue range
 #[must_use]
 pub fn compute_hue(input: &str) -> f64 {
     let hash = Sha1::digest(input.as_bytes());
@@ -97,45 +81,19 @@ pub fn compute_hue(input: &str) -> f64 {
     (value as f64 / 65536.0) * 360.0
 }
 
-/// Apply color vision deficiency correction to a hue angle.
-#[must_use]
-pub fn apply_cvd_correction(hue: f64, correction: CvdCorrection) -> f64 {
-    match correction {
-        CvdCorrection::None => hue,
-        CvdCorrection::RedGreen => {
-            // Map full range to blue (180°–300°) region
-            180.0 + (hue / 360.0) * 120.0
-        }
-        CvdCorrection::BlueYellow => {
-            // Map full range to red-green (0°–180°) region
-            (hue / 360.0) * 180.0
-        }
-    }
-}
-
 /// Generate a consistent color for an input string.
 ///
-/// Uses the default saturation (100%) and lightness (50%).
+/// Uses the default saturation (100) and lightness (50).
 #[must_use]
-pub fn generate_color(input: &str) -> HslColor {
-    generate_color_with_params(
-        input,
-        DEFAULT_SATURATION,
-        DEFAULT_LIGHTNESS,
-        CvdCorrection::None,
-    )
+pub fn generate_color(input: &str) -> HsluvColor {
+    generate_color_with_params(input, DEFAULT_SATURATION, DEFAULT_LIGHTNESS)
 }
 
-/// Generate a consistent color with custom parameters.
+/// Generate a consistent color with custom saturation and lightness
+/// (both 0.0-100.0).
 #[must_use]
-pub fn generate_color_with_params(
-    input: &str,
-    saturation: f64,
-    lightness: f64,
-    cvd: CvdCorrection,
-) -> HslColor {
-    let hue = apply_cvd_correction(compute_hue(input), cvd);
-    HslColor::new(hue, saturation, lightness)
+pub fn generate_color_with_params(input: &str, saturation: f64, lightness: f64) -> HsluvColor {
+    HsluvColor::new(compute_hue(input), saturation, lightness)
 }
 
 /// Trait for types that can generate a consistent color.
@@ -144,18 +102,13 @@ pub trait ConsistentColor {
     fn color_input(&self) -> &str;
 
     /// Generate the consistent color for this entity.
-    fn consistent_color(&self) -> HslColor {
+    fn consistent_color(&self) -> HsluvColor {
         generate_color(self.color_input())
     }
 
     /// Generate the consistent color with custom parameters.
-    fn consistent_color_with(
-        &self,
-        saturation: f64,
-        lightness: f64,
-        cvd: CvdCorrection,
-    ) -> HslColor {
-        generate_color_with_params(self.color_input(), saturation, lightness, cvd)
+    fn consistent_color_with(&self, saturation: f64, lightness: f64) -> HsluvColor {
+        generate_color_with_params(self.color_input(), saturation, lightness)
     }
 }
 
@@ -171,49 +124,118 @@ impl ConsistentColor for String {
     }
 }
 
-// ── HSL to RGB conversion ────────────────────────────────────────────
+// ── HSLuv (reference algorithm, hsluv.org) ───────────────────────────
 
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    if s == 0.0 {
-        let v = (l * 255.0).round() as u8;
-        return (v, v, v);
+const REF_U: f64 = 0.197_830_006_642_836_8;
+const REF_V: f64 = 0.468_319_994_938_791;
+const KAPPA: f64 = 903.296_296_296_296_3;
+const EPSILON: f64 = 0.008_856_451_679_035_631;
+
+const M: [[f64; 3]; 3] = [
+    [
+        3.240_969_941_904_521_6,
+        -1.537_383_177_570_093_7,
+        -0.498_610_760_293_003_4,
+    ],
+    [
+        -0.969_243_636_280_879_6,
+        1.875_967_501_507_720_7,
+        0.041_555_057_407_175_59,
+    ],
+    [
+        0.055_630_079_696_993_66,
+        -0.203_976_958_888_976_52,
+        1.056_971_514_242_878_6,
+    ],
+];
+
+/// The six lines bounding the sRGB gamut in LUV chroma space at
+/// lightness `l`, as (slope, intercept) pairs.
+fn gamut_lines(l: f64) -> [(f64, f64); 6] {
+    let sub1 = (l + 16.0).powi(3) / 1_560_896.0;
+    let sub2 = if sub1 > EPSILON { sub1 } else { l / KAPPA };
+    let mut lines = [(0.0, 0.0); 6];
+    for (c, row) in M.iter().enumerate() {
+        let [m1, m2, m3] = *row;
+        for t in 0..2 {
+            let t_f = t as f64;
+            let top1 = sub2 * (284_517.0 * m1 - 94_839.0 * m3);
+            let top2 =
+                sub2 * (838_422.0 * m3 + 769_860.0 * m2 + 731_718.0 * m1) * l - 769_860.0 * t_f * l;
+            let bottom = sub2 * (632_260.0 * m3 - 126_452.0 * m2) + 126_452.0 * t_f;
+            lines[c * 2 + t] = (top1 / bottom, top2 / bottom);
+        }
     }
+    lines
+}
 
-    let q = if l < 0.5 {
-        l * (1.0 + s)
+fn max_chroma_for_lh(l: f64, h_deg: f64) -> f64 {
+    let h = h_deg.to_radians();
+    let (sin, cos) = h.sin_cos();
+    gamut_lines(l)
+        .iter()
+        .filter_map(|&(slope, intercept)| {
+            // Distance from the origin to the line along the ray at angle h.
+            let length = intercept / (sin - slope * cos);
+            (length >= 0.0).then_some(length)
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+fn from_linear(c: f64) -> f64 {
+    if c <= 0.003_130_8 {
+        12.92 * c
     } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
 
-    let r = hue_to_rgb(p, q, h / 360.0 + 1.0 / 3.0);
-    let g = hue_to_rgb(p, q, h / 360.0);
-    let b = hue_to_rgb(p, q, h / 360.0 - 1.0 / 3.0);
-
+fn xyz_to_rgb(xyz: [f64; 3]) -> (f64, f64, f64) {
+    let dot = |row: &[f64; 3]| row[0] * xyz[0] + row[1] * xyz[1] + row[2] * xyz[2];
     (
-        (r * 255.0).round() as u8,
-        (g * 255.0).round() as u8,
-        (b * 255.0).round() as u8,
+        from_linear(dot(&M[0])),
+        from_linear(dot(&M[1])),
+        from_linear(dot(&M[2])),
     )
 }
 
-fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
-    if t < 0.0 {
-        t += 1.0;
+fn l_to_y(l: f64) -> f64 {
+    if l <= 8.0 {
+        l / KAPPA
+    } else {
+        ((l + 16.0) / 116.0).powi(3)
     }
-    if t > 1.0 {
-        t -= 1.0;
+}
+
+fn luv_to_xyz(l: f64, u: f64, v: f64) -> [f64; 3] {
+    if l == 0.0 {
+        return [0.0, 0.0, 0.0];
     }
-    if t < 1.0 / 6.0 {
-        return p + (q - p) * 6.0 * t;
-    }
-    if t < 1.0 / 2.0 {
-        return q;
-    }
-    if t < 2.0 / 3.0 {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    p
+    let var_u = u / (13.0 * l) + REF_U;
+    let var_v = v / (13.0 * l) + REF_V;
+    let y = l_to_y(l);
+    let x = 0.0 - (9.0 * y * var_u) / ((var_u - 4.0) * var_v - var_u * var_v);
+    let z = (9.0 * y - (15.0 * var_v * y) - (var_v * x)) / (3.0 * var_v);
+    [x, y, z]
+}
+
+/// The HSLuv operation `hsluvToRgb` from XEP-0392 "RGB generation".
+///
+/// `h` is a hue angle in degrees, `s` and `l` are 0.0-100.0. Returns
+/// sRGB channels in `0.0..=1.0`.
+#[must_use]
+pub fn hsluv_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let (r, g, b) = if l > 99.999_999_9 {
+        (1.0, 1.0, 1.0)
+    } else if l < 0.000_000_01 {
+        (0.0, 0.0, 0.0)
+    } else {
+        let h = h.rem_euclid(360.0);
+        let chroma = max_chroma_for_lh(l, h) / 100.0 * s;
+        let (sin, cos) = h.to_radians().sin_cos();
+        xyz_to_rgb(luv_to_xyz(l, cos * chroma, sin * chroma))
+    };
+    (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -255,69 +277,9 @@ mod tests {
 
     #[test]
     fn test_generate_color_custom_params() {
-        let color = generate_color_with_params("alice", 80.0, 40.0, CvdCorrection::None);
+        let color = generate_color_with_params("alice", 80.0, 40.0);
         assert_eq!(color.saturation, 80.0);
         assert_eq!(color.lightness, 40.0);
-    }
-
-    #[test]
-    fn test_cvd_red_green() {
-        let normal = generate_color("test");
-        let corrected = generate_color_with_params(
-            "test",
-            DEFAULT_SATURATION,
-            DEFAULT_LIGHTNESS,
-            CvdCorrection::RedGreen,
-        );
-        // Red-green maps to 180°–300° range
-        assert!(corrected.hue >= 180.0 && corrected.hue <= 300.0);
-        // Should differ from uncorrected (usually)
-        assert_ne!(normal.hue, corrected.hue);
-    }
-
-    #[test]
-    fn test_cvd_blue_yellow() {
-        let corrected = generate_color_with_params(
-            "test",
-            DEFAULT_SATURATION,
-            DEFAULT_LIGHTNESS,
-            CvdCorrection::BlueYellow,
-        );
-        // Blue-yellow maps to 0°–180° range
-        assert!(corrected.hue >= 0.0 && corrected.hue <= 180.0);
-    }
-
-    #[test]
-    fn test_hsl_to_css() {
-        let color = HslColor::new(120.0, 100.0, 50.0);
-        assert_eq!(color.to_css(), "hsl(120, 100%, 50%)");
-    }
-
-    #[test]
-    fn test_hsl_to_hex() {
-        // Pure red
-        let red = HslColor::new(0.0, 100.0, 50.0);
-        assert_eq!(red.to_hex(), "#ff0000");
-
-        // Pure green
-        let green = HslColor::new(120.0, 100.0, 50.0);
-        assert_eq!(green.to_hex(), "#00ff00");
-
-        // Pure blue
-        let blue = HslColor::new(240.0, 100.0, 50.0);
-        assert_eq!(blue.to_hex(), "#0000ff");
-    }
-
-    #[test]
-    fn test_hsl_to_rgb() {
-        let white = HslColor::new(0.0, 0.0, 100.0);
-        assert_eq!(white.to_rgb(), (255, 255, 255));
-
-        let black = HslColor::new(0.0, 0.0, 0.0);
-        assert_eq!(black.to_rgb(), (0, 0, 0));
-
-        let gray = HslColor::new(0.0, 0.0, 50.0);
-        assert_eq!(gray.to_rgb(), (128, 128, 128));
     }
 
     #[test]
@@ -332,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_consistent_color_with_params() {
-        let color = "alice".consistent_color_with(75.0, 60.0, CvdCorrection::None);
+        let color = "alice".consistent_color_with(75.0, 60.0);
         assert_eq!(color.saturation, 75.0);
         assert_eq!(color.lightness, 60.0);
     }
@@ -369,6 +331,56 @@ mod tests {
     #[test]
     fn test_spec_vector_board() {
         assert_spec_vector("Board", 171.430_664);
+    }
+
+    /// XEP-0392 "Test Vectors" (testvectors-fullrange): the r, g, b
+    /// columns at saturation 100 and lightness 50, printed to 3 places.
+    #[test]
+    fn test_spec_vector_rgb_hsluv() {
+        let vectors = [
+            ("Romeo", (0.865, 0.000, 0.686)),
+            ("juliet@capulet.lit", (0.000, 0.515, 0.573)),
+            ("\u{1F63A}", (0.872, 0.000, 0.659)),
+            ("council", (0.918, 0.000, 0.394)),
+            ("Board", (0.000, 0.527, 0.457)),
+        ];
+        for (input, (er, eg, eb)) in vectors {
+            let c = generate_color(input);
+            let (r, g, b) = hsluv_to_rgb(c.hue, c.saturation, c.lightness);
+            for (got, want) in [(r, er), (g, eg), (b, eb)] {
+                assert!(
+                    (got - want).abs() < 0.001,
+                    "{input:?}: rgb ({r:.3}, {g:.3}, {b:.3}) != ({er}, {eg}, {eb})"
+                );
+            }
+        }
+    }
+
+    /// HSLuv endpoints and a spec vector rendered as hex.
+    #[test]
+    fn test_hsluv_reference_values() {
+        assert_eq!(HsluvColor::new(0.0, 0.0, 100.0).to_rgb(), (255, 255, 255));
+        assert_eq!(HsluvColor::new(0.0, 0.0, 0.0).to_rgb(), (0, 0, 0));
+        // Romeo at S=100, L=50: spec vector (0.865, 0.000, 0.686).
+        assert_eq!(generate_color("Romeo").to_hex(), "#dd00af");
+    }
+
+    /// HSLuv is not HSL: pure HSL red must not come out for hue 0.
+    #[test]
+    fn test_hsluv_differs_from_hsl() {
+        assert_ne!(HsluvColor::new(0.0, 100.0, 50.0).to_hex(), "#ff0000");
+    }
+
+    #[test]
+    fn test_hsluv_channels_stay_in_gamut() {
+        for hue in (0..360).step_by(7) {
+            for l in [5.0, 34.0, 50.0, 70.0, 95.0] {
+                let (r, g, b) = hsluv_to_rgb(f64::from(hue), 100.0, l);
+                for c in [r, g, b] {
+                    assert!((0.0..=1.0).contains(&c));
+                }
+            }
+        }
     }
 
     #[test]

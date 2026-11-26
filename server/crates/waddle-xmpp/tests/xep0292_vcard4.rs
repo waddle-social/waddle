@@ -341,3 +341,58 @@ fn xep0292_pronouns_freeform_value_preserved_verbatim() {
     let parsed = parse_vcard4(&elem);
     assert_eq!(parsed.pronouns.as_deref(), Some(raw));
 }
+
+// ── RFC 6351 tel property: <uri> and <text> forms ────────────────────
+
+#[test]
+fn xep0292_tel_uri_form_is_parsed() {
+    // XEP-0292 §3.1 example carries <tel><uri>tel:...</uri></tel>.
+    let elem: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+        <tel><uri>tel:+44-20-1234-5678</uri></tel></vcard>"
+        .parse()
+        .expect("valid xml");
+    assert_eq!(
+        parse_vcard4(&elem).tel.as_deref(),
+        Some("tel:+44-20-1234-5678")
+    );
+}
+
+#[test]
+fn xep0292_tel_text_form_is_parsed() {
+    let elem: Element = "<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>\
+        <tel><text>+44 20 1234 5678</text></tel></vcard>"
+        .parse()
+        .expect("valid xml");
+    assert_eq!(parse_vcard4(&elem).tel.as_deref(), Some("+44 20 1234 5678"));
+}
+
+#[test]
+fn xep0292_tel_uri_value_is_emitted_as_uri_and_round_trips() {
+    let card = VCard4 {
+        tel: Some("tel:+1-555-0100".to_string()),
+        ..VCard4::default()
+    };
+    let elem = build_vcard4_element(&card);
+    let tel = elem
+        .children()
+        .find(|c| c.name() == "tel")
+        .expect("tel present");
+    assert!(tel.children().any(|c| c.name() == "uri"));
+    assert!(!tel.children().any(|c| c.name() == "text"));
+    assert_eq!(parse_vcard4(&elem), card);
+}
+
+#[test]
+fn xep0292_tel_plain_value_is_emitted_as_text() {
+    let card = VCard4 {
+        tel: Some("+1 555 0100".to_string()),
+        ..VCard4::default()
+    };
+    let elem = build_vcard4_element(&card);
+    let tel = elem
+        .children()
+        .find(|c| c.name() == "tel")
+        .expect("tel present");
+    assert!(tel.children().any(|c| c.name() == "text"));
+    assert_eq!(parse_vcard4(&elem), card);
+}

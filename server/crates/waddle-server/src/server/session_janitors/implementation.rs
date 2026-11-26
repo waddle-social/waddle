@@ -5387,6 +5387,25 @@ pub(in crate::server::session_janitors) async fn sweep_expired_session_rows(
         .await
     {
         warn!(error = %error, "auth janitor: expired session-row sweep failed; will retry next tick");
+        return;
+    }
+    // An OAuth grant is not a foreign key of its session (the pinned
+    // restricted ingress profile fixes the trigger set of `sessions`), so
+    // the grants of sessions deleted or expired above are removed here.
+    if let Err(error) = state
+        .deps
+        .auth_state
+        .session_manager
+        .actor_ref()
+        .ask(DbExecute {
+            sql: "DELETE FROM xmpp_oauth_grants WHERE NOT EXISTS ( \
+                  SELECT 1 FROM sessions s WHERE s.id = xmpp_oauth_grants.session_id)"
+                .to_string(),
+            params: vec![],
+        })
+        .await
+    {
+        warn!(error = %error, "auth janitor: orphan OAuth grant sweep failed; will retry next tick");
     }
 }
 

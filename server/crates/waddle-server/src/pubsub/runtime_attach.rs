@@ -169,6 +169,7 @@ const NODE_COLUMNS: &[Column] = &[
     text("send_last_published_item", true),
     bigint("created_at_ms", true),
     text("roster_groups_allowed", false),
+    bigint("item_expire", false),
 ];
 const ITEM_COLUMNS: &[Column] = &[
     Column {
@@ -754,7 +755,6 @@ pub(super) async fn verify_marker_shape_and_data_tx(
     verify_marker_data(tx, identity).await
 }
 
-/// Verify the baseline PubSub layout before Space bindings retain its nodes.
 pub(super) async fn verify_owner_schema_shape_tx(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -1953,4 +1953,40 @@ async fn verify_counter(
         return Err(PubSubRuntimeAttachError::InvalidCounter { component: counter });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod baseline_shape_tests {
+    use super::NODE_COLUMNS;
+
+    /// Column names of `pubsub_nodes` in the PostgreSQL v1 schema, in order.
+    fn v1_node_columns() -> Vec<String> {
+        let v1 = include_str!("../../sql/v1/postgres.sql");
+        let start = v1
+            .find("CREATE TABLE pubsub_nodes (")
+            .expect("v1 creates pubsub_nodes");
+        let body = &v1[start..];
+        let end = body.find("\n);").expect("table definition ends");
+        body["CREATE TABLE pubsub_nodes (".len()..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("CONSTRAINT"))
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn v1_pubsub_nodes_columns_match_expected_shape() {
+        let expected: Vec<&str> = NODE_COLUMNS.iter().map(|column| column.name).collect();
+        assert_eq!(expected, v1_node_columns());
+        assert_eq!(
+            NODE_COLUMNS
+                .last()
+                .map(|column| (column.name, column.kind, column.not_null)),
+            Some(("item_expire", "bigint", false))
+        );
+        let v1 = include_str!("../../sql/v1/postgres.sql");
+        assert!(v1.contains("INSERT INTO pubsub_schema_version (version)\nVALUES (10);"));
+    }
 }

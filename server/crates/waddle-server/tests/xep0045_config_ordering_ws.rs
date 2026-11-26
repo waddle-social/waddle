@@ -240,6 +240,8 @@ async fn xep_0045_owner_config_returns_iq_before_initiator_104() {
     let room = format!("config-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     observe_existing_occupant_join(&mut admin, &room, ALICE).await;
 
@@ -279,6 +281,8 @@ async fn xep_0045_unmanaged_members_only_removes_before_config_and_excludes_remo
     let room = format!("members-only-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     observe_existing_occupant_join(&mut admin, &room, ALICE).await;
 
@@ -318,6 +322,8 @@ async fn xep_0045_destroy_presence_precedes_owner_iq_result() {
     let room = format!("destroy-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     observe_existing_occupant_join(&mut admin, &room, ALICE).await;
 

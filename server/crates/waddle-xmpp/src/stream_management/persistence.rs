@@ -517,6 +517,9 @@ fn matches_protected_owner_configuration(iq: &minidom::Element, node: &str) -> b
                 "pubsub#send_last_published_item" => value.parse::<SendLastPublishedItem>().is_ok(),
                 "pubsub#type" => !value.is_empty(),
                 "pubsub#max_items" => value.parse::<u32>().is_ok(),
+                "pubsub#item_expire" => {
+                    value == "max" || value.parse::<u32>().is_ok_and(|seconds| seconds > 0)
+                }
                 "pubsub#persist_items"
                 | "pubsub#deliver_payloads"
                 | "pubsub#notify_retract"

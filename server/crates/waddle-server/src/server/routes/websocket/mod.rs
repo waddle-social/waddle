@@ -148,6 +148,10 @@ pub(crate) use handlers::iq::muc_admin_relay::{
 };
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use handlers::iq::muc_admin_relay::{AdminListDenial, AdminRoleEntry};
+#[cfg(feature = "clustering")]
+pub(crate) use handlers::muc_voice_relay::{
+    MUC_VOICE_FORM_MAILBOX_TIMEOUT, MUC_VOICE_FORM_REPLY_TIMEOUT,
+};
 pub(crate) use local_departures::{
     InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
     ACK_ABSENT_ROOM_RETRIES,

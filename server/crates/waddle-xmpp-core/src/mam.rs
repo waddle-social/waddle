@@ -17,7 +17,8 @@ pub use query::{
 };
 pub use response::{
     archived_inner_message, build_archived_muc_sender_x, build_archived_occupant_id_element,
-    build_fin_iq, build_metadata_iq, build_result_messages, message_type_wire_str,
+    build_fin_iq, build_metadata_element, build_metadata_iq, build_result_messages,
+    message_type_wire_str,
 };
 pub use stanza_id_filter::{
     MamFilterStanzaId, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, STANZA_ID_FILTER_FIELD,

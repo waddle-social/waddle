@@ -448,6 +448,7 @@ pub(super) async fn callback_handler(
             redirect,
             client_state,
             code_challenge,
+            scopes,
         } => {
             let auth_code = Uuid::new_v4().to_string();
             if let Err(err) = state
@@ -458,6 +459,7 @@ pub(super) async fn callback_handler(
                         session_id: session.id.clone(),
                         redirect_uri: redirect.as_str().to_string(),
                         code_challenge: Some(code_challenge.as_str().to_string()),
+                        scopes,
                         created_at: Utc::now(),
                     },
                 )
@@ -492,6 +494,7 @@ enum ValidatedFlow {
         redirect: XmppClientRedirectUri,
         client_state: Option<String>,
         code_challenge: PkceS256Challenge,
+        scopes: Vec<waddle_xmpp::xep::xep0493::OAuthScope>,
     },
 }
 
@@ -510,7 +513,9 @@ impl ValidatedFlow {
                 client_redirect_uri,
                 client_state,
                 client_code_challenge,
+                scopes,
             } => Self::Xmpp {
+                scopes,
                 redirect: XmppClientRedirectUri::parse(&client_redirect_uri)?,
                 client_state,
                 code_challenge: PkceS256Challenge::parse(

@@ -9,7 +9,7 @@ lockfile = "apps/android/../../flake.lock"
 [runtimes."apps/linux"]
 type = "nix"
 flake = "../.."
-output = "devShells.x86_64-linux.linux"
+output = "linux"
 digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
 lockfile = "apps/linux/../../flake.lock"
 
@@ -31,6 +31,12 @@ flake = ".."
 digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
 lockfile = "design/../flake.lock"
 
+[runtimes."infrastructure/github"]
+type = "nix"
+flake = "../.."
+digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+lockfile = "infrastructure/github/../../flake.lock"
+
 [runtimes."infrastructure/waddle.cloud"]
 type = "nix"
 flake = "../.."
@@ -40,6 +46,7 @@ lockfile = "infrastructure/waddle.cloud/../../flake.lock"
 [runtimes.operator]
 type = "nix"
 flake = ".."
+output = "operator"
 digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
 lockfile = "operator/../flake.lock"
 

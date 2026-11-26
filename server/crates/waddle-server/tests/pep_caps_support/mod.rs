@@ -1,5 +1,5 @@
 //! Shared XEP-0115/XEP-0163 helpers for PEP wire tests: advertise caps
-//! with `+notify` features and wait for mood-node pubsub events.
+//! with `+notify` features and wait for pubsub events of one node.
 
 use std::time::Duration;
 use waddle_ws_test_support as ws_common;
@@ -8,7 +8,6 @@ use ws_common::WsXmppClient;
 const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_CAPS: &str = "http://jabber.org/protocol/caps";
 const NS_DISCO_INFO: &str = "http://jabber.org/protocol/disco#info";
-const NODE: &str = "http://jabber.org/protocol/mood";
 
 pub fn caps_ver(name: &str, features: &[&str]) -> String {
     use waddle_xmpp::disco::info::{Feature, Identity};
@@ -17,7 +16,11 @@ pub fn caps_ver(name: &str, features: &[&str]) -> String {
     waddle_xmpp::xep::xep0115::compute_caps_hash(&identities, &features)
 }
 
-pub async fn wait_for_event(client: &mut WsXmppClient, dur: Duration) -> Option<String> {
+pub async fn wait_for_event(
+    client: &mut WsXmppClient,
+    node: &str,
+    dur: Duration,
+) -> Option<String> {
     let deadline = std::time::Instant::now() + dur;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -28,7 +31,8 @@ pub async fn wait_for_event(client: &mut WsXmppClient, dur: Duration) -> Option<
             Ok(frame) => {
                 if frame.contains("<message")
                     && frame.contains(NS_PUBSUB_EVENT)
-                    && frame.contains(&format!(r#"node='{NODE}'"#))
+                    && (frame.contains(&format!(r#"node='{node}'"#))
+                        || frame.contains(&format!(r#"node="{node}""#)))
                 {
                     return Some(frame);
                 }

@@ -1,7 +1,8 @@
-//! Stories verbs (XEP-0501): read and post stories on the community
-//! service's `urn:xmpp:pubsub-social-feed:stories:0` node, keep the
-//! account's private "seen" state on its own PEP node, and react to a
-//! story through XEP-0470 Pubsub Attachments.
+//! Stories verbs (XEP-0501): read an account's stories on its
+//! `urn:xmpp:pubsub-social-feed:stories:0` PEP node, post a story on the
+//! caller's own, keep the account's private "seen" state on its own PEP
+//! node, and react to a story through XEP-0470 Pubsub Attachments hosted
+//! by the story's author.
 //!
 //! Every verb parses its untyped FFI inputs into typed values first,
 //! then delegates to the shared builders in `waddle-xmpp-client` and
@@ -98,8 +99,8 @@ fn story_to_ffi(story: Story) -> Option<WaddleStory> {
     })
 }
 
-fn parse_community(community_jid: &str) -> Result<BareJid, WaddleError> {
-    community_jid.parse().map_err(|_| WaddleError::InvalidJid)
+fn parse_author(author_jid: &str) -> Result<BareJid, WaddleError> {
+    author_jid.parse().map_err(|_| WaddleError::InvalidJid)
 }
 
 fn require_story_id(story_id: &str) -> Result<(), WaddleError> {
@@ -129,14 +130,9 @@ fn fresh_iq_id() -> String {
 
 // ── Stories ──────────────────────────────────────────────────────────────────
 
-/// XEP-0060 items GET over the community stories node.
-pub(crate) fn stories_fetch_stanza(community: &BareJid, max_items: Option<u32>) -> Element {
-    build_pubsub_items_iq(
-        &fresh_iq_id(),
-        Some(community),
-        PUBSUB_NODE_STORIES,
-        max_items,
-    )
+/// XEP-0060 items GET over the stories node of `author`'s PEP service.
+pub(crate) fn stories_fetch_stanza(author: &BareJid, max_items: Option<u32>) -> Element {
+    build_pubsub_items_iq(&fresh_iq_id(), Some(author), PUBSUB_NODE_STORIES, max_items)
 }
 
 /// Turn a post into the story to publish: a fresh item id, `author` as
@@ -174,11 +170,12 @@ pub(crate) fn story_from_post(
     Ok(story)
 }
 
-/// XEP-0060 publish SET carrying `story` as an Atom `<entry/>`.
-pub(crate) fn story_publish_stanza(community: &BareJid, story: &Story) -> Element {
+/// XEP-0060 publish SET carrying `story` as an Atom `<entry/>` on the
+/// account's own stories node (no `to`: XEP-0163 §3).
+pub(crate) fn story_publish_stanza(story: &Story) -> Element {
     build_pubsub_publish_iq(
         &fresh_iq_id(),
-        Some(community),
+        None,
         PUBSUB_NODE_STORIES,
         Some(&story.id),
         build_story_element(story),
@@ -305,34 +302,31 @@ pub(crate) fn next_story_attachment(
 
 #[uniffi::export(async_runtime = "tokio")]
 impl WaddleClient {
-    /// XEP-0501: fetch the stories on `community_jid` (the
-    /// `community.<domain>` service). Expired stories are included.
+    /// XEP-0501: fetch the stories on the stories node of `author_jid`,
+    /// the account's own bare JID or a contact's. Expired stories are
+    /// included.
     pub async fn fetch_stories(
         &self,
-        community_jid: String,
+        author_jid: String,
         max_items: Option<u32>,
     ) -> Result<Vec<WaddleStory>, WaddleError> {
-        let community = parse_community(&community_jid)?;
+        let author = parse_author(&author_jid)?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
         };
-        let iq = stories_fetch_stanza(&community, max_items);
+        let iq = stories_fetch_stanza(&author, max_items);
         map_stories_reply(send_iq_with_timeout(&handle, iq).await)
     }
 
-    /// XEP-0501: post a story and return it as published, so the
-    /// caller can show it without fetching again.
-    pub async fn publish_story(
-        &self,
-        community_jid: String,
-        post: WaddleStoryPost,
-    ) -> Result<WaddleStory, WaddleError> {
-        let community = parse_community(&community_jid)?;
+    /// XEP-0501: post a story on the account's own stories node and
+    /// return it as published, so the caller can show it without
+    /// fetching again.
+    pub async fn publish_story(&self, post: WaddleStoryPost) -> Result<WaddleStory, WaddleError> {
         let story = story_from_post(post, &self.account_bare_jid()?)?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
         };
-        let iq = story_publish_stanza(&community, &story);
+        let iq = story_publish_stanza(&story);
         send_iq_with_timeout(&handle, iq)
             .await
             .map_err(|e| client_error_to_waddle(&e))?;
@@ -368,20 +362,21 @@ impl WaddleClient {
     }
 
     /// XEP-0470: fetch the reaction counts on one story and which
-    /// emoji this account reacted with.
+    /// emoji this account reacted with. `author_jid` is the story's
+    /// author, whose PEP service hosts the reactions.
     pub async fn fetch_story_reactions(
         &self,
-        community_jid: String,
+        author_jid: String,
         story_id: String,
     ) -> Result<WaddleStoryReactions, WaddleError> {
-        let community = parse_community(&community_jid)?;
+        let author = parse_author(&author_jid)?;
         require_story_id(&story_id)?;
         let own = self.account_bare_jid()?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
         };
-        let summary_iq = build_story_reaction_summary_iq(&fresh_iq_id(), &community, &story_id);
-        let own_iq = build_own_story_attachment_iq(&fresh_iq_id(), &community, &story_id, &own);
+        let summary_iq = build_story_reaction_summary_iq(&fresh_iq_id(), &author, &story_id);
+        let own_iq = build_own_story_attachment_iq(&fresh_iq_id(), &author, &story_id, &own);
         let (summary_reply, own_reply) = tokio::join!(
             send_iq_with_timeout(&handle, summary_iq),
             send_iq_with_timeout(&handle, own_iq),
@@ -391,21 +386,22 @@ impl WaddleClient {
 
     /// XEP-0470: make `emojis` this account's reactions to one story,
     /// replacing the ones it had; an empty list removes them. At most
-    /// 12 reactions, each a single emoji.
+    /// 12 reactions, each a single emoji. `author_jid` is the story's
+    /// author.
     pub async fn set_story_reactions(
         &self,
-        community_jid: String,
+        author_jid: String,
         story_id: String,
         emojis: Vec<String>,
     ) -> Result<(), WaddleError> {
-        let community = parse_community(&community_jid)?;
+        let author = parse_author(&author_jid)?;
         require_story_id(&story_id)?;
         let reactions = reaction_set(emojis)?;
         let own = self.account_bare_jid()?;
         let Some(handle) = self.clone_handle().await else {
             return Err(WaddleError::NotConnected);
         };
-        let fetch = build_own_story_attachment_iq(&fresh_iq_id(), &community, &story_id, &own);
+        let fetch = build_own_story_attachment_iq(&fresh_iq_id(), &author, &story_id, &own);
         let current = own_attachment(send_iq_with_timeout(&handle, fetch).await, &own)?;
         let had_attachment = current.is_some();
         let Some(next) = next_story_attachment(current, reactions) else {
@@ -414,12 +410,12 @@ impl WaddleClient {
             }
             // Already gone (a retry after a lost reply) is success.
             let retract =
-                build_story_attachment_retract_iq(&fresh_iq_id(), &community, &story_id, &own);
+                build_story_attachment_retract_iq(&fresh_iq_id(), &author, &story_id, &own);
             return reply_or_absent(send_iq_with_timeout(&handle, retract).await).map(|_| ());
         };
         // `item-not-found` here means the story itself is gone.
         let publish =
-            build_story_attachment_publish_iq(&fresh_iq_id(), &community, &story_id, &own, &next);
+            build_story_attachment_publish_iq(&fresh_iq_id(), &author, &story_id, &own, &next);
         send_iq_with_timeout(&handle, publish)
             .await
             .map(|_| ())

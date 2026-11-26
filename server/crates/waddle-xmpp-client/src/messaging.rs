@@ -40,7 +40,7 @@ pub use link_preview_lookup::{
     LinkPreviewLookup, LinkPreviewLookupReady, MAX_LINK_PREVIEW_TOKEN_BYTES,
 };
 pub use mentions::{
-    MentionDirectory, MentionTarget, MENTION_URI_EVERYONE, MENTION_URI_HERE, REFERENCE_TYPE_MENTION,
+    BroadcastMention, BroadcastSpan, MentionDirectory, MentionTarget, REFERENCE_TYPE_MENTION,
 };
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, InCallPresenceMarkers,

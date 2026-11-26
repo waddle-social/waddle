@@ -19,6 +19,15 @@ use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
+/// Whether any serialized reply frame is an IQ of `type='error'`.
+fn frames_contain_iq_error(frames: &[String]) -> bool {
+    frames.iter().any(|frame| {
+        frame
+            .parse::<xmpp_parsers::minidom::Element>()
+            .is_ok_and(|element| element.name() == "iq" && element.attr("type") == Some("error"))
+    })
+}
+
 pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
     use waddle_xmpp::protocol::OutboundEvent;
     use waddle_xmpp::Stanza;
@@ -151,6 +160,22 @@ async fn handle_sans_io_iq_with_relay_override(
                 not_authorized_iq_error("Authentication required."),
             )]);
         };
+        // XEP-0272 puts `<muji room/>` only on the initiate; a hangup names its
+        // session by `sid` alone. Resolve it through the session this replica
+        // accepted, so it is located, relayed and cleared like a terminate that
+        // carries the room, wherever the room is owned.
+        let resolved_terminate;
+        let iq = match (payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE)
+            .then(|| super::jingle_muji_gate::plain_mixer_terminate_sid(iq, domain))
+            .flatten()
+            .and_then(|sid| state.muji_session_rooms.room_of(full_jid, &sid))
+        {
+            Some(room) => {
+                resolved_terminate = super::jingle_muji_gate::with_muji_room(iq, &room);
+                &resolved_terminate
+            }
+            None => iq,
+        };
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
             if let Some(reply) = peer_jingle_blocklist_reply(state, full_jid, iq, domain).await {
                 return Some(vec![match reply {
@@ -205,6 +230,16 @@ async fn handle_sans_io_iq_with_relay_override(
         // only when the embedded `<jingle/>` carries a `<muji/>`
         // child — 1:1 Jingle traffic passes through untouched.
         let mut media_capabilities = None;
+        let record_initiated_session = || {
+            if let Some((sid, room)) = super::jingle_muji_gate::muji_initiate_session(iq) {
+                state.muji_session_rooms.record(
+                    &state.deps.protocol.connection_registry,
+                    full_jid,
+                    &sid,
+                    &room,
+                );
+            }
+        };
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
             match super::jingle_muji_gate::verify_muji_jingle_request(
                 state,
@@ -273,6 +308,9 @@ async fn handle_sans_io_iq_with_relay_override(
                     )
                     .await
                     {
+                        if !frames_contain_iq_error(&frames) {
+                            record_initiated_session();
+                        }
                         return Some(frames);
                     }
                 }
@@ -405,6 +443,7 @@ async fn handle_sans_io_iq_with_relay_override(
                         reply_id, reply_from, reply_to, *error,
                     )]);
                 }
+                record_initiated_session();
             }
         }
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
@@ -449,6 +488,11 @@ async fn handle_sans_io_iq_with_relay_override(
                 terminate_session.as_ref(),
             )
             .await;
+            if let xmpp_parsers::iq::Iq::Set { payload, .. } = iq {
+                if let Some(sid) = payload.attr("sid") {
+                    state.muji_session_rooms.forget(full_jid, sid);
+                }
+            }
         }
         if outcome.close {
             warn!(

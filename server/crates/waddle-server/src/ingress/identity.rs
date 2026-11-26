@@ -148,7 +148,11 @@ impl IngressAppendObligationRef {
     /// A relayed claim whose canonical read is deferred to the first consumer
     /// that trusts it (#1790). Call only after the synchronous checks passed.
     #[cfg(feature = "clustering")]
-    pub(crate) fn into_deferred_context(self, db: Database) -> SmIngressAppendContext {
+    pub(crate) fn into_deferred_context(
+        self,
+        db: Database,
+        occupant_id_secret: waddle_xmpp::xep::xep0421::OccupantIdSecret,
+    ) -> SmIngressAppendContext {
         SmIngressAppendContext {
             message_key: self.message_key,
             receipt: self.receipt.clone(),
@@ -156,7 +160,7 @@ impl IngressAppendObligationRef {
             archive_positions: self.archive_positions.clone(),
             dispatch_stream: self.dispatch_stream.clone(),
             authority: AppendAuthority::Deferred(std::sync::Arc::new(
-                super::append_authority::DeferredAppendAuthority::new(db, self),
+                super::append_authority::DeferredAppendAuthority::new(db, occupant_id_secret, self),
             )),
         }
     }

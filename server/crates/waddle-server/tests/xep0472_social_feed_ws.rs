@@ -434,3 +434,105 @@ async fn member_cannot_clobber_another_members_feed_post() {
     let _ = alice.close().await;
     let _ = bob.close().await;
 }
+
+#[tokio::test]
+async fn feed_node_config_follows_the_base_profile() {
+    // XEP-0472 §"Base profile": notify_retract MUST be true, max_items MUST be
+    // "max", persist_items MUST be true, send_last_published_item SHOULD be
+    // "never".
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="feed-config" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub#owner">
+                <configure node="{FEED_NODE}"/>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send configure get");
+    let response = client
+        .recv_matching(|frame| frame.contains("feed-config"))
+        .await
+        .expect("configure response");
+    assert!(
+        response.contains("type='result'"),
+        "owner configure get must succeed: {response}"
+    );
+    let compact: String = response.split_whitespace().collect();
+    let field_value = |var: &str| -> String {
+        let marker = format!("var='{var}'");
+        let start = compact
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {var}: {response}"));
+        let rest = &compact[start..];
+        let value_start = rest.find("<value>").expect("value") + "<value>".len();
+        let value_end = rest[value_start..].find("</value>").expect("value end");
+        rest[value_start..value_start + value_end].to_owned()
+    };
+    assert_eq!(field_value("pubsub#send_last_published_item"), "never");
+    assert!(matches!(
+        field_value("pubsub#notify_retract").as_str(),
+        "1" | "true"
+    ));
+    assert!(matches!(
+        field_value("pubsub#persist_items").as_str(),
+        "1" | "true"
+    ));
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn server_inserts_xmpp_alternate_link_on_publish() {
+    // XEP-0472 §"Publishing a Post": the xmpp: alternate link "SHOULD be
+    // inserted at server side".
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup_member().await;
+
+    let post_id = format!("post-{}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<iq type="set" id="link-publish" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <publish node="{FEED_NODE}">
+                  <item id="{post_id}">{}</item>
+                </publish>
+              </pubsub>
+            </iq>"#,
+            feed_entry_xml(&post_id, "Linked post", "Body", "member@localhost")
+        ))
+        .await
+        .expect("send publish");
+    let result = client
+        .recv_matching(|frame| frame.contains("link-publish"))
+        .await
+        .expect("publish result");
+    assert!(result.contains("type='result'"), "{result}");
+
+    client
+        .send(&format!(
+            r#"<iq type="get" id="link-items" to="{COMMUNITY_JID}">
+              <pubsub xmlns="http://jabber.org/protocol/pubsub">
+                <items node="{FEED_NODE}"/>
+              </pubsub>
+            </iq>"#
+        ))
+        .await
+        .expect("send items query");
+    let items = client
+        .recv_matching(|frame| frame.contains("link-items") && frame.contains("<entry"))
+        .await
+        .expect("items response");
+    assert!(
+        items.contains("rel='alternate'")
+            && items.contains(&format!(
+                "xmpp:{COMMUNITY_JID}?;node=urn%3Axmpp%3Apubsub-social-feed%3A1;item={post_id}"
+            )),
+        "server must insert the xmpp: alternate link: {items}"
+    );
+
+    let _ = client.close().await;
+}

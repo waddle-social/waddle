@@ -24,8 +24,8 @@ public extension GroupCallStage {
         case .joiningGroup(let call):
             self = .joining(room: call.room, media: call.media)
         case .inGroup(let call):
-            switch media {
-            case .idle, .connecting: self = .connecting(room: call.room, media: call.media)
+            switch CallSessionStatus(media) {
+            case .connecting: self = .connecting(room: call.room, media: call.media)
             case .connected: self = .inCall(room: call.room, media: call.media)
             case .reconnecting: self = .reconnecting(room: call.room, media: call.media)
             }

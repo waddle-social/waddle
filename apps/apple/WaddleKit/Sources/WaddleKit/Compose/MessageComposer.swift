@@ -72,8 +72,12 @@ public enum MessageComposer {
             reply: draft.reply.map { OutboundOptions.Reply(targetID: $0.targetID, author: $0.author, fallback: fallback) },
             thread: draft.thread.map { ThreadTarget(id: $0) },
             markupSpans: markdown.spans.map { MarkupSpan(kind: $0.kind, start: $0.start + offset, end: $0.end + offset) },
-            references: markdown.mentions.map {
-                Reference(kind: .mention, uri: $0.target.uri, begin: $0.range.lowerBound + offset, end: $0.range.upperBound + offset)
+            // Broadcast tokens (`@everyone` / `@here`) are not references: the
+            // Rust send builder turns the typed token into an XEP-0513
+            // `#channel` mention through the room's mention directory.
+            references: markdown.mentions.compactMap { mention in
+                guard case let .user(jid) = mention.target else { return nil }
+                return Reference(kind: .mention, uri: "xmpp:\(jid)", begin: mention.range.lowerBound + offset, end: mention.range.upperBound + offset)
             },
             sharedFiles: draft.attachments,
             requestDisplayedMarker: true

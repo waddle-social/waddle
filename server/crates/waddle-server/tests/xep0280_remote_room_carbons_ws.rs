@@ -213,15 +213,26 @@ async fn a_private_message_to_a_remote_room_occupant_is_copied_as_a_sent_carbon(
 }
 
 #[tokio::test]
-async fn a_private_message_the_remote_route_refuses_is_not_copied() {
+async fn the_error_for_a_private_message_the_remote_route_refuses_is_copied() {
     let route = Arc::new(AcceptingRoute::refusing(&["refused-pm"]));
     let (_loopback, mut phone, mut laptop) = alice_with_two_resources(route.clone()).await;
 
     send(&mut phone, chat(OCCUPANT, "refused-pm", "never sent")).await;
     let reply = receive_message(&mut phone, "refused-pm").await;
     assert_eq!(reply.type_, MessageType::Error);
-    send(&mut phone, chat(OCCUPANT, "sentinel", "after the refusal")).await;
 
+    // XEP-0280 section 6.1: an error sent in response to an eligible message
+    // is eligible. The message reaches the other resource as `<sent/>` and
+    // the error as `<received/>`.
+    let sent = first_carbon(&mut laptop, "sent").await;
+    assert_eq!(id_of(&sent), Some("refused-pm"));
+    assert_eq!(sent.type_, MessageType::Chat);
+    let error = first_carbon(&mut laptop, "received").await;
+    assert_eq!(id_of(&error), Some("refused-pm"));
+    assert_eq!(error.type_, MessageType::Error);
+    assert_eq!(error.to, Some(Jid::from(full_jid(&phone))));
+
+    send(&mut phone, chat(OCCUPANT, "sentinel", "after the refusal")).await;
     let copy = first_carbon(&mut laptop, "sent").await;
     assert_eq!(id_of(&copy), Some("sentinel"));
     assert_eq!(

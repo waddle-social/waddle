@@ -34,6 +34,24 @@ impl fmt::Debug for ScramPendingState {
     }
 }
 
+/// The SASL defined condition of the `<failure/>` that ends a failed SASL1
+/// OAUTHBEARER exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthSaslFailure {
+    NotAuthorized,
+    InvalidAuthzid,
+}
+
+impl OAuthSaslFailure {
+    /// The condition's element name (RFC 6120 §6.5).
+    pub const fn condition(self) -> &'static str {
+        match self {
+            Self::NotAuthorized => "not-authorized",
+            Self::InvalidAuthzid => "invalid-authzid",
+        }
+    }
+}
+
 /// XMPP connection lifecycle phases.
 ///
 /// Later migration steps add:
@@ -53,6 +71,10 @@ pub enum ConnectionPhase {
     /// SASL2 OAUTHBEARER rejected an invalid token and is awaiting the
     /// mechanism's required dummy response or an abort before final failure.
     Sasl2OAuthErrorPending,
+
+    /// SASL1 OAUTHBEARER sent its RFC 7628 §3.2.2 error challenge and is
+    /// awaiting the client's dummy response before the final `<failure/>`.
+    Sasl1OAuthErrorPending { failure: OAuthSaslFailure },
 
     /// SASL succeeded and the connection now has an authenticated bare JID,
     /// but resource binding has not yet completed.
@@ -93,6 +115,10 @@ impl ConnectionPhase {
 
     pub fn sasl2_oauth_error_pending() -> Self {
         Self::Sasl2OAuthErrorPending
+    }
+
+    pub fn sasl1_oauth_error_pending(failure: OAuthSaslFailure) -> Self {
+        Self::Sasl1OAuthErrorPending { failure }
     }
 
     pub fn authenticated(full_jid: &FullJid) -> Self {
@@ -167,7 +193,10 @@ impl ConnectionPhase {
     }
 
     pub fn allows_sasl_response(&self) -> bool {
-        matches!(self, Self::ScramPending { .. })
+        matches!(
+            self,
+            Self::ScramPending { .. } | Self::Sasl1OAuthErrorPending { .. }
+        )
     }
 
     pub fn allows_resource_binding(&self) -> bool {
@@ -211,6 +240,19 @@ impl ConnectionPhase {
             true
         } else {
             false
+        }
+    }
+
+    /// Consume the pending SASL1 OAuth error exchange and return to pre-auth
+    /// state, yielding the failure its final `<failure/>` carries.
+    pub fn take_sasl1_oauth_error_pending(&mut self) -> Option<OAuthSaslFailure> {
+        match self {
+            Self::Sasl1OAuthErrorPending { failure } => {
+                let failure = *failure;
+                *self = Self::Unauthenticated;
+                Some(failure)
+            }
+            _ => None,
         }
     }
 
@@ -286,7 +328,7 @@ impl Default for ConnectionPhase {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionPhase, ScramPendingState};
+    use super::{ConnectionPhase, OAuthSaslFailure, ScramPendingState};
     use crate::auth::ScramServer;
     use jid::FullJid;
 
@@ -337,6 +379,24 @@ mod tests {
         assert!(phase.take_sasl2_oauth_error_pending());
         assert!(matches!(phase, ConnectionPhase::Unauthenticated));
         assert!(!phase.take_sasl2_oauth_error_pending());
+    }
+
+    #[test]
+    fn sasl1_oauth_error_pending_only_allows_the_dummy_response() {
+        let mut phase =
+            ConnectionPhase::sasl1_oauth_error_pending(OAuthSaslFailure::InvalidAuthzid);
+        assert!(!phase.allows_sasl_auth());
+        assert!(phase.allows_sasl_response());
+        assert!(!phase.allows_resource_binding());
+        assert!(!phase.is_sasl2_oauth_error_pending());
+        assert_eq!(
+            phase
+                .take_sasl1_oauth_error_pending()
+                .map(|f| f.condition()),
+            Some("invalid-authzid")
+        );
+        assert!(matches!(phase, ConnectionPhase::Unauthenticated));
+        assert_eq!(phase.take_sasl1_oauth_error_pending(), None);
     }
 
     #[test]

@@ -101,6 +101,8 @@ async fn a_fresh_sqlite_database_is_built_from_v1() {
         "ingress_protocol_epoch",
         "sm_durable_sessions",
         "tenant_placement_leases",
+        "xmpp_oauth_grants",
+        "entity_caps",
     ] {
         let mut rows = conn
             .query(

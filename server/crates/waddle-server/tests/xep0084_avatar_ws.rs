@@ -498,7 +498,7 @@ async fn combined_fn_plus_avatar_publishes_full_chain() {
     assert!(vcard4.contains("Combined"), "FN: {vcard4}");
     assert!(
         vcard4.contains("xmpp:")
-            && vcard4.contains("?pubsub")
+            && vcard4.contains("?pubsub;action=retrieve;")
             && vcard4.contains(&format!("node={NS_AVATAR_DATA}")),
         "vCard4 photo MUST reference the PEP avatar-data item, not embed bytes inline: {vcard4}"
     );
@@ -692,7 +692,7 @@ async fn fn_only_after_combined_preserves_photo() {
     assert!(
         vcard4.contains("Renamed")
             && vcard4.contains("<photo")
-            && vcard4.contains("?pubsub")
+            && vcard4.contains("?pubsub;action=retrieve;")
             && vcard4.contains(&format!("node={NS_AVATAR_DATA}")),
         "vCard4 must preserve the photo PEP-item URI on FN-only follow-up: {vcard4}"
     );
@@ -1087,6 +1087,15 @@ async fn avatar_removal_fans_out_empty_metadata_event_to_subscriber() {
     assert!(
         sub_resp.contains(r#"type='result'"#),
         "subscribe must succeed (Open access): {sub_resp}"
+    );
+    // XEP-0163 §4: the new subscriber is first sent the last published
+    // item, the seeded avatar's metadata, with a XEP-0203 delay.
+    let replay = wait_for_event_message(&mut bob, NS_AVATAR_METADATA, Duration::from_secs(2))
+        .await
+        .expect("bob receives the last published metadata on subscribing");
+    assert!(
+        replay.contains("<info") && replay.contains("urn:xmpp:delay"),
+        "replay carries the seeded avatar metadata with a delay: {replay}"
     );
 
     // OIDC removal — empty `<metadata/>` published; fan-out MUST

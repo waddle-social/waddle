@@ -42,10 +42,8 @@ fn delivery_copy_restores_canonical_content_address_and_recipient_stamp() {
             extract_stanza_id_by(&copy, &recipient.clone().into()),
             Some(saved.id.clone())
         );
-        assert_eq!(
-            extract_stanza_id_by(&copy, &sender.clone().into()),
-            Some("sender-saved".into())
-        );
-        assert_eq!(waddle_xmpp::xep::extract_stanza_ids(&copy).len(), 2);
+        // XEP-0313 4.1.1: the recipient copy omits the sender's archive stamp.
+        assert_eq!(extract_stanza_id_by(&copy, &sender.clone().into()), None);
+        assert_eq!(waddle_xmpp::xep::extract_stanza_ids(&copy).len(), 1);
     }
 }

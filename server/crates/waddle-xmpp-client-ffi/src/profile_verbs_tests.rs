@@ -429,6 +429,7 @@ mod xep0108 {
             "working",
             Some("coding"),
             Some("rewriting waddle"),
+            None,
         );
         assert_eq!(iq.attr("id"), Some("activity-req"));
         let activity = publish_item(&iq, NS_ACTIVITY)
@@ -474,7 +475,7 @@ mod xep0108 {
         for general in ["", "no way", "euphoric", "text"] {
             assert_eq!(
                 client
-                    .publish_activity(general.to_string(), None, None)
+                    .publish_activity(general.to_string(), None, None, None)
                     .await
                     .unwrap_err(),
                 WaddleError::InvalidArgument,
@@ -486,7 +487,12 @@ mod xep0108 {
         for specific in ["no way", "2fast", "-lane", "text"] {
             assert_eq!(
                 client
-                    .publish_activity("working".to_string(), Some(specific.to_string()), None)
+                    .publish_activity(
+                        "working".to_string(),
+                        Some(specific.to_string()),
+                        None,
+                        None
+                    )
                     .await
                     .unwrap_err(),
                 WaddleError::InvalidArgument,
@@ -500,7 +506,12 @@ mod xep0108 {
         let client = offline_client();
         assert_eq!(
             client
-                .publish_activity("working".to_string(), Some("coding".to_string()), None)
+                .publish_activity(
+                    "working".to_string(),
+                    Some("coding".to_string()),
+                    None,
+                    None
+                )
                 .await
                 .unwrap_err(),
             WaddleError::NotConnected

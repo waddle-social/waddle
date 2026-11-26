@@ -52,6 +52,7 @@ use waddle_xmpp::muc::room_actor::{
     GetConfig, GetOccupantSessionGeneration, GetSeatedSessionGenerations, LeaveSessionSelector,
     PingSelfCheck,
 };
+use waddle_xmpp::muc::voice::{parse_voice_form, VoiceForm};
 use waddle_xmpp::muc::MucRemovalCause;
 use waddle_xmpp::protocol::room::archive::is_archivable;
 use waddle_xmpp::xep::xep0085::NS_CHATSTATES;
@@ -75,6 +76,7 @@ use super::handlers::iq::{
     muc_admin_for_remote, muc_disco_info_for_remote, muc_owner_or_moderation_for_remote,
     muc_rooms_for_remote, page_listing,
 };
+use super::handlers::muc_voice::{decide_voice_form, VoiceDecision, VoiceSender};
 use super::handlers::presence::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
     host_grant_read_still_admitted_as, principal_witness, resolve_muc_room_archive_access_as,
@@ -628,6 +630,48 @@ fn told_to_remote(feature: &str) -> bool {
         || feature == DISCO_ITEMS_NS
         || feature == NS_MUC
         || feature.starts_with("muc_")
+}
+
+/// Settle what a session handler's batch carries beside its frames and
+/// return the frames as typed stanzas: the answer is handed on to a remote
+/// requester, which is all the custody a reply to one has. `None` when a
+/// frame is no stanza: an answer read only in part must not be taken for
+/// the whole.
+pub(crate) async fn settle_answered(
+    state: &Arc<WebSocketState>,
+    batch: ResponseBatch,
+) -> Option<Vec<Stanza>> {
+    let ResponseBatch {
+        frames,
+        completions,
+        mut ingress_reports,
+        ..
+    } = batch;
+    let stanzas: Option<Vec<Stanza>> = frames.into_iter().map(stanza_of).collect();
+    for report in &mut ingress_reports {
+        let completed = state
+            .deps
+            .protocol
+            .ingress
+            .complete_frame_obligations(report)
+            .await;
+        if completed.is_err() {
+            tracing::warn!("recording a remote principal's answered room request failed");
+        }
+    }
+    for completion in completions {
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            // An effect whose completion is not recorded stays leased
+            // and is delivered again by the room's outbox.
+            let recorded =
+                crate::room_effect_outbox::drain::complete_after_write(&state, &completion).await;
+            if recorded.is_err() {
+                tracing::warn!("recording a remote principal's delivered room effect failed");
+            }
+        });
+    }
+    stanzas
 }
 
 impl Asked<'_> {
@@ -1188,39 +1232,7 @@ impl Asked<'_> {
     /// other occupants' connections to take their copies, so it is settled
     /// off the room's request order.
     async fn answered(&self, batch: ResponseBatch) -> RoomReplies {
-        let ResponseBatch {
-            frames,
-            completions,
-            mut ingress_reports,
-            ..
-        } = batch;
-        let stanzas: Option<Vec<Stanza>> = frames.into_iter().map(stanza_of).collect();
-        for report in &mut ingress_reports {
-            let completed = self
-                .state
-                .deps
-                .protocol
-                .ingress
-                .complete_frame_obligations(report)
-                .await;
-            if completed.is_err() {
-                tracing::warn!("recording a remote principal's answered room request failed");
-            }
-        }
-        for completion in completions {
-            let state = Arc::clone(self.state);
-            tokio::spawn(async move {
-                // An effect whose completion is not recorded stays leased
-                // and is delivered again by the room's outbox.
-                let recorded =
-                    crate::room_effect_outbox::drain::complete_after_write(&state, &completion)
-                        .await;
-                if recorded.is_err() {
-                    tracing::warn!("recording a remote principal's delivered room effect failed");
-                }
-            });
-        }
-        match stanzas {
+        match settle_answered(self.state, batch).await {
             Some(stanzas) => RoomReplies::of(stanzas),
             // The request may have been applied, and its answer cannot be
             // given in full.
@@ -1230,6 +1242,54 @@ impl Asked<'_> {
 
     // --- messages -------------------------------------------------------------
 
+    /// XEP-0045 §7.13 and §8.6: a seated remote occupant asks for voice, or
+    /// a remote moderator answers an approval form, as a session of this
+    /// deployment would. The room decides on the standing it holds for the
+    /// sender, honoured for the stream that carried the form.
+    async fn voice_form(&self, message: &Message, form: VoiceForm) -> RoomReplies {
+        let Some(room) = self.room() else {
+            return RoomReplies::none();
+        };
+        let Some(sender) = self
+            .request
+            .principal
+            .full()
+            .filter(|_| self.request.seat.is_some())
+        else {
+            // XEP-0045 §7.4: only an occupant sends to the room.
+            return self.refuse(error(
+                ErrorType::Modify,
+                DefinedCondition::NotAcceptable,
+                "You are not an occupant of this room.",
+            ));
+        };
+        if matches!(form, VoiceForm::Approval { allow: true, .. }) {
+            // The room may apply the role change before it answers.
+            self.request.taken.take();
+        }
+        let mut stamped = message.clone();
+        stamped.from = Some(Jid::from(sender.clone()));
+        let deps = build_interpret_deps(self.state, None);
+        let voice_sender = VoiceSender {
+            jid: &sender,
+            evidence: &self.evidence,
+        };
+        let decision = decide_voice_form(
+            &stamped,
+            self.state,
+            &deps,
+            &voice_sender,
+            &room,
+            form,
+            self.state.deps.service_domains.muc.as_str(),
+        )
+        .await;
+        match decision {
+            VoiceDecision::NotHere => self.refuse(no_such_room()),
+            VoiceDecision::Answered(batch) => self.answered(batch).await,
+        }
+    }
+
     async fn message(&self, message: &Message) -> RoomReplies {
         if message.type_ == MessageType::Error {
             return RoomReplies::none();
@@ -1238,10 +1298,17 @@ impl Asked<'_> {
         // marker, is never answered with an error: what is not taken of
         // it is dropped.
         let unanswered = crate::s2s::route::is_unanswered_message(message);
+        if message.type_ == MessageType::Normal && self.to.resource().is_none() {
+            match parse_voice_form(message) {
+                Ok(Some(form)) => return self.voice_form(message, form).await,
+                Err(_) => return self.refuse(bad_request()),
+                Ok(None) => {}
+            }
+        }
         let room = match (message.type_.clone(), self.room(), self.to.resource()) {
             (MessageType::Groupchat, Some(room), None) => room,
             _ if unanswered => return RoomReplies::none(),
-            // Private messages, invitations, voice requests and declines.
+            // Private messages, invitations and declines.
             _ => {
                 return self.refuse(error(
                     ErrorType::Cancel,

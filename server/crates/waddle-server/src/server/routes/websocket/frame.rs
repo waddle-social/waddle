@@ -905,7 +905,7 @@ async fn handle_xmpp_frame_impl(
             let open_element = websocket_stream_open_element(domain, from.as_ref());
             *stream_open_from = from;
             let features_element =
-                build_stream_features_for_phase_element(phase, state.sasl2_negotiation_enabled());
+                build_stream_features_for_phase_element(phase, super::sasl::sasl2_offer(state));
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
         }
@@ -922,6 +922,8 @@ async fn handle_xmpp_frame_impl(
         InboundFrame::Auth { mechanism, data } => {
             if !phase.allows_sasl_auth() {
                 let reset_scram_phase = phase.scram_pending_username().is_some();
+                // A new <auth/> abandons a pending OAUTHBEARER error exchange.
+                let _ = phase.take_sasl1_oauth_error_pending();
                 warn!(phase = ?phase, mechanism = %mechanism, "SASL auth received in invalid phase");
                 if reset_scram_phase || mechanism == "SCRAM-SHA-256" {
                     record_scram_failure(AuthFailure::ScramOther, None);
@@ -972,6 +974,15 @@ async fn handle_xmpp_frame_impl(
         }
 
         InboundFrame::SaslResponse(data) => {
+            // RFC 7628 §3.2.2: the client acknowledges the error challenge
+            // with a dummy response, and the mechanism then fails.
+            if let Some(failure) = phase.take_sasl1_oauth_error_pending() {
+                *authenticated_session = None;
+                if data.trim() != "AQ==" {
+                    warn!("SASL1 OAUTHBEARER error challenge received a non-dummy response");
+                }
+                return vec![sasl_failure_element(failure.condition())].into();
+            }
             if !phase.allows_sasl_response() || phase.scram_pending_is_sasl2() {
                 warn!(phase = ?phase, "SASL response received in invalid phase");
                 record_scram_failure(AuthFailure::ScramOther, None);
@@ -1324,7 +1335,11 @@ async fn handle_xmpp_frame_impl(
                 }
                 _ => None,
             };
-            if let (Stanza::Message(message), None) = (stanza.as_ref(), &unserved_message) {
+            let voice_form = matches!(stanza.as_ref(), Stanza::Message(message)
+                if handlers::muc_voice::is_voice_form(message, &muc_domain));
+            if let (Stanza::Message(message), None, false) =
+                (stanza.as_ref(), &unserved_message, voice_form)
+            {
                 if let Some(principal) = authenticated_session
                     .as_ref()
                     .and_then(|session| session.authenticated_principal_ref().ok())
@@ -1399,6 +1414,16 @@ async fn handle_xmpp_frame_impl(
                             )
                             .await
                             .into()
+                        }
+                        None if voice_form => {
+                            handlers::muc_voice::handle_voice_form(
+                                message,
+                                state,
+                                phase,
+                                authenticated_session.as_ref(),
+                                &muc_domain,
+                            )
+                            .await
                         }
                         None => handlers::message::handle_message(
                             message,

@@ -27,15 +27,22 @@ final class CallTileSource {
 /// Equatable, and drawn with `.equatable()`: the stage redraws whenever
 /// anyone starts or stops speaking, and on a Mac every picture is drawn on
 /// the main thread (#2625), so a tile whose values did not change must cost nothing.
+///
+/// Not from the first moment: SwiftUI asks `==` only once it has worked out,
+/// in the background, how to compare this kind of view, and counts every
+/// update before that as a change (#2701). So a redraw is cheap, never
+/// free, and nothing here may rely on a body not running.
 struct CallTileView: View, Equatable {
     let tile: CallStageTile
     var isPinned = false
+    /// Off where a click has nothing to pin, as in the window a call floats in.
+    var pins = true
     let source: CallTileSource
 
     @State private var isHovered = false
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.tile == rhs.tile && lhs.isPinned == rhs.isPinned && lhs.source === rhs.source
+        lhs.tile == rhs.tile && lhs.isPinned == rhs.isPinned && lhs.pins == rhs.pins && lhs.source === rhs.source
     }
 
     var body: some View {
@@ -52,14 +59,18 @@ struct CallTileView: View, Equatable {
             .huddleAnimation(.press, value: tile.isSpeaking)
             .accessibilityHidden(true)
             .overlay {
-                Button { source.togglePin(tile.id) } label: {
-                    Color.clear.contentShape(Metrics.shape)
-                }
-                .buttonStyle(.plain)
-                .onHover { isHovered = $0 }
-                .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
-                .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin")) { source.togglePin(tile.id) }
+                if pins { pinButton } else { Color.clear.accessibilityLabel(Text(tile.spokenLabel(isPinned: false))) }
             }
+    }
+
+    private var pinButton: some View {
+        Button { source.togglePin(tile.id) } label: {
+            Color.clear.contentShape(Metrics.shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
+        .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin")) { source.togglePin(tile.id) }
     }
 
     /// Drawn around the tile, as the web's box shadows are, so a ring never covers the picture.

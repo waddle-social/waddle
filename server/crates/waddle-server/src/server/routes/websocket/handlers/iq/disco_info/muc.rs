@@ -294,11 +294,13 @@ fn room_disco_extension_forms(
     features: &mut Vec<Feature>,
     space_link: Option<RoomSpaceLink>,
     description: Option<&str>,
+    avatar_hashes: Vec<String>,
     room_metadata_form: Element,
 ) -> Vec<Element> {
     let mut extensions = Vec::new();
     let mut room_info = MucRoomInfo {
         description: description.map(str::to_string),
+        avatar_hashes,
         ..MucRoomInfo::default()
     };
     if let Some(link) = space_link {
@@ -561,6 +563,20 @@ pub(super) async fn handle_muc_disco_info<'a>(
             return Some(denial);
         }
         let snapshot = snapshot.room;
+        // XEP-0045 §10.1.1: a locked room does not (yet) exist for anyone
+        // but its owner.
+        if snapshot.is_locked()
+            && !req.requester.is_some_and(|requester| {
+                snapshot.affiliation(&requester.to_bare()) == Affiliation::Owner
+            })
+        {
+            return Some(DiscoInfoResponse::error(
+                req.id,
+                req.response_from,
+                req.response_to,
+                item_not_found_iq_error("Requested item not found."),
+            ));
+        }
         let managed_channel = get_managed_channel_for_room(state, &room_jid)
             .await
             .ok()
@@ -606,6 +622,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             &mut features,
             space_link,
             description,
+            super::super::muc_avatar::room_avatar_hashes(state, &room_jid).await,
             build_room_metadata_form(channel_type, snapshot.config.pin_permission.as_form_value()),
         );
         let response = build_disco_info_response_with_extensions(
@@ -672,6 +689,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
             &mut features,
             space_link,
             channel.description.as_deref(),
+            super::super::muc_avatar::room_avatar_hashes(state, &room_jid).await,
             build_room_metadata_form(
                 &channel.channel_type,
                 channel.pin_permission.as_form_value(),

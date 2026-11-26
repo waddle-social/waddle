@@ -4,9 +4,9 @@ use super::{
     build_pubsub_publish_result, build_pubsub_success, debug, handle_community_items,
     handle_community_publish, handle_community_retract, handle_extension_route_items,
     handle_spaces_items, handle_spaces_publish, handle_spaces_retract, iq_to_xml,
-    is_pep_self_or_to, is_pubsub_iq, not_authorized_iq_error, parse_pubsub_iq, warn, BareJid,
-    ConnectionPhase, Element, IqHandlerContext, Jid, PubSubError, PubSubItemsRead, PubSubRequest,
-    Session, WebSocketState,
+    is_pep_self_or_to, is_pubsub_iq, not_authorized_iq_error, parse_pubsub_iq, stanza_to_xml, warn,
+    BareJid, ConnectionPhase, Element, IqHandlerContext, Jid, PubSubError, PubSubItemsRead,
+    PubSubRequest, Session, Stanza, WebSocketState,
 };
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
@@ -197,6 +197,22 @@ pub(super) async fn handle_pubsub_iq(
                     return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
                 }
 
+                if super::story_attachments::is_story_attachment_node(&node, &target_jid) {
+                    return super::story_attachments::handle_story_attachment_publish(
+                        iq,
+                        state,
+                        &target_jid,
+                        &node,
+                        item,
+                        authenticated_session,
+                    )
+                    .await;
+                }
+                if super::story_attachments::is_story_attachment_summary_node(&node) {
+                    // The service maintains summary nodes; no entity writes them.
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
+                }
+
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
                 match crate::pubsub_authz::can_publish(
                     &state.deps.protocol.pubsub_storage,
@@ -265,6 +281,17 @@ pub(super) async fn handle_pubsub_iq(
                         return vec![iq_to_xml(build_pubsub_error(iq, error))];
                     }
                 }
+
+                // XEP-0501: every item of a stories node carries exactly one
+                // enclosure. The service binds the story to its author.
+                let item = if is_pep && node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                    match stamp_story_publish(item, &user_jid) {
+                        Ok(item) => item,
+                        Err(error) => return vec![iq_to_xml(build_pubsub_error(iq, error))],
+                    }
+                } else {
+                    item
+                };
 
                 // Pre-publish reconcile for well-known PEP nodes whose
                 // canonical XEP-defined config differs from the
@@ -609,6 +636,33 @@ pub(super) async fn handle_pubsub_iq(
                     .await;
                 }
 
+                if super::story_attachments::is_story_attachment_node(&node, &target_jid) {
+                    return super::story_attachments::handle_story_attachment_retract(
+                        iq,
+                        state,
+                        &target_jid,
+                        &node,
+                        &item_id,
+                        authenticated_session,
+                    )
+                    .await;
+                }
+
+                // Moderation decision (XEP-0501 stories): a story lives on its
+                // author's own PEP node, whose owner is the account
+                // (XEP-0163 §4, XEP-0060 §4.1: only an owner or the item's
+                // publisher may retract). XEP-0060 has no moderator
+                // affiliation, XEP-0501 defines no moderation retract, and a
+                // personal story belongs to no community or space, so the
+                // permission model has no authority a retract by the server
+                // owner or a space moderator could rest on. The only
+                // XMPP-native shapes (a foreign retract honoured on a global
+                // role, or a service-granted owner affiliation on someone
+                // else's PEP node) would invent semantics and break PEP
+                // ownership, so another account's retract stays `forbidden`.
+                // Abuse is bounded by `pubsub#item_expire` (24 h default) and
+                // handled by blocking or account administration, not by
+                // editing the author's node.
                 if target_jid != user_jid {
                     let error = build_pubsub_error(iq, PubSubError::Forbidden);
                     return vec![iq_to_xml(error)];
@@ -664,6 +718,23 @@ pub(super) async fn handle_pubsub_iq(
                                 notify,
                             )
                             .await;
+                            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
+                                if let Err(error) =
+                                    super::story_attachments::cleanup_story_attachment_state(
+                                        state,
+                                        &target_jid,
+                                        &item_id,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        node = %node,
+                                        item_id = %item_id,
+                                        error = ?error,
+                                        "Failed to clean story attachment state after accepted story retract"
+                                    );
+                                }
+                            }
                             let response = build_pubsub_success(iq);
                             return vec![iq_to_xml(response)];
                         } else {
@@ -680,7 +751,11 @@ pub(super) async fn handle_pubsub_iq(
             }
 
             request => {
-                return handle_pubsub_admin_request(
+                let subscribed = match &request {
+                    PubSubRequest::Subscribe { node, jid } => Some((node.clone(), jid.clone())),
+                    _ => None,
+                };
+                let responses = handle_pubsub_admin_request(
                     iq,
                     state,
                     &target_jid,
@@ -689,10 +764,47 @@ pub(super) async fn handle_pubsub_iq(
                     authenticated_session,
                     request,
                 )
-                .await
-                .into_iter()
-                .map(iq_to_xml)
-                .collect();
+                .await;
+                let succeeded = responses
+                    .iter()
+                    .all(|response| matches!(response, xmpp_parsers::iq::Iq::Result { .. }));
+                let mut out: Vec<String> = responses.into_iter().map(iq_to_xml).collect();
+                // XEP-0060 §12.20 / XEP-0163 §4: a new subscriber is sent
+                // the last published item after the subscription result
+                // when `pubsub#send_last_published_item` asks for it.
+                if let (true, Some((node, subscriber)), Some(bound)) =
+                    (succeeded, subscribed, phase.bound_jid())
+                {
+                    let other_resource = subscriber
+                        .try_as_full()
+                        .ok()
+                        .filter(|full| *full != bound)
+                        .cloned();
+                    let recipient = match &other_resource {
+                        Some(full) => Jid::from(full.clone()),
+                        None => Jid::from(bound.clone()),
+                    };
+                    if let Some(message) = pubsub_fanout::last_item_for_new_subscription(
+                        state,
+                        &target_jid,
+                        &node,
+                        &recipient,
+                    )
+                    .await
+                    {
+                        match other_resource {
+                            None => out.push(stanza_to_xml(&Stanza::Message(message))),
+                            Some(full) => {
+                                let _ = state
+                                    .deps
+                                    .protocol
+                                    .connection_registry
+                                    .try_send_to(&full, Stanza::Message(message));
+                            }
+                        }
+                    }
+                }
+                return out;
             }
         }
     }
@@ -804,6 +916,22 @@ fn is_user_avatar_retract(node: &str, item: &waddle_xmpp::pubsub::PubSubItem) ->
         return false;
     }
     payload.children().next().is_none()
+}
+
+/// A stories item must be a story entry with one enclosure (XEP-0501
+/// §"Pubsub Stories profile"); the stored entry names the authenticated
+/// publisher as its author so an item cannot claim another identity.
+fn stamp_story_publish(
+    mut item: waddle_xmpp::pubsub::PubSubItem,
+    publisher: &BareJid,
+) -> Result<waddle_xmpp::pubsub::PubSubItem, PubSubError> {
+    let payload = item.payload.as_ref().ok_or(PubSubError::PayloadRequired)?;
+    let item_id = item.id.as_deref().unwrap_or_default();
+    item.payload = Some(
+        waddle_xmpp_core::xep0501::stamp_story_author(item_id, payload, publisher.as_str())
+            .ok_or(PubSubError::InvalidPayload)?,
+    );
+    Ok(item)
 }
 
 fn validate_xep0402_bookmark_publish_request(

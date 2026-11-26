@@ -217,7 +217,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn parse_ts(value: &str) -> Result<DateTime<Utc>, AuthError> {
+    pub(crate) fn parse_ts(value: &str) -> Result<DateTime<Utc>, AuthError> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
             return Ok(dt.with_timezone(&Utc));
         }

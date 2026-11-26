@@ -129,6 +129,7 @@ impl WaddleWindow {
             .icon_name("go-previous-symbolic")
             .tooltip_text("Back")
             .build();
+        super::a11y::label(&back, "Back to the menu");
         back.add_css_class("flat");
         let stack = stack.clone();
         back.connect_clicked(move |_| stack.set_visible_child_name(MENU));
@@ -457,6 +458,14 @@ fn gif_button(
         .child(&picture)
         .tooltip_text(&gif.title)
         .build();
+    super::a11y::label(
+        &button,
+        &if gif.title.is_empty() {
+            "Send this GIF".to_string()
+        } else {
+            format!("Send GIF: {}", gif.title)
+        },
+    );
     button.add_css_class("flat");
     let (window, popover) = (window.clone(), popover.clone());
     button.connect_clicked(move |_| {
@@ -498,6 +507,7 @@ fn pack_section(
             .child(&sticker_picture(window, session, sticker, 72))
             .tooltip_text(sticker.text())
             .build();
+        super::a11y::label(&button, &format!("Send sticker: {}", sticker.text()));
         button.add_css_class("flat");
         let (weak, popover, sticker, reference) = (
             window.downgrade(),

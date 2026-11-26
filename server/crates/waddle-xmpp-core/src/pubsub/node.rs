@@ -200,6 +200,10 @@ pub struct NodeConfig {
     /// groups whose members may subscribe and retrieve items when
     /// `access_model` is `roster`. Empty admits only the owner.
     pub roster_groups_allowed: Vec<String>,
+    /// `pubsub#item_expire` (XEP-0060 §16.4.4): seconds after which the
+    /// service purges a published item. `None` keeps items until they are
+    /// retracted or evicted by `max_items`.
+    pub item_expire: Option<u32>,
 }
 
 /// Partial node configuration submitted by an XEP-0060 configure form.
@@ -225,6 +229,10 @@ pub struct NodeConfigPatch {
     pub send_last_published_item: Option<SendLastPublishedItem>,
     /// `pubsub#roster_groups_allowed`, replacing the stored list when present.
     pub roster_groups_allowed: Option<Vec<String>>,
+    /// `pubsub#item_expire`, replacing the stored value when present. The
+    /// inner `None` is the form value `max`: no limit other than a server
+    /// imposed maximum, and this service imposes none.
+    pub item_expire: Option<Option<u32>>,
 }
 
 impl NodeConfigPatch {
@@ -260,6 +268,9 @@ impl NodeConfigPatch {
         }
         if let Some(roster_groups_allowed) = &self.roster_groups_allowed {
             config.roster_groups_allowed = roster_groups_allowed.clone();
+        }
+        if let Some(item_expire) = self.item_expire {
+            config.item_expire = item_expire;
         }
         config
     }
@@ -298,6 +309,7 @@ impl NodeConfigPatch {
                         .iter()
                         .all(|group| config.roster_groups_allowed.contains(group))
             })
+            && self.item_expire.is_none_or(|v| v == config.item_expire)
     }
 
     /// Apply this patch to `base`, resolving `pubsub#max_items=max` to the
@@ -333,6 +345,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -347,6 +360,13 @@ impl NodeConfig {
     /// outcasts via `can_publish`. Distinct from `spaces_public()`
     /// (Publisher publish-model) which the owner-only stories and
     /// calendar nodes keep.
+    ///
+    /// XEP-0472 §"Base profile" says `pubsub#send_last_published_item`
+    /// SHOULD be `never`, which this node follows. It also says
+    /// `pubsub#deliver_payloads` SHOULD be `false`; Waddle deliberately keeps
+    /// `true` (a permitted SHOULD deviation) because the feed UI renders
+    /// notifications straight from the event payload instead of issuing a
+    /// follow-up items query per post.
     #[must_use]
     pub fn community_feed() -> Self {
         Self {
@@ -358,30 +378,34 @@ impl NodeConfig {
             deliver_payloads: true,
             notify_retract: true,
             notify_delete: true,
-            send_last_published_item: SendLastPublishedItem::OnSub,
+            send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
-    /// Configuration for the XEP-0501 community stories node.
+    /// Defaults for the XEP-0501 Pubsub Stories PEP node.
     ///
-    /// Stories are community-broadcast content, like the social feed:
-    /// any authenticated, non-outcast member may publish. The server
-    /// still stamps the authenticated publisher into the story payload
-    /// before storing it.
+    /// XEP-0501 §"Pubsub Node Configuration": the node bases its
+    /// configuration on the XEP-0472 base profile (`notify_retract=true`,
+    /// `max_items=max`, `persist_items=true`, `send_last_published_item`
+    /// `never`, `deliver_payloads=false`) and sets `pubsub#type` to the
+    /// stories type, `pubsub#access_model` to `presence` and
+    /// `pubsub#item_expire` to 24 hours (86400).
     #[must_use]
-    pub fn community_stories() -> Self {
+    pub fn pep_stories() -> Self {
         Self {
-            access_model: AccessModel::Open,
-            publish_model: PublishModel::Open,
+            access_model: AccessModel::Presence,
+            publish_model: PublishModel::Publishers,
             node_type: Some(PubSubNodeType::PubsubSocialFeedStories),
             max_items: u32::MAX,
             persist_items: true,
-            deliver_payloads: true,
+            deliver_payloads: false,
             notify_retract: true,
             notify_delete: true,
-            send_last_published_item: SendLastPublishedItem::OnSub,
+            send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: Some(crate::xep0501::STORIES_ITEM_EXPIRE_SECS),
         }
     }
 
@@ -409,6 +433,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -441,6 +466,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSubAndPresence,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -473,6 +499,10 @@ impl NodeConfig {
             config = Self::waddle_status_preference_defaults();
         } else if node == PEP_NODE_WADDLE_STORY_READS {
             config = Self::waddle_story_reads_defaults();
+        } else if node == crate::xep0501::PUBSUB_NODE_STORIES {
+            config = Self::pep_stories();
+        } else if node == super::pep::PEP_NODE_MICROBLOG {
+            config = Self::microblog_defaults();
         }
         config
     }
@@ -491,6 +521,22 @@ impl NodeConfig {
     #[must_use]
     pub fn pins_whitelist_access(node: &str) -> bool {
         Self::pep_for_node(node).access_model == AccessModel::Whitelist
+    }
+
+    /// Defaults for the XEP-0277 microblog PEP node.
+    ///
+    /// XEP-0277 §"Microblog node configuration": `pubsub#notify_retract`
+    /// MUST be true, `pubsub#max_items` SHOULD be increased from the default,
+    /// and `pubsub#send_last_published_item` SHOULD be `never`. The node keeps
+    /// every post (`max`), like the XEP-0472 base profile it builds on.
+    #[must_use]
+    pub fn microblog_defaults() -> Self {
+        Self {
+            max_items: u32::MAX,
+            notify_retract: true,
+            send_last_published_item: SendLastPublishedItem::Never,
+            ..Self::pep_default()
+        }
     }
 
     /// Defaults for the Waddle story-reads PEP node.
@@ -522,6 +568,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -555,6 +602,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -593,6 +641,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -620,6 +669,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -653,6 +703,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -689,6 +740,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -724,6 +776,7 @@ impl NodeConfig {
             max_items: PEP_BOOKMARK_MAX_ITEMS,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
             ..Self::pep_default()
         }
     }
@@ -803,6 +856,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -875,6 +929,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -892,6 +947,7 @@ impl NodeConfig {
             notify_delete: true,
             send_last_published_item: SendLastPublishedItem::OnSub,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 
@@ -914,6 +970,7 @@ impl NodeConfig {
             notify_delete: false,
             send_last_published_item: SendLastPublishedItem::Never,
             roster_groups_allowed: Vec::new(),
+            item_expire: None,
         }
     }
 }
@@ -958,6 +1015,12 @@ mod tests {
         assert_eq!(config.node_type, Some(PubSubNodeType::PubsubSocialFeed));
         assert!(config.persist_items);
         assert!(config.deliver_payloads);
+        assert_eq!(config.max_items, u32::MAX);
+        assert!(config.notify_retract);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
         // Differs from spaces_public() only on publish-model: the feed
         // is member-postable, spaces nodes are Publisher-gated.
         assert_eq!(
@@ -967,11 +1030,34 @@ mod tests {
     }
 
     #[test]
-    fn community_stories_sets_xep0501_node_type() {
-        let config = NodeConfig::community_stories();
+    fn microblog_node_follows_the_xep0277_recommendations() {
+        let config = NodeConfig::pep_for_node(super::super::pep::PEP_NODE_MICROBLOG);
+        assert_eq!(config, NodeConfig::microblog_defaults());
+        assert!(config.notify_retract);
+        assert_eq!(config.max_items, u32::MAX);
+        assert_ne!(config.max_items, NodeConfig::pep_default().max_items);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
+        );
+        assert_eq!(config.access_model, AccessModel::Presence);
+    }
+
+    #[test]
+    fn pep_stories_follow_the_xep0501_profile() {
+        let config = NodeConfig::pep_for_node(crate::xep0501::PUBSUB_NODE_STORIES);
+        assert_eq!(config, NodeConfig::pep_stories());
         assert_eq!(
             config.node_type,
             Some(PubSubNodeType::PubsubSocialFeedStories)
+        );
+        assert_eq!(config.access_model, AccessModel::Presence);
+        assert_eq!(config.item_expire, Some(86_400));
+        assert_eq!(config.max_items, u32::MAX);
+        assert!(config.persist_items && config.notify_retract);
+        assert_eq!(
+            config.send_last_published_item,
+            SendLastPublishedItem::Never
         );
     }
 

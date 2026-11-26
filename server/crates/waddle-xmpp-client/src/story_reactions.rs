@@ -1,11 +1,12 @@
-//! Story reactions: XEP-0470 Pubsub Attachments over the XEP-0501
-//! community stories node.
+//! Story reactions: XEP-0470 Pubsub Attachments over a XEP-0501 stories
+//! PEP node.
 //!
-//! A member's reactions to one story are a single item, keyed by the
-//! member's bare JID, on the story's attachment node
-//! (`urn:xmpp:pubsub-attachments:1/<story item URI>`). The community
-//! service keeps per-emoji counts for every story on one summary node,
-//! keyed by story id.
+//! A contact's reactions to one story are a single item, keyed by the
+//! contact's bare JID, on the story's attachment node
+//! (`urn:xmpp:pubsub-attachments:1/<story item URI>`). Both live on the
+//! PEP service of the story's author (`host`, the author's bare JID). That
+//! service keeps per-emoji counts for the author's stories on one summary
+//! node, keyed by story id.
 
 use jid::BareJid;
 use minidom::Element;
@@ -31,13 +32,13 @@ pub fn story_reactions_summary_node() -> String {
     format!("{NS_PUBSUB_ATTACHMENTS_SUMMARY}/{PUBSUB_NODE_STORIES}")
 }
 
-/// Attachment node of one story on `community`. The service accepts
+/// Attachment node of one story hosted by `host`. The service accepts
 /// only this exact spelling, so the node and item id are
 /// percent-encoded the way it encodes them.
 #[must_use]
-pub fn story_attachment_node(community: &BareJid, story_id: &str) -> String {
+pub fn story_attachment_node(host: &BareJid, story_id: &str) -> String {
     format!(
-        "{PUBSUB_ATTACHMENTS_NODE_PREFIX}/xmpp:{community}?;node={};item={}",
+        "{PUBSUB_ATTACHMENTS_NODE_PREFIX}/xmpp:{host}?;node={};item={}",
         urlencoding::encode(PUBSUB_NODE_STORIES),
         urlencoding::encode(story_id)
     )
@@ -45,31 +46,22 @@ pub fn story_attachment_node(community: &BareJid, story_id: &str) -> String {
 
 /// Items GET for the reaction counts of one story.
 #[must_use]
-pub fn build_story_reaction_summary_iq(
-    iq_id: &str,
-    community: &BareJid,
-    story_id: &str,
-) -> Element {
-    build_pubsub_item_iq(
-        iq_id,
-        Some(community),
-        &story_reactions_summary_node(),
-        story_id,
-    )
+pub fn build_story_reaction_summary_iq(iq_id: &str, host: &BareJid, story_id: &str) -> Element {
+    build_pubsub_item_iq(iq_id, Some(host), &story_reactions_summary_node(), story_id)
 }
 
 /// Items GET for the attachment `own` published on one story.
 #[must_use]
 pub fn build_own_story_attachment_iq(
     iq_id: &str,
-    community: &BareJid,
+    host: &BareJid,
     story_id: &str,
     own: &BareJid,
 ) -> Element {
     build_pubsub_item_iq(
         iq_id,
-        Some(community),
-        &story_attachment_node(community, story_id),
+        Some(host),
+        &story_attachment_node(host, story_id),
         own.as_str(),
     )
 }
@@ -78,15 +70,15 @@ pub fn build_own_story_attachment_iq(
 #[must_use]
 pub fn build_story_attachment_publish_iq(
     iq_id: &str,
-    community: &BareJid,
+    host: &BareJid,
     story_id: &str,
     own: &BareJid,
     attachment: &Attachment,
 ) -> Element {
     build_pubsub_publish_iq(
         iq_id,
-        Some(community),
-        &story_attachment_node(community, story_id),
+        Some(host),
+        &story_attachment_node(host, story_id),
         Some(own.as_str()),
         build_attachments_element(attachment),
         None,
@@ -97,14 +89,14 @@ pub fn build_story_attachment_publish_iq(
 #[must_use]
 pub fn build_story_attachment_retract_iq(
     iq_id: &str,
-    community: &BareJid,
+    host: &BareJid,
     story_id: &str,
     own: &BareJid,
 ) -> Element {
     build_pubsub_retract_iq(
         iq_id,
-        Some(community),
-        &story_attachment_node(community, story_id),
+        Some(host),
+        &story_attachment_node(host, story_id),
         own.as_str(),
     )
 }

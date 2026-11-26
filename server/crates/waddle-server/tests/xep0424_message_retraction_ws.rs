@@ -353,13 +353,14 @@ async fn query_mam(client: &mut WsXmppClient, archive: &str, query_id: &str) -> 
 
 /// Send each of [`CORRECTION_TEXTS`] as a correction of `original_id` using
 /// `message_attrs` for the `<message>` element, waiting for each to be delivered
-/// to `receiver` (the sender itself when `None`).
+/// to `receiver` (the sender itself when `None`). Returns the delivered frames.
 async fn send_corrections(
     sender: &mut WsXmppClient,
     mut receiver: Option<&mut WsXmppClient>,
     message_attrs: &str,
     original_id: &str,
-) {
+) -> Vec<String> {
+    let mut delivered = Vec::new();
     for (index, text) in CORRECTION_TEXTS.iter().enumerate() {
         sender
             .send(&format!(
@@ -371,11 +372,14 @@ async fn send_corrections(
             .await
             .expect("send correction");
         let waiting = receiver.as_deref_mut().unwrap_or(&mut *sender);
-        waiting
-            .recv_matching(|frame| frame.contains(text))
-            .await
-            .expect("correction delivered");
+        delivered.push(
+            waiting
+                .recv_matching(|frame| frame.contains(text))
+                .await
+                .expect("correction delivered"),
+        );
     }
+    delivered
 }
 
 /// A correction of a retracted message is refused with `<item-not-found/>`.
@@ -444,6 +448,15 @@ async fn groupchat_retraction_tombstones_corrections_with_reason() {
 
     let frames = query_mam(&mut client, &room, "mam-corr").await;
     assert_corrections_tombstoned(&frames, original_id, "retract-corr");
+    // XEP-0421 §Business Rules: every archived MUC message, tombstones
+    // included, carries exactly one occupant-id of its author.
+    for tombstone in frames.iter().filter(|frame| frame.contains("<retracted ")) {
+        assert_eq!(
+            tombstone.matches("<occupant-id").count(),
+            1,
+            "tombstone keeps exactly one occupant-id: {tombstone}"
+        );
+    }
     // The original's tombstone is the one without a <replace/>.
     assert!(
         frames
@@ -504,6 +517,97 @@ async fn dm_retraction_tombstones_corrections_with_reason_in_both_archives() {
     assert_corrections_tombstoned(&admin_frames, &original_id, "dm-retract-corr");
 
     assert_late_correction_rejected(&mut admin, &attrs, &original_id).await;
+
+    let _ = bob.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn groupchat_retraction_naming_a_correction_retracts_original_and_all_corrections() {
+    // XEP-0424 §Business rules (xep-0424.xml line 329): "A receiving entity
+    // SHOULD treat a retraction that refers to a correction as retracting
+    // the original message and all of its corrections."
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("retract-corr-id-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    let original_id = "orig-corrected-by-id";
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="{original_id}"><body>{ORIGINAL_TEXT}</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    client
+        .recv_matching(|frame| frame.contains(ORIGINAL_TEXT))
+        .await
+        .expect("original echo");
+
+    let attrs = format!(r#"type="groupchat" to="{room}""#);
+    let corrections = send_corrections(&mut client, None, &attrs, original_id).await;
+    let correction_stanza_id = extract_attr_after(&corrections[0], "stanza-id", "id")
+        .expect("correction reflection must carry a <stanza-id by='room'/>");
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="retract-corr-id">
+                <retract xmlns="urn:xmpp:message-retract:1" id="{correction_stanza_id}">
+                    <reason>{REASON}</reason>
+                </retract>
+                <body>/me retracted a previous message</body>
+            </message>"#
+        ))
+        .await
+        .expect("send retraction");
+    client
+        .recv_matching(|frame| frame.contains("urn:xmpp:message-retract:1"))
+        .await
+        .expect("retraction echo");
+
+    let frames = query_mam(&mut client, &room, "mam-corr-id").await;
+    assert_corrections_tombstoned(&frames, original_id, "retract-corr-id");
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn dm_retraction_naming_a_correction_retracts_original_and_all_corrections() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut admin, mut bob) = connect_admin_and_bob().await;
+
+    let original_id = format!("dm-corr-id-{}", uuid::Uuid::new_v4());
+    admin
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="{original_id}"><body>{ORIGINAL_TEXT}</body></message>"#
+        ))
+        .await
+        .expect("send DM");
+    bob.recv_matching(|frame| frame.contains(ORIGINAL_TEXT))
+        .await
+        .expect("bob receives DM");
+    let attrs = format!(r#"xmlns="jabber:client" type="chat" to="bob@{DOMAIN}""#);
+    send_corrections(&mut admin, Some(&mut bob), &attrs, &original_id).await;
+
+    // The retraction names the first correction ("fix-0"), not the original.
+    admin
+        .send(&format!(
+            r#"<message xmlns="jabber:client" type="chat" to="bob@{DOMAIN}" id="dm-retract-corr-id">
+                <retract xmlns="urn:xmpp:message-retract:1" id="fix-0">
+                    <reason>{REASON}</reason>
+                </retract>
+                <body>/me retracted a previous message</body>
+            </message>"#
+        ))
+        .await
+        .expect("send retraction");
+    bob.recv_matching(|frame| frame.contains("urn:xmpp:message-retract:1"))
+        .await
+        .expect("bob receives retraction");
+
+    let bob_frames = query_mam(&mut bob, &format!("bob@{DOMAIN}"), "bob-mam-corr-id").await;
+    assert_corrections_tombstoned(&bob_frames, &original_id, "dm-retract-corr-id");
+    let admin_frames = query_mam(&mut admin, &format!("admin@{DOMAIN}"), "admin-mam-corr-id").await;
+    assert_corrections_tombstoned(&admin_frames, &original_id, "dm-retract-corr-id");
 
     let _ = bob.close().await;
     let _ = admin.close().await;

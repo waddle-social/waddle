@@ -10,7 +10,8 @@
 
 use minidom::Element;
 
-use crate::xep::xep0004::{DataForm, Field, FormType, ToElement};
+use crate::xep::xep0004::{DataForm, Field, FieldType, FormType, ToElement};
+use crate::xep::xep0486::{FIELD_ROOMINFO_AVATARHASH, LABEL_ROOMINFO_AVATARHASH};
 use crate::xep::xep0500::FIELD_ROOMINFO_SLOW_MODE_DURATION;
 
 /// FORM_TYPE of the XEP-0045 §6.4 room-information extension form.
@@ -36,6 +37,11 @@ pub struct MucRoomInfo {
     /// (`muc#roomconfig_pubsub`), omitted when the room is not linked
     /// to a space.
     pub space_pubsub_iri: Option<String>,
+    /// XEP-0486 XEP-0153 hashes of the room's published avatar photos
+    /// (`muc#roominfo_avatarhash`); the field is omitted when empty
+    /// ("A room SHOULD NOT include a 'muc#roominfo_avatarhash' field if
+    /// it doesn't have an avatar set").
+    pub avatar_hashes: Vec<String>,
 }
 
 impl MucRoomInfo {
@@ -56,6 +62,14 @@ impl MucRoomInfo {
         ));
         if let Some(iri) = self.space_pubsub_iri.as_deref() {
             form = form.add_field(Field::text_single(FIELD_ROOMCONFIG_PUBSUB, iri));
+        }
+        if !self.avatar_hashes.is_empty() {
+            let mut field = Field::new(FIELD_ROOMINFO_AVATARHASH, FieldType::TextMulti)
+                .with_label(LABEL_ROOMINFO_AVATARHASH);
+            for hash in &self.avatar_hashes {
+                field = field.add_value(hash);
+            }
+            form = form.add_field(field);
         }
         form.to_element()
     }
@@ -99,6 +113,7 @@ mod tests {
             description: Some("A cosy room".to_string()),
             slow_mode_duration_secs: 20,
             space_pubsub_iri: Some("xmpp:spaces.example?;node=eng".to_string()),
+            avatar_hashes: Vec::new(),
         };
         let form = info.to_form_element();
         assert_eq!(
@@ -117,6 +132,32 @@ mod tests {
             field_values(&form, FIELD_ROOMCONFIG_PUBSUB),
             vec!["xmpp:spaces.example?;node=eng".to_string()]
         );
+    }
+
+    #[test]
+    fn avatar_hashes_ride_in_one_text_multi_field() {
+        let info = MucRoomInfo {
+            avatar_hashes: vec!["aa".to_string(), "bb".to_string()],
+            ..MucRoomInfo::default()
+        };
+        let form = info.to_form_element();
+        assert_eq!(
+            field_values(&form, FIELD_ROOMINFO_AVATARHASH),
+            vec!["aabb".to_string()],
+            "one field element carries every hash"
+        );
+        let field = form
+            .children()
+            .find(|c| c.attr("var") == Some(FIELD_ROOMINFO_AVATARHASH))
+            .expect("avatar hash field");
+        assert_eq!(field.attr("type"), Some("text-multi"));
+        assert_eq!(field.children().filter(|c| c.name() == "value").count(), 2);
+    }
+
+    #[test]
+    fn no_avatar_means_no_avatarhash_field() {
+        let form = MucRoomInfo::default().to_form_element();
+        assert!(field_values(&form, FIELD_ROOMINFO_AVATARHASH).is_empty());
     }
 
     #[test]

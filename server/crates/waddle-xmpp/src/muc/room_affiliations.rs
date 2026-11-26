@@ -98,7 +98,12 @@ impl MucRoom {
     /// For members-only rooms and group DMs, users need at least Member
     /// affiliation. The group-DM check is intentionally redundant with
     /// config normalization so malformed restored state fails closed.
+    ///
+    /// A locked room (XEP-0045 §10.1.1) admits only an owner.
     pub fn can_user_join(&self, jid: &BareJid) -> bool {
+        if self.is_locked() {
+            return self.affiliation(jid) == Affiliation::Owner;
+        }
         if !self.config.requires_membership() {
             self.affiliation(jid) != Affiliation::Outcast
         } else {

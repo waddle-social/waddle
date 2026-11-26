@@ -4083,7 +4083,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         .await
         .expect("grant explicit channel membership");
 
-    let _ = handle_muc_join(
+    let alice_join = handle_muc_join(
         state.as_ref(),
         "example.com",
         &room_jid,
@@ -4093,6 +4093,13 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         Some(&alice_session.clone()),
     )
     .await;
+    assert!(
+        alice_join
+            .iter()
+            .any(|stanza| stanza.contains("code='201'")),
+        "the creator is told it created the room even when the join was retried \
+         after the durable restore advanced the admission revision: {alice_join:?}"
+    );
     let _ = handle_muc_join(
         state.as_ref(),
         "example.com",
@@ -9754,7 +9761,9 @@ mod remote_owner_admin_list {
         else {
             panic!("a member gets the member list: {member:?}");
         };
-        assert!(members.contains(&(bob_jid.to_bare(), Affiliation::Member)));
+        assert!(members.iter().any(
+            |entry| entry.jid == bob_jid.to_bare() && entry.affiliation == Affiliation::Member
+        ));
 
         let stranger =
             relayed_muc_admin_query(owner.as_ref(), member_list_request(room_jid, mallory)).await;

@@ -24,6 +24,49 @@ import Testing
         #expect(memory.promotedSpeaker == nil)
     }
 
+    @Test func aCallFloatsUntilItIsBroughtBackAndTheNextStartsOnItsStage() {
+        var memory = CallStageMemory()
+        memory.follow(call: "c1")
+        #expect(!memory.isFloating)
+        memory.toggleFloating()
+        #expect(memory.isFloating)
+        memory.toggleFloating()
+        #expect(!memory.isFloating)
+
+        memory.toggleFloating()
+        memory.follow(call: "c2")
+        #expect(!memory.isFloating)
+    }
+
+    @Test func aCallOpenedOnAPhoneCanBeMinimisedAndTheNextStartsInTheDock() {
+        var memory = CallStageMemory()
+        memory.follow(call: "c1")
+        #expect(!memory.isOpened)
+        memory.open()
+        #expect(memory.isOpened)
+        memory.minimise()
+        #expect(!memory.isOpened)
+
+        memory.open()
+        memory.follow(call: "c2")
+        #expect(!memory.isOpened)
+    }
+
+    @Test func theListOverAPhonesScreenLeavesTheStagesSizeAlone() {
+        var memory = CallStageMemory()
+        memory.open()
+        memory.toggleParticipants()
+        #expect(memory.showsParticipants)
+        #expect(memory.size == .split)
+    }
+
+    @Test func aCallOpensOnAPhoneWithItsTilesInFront() {
+        var memory = CallStageMemory()
+        memory.toggleParticipants()
+        memory.open()
+        #expect(!memory.showsParticipants)
+    }
+
     @Test func pinningThePinnedTileUnpinsIt() {
         var memory = CallStageMemory()
         memory.togglePin(Self.linus.id)

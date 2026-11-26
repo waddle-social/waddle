@@ -27,6 +27,8 @@ pub enum IngressUowError {
     BlocklistUnavailable(#[source] waddle_xmpp::xep::xep0191::BlockingStorageError),
     #[error("ingress transaction timed out before commit")]
     Timeout,
+    #[error("the occupant-id secret is not bound to this ingress authority")]
+    OccupantIdSecretUnbound,
     #[error("ingress authority has stopped")]
     AuthorityStopped,
     #[error("authenticated principal is no longer asserted")]

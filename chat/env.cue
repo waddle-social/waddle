@@ -101,30 +101,28 @@ schema.#Project & {
 			}
 			"tasks": [tasks.nativeTelemetryContract, tasks.deploy]
 		}
-		pullRequest: {
-			when: {
-				pullRequest: true
-			}
-			// Keep the shared Namespace pool available for Rust compilation
-			// and Android jobs that require the larger runner profiles.
+		queueChecks: {
+			when: manual: true
 			provider: github: runner: "ubuntu-24.04"
-			provider: github: permissions: {
-				contents:   "read"
-				"id-token": "write"
-				packages:   "none"
-			}
-			"tasks": [tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build, tasks.tokensCheck, tasks.tokensTest]
+			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
+			"tasks": [tasks.wasmBuildContract, tasks.tokensCheck, tasks.tokensTest, tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build]
 		}
 	}
 
 	tasks: {
+		wasmBuildContract: schema.#Task & {
+			command: "bun"
+			args: ["test", "tests/wasm-ui-build-contract.test.ts"]
+			inputs: list.Concat([_WasmBuildInputs, ["tests/wasm-ui-build-contract.test.ts"]])
+		}
+
 		// A task without path inputs is always affected; its dependency edge
 		// keeps a triggered WASM workflow from being skipped.
 		wasmPipelineTrigger: schema.#Task & {
 			command: "true"
 		}
 
-		// Builds WASM from Rust source for the PR lint/build pipelines.
+		// Builds WASM from Rust source for lint and build tasks.
 		// The script always rebuilds so CI never needs committed artifacts.
 		buildWasm: schema.#Task & {
 			command: "bun"

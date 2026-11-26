@@ -1,5 +1,12 @@
 import Foundation
 
+/// A change to the account's XEP-0191 block list.
+public enum BlockListChange: Sendable {
+    case blocked([JID])
+    case unblocked([JID])
+    case unblockedAll
+}
+
 /// The XEP-0201 thread a message goes to: `<thread parent='…'>id</thread>`.
 public struct ThreadTarget: Hashable, Sendable {
     public let id: String
@@ -29,6 +36,9 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     public var references: [Reference]
     public var sharedFiles: [SharedFile]
     public var requestDisplayedMarker: Bool
+    /// XEP-0085 §5.1: carry `<active/>` on the content message. Stamped by
+    /// the coordinator from the chat-state preference at send time.
+    public var chatStateActive: Bool
     /// Room sends: resolve typed `@nick` tokens to mention references.
     public var mentionDirectory: MentionDirectory?
     /// XEP-0449: the message is a sticker, whose picture is the one file
@@ -52,7 +62,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         case reply
         case threadID = "thread"
         case parentThreadID = "parentThread"
-        case markupSpans, references, sharedFiles, requestDisplayedMarker, mentionDirectory, sticker
+        case markupSpans, references, sharedFiles, requestDisplayedMarker, chatStateActive, mentionDirectory, sticker
     }
 
     public init(
@@ -62,6 +72,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         references: [Reference] = [],
         sharedFiles: [SharedFile] = [],
         requestDisplayedMarker: Bool = false,
+        chatStateActive: Bool = false,
         mentionDirectory: MentionDirectory? = nil,
         sticker: StickerReference? = nil
     ) {
@@ -72,6 +83,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         self.references = references
         self.sharedFiles = sharedFiles
         self.requestDisplayedMarker = requestDisplayedMarker
+        self.chatStateActive = chatStateActive
         self.mentionDirectory = mentionDirectory
         self.sticker = sticker
     }

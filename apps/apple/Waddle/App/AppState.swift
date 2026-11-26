@@ -692,6 +692,9 @@ final class AppState {
         guard let active = session else { return }
         await finishPendingPushRegistration?(active.coordinator)
         session = nil
+        #if os(macOS)
+        active.callFloating.close()
+        #endif
         ringer.show(nil)
         #if os(iOS)
         systemCalls.update(state: .idle, isMediaConnected: false, isMuted: false, isDoNotDisturb: false)
@@ -718,6 +721,10 @@ final class ActiveSession {
     let callMedia: LiveKitCallMediaController
     /// What the person chose on the stage of this session's call.
     let callStage: CallStageModel
+    #if os(macOS)
+    /// The window this session's call floats in while it is in Picture-in-Picture.
+    let callFloating: CallFloatingWindow
+    #endif
 
     init?(auth: AuthSession, server: URL, preferences: Preferences) {
         guard let jid = BareJID(parsing: auth.jid) ?? JID(parsing: auth.jid)?.bare,
@@ -751,5 +758,8 @@ final class ActiveSession {
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts
         coordinator.sendsChatStates = preferences.sendsChatStates
         callStage = CallStageModel(calls: coordinator.calls, media: callMedia)
+        #if os(macOS)
+        callFloating = CallFloatingWindow(session: coordinator, stage: callStage, media: callMedia)
+        #endif
     }
 }

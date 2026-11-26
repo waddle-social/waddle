@@ -452,6 +452,11 @@ pub enum TombstoneReplayTarget {
         author: BareJid,
         archive: BareJid,
     },
+    GroupchatCorrection {
+        replaced_id: String,
+        occupant: FullJid,
+        room: BareJid,
+    },
 }
 
 impl TombstoneReplayTarget {
@@ -465,6 +470,11 @@ impl TombstoneReplayTarget {
                 author,
                 archive,
             } => format!("direct|{}|{}|{}", archive, author, wire_id),
+            Self::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                room,
+            } => format!("groupchat-correction|{}|{}|{}", room, occupant, replaced_id),
         }
     }
 }
@@ -3090,6 +3100,11 @@ enum StoredTombstoneReplayTarget {
         author: BareJid,
         archive: BareJid,
     },
+    GroupchatCorrection {
+        replaced_id: String,
+        occupant: FullJid,
+        room: BareJid,
+    },
 }
 
 impl From<TombstoneReplayTarget> for StoredTombstoneReplayTarget {
@@ -3106,6 +3121,15 @@ impl From<TombstoneReplayTarget> for StoredTombstoneReplayTarget {
                 wire_id,
                 author,
                 archive,
+            },
+            TombstoneReplayTarget::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                room,
+            } => Self::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                room,
             },
         }
     }
@@ -3125,6 +3149,15 @@ impl From<StoredTombstoneReplayTarget> for TombstoneReplayTarget {
                 wire_id,
                 author,
                 archive,
+            },
+            StoredTombstoneReplayTarget::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                room,
+            } => Self::GroupchatCorrection {
+                replaced_id,
+                occupant,
+                room,
             },
         }
     }

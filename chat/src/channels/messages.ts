@@ -37,7 +37,6 @@ import {
   listQueuedRoomMessages,
 } from "@/lib/outbound-queue-store";
 import { mentionMatchesBareJid } from "@/lib/mentions";
-import { useChatStatePreference } from "@/preferences/chat-states";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { roomJidForChannelSummary } from "@/lib/channel-room";
 import { withSpan } from "@/lib/telemetry";
@@ -76,7 +75,6 @@ export function useChannelMessages(
   isChannelTimelineActive: Ref<boolean> = computed(() => true),
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
-  const { sendChatStates } = useChatStatePreference();
   // xmppStatus is owned by $xmppStatus (written from XmppProvider, which is
   // persisted across route changes). Reading via useStore keeps the composable
   // in sync with the authoritative snapshot on every mount.
@@ -534,20 +532,17 @@ export function useChannelMessages(
     scrollToPinnedEdgeAndPin,
     // Post-send XEP-0085 cleanup. The composing-timer + lastChatState
     // bookkeeping moved into useChannelChatStates in PR 5; the
-    // orchestrator routes the post-send signal via `resetOnSend()` and
-    // emits the active state through the client.
-    onSendComplete: (result, spaceId, channelId, isStillCurrentChannel) => {
+    // orchestrator routes the post-send signal via `resetOnSend()`. The
+    // content message itself carries <active/> (XEP-0085 §5.1), so no
+    // standalone active notification follows a send.
+    onSendComplete: (_result, _spaceId, _channelId, isStillCurrentChannel) => {
       if (!isStillCurrentChannel) {
-        // Client swap or channel change happened during the send. Don't
-        // emit XEP-0085 "active" through the new session targeting the
-        // old room — and skip the composing-timer cleanup since it
-        // belonged to the prior session.
+        // Client swap or channel change happened during the send; skip
+        // the composing-timer cleanup since it belonged to the prior
+        // session.
         return;
       }
       chatStates.resetOnSend();
-      if (result?.state === "sending" && xmppClient.value && sendChatStates.value) {
-        void xmppClient.value.sendChatState(spaceId, channelId, "active").catch(() => undefined);
-      }
     },
   });
   const {

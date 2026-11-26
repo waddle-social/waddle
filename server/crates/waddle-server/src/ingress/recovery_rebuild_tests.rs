@@ -55,6 +55,7 @@ fn run_at(
     pending: &[IngressEffectIntent],
     created_at: chrono::DateTime<Utc>,
 ) -> RebuiltRecovery {
+    let secret = crate::ingress::test_support::fixture_occupant_id_secret();
     rebuild(RecoveryInput {
         key: MessageKey::new(),
         envelope,
@@ -64,6 +65,7 @@ fn run_at(
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
+        occupant_id_secret: Some(&secret),
         route_progress: pending
             .iter()
             .filter(|i| matches!(i, IngressEffectIntent::RouteDirect { .. }))
@@ -225,6 +227,7 @@ fn partially_completed_fanout_keeps_only_remaining_resources() {
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
+        occupant_id_secret: None,
         route_progress: vec![progress.clone()],
     })
     .expect("rebuild");
@@ -582,6 +585,7 @@ fn blocked_received_carbons_settle_without_replaying_local_or_remote_copies() {
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[owner],
+        occupant_id_secret: None,
     })
     .expect("rebuild blocked carbons");
     assert!(result.decision.external.is_empty());
@@ -849,6 +853,7 @@ fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
     ];
     let message = MessageEnvelope::new(message);
     let pending = &intents[..2];
+    let secret = crate::ingress::test_support::fixture_occupant_id_secret();
     let result = rebuild(RecoveryInput {
         key: MessageKey::new(),
         envelope: &message,
@@ -859,6 +864,7 @@ fn blocked_recipient_discards_a_pre_restored_muc_decline_route() {
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[bare("juliet@example.com")],
+        occupant_id_secret: Some(&secret),
     })
     .expect("blocked rebuild");
     assert!(matches!(

@@ -115,14 +115,6 @@ enum Theme {
 }
 
 extension Color {
-    /// XEP-0392 consistent color for `identifier`, from the shared Rust
-    /// implementation so every Waddle client picks the same hue.
-    static func consistent(for identifier: String) -> Color {
-        // Waddle renders HSL 55%/45% on every client; this is the same
-        // color in SwiftUI's HSB space.
-        Color(hue: consistentColorHue(input: identifier) / 360, saturation: 0.7097, brightness: 0.6975)
-    }
-
     /// The page ground.
     static var primaryBackground: Color { Theme.Colors.bg }
 

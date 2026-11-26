@@ -31,6 +31,9 @@ pub const PEP_NODE_MDS_DISPLAYED: &str = "urn:xmpp:mds:displayed:0";
 /// layer; the two constants are pinned equal by a `waddle-xmpp` test.
 pub const PEP_NODE_STICKERS: &str = "urn:xmpp:stickers:0";
 
+/// XEP-0277 microblog PEP node.
+pub const PEP_NODE_MICROBLOG: &str = "urn:xmpp:microblog:0";
+
 /// XEP-0292 §3 vCard4 PEP node.
 ///
 /// Mirrored as `waddle_xmpp::xep::xep0292::PEP_NODE_VCARD4` for use at
@@ -150,7 +153,7 @@ impl PepHandler {
             || node == "http://jabber.org/protocol/activity"
             || node == "http://jabber.org/protocol/tune"
             || node == "http://jabber.org/protocol/geoloc"
-            || node == "urn:xmpp:microblog:0"
+            || node == PEP_NODE_MICROBLOG
     }
 
     /// Get the default access model for a well-known PEP node.
@@ -194,10 +197,9 @@ pub fn build_pep_identity() -> Identity {
 
 /// Shared PEP feature advertisement.
 ///
-/// XEP-0163 §6 mandates `http://jabber.org/protocol/pubsub#pep`
-/// on the user's bare-JID disco#info as the canonical PEP-support
-/// signal — without it, clients fall back to per-node `+notify`
-/// probing or skip PEP-driven features entirely.
+/// XEP-0163 §6 (Determining Support) signals PEP with the `pubsub/pep`
+/// identity ([`build_pep_identity`]) plus the supported XEP-0060 features
+/// listed here; it defines no feature of its own.
 /// Note: `urn:waddle:dnd:0+notify` is deliberately NOT advertised
 /// here. The DND PEP node defaults to `AccessModel::Whitelist` +
 /// `SendLastPublishedItem::Never` (see [`super::node::NodeConfig::waddle_dnd_defaults`])
@@ -207,7 +209,6 @@ pub fn build_pep_identity() -> Identity {
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),
-        Feature::pep(),
         Feature::pubsub_access_open(),
         Feature::pubsub_access_presence(),
         Feature::pubsub_access_roster(),
@@ -239,6 +240,11 @@ pub fn pep_features() -> Vec<Feature> {
         Feature::mam_extended(),
         Feature::push(),
         Feature::vcard4(),
+        // XEP-0501 §"Discovery": an entity that implements Pubsub Stories
+        // MUST advertise both the base social-feed feature and the stories
+        // feature. Each account hosts its own stories PEP node.
+        Feature::social_feed(),
+        Feature::stories(),
     ]
 }
 

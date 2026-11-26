@@ -13,9 +13,10 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0446::FileMetadata;
 use waddle_xmpp::xep::xep0447::{
-    build_file_sharing_element, extract_file_sharing_from_message, has_file_sharing,
-    is_file_sharing_element, parse_file_sharing_element, set_file_sharing, strip_file_sharing,
-    Disposition, FileSharing, FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
+    assign_distinct_file_sharing_ids, build_file_sharing_element,
+    extract_file_sharing_from_message, has_file_sharing, is_file_sharing_element,
+    parse_file_sharing_element, set_file_sharing, strip_file_sharing, Disposition, FileSharing,
+    FileSharingCarrier, Source, NS_SFS, NS_URL_DATA,
 };
 use xmpp_parsers::message::Message;
 
@@ -250,4 +251,48 @@ fn xep0447_set_replaces_prior_payload_and_strip_clears() {
 
     strip_file_sharing(&mut msg);
     assert!(!has_file_sharing(&msg));
+}
+
+#[test]
+fn xep0447_id_attribute_round_trips() {
+    let elem = build_file_sharing_element(&sample_sharing().with_id("sfs-a"));
+    assert_eq!(elem.attr("id"), Some("sfs-a"));
+    let parsed = parse_file_sharing_element(&elem).expect("parseable");
+    assert_eq!(parsed.id.as_deref(), Some("sfs-a"));
+    assert_eq!(
+        parse_file_sharing_element(&build_file_sharing_element(&sample_sharing()))
+            .expect("parseable")
+            .id,
+        None
+    );
+}
+
+#[test]
+fn xep0447_multiple_file_sharing_get_differing_ids() {
+    // "It MUST add an id attribute with differing values to each of these
+    // <file-sharing/> elements." (xep-0447.xml:288)
+    let mut payloads = vec![
+        build_file_sharing_element(&sample_sharing().with_id("sfs-0")),
+        Element::builder("other", "urn:example:x").build(),
+        build_file_sharing_element(&sample_sharing()),
+        build_file_sharing_element(&sample_sharing().with_id("sfs-0")),
+    ];
+    assign_distinct_file_sharing_ids(&mut payloads);
+    let ids: Vec<&str> = payloads
+        .iter()
+        .filter(|e| is_file_sharing_element(e))
+        .map(|e| e.attr("id").expect("id assigned"))
+        .collect();
+    assert_eq!(ids.len(), 3);
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), 3, "ids must differ: {ids:?}");
+    assert_eq!(ids[0], "sfs-0", "existing unique id is kept");
+    assert!(payloads[1].attr("id").is_none());
+}
+
+#[test]
+fn xep0447_single_file_sharing_is_left_without_id() {
+    let mut payloads = vec![build_file_sharing_element(&sample_sharing())];
+    assign_distinct_file_sharing_ids(&mut payloads);
+    assert!(payloads[0].attr("id").is_none());
 }

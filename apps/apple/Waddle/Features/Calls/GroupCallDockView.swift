@@ -7,6 +7,8 @@ struct GroupCallDockActions {
     let toggleMicrophone: @MainActor () -> Void
     let toggleCamera: @MainActor () -> Void
     let toggleHand: @MainActor () -> Void
+    /// Opens the call's stage over the screen, on a phone; `nil` where there is no such stage.
+    var open: (@MainActor () -> Void)?
 }
 
 /// A room's call in the dock: the room, who is in it, and our controls.
@@ -206,6 +208,7 @@ struct GroupCallDockView: View {
                         microphoneToggle(stretched: true)
                         cameraToggle(stretched: true)
                         handToggle(stretched: true)
+                        CallOpenButton(stretched: true, action: actions.open)
                     }
                     leaveButton(stretched: true)
                 }
@@ -220,6 +223,7 @@ struct GroupCallDockView: View {
         microphoneToggle(stretched: false)
         cameraToggle(stretched: false)
         handToggle(stretched: false)
+        CallOpenButton(action: actions.open)
         leaveButton(stretched: stretched)
     }
 

@@ -1,5 +1,6 @@
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import taskPaths from "../ci/rust-tests/queue-paths.json";
 
 const workflowDirectory = ".github/workflows";
 export const outputFile = `${workflowDirectory}/waddle-integration.yml`;
@@ -25,32 +26,134 @@ function pinActionReferences(value: any): any {
 }
 
 type Workflow = Record<string, any>;
-export type Lane = { id: string; file: string; workflow: Workflow };
+export type Lane = { id: string; file: string; workflow: Workflow; paths?: string[]; mainOwner?: { file: string; paths: Bun.Glob[] } };
+
+// These verification workflows run on demand or after merge. The queue reuses
+// their jobs and the path filters of the matching project workflows. Only
+// trigger paths are read from default workflows; publishing jobs stay on main.
+const queueScopes: Record<string, string[]> = {
+  "operational-qualification": ["operational-qualification"],
+  "waddle-server-xmppcompliance": ["waddle-server-xmppcompliance"],
+  "waddle-server-authzidcodec": ["waddle-server-authzidcodec"],
+  "waddle-server-rootsync": ["waddle-server-rootsync"],
+  "waddle-apple-default": ["waddle-apple-default"],
+  "waddle-server-federationgrantfence": ["waddle-server-federationgrantfence"],
+  ...Object.fromEntries(["chat", "operator"].map(project => [
+    `waddle-${project}-queuechecks`, [`waddle-${project}-queuechecks`, `waddle-${project}-default`],
+  ])),
+  ...Object.fromEntries(["android", "linux"].map(project => [
+    `waddle-${project}-queuechecks`, [`waddle-${project}-pullrequest`, `waddle-${project}-default`],
+  ])),
+};
+
+// The standalone Apple workflow and the server publisher each run the same
+// verification command as the corresponding candidate lane.
+const mainJobs: Record<string, { file: string; job: string }> = {
+  "waddle-apple-default": { file: "waddle-apple-default.yml", job: "apple-xmpp-client" },
+  "waddle-server-namespacerustchecks": { file: "waddle-server-default.yml", job: "mainTest" },
+};
+
+function triggerPaths(trigger: any, file: string): string[] | undefined {
+  if (trigger?.["paths-ignore"]) throw new Error(`Unsupported paths-ignore in ${file}`);
+  const paths = trigger?.paths;
+  if (paths !== undefined && (!Array.isArray(paths) || paths.some(path => typeof path !== "string"))) {
+    throw new Error(`Invalid paths in ${file}`);
+  }
+  return paths;
+}
 
 export function readLanes(directory = workflowDirectory): Lane[] {
-  return readdirSync(directory).filter(file => /\.ya?ml$/.test(file)).sort().flatMap(file => {
-    if (file === "waddle-integration.yml") return [];
+  const workflows = new Map<string, Workflow>();
+  for (const file of readdirSync(directory).filter(file => /\.ya?ml$/.test(file)).sort()) {
+    if (file === "waddle-integration.yml" || file === "waddle-pr-smoke.yml") continue;
     const workflow = Bun.YAML.parse(readFileSync(join(directory, file), "utf8")) as Workflow;
     if (typeof workflow.on === "string") workflow.on = { [workflow.on]: {} };
     if (Array.isArray(workflow.on)) workflow.on = Object.fromEntries(workflow.on.map((event: string) => [event, {}]));
-    if (!workflow.on || !Object.hasOwn(workflow.on, "pull_request")) return [];
-    if (workflow.on.pull_request?.["paths-ignore"]) throw new Error(`Unsupported paths-ignore in ${file}`);
-    const id = file.replace(/\.ya?ml$/, "").replaceAll("-", "_");
-    return [{ id, file, workflow }];
+    workflows.set(file, workflow);
+  }
+
+  const deferred = new Map<string, string[] | undefined>(Object.entries(taskPaths));
+  for (const [name, scopes] of Object.entries(queueScopes)) {
+    const filters = scopes.map(scope => {
+      if (deferred.has(scope)) return deferred.get(scope);
+      const source = workflows.get(scope + ".yml");
+      if (!source?.on || !["pull_request", "push"].some(event => Object.hasOwn(source.on, event))) {
+        throw new Error(`Missing path source ${scope} for ${name}`);
+      }
+      return triggerPaths(source.on.pull_request ?? source.on.push, scope);
+    });
+    deferred.set(name, filters.every(filter => filter !== undefined) ? [...new Set(filters.flat())] : undefined);
+  }
+  for (const name of deferred.keys()) {
+    if (!workflows.has(name + ".yml")) throw new Error(`Missing deferred workflow ${name}`);
+  }
+
+  return [...workflows].flatMap(([file, workflow]) => {
+    const name = file.replace(/\.ya?ml$/, "");
+    let paths: string[] | undefined;
+    if (deferred.has(name)) {
+      if (!workflow.on || !Object.hasOwn(workflow.on, "workflow_dispatch") || Object.hasOwn(workflow.on, "pull_request") || Object.hasOwn(workflow.on, "merge_group")) {
+        throw new Error(`Expected separately dispatched queue verification in ${file}`);
+      }
+      const scope = deferred.get(name);
+      if (scope) paths = [`.github/workflows/${file}`, ...scope];
+    } else if (workflow.on && Object.hasOwn(workflow.on, "pull_request")) {
+      paths = triggerPaths(workflow.on.pull_request, file);
+    } else {
+      return [];
+    }
+    const lane: Lane = { id: name.replaceAll("-", "_"), file, workflow, paths };
+    const owner = mainJobs[name];
+    if (owner) {
+      const main = workflows.get(owner.file);
+      const push = main?.on?.push;
+      const filters = push && !push["paths-ignore"] && triggerPaths(push, owner.file);
+      if (main?.jobs[owner.job] && !main.jobs[owner.job].if && push?.branches?.length === 1 && push.branches[0] === "main" &&
+          filters?.length && filters.every((pattern: string) => simpleGlob.test(pattern))) {
+        lane.mainOwner = { file: owner.file, paths: filters.map((pattern: string) => new Bun.Glob(pattern)) };
+      }
+    }
+    return [lane];
   });
 }
+
+const graphInputs = new Set([
+  outputFile, "ci/rust-tests/queue-paths.cue", "ci/rust-tests/queue-paths.json", "scripts/sync-rust-tests.sh",
+  "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py",
+  "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py",
+]);
+const simpleGlob = /^(?:(?:[A-Za-z0-9_.-]+|\*\*)\/)*(?:[A-Za-z0-9_.-]+|\*\*|\*\.cue)$/;
 
 export function applicable(lane: Lane, files: string[]): boolean {
   // A graph or planner change exercises every lane. Source PR branch filters
   // are deliberately ignored: queue validation can conservatively add coverage.
-  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py"].includes(file))) return true;
-  const patterns = lane.workflow.on.pull_request?.paths;
+  if (files.some(file => graphInputs.has(file))) return true;
+  const patterns = lane.paths ?? lane.workflow.on.pull_request?.paths;
   if (!patterns) return true;
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== "string")) throw new Error(`Invalid paths in ${lane.file}`);
   // GitHub accepts more glob syntax than Bun. Unknown syntax selects the lane
   // rather than risking a false negative. Checked-in patterns currently use *.
   if (patterns.some(pattern => /[!+\[\]{}()\\]/.test(pattern))) return true;
-  return files.some(file => patterns.some(pattern => new Bun.Glob(pattern).match(file)));
+  return files.some(file => patterns.some(pattern => new Bun.Glob(pattern).match(file) || (!pattern.includes("*") && file.startsWith(pattern + "/"))));
+}
+
+export function selectLanes(lanes: Lane[], files: string[], mergingToMain: boolean): Lane[] {
+  // Classify unknown surfaces before moving work to main. Apple-only changes
+  // still belong to the Apple job even when main will execute that job.
+  const unknown = files.some(file => !lanes.some(lane => applicable(lane, [file])));
+  const selected = unknown ? lanes : lanes.filter(lane => applicable(lane, files));
+  if (!mergingToMain || files.length > 300 || files.some(file => graphInputs.has(file))) return selected;
+  return selected.filter(lane => {
+    const owner = lane.mainOwner;
+    if (!owner || !lane.paths?.every(pattern => simpleGlob.test(pattern))) return true;
+    if (files.includes(`.github/workflows/${lane.file}`) || files.includes(`.github/workflows/${owner.file}`)) return true;
+    if (owner.file === "waddle-server-default.yml" && files.some(file => file === "server/env.cue" || file === "namespace.cue")) return true;
+
+    // Every changed input for this lane must also trigger the owning workflow.
+    // Fixture-only and mixed fixture/source changes retain the candidate check.
+    const covered = (file: string) => owner.paths.some(glob => glob.match(file));
+    return !files.some(covered) || files.some(file => applicable(lane, [file]) && !covered(file));
+  });
 }
 
 export function jobIds(lane: Lane): string[] {
@@ -126,7 +229,7 @@ export function generate(lanes: Lane[]): string {
         }
         if (step.uses?.startsWith("actions/checkout@")) {
           checkouts++;
-          if (step.with?.repository || step.with?.ref) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
+          if (step.with?.repository || (step.with?.ref && step.with.ref !== "${{ github.sha }}")) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
           step.with = { ...step.with, ref: "${{ github.sha }}", "persist-credentials": false, "fetch-depth": 0 };
         }
         if (/^actions\/(upload|download)-artifact@/.test(step.uses ?? "")) {
@@ -155,10 +258,8 @@ export function generate(lanes: Lane[]): string {
       env: { JOB_RESULTS: "${{ toJSON(needs) }}", EXPECTED_JOBS: "${{ needs.plan.outputs.expected }}" },
     }],
   };
-  // Every lane here is copied from a workflow that already runs on the pull
-  // request. Running the copies there as well doubled the demand for each
-  // runner, including the 32-core builder, so this graph verifies merge-queue
-  // candidates and explicit dispatches only.
+  // Ordinary PR workflows provide fast feedback; the complete graph runs once
+  // on the combined merge candidate, with an explicit dispatch for qualification.
   const workflow = {
     name: "waddle-integration",
     on: { merge_group: { types: ["checks_requested"] }, workflow_dispatch: {
@@ -168,7 +269,7 @@ export function generate(lanes: Lane[]): string {
     concurrency: { group: "integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}", "cancel-in-progress": true },
     jobs,
   };
-  return "# Generated from existing PR workflow graphs; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(pinActionReferences(workflow), null, 2).replace(/[ \t]+$/gm, "") + "\n";
+  return "# Generated from PR and deferred verification workflows; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(pinActionReferences(workflow), null, 2).replace(/[ \t]+$/gm, "") + "\n";
 }
 
 export function verifyGate(results: Record<string, { result: string }>, expected: string[], allJobs: string[]): void {
@@ -215,9 +316,8 @@ if (import.meta.main) {
     git(["merge-base", "--is-ancestor", base, sha]);
     const files = git(["diff", "--no-renames", "--name-only", "-z", base, sha]).split("\0").filter(Boolean);
     if (!files.length) throw new Error("Candidate diff is empty; refusing unverified no-op success");
-    const matches = lanes.filter(lane => applicable(lane, files));
-    // An unrecognized surface must not silently become a zero-job success.
-    const selected = files.some(file => !lanes.some(lane => applicable(lane, [file]))) ? lanes : matches;
+    const mergingToMain = process.env.GITHUB_EVENT_NAME === "merge_group" && event.merge_group?.base_ref === "refs/heads/main";
+    const selected = selectLanes(lanes, files, mergingToMain);
     appendFileSync(process.env.GITHUB_OUTPUT!, `base=${base}\n` + selected.map(lane => `${lane.id}=true\n`).join("") + `expected=${JSON.stringify(selected.flatMap(jobIds))}\n`);
     console.log(JSON.stringify({ candidate: sha, base, changedFiles: files, workflows: selected.map(lane => lane.file) }, null, 2));
   } else if (mode === "gate") {

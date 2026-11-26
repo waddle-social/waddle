@@ -66,6 +66,21 @@ struct CallIconToggle: View {
     }
 }
 
+/// The dock's way to a call's stage on a phone, where the stage covers
+/// the screen once it is opened; nothing where there is no such stage.
+struct CallOpenButton: View {
+    var stretched = false
+    let action: (@MainActor () -> Void)?
+
+    var body: some View {
+        if let action {
+            CallIconToggle(
+                title: "Open call", symbol: "arrow.up.left.and.arrow.down.right", stretched: stretched, action: action
+            )
+        }
+    }
+}
+
 struct CallDockVideo {
     var remote: AnyView?
     var preview: AnyView?

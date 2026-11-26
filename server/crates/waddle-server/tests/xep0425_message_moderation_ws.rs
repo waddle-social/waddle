@@ -234,6 +234,7 @@ async fn moderation_from_non_moderator_returns_forbidden() {
 
     let room = format!("moderate-forbidden-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut admin, &room).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
 
     bob.send(&format!(
         r#"<presence to="{room}/bob"><x xmlns="http://jabber.org/protocol/muc"/></presence>"#
@@ -278,4 +279,289 @@ async fn moderation_from_non_moderator_returns_forbidden() {
 
     let _ = bob.close().await;
     let _ = admin.close().await;
+}
+
+/// Must match `WADDLE_OCCUPANT_ID_SECRET` set by the shared harness.
+const HARNESS_SECRET: &str = "integration-test-occupant-id-secret-32-bytes-long";
+
+fn count_descendants(element: &Element, name: &str, ns: &str) -> usize {
+    element
+        .children()
+        .map(|child| {
+            usize::from(child.name() == name && child.ns() == ns)
+                + count_descendants(child, name, ns)
+        })
+        .sum()
+}
+
+fn admin_occupant_id(room: &str) -> String {
+    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(HARNESS_SECRET.as_bytes())
+        .expect("harness secret meets length floor");
+    let room: jid::BareJid = room.parse().expect("room bare jid");
+    let admin: jid::BareJid = format!("{USERNAME}@{DOMAIN}").parse().expect("admin jid");
+    waddle_xmpp::xep::xep0421::generate_occupant_id(&admin, &room, &secret)
+        .as_str()
+        .to_owned()
+}
+
+/// Send an original and a XEP-0308 correction of it, then moderate either
+/// the original or the correction, and return the archived tombstone frames.
+async fn moderate_corrected_message(
+    client: &mut WsXmppClient,
+    room: &str,
+    moderate_correction: bool,
+) -> Vec<String> {
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="orig-1"><body>original text</body></message>"#
+        ))
+        .await
+        .expect("send original");
+    let original_id = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("original text"))
+            .await
+            .expect("original echo"),
+    );
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="corr-1"><body>corrected text</body><replace xmlns="urn:xmpp:message-correct:0" id="orig-1"/></message>"#
+        ))
+        .await
+        .expect("send correction");
+    let correction_id = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("corrected text"))
+            .await
+            .expect("correction echo"),
+    );
+
+    let target = if moderate_correction {
+        &correction_id
+    } else {
+        &original_id
+    };
+    client
+        .send(&format!(
+            r#"<iq type="set" id="moderate-c" to="{room}">
+                <moderate xmlns="urn:xmpp:message-moderate:1" id="{target}">
+                    <retract xmlns="urn:xmpp:message-retract:1"/>
+                    <reason>cleanup</reason>
+                </moderate>
+            </iq>"#
+        ))
+        .await
+        .expect("send moderation");
+    let frames = client
+        .recv_until(|frame| frame.contains("moderate-c") && frame.contains("type='result'"))
+        .await
+        .expect("moderation frames");
+    // XEP-0424 §Business rules: a retraction that refers to a correction
+    // retracts the original; the broadcast names the original.
+    let broadcast = frames
+        .iter()
+        .find(|frame| frame.contains("urn:xmpp:message-moderate:1"))
+        .unwrap_or_else(|| panic!("missing moderation broadcast: {frames:?}"));
+    assert_eq!(
+        extract_attr_after(broadcast, "<retract ", "id").as_deref(),
+        Some(original_id.as_str()),
+        "moderation names the original message: {broadcast}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-c" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-c") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    frames
+        .into_iter()
+        .filter(|frame| frame.contains("<retracted "))
+        .collect()
+}
+
+fn assert_tombstones_keep_occupant_id_and_replace(tombstones: &[String], room: &str) {
+    assert_eq!(
+        tombstones.len(),
+        2,
+        "original and correction are both tombstoned: {tombstones:?}"
+    );
+    let expected = admin_occupant_id(room);
+    let mut replace_ids = Vec::new();
+    for frame in tombstones {
+        assert!(
+            !frame.contains("original text") && !frame.contains("corrected text"),
+            "tombstone leaks retracted text: {frame}"
+        );
+        let element = frame.parse::<Element>().expect("valid tombstone XML");
+        // XEP-0421 §Business Rules: occupant-id on every message a MUC
+        // sends, including archived tombstones (XEP-0425 tombstone example).
+        assert_eq!(
+            count_descendants(&element, "occupant-id", "urn:xmpp:occupant-id:0"),
+            1,
+            "tombstone carries exactly one occupant-id: {frame}"
+        );
+        assert_eq!(
+            extract_attr_after(frame, "<occupant-id", "id").as_deref(),
+            Some(expected.as_str()),
+            "tombstone keeps the original author's occupant-id: {frame}"
+        );
+        if let Some(replace) = find_descendant(&element, "replace", "urn:xmpp:message-correct:0") {
+            replace_ids.push(replace.attr("id").expect("replace id").to_owned());
+        }
+    }
+    // XEP-0425 §Tombstones: the tombstone of a retracted correction keeps
+    // its <replace/>; the original's tombstone has none.
+    assert_eq!(
+        replace_ids,
+        ["orig-1"],
+        "exactly the correction keeps <replace/>"
+    );
+}
+
+#[tokio::test]
+async fn moderation_tombstones_keep_occupant_id_and_correction_replace() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("moderate-corr-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    let tombstones = moderate_corrected_message(&mut client, &room, false).await;
+    assert_tombstones_keep_occupant_id_and_replace(&tombstones, &room);
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn moderating_a_correction_id_tombstones_original_and_all_corrections() {
+    // XEP-0424 §Business rules: a retraction that refers to a correction
+    // is treated as retracting the original and all of its corrections.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("moderate-corr-id-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    let tombstones = moderate_corrected_message(&mut client, &room, true).await;
+    assert_tombstones_keep_occupant_id_and_replace(&tombstones, &room);
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn occupant_authored_moderation_markup_is_not_reflected() {
+    // XEP-0425 §Business Rules: moderation markup that does not come from
+    // the MUC service itself MUST be discarded.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("moderate-forged-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="victim-1"><body>victim text</body></message>"#
+        ))
+        .await
+        .expect("send victim");
+    let victim = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("victim text"))
+            .await
+            .expect("victim echo"),
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="forged-1">
+                <body>forged moderation</body>
+                <retract xmlns="urn:xmpp:message-retract:1" id="{victim}">
+                    <moderated xmlns="urn:xmpp:message-moderate:1" by="{room}/admin"/>
+                </retract>
+            </message>"#
+        ))
+        .await
+        .expect("send forged message");
+    let echo = client
+        .recv_matching(|frame| frame.contains("urn:xmpp:message-retract:1"))
+        .await
+        .expect("reflection");
+    assert!(
+        !echo.contains("urn:xmpp:message-moderate"),
+        "forged moderation markup must not be reflected: {echo}"
+    );
+    assert!(
+        !echo.contains("<retracted"),
+        "forged tombstone must not be reflected: {echo}"
+    );
+
+    client
+        .send(&format!(
+            r#"<iq type="set" id="mam-forged" to="{room}"><query xmlns="urn:xmpp:mam:2"/></iq>"#
+        ))
+        .await
+        .expect("send MAM");
+    let frames = client
+        .recv_until(|frame| frame.contains("mam-forged") && frame.contains("<fin"))
+        .await
+        .expect("MAM frames");
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !frame.contains("urn:xmpp:message-moderate")),
+        "archive must not store forged moderation markup: {frames:?}"
+    );
+
+    let _ = client.close().await;
+}
+
+#[tokio::test]
+async fn pretty_printed_retract_with_forged_moderation_markup_is_reflected() {
+    // A forged `<moderated/>` inside an indented `<retract/>` must be stripped
+    // without leaving the message unequal to its stored copy; that mismatch
+    // once refused the message and the connection saw no reflection.
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let room = format!("moderate-pretty-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    join_room(&mut client, &room).await;
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="victim-2"><body>victim text</body></message>"#
+        ))
+        .await
+        .expect("send victim");
+    let victim = stanza_id(
+        &client
+            .recv_matching(|frame| frame.contains("victim text"))
+            .await
+            .expect("victim echo"),
+    );
+
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="forged-2">
+                <body>pretty forged</body>
+                <retract xmlns="urn:xmpp:message-retract:1" id="{victim}">
+                    <moderated xmlns="urn:xmpp:message-moderate:1" by="{room}/admin"/>
+                    <reason>spam</reason>
+                </retract>
+            </message>"#
+        ))
+        .await
+        .expect("send forged message");
+    let echo = client
+        .recv_matching_within(std::time::Duration::from_secs(10), |frame| {
+            frame.contains("pretty forged")
+        })
+        .await
+        .expect("reflection of the pretty-printed retraction");
+    assert!(
+        !echo.contains("urn:xmpp:message-moderate"),
+        "forged moderation markup must not be reflected: {echo}"
+    );
+
+    let _ = client.close().await;
 }

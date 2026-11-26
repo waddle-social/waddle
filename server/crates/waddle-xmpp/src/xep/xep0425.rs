@@ -210,6 +210,57 @@ pub fn build_moderation_result_message(
     msg
 }
 
+/// True for any XEP-0425 moderation namespace (`urn:xmpp:message-moderate:*`).
+fn is_moderation_namespace(ns: &str) -> bool {
+    ns.starts_with("urn:xmpp:message-moderate:")
+}
+
+/// Drop forged moderation elements below `element`.
+///
+/// A parsed element tree never holds two adjacent text nodes, and the ingress
+/// substrate relies on that: it compares the in-memory message with the copy it
+/// decoded from its stored XML, and `minidom` equality counts text nodes. Text
+/// that surrounded a removed child (pretty-printed indentation) is therefore
+/// merged back into one node instead of being left as two, which made the stored
+/// copy compare unequal and the message be refused as a content conflict.
+fn prune_forged_moderation_children(element: &mut Element) {
+    for node in element.take_nodes() {
+        match node {
+            minidom::Node::Element(mut child) => {
+                if is_moderation_namespace(child.ns().as_str())
+                    || (child.ns().as_str() == NS_RETRACT && child.name() == "retracted")
+                {
+                    continue;
+                }
+                prune_forged_moderation_children(&mut child);
+                element.append_node(minidom::Node::Element(child));
+            }
+            minidom::Node::Text(text) => element.append_text(text),
+        }
+    }
+}
+
+/// Remove client-forged XEP-0425 moderation markup from a client-authored
+/// groupchat message.
+///
+/// XEP-0425 §Business Rules: "In MUCs, only moderation messages (not
+/// tombstones, but messages containing the <moderate/> element) received from
+/// the MUC service itself are legitimate, all other such messages MUST be
+/// discarded." Moderation notices and `<retracted/>` tombstones are produced by
+/// the service alone, so every `urn:xmpp:message-moderate:*` element, at any
+/// depth (including inside a sender's own `<retract/>`), and every
+/// `<retracted/>` tombstone element is stripped before the message is
+/// archived or reflected.
+pub fn strip_forged_moderation_markup(message: &mut Message) {
+    message.payloads.retain(|payload| {
+        !is_moderation_namespace(payload.ns().as_str())
+            && !(payload.ns().as_str() == NS_RETRACT && payload.name() == "retracted")
+    });
+    for payload in &mut message.payloads {
+        prune_forged_moderation_children(payload);
+    }
+}
+
 /// Build the v1 XEP-0425 broadcast payload:
 ///
 /// ```xml

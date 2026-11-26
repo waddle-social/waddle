@@ -260,6 +260,7 @@ async fn raise_hand_presence_reflects_in_call_child_alongside_muji() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "hand-bob").await;
     let room = format!("hand-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     // Alice enters the call and raises her hand in one presence update.
@@ -318,6 +319,7 @@ async fn leave_call_presence_forces_hand_lowered_despite_stale_marker() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "stale-bob").await;
     let room = format!("hand-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     // Alice raises her hand legitimately, then bob drains the raise.
@@ -364,6 +366,7 @@ async fn leave_call_presence_forces_mute_cleared_despite_stale_marker() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "stale-mute-bob").await;
     let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     // Alice enters the call muted legitimately, then bob drains the reflection.
@@ -405,6 +408,7 @@ async fn raised_hand_replays_to_late_joiner_and_clears_on_lower() {
     let mut alice = connect(&server, ALICE, &alice_password, "late-alice").await;
     let room = format!("hand-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
 
     // Alice enters the call and raises her hand, then drains her own echo
     // so the room actor has committed the state before Carol arrives.
@@ -539,6 +543,7 @@ async fn mute_presence_reflects_in_call_child_alongside_muji() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "mute-bob").await;
     let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     // Alice enters the call muted in one presence update.
@@ -593,6 +598,7 @@ async fn muted_state_replays_to_late_joiner_and_clears_on_unmute() {
     let mut alice = connect(&server, ALICE, &alice_password, "mute-late-alice").await;
     let room = format!("mute-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
 
     // Alice enters the call muted, then drains her own echo so the room actor
     // has committed the state before Carol arrives.
@@ -656,6 +662,7 @@ async fn hand_raised_and_muted_coexist_on_the_wire() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "both-bob").await;
     let room = format!("both-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     alice
@@ -751,6 +758,7 @@ async fn muc_in_call_reaction_fans_out_to_room_and_is_not_archived() {
     let mut bob = connect(&server, BOB, BOB_PASSWORD, "in-call-muc-bob").await;
     let room = format!("in-call-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
     join_room(&mut alice, &room, ALICE).await;
+    ws_common::iq::unlock_created_room(&mut alice, &room).await;
     join_room(&mut bob, &room, BOB).await;
 
     alice

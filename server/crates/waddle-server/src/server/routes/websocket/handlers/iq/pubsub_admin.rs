@@ -154,14 +154,22 @@ pub(super) async fn handle_pubsub_admin_request(
             else {
                 return vec![build_pubsub_error(iq, PubSubError::NodeNotFound)];
             };
-            let response = build_pubsub_configure_form_result(iq, &node, &node_meta.config);
-            // A Space's owner is shown whether the Space is open to other
-            // servers. A request without a session is a remote principal's,
-            // which neither reads nor changes that setting.
             let is_spaces_service = matches!(
                 spaces_service_bare_jid(spaces_domain),
                 Ok(spaces_jid) if target_jid == &spaces_jid
             );
+            let response = if is_spaces_service {
+                waddle_xmpp_core::pubsub::build_pubsub_space_configure_form_result(
+                    iq,
+                    &node,
+                    &node_meta.config,
+                )
+            } else {
+                build_pubsub_configure_form_result(iq, &node, &node_meta.config)
+            };
+            // A Space's owner is shown whether the Space is open to other
+            // servers. A request without a session is a remote principal's,
+            // which neither reads nor changes that setting.
             if is_spaces_service && authenticated_session.is_some() {
                 let federated = crate::server::routes::websocket::s2s_spaces::space_federated(
                     state, target_jid, &node_meta,
@@ -366,6 +374,17 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 Ok(sub) => {
                     let response = build_pubsub_subscribe_result(iq, &node, &jid, &sub.subid);
+                    if target_jid.as_str() == spaces_domain {
+                        pubsub_fanout::fan_out_subscription_change(
+                            state,
+                            target_jid,
+                            &node,
+                            &jid,
+                            waddle_xmpp::pubsub::SubscriptionState::Subscribed,
+                            Some(&sub.subid),
+                        )
+                        .await;
+                    }
                     vec![response]
                 }
                 Err(e) => {
@@ -394,6 +413,17 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 Ok(true) => {
                     let response = build_pubsub_success(iq);
+                    if target_jid.as_str() == spaces_domain {
+                        pubsub_fanout::fan_out_subscription_change(
+                            state,
+                            target_jid,
+                            &node,
+                            &jid,
+                            waddle_xmpp::pubsub::SubscriptionState::None,
+                            typed_subid.as_ref(),
+                        )
+                        .await;
+                    }
                     vec![response]
                 }
                 Ok(false) => {
@@ -547,6 +577,7 @@ pub(super) async fn handle_pubsub_admin_request(
                 None
             };
             let node_created_at_ms = existing_node.created_at.timestamp_millis();
+            let previous_config = existing_node.config.clone();
             let config = config_patch.apply_to(existing_node.config);
             // The `authorize` approval flow is not implemented, so no node
             // can be configured with it (XEP-0060 §8.1.3: not-acceptable with
@@ -591,6 +622,11 @@ pub(super) async fn handle_pubsub_admin_request(
                 .await
             {
                 Ok(_) => {
+                    // XEP-0503 `pubsub#notify_config`: a Space's subscribers
+                    // are told of a change of the stored configuration.
+                    if is_spaces_service && config != previous_config {
+                        pubsub_fanout::fan_out_configuration(state, target_jid, &node).await;
+                    }
                     if let Some(federated) = federated {
                         let applied =
                             crate::server::routes::websocket::s2s_spaces::set_space_federated(
@@ -836,15 +872,35 @@ pub(super) async fn handle_pubsub_admin_request(
                         if already_subscribed {
                             continue;
                         }
-                        if let Err(error) = state
+                        match state
                             .deps
                             .protocol
                             .pubsub_storage
                             .subscribe(target_jid, &node, &subscriber)
                             .await
                         {
-                            warn!("PubSub owner subscription add failed: {error}");
-                            return vec![build_pubsub_error(iq, PubSubError::InternalServerError)];
+                            Ok(added) => {
+                                // XEP-0503 `pubsub#notify_sub`: the owners are
+                                // told of a subscription the owner added.
+                                if is_spaces_service {
+                                    pubsub_fanout::fan_out_subscription_change(
+                                        state,
+                                        target_jid,
+                                        &node,
+                                        &subscriber,
+                                        SubscriptionState::Subscribed,
+                                        Some(&added.subid),
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(error) => {
+                                warn!("PubSub owner subscription add failed: {error}");
+                                return vec![build_pubsub_error(
+                                    iq,
+                                    PubSubError::InternalServerError,
+                                )];
+                            }
                         }
                     }
                     SubscriptionState::None => {
@@ -873,7 +929,19 @@ pub(super) async fn handle_pubsub_admin_request(
                                 .unsubscribe(target_jid, &node, &subscriber, Some(typed_subid))
                                 .await
                             {
-                                Ok(true) => {}
+                                Ok(true) => {
+                                    if is_spaces_service {
+                                        pubsub_fanout::fan_out_subscription_change(
+                                            state,
+                                            target_jid,
+                                            &node,
+                                            &subscriber,
+                                            SubscriptionState::None,
+                                            Some(typed_subid),
+                                        )
+                                        .await;
+                                    }
+                                }
                                 Ok(false) => {
                                     return vec![build_pubsub_error(
                                         iq,
@@ -929,6 +997,17 @@ pub(super) async fn handle_pubsub_admin_request(
                                     iq,
                                     PubSubError::InternalServerError,
                                 )];
+                            }
+                            if is_spaces_service {
+                                pubsub_fanout::fan_out_subscription_change(
+                                    state,
+                                    target_jid,
+                                    &node,
+                                    &subscriber,
+                                    SubscriptionState::None,
+                                    Some(&matching_subid),
+                                )
+                                .await;
                             }
                         }
                     }

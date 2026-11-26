@@ -45,6 +45,9 @@ pub struct Settings {
     /// Rooms with no mode of their own notify only for mentions. Direct
     /// messages always notify, and a mode set on a room beats this.
     pub rooms_mentions_only: bool,
+    /// Author names in their XEP-0392 color. XEP-0392 says implementations
+    /// SHOULD let the user turn colorization off.
+    pub colorize_names: bool,
 }
 
 impl Default for Settings {
@@ -54,6 +57,7 @@ impl Default for Settings {
             message_order: MessageOrder::default(),
             notifications: true,
             rooms_mentions_only: true,
+            colorize_names: true,
         }
     }
 }
@@ -167,11 +171,12 @@ mod tests {
             message_order: MessageOrder::Social,
             notifications: false,
             rooms_mentions_only: false,
+            colorize_names: true,
         })
         .expect("serializes");
         assert_eq!(
             json,
-            r#"{"appearance":"light","message_order":"social","notifications":false,"rooms_mentions_only":false}"#
+            r#"{"appearance":"light","message_order":"social","notifications":false,"rooms_mentions_only":false,"colorize_names":true}"#
         );
     }
 
@@ -209,6 +214,7 @@ mod tests {
             message_order: MessageOrder::Social,
             notifications: false,
             rooms_mentions_only: false,
+            colorize_names: false,
         };
         settings.save_to(&path).expect("saves");
         assert_eq!(Settings::load_from(&path), settings);

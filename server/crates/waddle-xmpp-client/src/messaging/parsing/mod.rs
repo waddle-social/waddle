@@ -18,7 +18,7 @@ use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 use waddle_xmpp_core::{first_eligible_https_url_text, PreviewImageMediaType};
 
 use self::files::{parse_file_sharing_element, parse_shared_file};
-use self::markup::parse_markup_spans;
+use self::markup::{parse_broadcast_mention, parse_broadcast_spans, parse_markup_spans};
 pub use self::payloads::{
     parse_chat_state_payload, parse_correction_payload, parse_displayed_marker_payload,
     parse_extension_envelope, parse_in_call_reaction_payload, parse_markable_marker_payload,
@@ -28,13 +28,12 @@ pub use self::payloads::{
 use super::namespaces::{
     NS_CLIENT, NS_DELAY, NS_MARKUP, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC_USER,
     NS_OPENGRAPH, NS_OPENGRAPH_IMAGE, NS_OPENGRAPH_VIDEO, NS_ORIGIN_ID, NS_RDF_SYNTAX,
-    NS_REFERENCES, NS_SFS, NS_SIMS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
+    NS_REFERENCES, NS_SFS, NS_STANZA_ID, NS_STICKERS, NS_WADDLE_EXTENSION,
 };
 use super::presence::parse_presence;
 use super::types::{
     InCallSignal, InboundMessage, LinkPreviewData, LinkPreviewImageData, LinkPreviewPlayer,
     LinkPreviewVideoData, MdsDisplayedEntry, MessagingEvent, ReferenceData, SharedFile,
-    SharedFileDisposition,
 };
 use url::Url;
 

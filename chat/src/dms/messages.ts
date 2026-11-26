@@ -28,7 +28,6 @@ import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import {
   listQueuedDmMessages,
 } from "@/lib/outbound-queue-store";
-import { useChatStatePreference } from "@/preferences/chat-states";
 import { useScrollDirectionPreference } from "@/preferences/scroll-direction";
 import { queuedDmMessageToTimeline } from "@/dms/message-timeline-state";
 import { useDmMamPaging } from "@/dms/mam-paging";
@@ -57,7 +56,6 @@ export function useDirectMessages(
   activeConversationScope?: Readonly<Ref<DmConversationScope | null>>,
 ) {
   const { mode: scrollDirection } = useScrollDirectionPreference();
-  const { sendChatStates } = useChatStatePreference();
   const peerNameFromJid = (jid: string) => jidLocalpart(jid);
   const dmLoadErrorMessage = (peerJid: string, opts: { queuedOnly?: boolean } = {}) => {
     const username = peerNameFromJid(peerJid).trim();
@@ -195,17 +193,15 @@ export function useDirectMessages(
     normalizeError,
     scrollToPinnedEdgeAndPin,
     conversationScope,
-    onSendComplete: (result, peerJid, isStillActive, scope) => {
+    // The content message itself carries <active/> (XEP-0085 §5.1), so
+    // completing a send only resets the local composing state.
+    onSendComplete: (_result, _peerJid, isStillActive) => {
       if (!isStillActive) {
-        // Client swap or peer change happened during the send. Don't
-        // emit XEP-0085 "active" through the new session targeting the
-        // old peer.
+        // Client swap or peer change happened during the send; the
+        // composing state belonged to the prior session.
         return;
       }
       chatStates.resetOnSend();
-      if (result?.state === "sending" && xmppClient.value && sendChatStates.value) {
-        void xmppClient.value.sendDmChatState(peerJid, "active", undefined, scope).catch(() => undefined);
-      }
     },
   });
   const {
@@ -466,6 +462,9 @@ export function useDirectMessages(
 
   function onChatState(event: DmChatStateEvent) {
     if (!activePeerJid.value || event.peerJid !== activePeerJid.value) return;
+    // XEP-0085 §5.1: a chat state from the peer shows it supports the
+    // protocol, which lets us send composing/paused back.
+    chatStates.notePeerChatState(event.peerJid);
     const peerName = peerNameFromJid(event.peerJid);
     if (event.state === "composing") addTypingUser(peerName);
     else removeTypingUser(peerName);

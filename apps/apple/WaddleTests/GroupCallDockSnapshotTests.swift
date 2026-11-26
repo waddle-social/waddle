@@ -46,8 +46,11 @@ final class GroupCallDockSnapshotTests: XCTestCase {
     private func assertDock(
         _ stage: GroupCallStage, rows: [GroupCallRosterRow], elapsed: Duration? = nil, isMicrophoneOn: Bool = true,
         isCameraOn: Bool = false, isHandRaised: Bool = false, remoteVideo: AnyView? = nil, localVideo: AnyView? = nil,
-        width: CGFloat = phone, textSize: DynamicTypeSize = .large, testName: String = #function, line: UInt = #line
+        width: CGFloat = phone, textSize: DynamicTypeSize = .large, opens: Bool = false,
+        testName: String = #function, line: UInt = #line
     ) {
+        var actions = Self.actions
+        if opens { actions.open = Self.noAction }
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
             precision: 0.97,
@@ -55,7 +58,7 @@ final class GroupCallDockSnapshotTests: XCTestCase {
                 stage: stage, roomName: "design", rows: rows, elapsed: elapsed, isMicrophoneOn: isMicrophoneOn,
                 isCameraOn: isCameraOn, isHandRaised: isHandRaised,
                 video: CallDockVideo(remote: remoteVideo, preview: localVideo),
-                announcesChanges: false, actions: Self.actions
+                announcesChanges: false, actions: actions
             )
             .dynamicTypeSize(textSize),
             width: width,
@@ -72,6 +75,11 @@ final class GroupCallDockSnapshotTests: XCTestCase {
     /// Only Leave works until the mixer has let us in.
     func testJoining() {
         assertDock(.joining(room: Self.room, media: Self.audio), rows: [Self.mika, Self.ana], isMicrophoneOn: false)
+    }
+
+    /// On a phone the dock has the way to the call's stage.
+    func testInCallOnAPhoneWithTheWayToItsStage() {
+        assertDock(.inCall(room: Self.room, media: Self.audio), rows: Self.three, elapsed: .seconds(4 * 60 + 12), opens: true)
     }
 
     func testInCallWithThreeOthers() {

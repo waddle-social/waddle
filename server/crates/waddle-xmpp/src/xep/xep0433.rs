@@ -10,7 +10,7 @@ use minidom::Element;
 use xmpp_parsers::iq::Iq;
 
 use super::xep0004::{DataForm, FormType, FromElement, ToElement};
-use super::xep0004::{Field, FieldType, NS_DATA_FORMS};
+use super::xep0004::{Field, FieldOption, FieldType, NS_DATA_FORMS};
 use super::xep0059::{
     build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
     extract_rsm_response, RsmRequest, RsmResponse,
@@ -22,8 +22,116 @@ pub const NS_CHANNEL_SEARCH: &str = "urn:xmpp:channel-search:0:search";
 /// FORM_TYPE value for search parameter forms.
 pub const NS_CHANNEL_SEARCH_PARAMS: &str = "urn:xmpp:channel-search:0:search-params";
 
+/// Namespace of the XEP-0433 application-defined error conditions.
+pub const NS_CHANNEL_SEARCH_ERROR: &str = "urn:xmpp:channel-search:0:error";
+
+/// Namespace of the XEP-0433 sort key values.
+pub const NS_CHANNEL_SEARCH_ORDER: &str = "urn:xmpp:channel-search:0:order";
+
 /// XEP-0433 query field name.
 pub const FIELD_QUERY: &str = "q";
+
+/// XEP-0433 field: search in the channel address.
+pub const FIELD_SEARCH_IN_ADDRESS: &str = "sinaddress";
+
+/// XEP-0433 field: search in the channel name.
+pub const FIELD_SEARCH_IN_NAME: &str = "sinname";
+
+/// XEP-0433 field: search in the channel description.
+pub const FIELD_SEARCH_IN_DESCRIPTION: &str = "sindescription";
+
+/// XEP-0433 field: service types to search.
+pub const FIELD_TYPES: &str = "types";
+
+/// XEP-0433 field: result sort key.
+pub const FIELD_KEY: &str = "key";
+
+/// The service type value for XEP-0045 group chats, the only type this
+/// service searches.
+pub const SERVICE_TYPE_MUC: &str = "xep-0045";
+
+/// Sort key value ordering results by channel address (Clark notation).
+pub const SORT_KEY_ADDRESS: &str = "{urn:xmpp:channel-search:0:order}address";
+
+/// Sort key value ordering results by descending user count (Clark notation).
+pub const SORT_KEY_NUSERS: &str = "{urn:xmpp:channel-search:0:order}nusers";
+
+/// How results are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortKey {
+    /// Ascending by channel address.
+    #[default]
+    Address,
+    /// Descending by number of users.
+    Nusers,
+}
+
+impl SortKey {
+    /// The Clark-notation wire value.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Address => SORT_KEY_ADDRESS,
+            Self::Nusers => SORT_KEY_NUSERS,
+        }
+    }
+
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            SORT_KEY_ADDRESS => Some(Self::Address),
+            SORT_KEY_NUSERS => Some(Self::Nusers),
+            _ => None,
+        }
+    }
+}
+
+/// Which channel properties a keyword search looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchScope {
+    /// Search in the channel address.
+    pub address: bool,
+    /// Search in the channel name.
+    pub name: bool,
+    /// Search in the channel description.
+    pub description: bool,
+}
+
+impl Default for SearchScope {
+    fn default() -> Self {
+        Self {
+            address: true,
+            name: true,
+            description: true,
+        }
+    }
+}
+
+/// Why a search request cannot be executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchRequestError {
+    /// Not a submit form of the search-params type.
+    Malformed,
+    /// No field defining a result set is present: `bad-request`, type
+    /// `cancel`, with `<no-search-conditions/>`.
+    NoSearchConditions,
+    /// `q` supplied but without any usable term: `bad-request`, type
+    /// `modify`, with `<invalid-search-terms/>`.
+    InvalidSearchTerms,
+    /// The `key` is not supported: `feature-not-implemented`, type
+    /// `modify`, with `<invalid-sort-key/>`.
+    InvalidSortKey,
+}
+
+impl SearchRequestError {
+    /// Local name of the application-defined condition, if the error has one.
+    pub fn application_condition(self) -> Option<&'static str> {
+        match self {
+            Self::Malformed => None,
+            Self::NoSearchConditions => Some("no-search-conditions"),
+            Self::InvalidSearchTerms => Some("invalid-search-terms"),
+            Self::InvalidSortKey => Some("invalid-sort-key"),
+        }
+    }
+}
 
 /// A search request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +142,12 @@ pub struct SearchRequest {
     pub max: Option<u32>,
     /// Result Set Management request metadata.
     pub rsm: Option<RsmRequest>,
+    /// Channel properties the keyword is matched against.
+    pub scope: SearchScope,
+    /// Requested service types; `None` when the field was not submitted.
+    pub types: Option<Vec<String>>,
+    /// Result ordering.
+    pub key: SortKey,
 }
 
 impl SearchRequest {
@@ -43,6 +157,9 @@ impl SearchRequest {
             query: query.into(),
             max: None,
             rsm: None,
+            scope: SearchScope::default(),
+            types: None,
+            key: SortKey::default(),
         }
     }
 
@@ -128,26 +245,17 @@ impl ChannelResult {
 
 /// Trait for matching channels against a search query.
 pub trait Searchable {
-    /// Check if this item matches a search query.
-    fn matches_query(&self, query: &str) -> bool;
+    /// Check if this item matches a search query within `scope`.
+    fn matches_query(&self, query: &str, scope: SearchScope) -> bool;
 }
 
 impl Searchable for ChannelResult {
-    fn matches_query(&self, query: &str) -> bool {
+    fn matches_query(&self, query: &str, scope: SearchScope) -> bool {
         let q = query.to_lowercase();
-        self.address.to_lowercase().contains(&q)
-            || self
-                .name
-                .as_deref()
-                .is_some_and(|n| n.to_lowercase().contains(&q))
-            || self
-                .description
-                .as_deref()
-                .is_some_and(|d| d.to_lowercase().contains(&q))
-            || self
-                .language
-                .as_deref()
-                .is_some_and(|l| l.to_lowercase().contains(&q))
+        let contains = |text: &str| text.to_lowercase().contains(&q);
+        (scope.address && contains(&self.address))
+            || (scope.name && self.name.as_deref().is_some_and(contains))
+            || (scope.description && self.description.as_deref().is_some_and(contains))
     }
 }
 
@@ -166,28 +274,61 @@ pub fn is_search_form_request(iq: &Iq) -> bool {
 }
 
 /// Parse a search request from an IQ.
-pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
+///
+/// `q` must be present (XEP-0433 "No Search Conditions") and yield a term
+/// after trimming ("Invalid Search Terms"); `key`, when present, must be a
+/// supported sort key ("Unsupported Sort Key"). Fields the service does not
+/// understand are ignored.
+pub fn parse_search_request(iq: &Iq) -> Result<SearchRequest, SearchRequestError> {
     let elem = match iq {
         Iq::Get { payload: elem, .. } if elem.is("search", NS_CHANNEL_SEARCH) => elem,
-        _ => return None,
+        _ => return Err(SearchRequestError::Malformed),
     };
 
     let form = elem
         .children()
         .find(|child| child.is("x", NS_DATA_FORMS))
-        .and_then(|child| DataForm::from_element(child).ok())?;
-    if form.form_type != FormType::Submit {
-        return None;
-    }
-    if form.form_type_value() != Some(NS_CHANNEL_SEARCH_PARAMS) {
-        return None;
+        .and_then(|child| DataForm::from_element(child).ok())
+        .ok_or(SearchRequestError::Malformed)?;
+    if form.form_type != FormType::Submit
+        || form.form_type_value() != Some(NS_CHANNEL_SEARCH_PARAMS)
+    {
+        return Err(SearchRequestError::Malformed);
     }
 
     let rsm = extract_rsm_request(elem).and_then(Result::ok);
-    let query = form.value(FIELD_QUERY).unwrap_or_default().to_owned();
+    let query_field = form
+        .field(FIELD_QUERY)
+        .ok_or(SearchRequestError::NoSearchConditions)?;
+    let query = query_field.value().unwrap_or_default().trim().to_owned();
+    if query.is_empty() {
+        return Err(SearchRequestError::InvalidSearchTerms);
+    }
+    let key = match form.value(FIELD_KEY) {
+        None => SortKey::default(),
+        Some(value) => SortKey::from_wire(value).ok_or(SearchRequestError::InvalidSortKey)?,
+    };
+    let defaults = SearchScope::default();
+    let scope = SearchScope {
+        address: form
+            .bool(FIELD_SEARCH_IN_ADDRESS)
+            .unwrap_or(defaults.address),
+        name: form.bool(FIELD_SEARCH_IN_NAME).unwrap_or(defaults.name),
+        description: form
+            .bool(FIELD_SEARCH_IN_DESCRIPTION)
+            .unwrap_or(defaults.description),
+    };
+    let types = form.values(FIELD_TYPES).map(<[String]>::to_vec);
     let max = rsm.as_ref().and_then(|rsm| rsm.max);
 
-    Some(SearchRequest { query, max, rsm })
+    Ok(SearchRequest {
+        query,
+        max,
+        rsm,
+        scope,
+        types,
+        key,
+    })
 }
 
 /// Parse search results from an IQ response.
@@ -247,10 +388,25 @@ pub fn build_search_request(to: jid::Jid, request: &SearchRequest, id: &str) -> 
         search = search.append(build_rsm_request_element(&rsm));
     }
 
-    let form = DataForm::new(FormType::Submit)
+    let mut form = DataForm::new(FormType::Submit)
         .add_field(Field::form_type(NS_CHANNEL_SEARCH_PARAMS))
         .add_field(Field::text_single(FIELD_QUERY, request.query.as_str()))
-        .to_element();
+        .add_field(Field::boolean(
+            FIELD_SEARCH_IN_ADDRESS,
+            request.scope.address,
+        ))
+        .add_field(Field::boolean(FIELD_SEARCH_IN_NAME, request.scope.name))
+        .add_field(Field::boolean(
+            FIELD_SEARCH_IN_DESCRIPTION,
+            request.scope.description,
+        ))
+        .add_field(Field::new(FIELD_KEY, FieldType::ListSingle).with_value(request.key.as_wire()));
+    if let Some(types) = &request.types {
+        let mut field = Field::new(FIELD_TYPES, FieldType::ListMulti);
+        field.values = types.clone();
+        form = form.add_field(field);
+    }
+    let form = form.to_element();
     search = search.append(form);
 
     Iq::Get {
@@ -269,6 +425,26 @@ pub fn build_search_form_response(original_iq: &Iq) -> Iq {
             Field::new(FIELD_QUERY, FieldType::TextSingle)
                 .with_label("Search for")
                 .with_required(),
+        )
+        .add_field(Field::boolean(FIELD_SEARCH_IN_ADDRESS, true).with_label("Search in address"))
+        .add_field(Field::boolean(FIELD_SEARCH_IN_NAME, true).with_label("Search in name"))
+        .add_field(
+            Field::boolean(FIELD_SEARCH_IN_DESCRIPTION, true).with_label("Search in description"),
+        )
+        .add_field(
+            Field::new(FIELD_TYPES, FieldType::ListMulti)
+                .with_label("Service types")
+                .with_value(SERVICE_TYPE_MUC)
+                .add_option(FieldOption::with_label(
+                    "XEP-0045 Multi User Chats",
+                    SERVICE_TYPE_MUC,
+                )),
+        )
+        .add_field(
+            Field::new(FIELD_KEY, FieldType::ListSingle)
+                .with_label("Sort results by")
+                .with_value(SORT_KEY_ADDRESS)
+                .add_option(FieldOption::with_label("Address", SORT_KEY_ADDRESS)),
         )
         .to_element();
     let payload = Element::builder("search", NS_CHANNEL_SEARCH)
@@ -372,6 +548,7 @@ mod tests {
     fn test_parse_search_request() {
         let iq = make_search_iq();
         let req = parse_search_request(&iq).expect("parseable");
+        assert_eq!(req.key, SortKey::Address);
         assert_eq!(req.query, "general");
         assert_eq!(req.max, Some(20));
         assert_eq!(req.rsm.and_then(|rsm| rsm.max), Some(20));
@@ -400,13 +577,34 @@ mod tests {
     }
 
     #[test]
+    fn sort_key_wire_values_use_the_order_namespace() {
+        assert_eq!(
+            SORT_KEY_ADDRESS,
+            format!("{{{NS_CHANNEL_SEARCH_ORDER}}}address")
+        );
+        assert_eq!(
+            SORT_KEY_NUSERS,
+            format!("{{{NS_CHANNEL_SEARCH_ORDER}}}nusers")
+        );
+    }
+
+    #[test]
     fn test_searchable() {
         let ch = ChannelResult::new("general@muc.example.com")
             .with_name("General Discussion")
             .with_description("Main chat");
-        assert!(ch.matches_query("general"));
-        assert!(ch.matches_query("DISCUSSION"));
-        assert!(ch.matches_query("chat"));
-        assert!(!ch.matches_query("random"));
+        let all = SearchScope::default();
+        assert!(ch.matches_query("general", all));
+        assert!(ch.matches_query("DISCUSSION", all));
+        assert!(ch.matches_query("chat", all));
+        assert!(!ch.matches_query("random", all));
+        let name_only = SearchScope {
+            address: false,
+            name: true,
+            description: false,
+        };
+        assert!(ch.matches_query("discussion", name_only));
+        assert!(!ch.matches_query("chat", name_only));
+        assert!(!ch.matches_query("muc.example", name_only));
     }
 }

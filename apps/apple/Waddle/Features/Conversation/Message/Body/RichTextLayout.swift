@@ -16,6 +16,8 @@ struct RichTextInput {
     let isEdited: Bool
     let spans: [MarkupSpan]
     let references: [Reference]
+    /// XEP-0513 `@everyone` / `@here` ranges over the same wire body.
+    let broadcastSpans: [BroadcastSpan]
     let ownNick: String
     /// Classifies a reference as a mention; nil for non-mentions.
     let mentionKind: (Reference) -> RichMentionKind?
@@ -87,6 +89,11 @@ enum RichTextLayout {
                 } else if let url = webURL(reference) {
                     inline.append(RichStyledRange(style: .link(url), range: range))
                 }
+            }
+            // `@everyone` / `@here` address the signed-in account too.
+            for broadcast in input.broadcastSpans {
+                guard let range = mapping.displayedRange(ofWire: broadcast.start, broadcast.end) else { continue }
+                inline.append(RichStyledRange(style: .mention(.me), range: range))
             }
         }
         // XEP-0372 references remain authoritative. This fallback only adds

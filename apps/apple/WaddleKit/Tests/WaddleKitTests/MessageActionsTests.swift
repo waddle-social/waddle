@@ -98,9 +98,11 @@ struct MessageActionsTests {
         coordinator.status.connection = .offline(retryAt: nil)
         let id = try #require(await coordinator.send(Draft(text: "queued"), in: bobConversation))
         let echo = try #require(coordinator.timelines.timeline(for: bobConversation).item(withID: id))
-        // 1:1 has no pins; an echo carries its own origin id, so others
-        // could target it, but it cannot be corrected before it is sent.
-        #expect(MessageActions.available(for: echo, in: context(pinning: .denied))
+        // An echo carries its own origin id, so others could target it, but
+        // it cannot be corrected before it is sent, nor pinned: the server
+        // has not seen it.
+        #expect(coordinator.pinAccess(for: echo) == .denied)
+        #expect(MessageActions.available(for: echo, in: context(pinning: coordinator.pinAccess(for: echo)))
             == reactions + [.addReaction, .reply, .startThread, .selectText, .delete])
     }
 
@@ -129,8 +131,8 @@ struct MessageActionsTests {
     @Test func labelsAreTheSameEverywhere() {
         #expect(MessageAction.startThread.title == "Reply in thread")
         #expect(MessageAction.openThread.title == "Open thread")
-        #expect(MessageAction.pin.title == "Pin to room")
-        #expect(MessageAction.unpin.title == "Unpin from room")
+        #expect(MessageAction.pin.title == "Pin message")
+        #expect(MessageAction.unpin.title == "Unpin message")
         #expect(MessageAction.react("👍").title == "React with 👍")
         #expect(MessageAction.react("👍").accessibilityLabel == "React to message with 👍")
         #expect(MessageAction.reply.accessibilityLabel == "Reply")
@@ -138,9 +140,9 @@ struct MessageActionsTests {
 
     // MARK: Pinning
 
-    @Test func ownersAndAdminsMayPinMembersMightDirectMessagesCannot() {
+    @Test func ownersAndAdminsMayPinMembersMightAndInADirectMessageEitherPersonMay() {
         let coordinator = SessionCoordinator(account: me, port: FakePort())
-        #expect(coordinator.pinAccess(in: bobConversation) == .denied)
+        #expect(coordinator.pinAccess(in: bobConversation) == .allowed)
         // Not in the room: web offers no Pin there either.
         #expect(coordinator.pinAccess(in: roomConversation) == .denied)
         for (affiliation, expected) in [(RoomAffiliation.owner, PinAccess.allowed), (.admin, .allowed), (.member, .unknown)] {

@@ -180,6 +180,29 @@ impl OccupantIdCarrier for Presence {
 
 // ── Generation ───────────────────────────────────────────────────────
 
+/// Generate the stable occupant ID the room itself carries on the groupchat
+/// messages it authors (pin notices, the empty subject of a never-set room).
+///
+/// XEP-0421 §Business Rules: "The <occupant-id> element MUST be attached to
+/// every message and every presence sent by a MUC." A room-authored message
+/// has no occupant, so the room is the identified party. The HMAC input is
+/// `0x00 || "room" || 0x00 || room`: it begins with a NUL, which no room JID
+/// does, so it can never equal a user id's `room || 0x00 || user` input.
+pub fn generate_room_occupant_id(
+    room_jid: &jid::BareJid,
+    server_secret: &OccupantIdSecret,
+) -> OccupantId {
+    let mut mac =
+        HmacSha256::new_from_slice(server_secret.key()).expect("HMAC accepts any key length");
+    mac.update(&[0u8]);
+    mac.update(b"room");
+    mac.update(&[0u8]);
+    mac.update(room_jid.as_str().as_bytes());
+    let result = mac.finalize().into_bytes();
+    let hex: String = result[..16].iter().map(|b| format!("{b:02x}")).collect();
+    OccupantId(hex)
+}
+
 /// Generate a stable occupant ID from a user's bare JID and room JID.
 ///
 /// Uses HMAC-SHA-256 with the deployment server-secret as key and the

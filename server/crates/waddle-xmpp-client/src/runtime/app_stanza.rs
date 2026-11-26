@@ -1,9 +1,14 @@
 //! Application stanza dispatch and request-result correlation inside the runtime.
 
+use jid::BareJid;
+use minidom::Element;
+use xmpp_parsers::iq::Iq;
+
+use crate::blocking::{parse_blocking_push, NS_BLOCKING};
+use crate::carbons::NS_CARBONS;
 use crate::messaging::CarbonDirection;
 use crate::messaging::MessageRejection;
 use crate::messaging::MessagingEvent;
-use minidom::Element;
 
 use crate::event::{ClientEvent, ConnectionEvent};
 use crate::transport::TransportMessage;
@@ -34,13 +39,18 @@ impl XmppRuntime {
             }
         }
 
-        if element.name() == "iq"
-            && type_attr == "set"
-            && element
+        if element.name() == "iq" && type_attr == "set" {
+            if element.get_child("block", NS_BLOCKING).is_some()
+                || element.get_child("unblock", NS_BLOCKING).is_some()
+            {
+                return handle_blocking_push(element, self.account_bare_jid());
+            }
+            if element
                 .get_child("query", waddle_xmpp_core::roster::ROSTER_NS)
                 .is_some()
-        {
-            return handle_roster_push(element, self.account_bare_jid());
+            {
+                return handle_roster_push(element, self.account_bare_jid());
+            }
         }
 
         if let Some(response) = caps::build_client_caps_disco_info_response(
@@ -127,9 +137,6 @@ impl XmppRuntime {
                 pep::parse_activity_notification(element, self.account_bare_jid())
             {
                 events.push(ClientEvent::ActivityChanged { jid, activity });
-            }
-            if let Some(pep_item) = pep::parse(element) {
-                events.push(ClientEvent::PepEvent(pep_item));
                 return events;
             }
         }
@@ -154,6 +161,27 @@ impl XmppRuntime {
         events.push(ClientEvent::UnhandledStanza(element.clone()));
         events
     }
+}
+
+fn handle_blocking_push(element: &Element, account: &BareJid) -> Vec<ClientEvent> {
+    let Ok(iq) = Iq::try_from(element.clone()) else {
+        return Vec::new();
+    };
+    let Some(change) = parse_blocking_push(&iq, account) else {
+        return Vec::new();
+    };
+    let ack = Iq::Result {
+        from: None,
+        to: iq.from().cloned(),
+        id: iq.id().to_owned(),
+        payload: None,
+    };
+    vec![
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+            ack.into(),
+        ))),
+        ClientEvent::BlockListChanged(change),
+    ]
 }
 
 /// Flatten the XEP-0060 notifications attached to a parsed message
@@ -202,15 +230,15 @@ impl XmppRuntime {
         vec![ClientEvent::MessageRejected(Box::new(rejection))]
     }
 
-    fn account_bare_jid(&self) -> &jid::BareJid {
+    /// Bare JID of the authenticated account this runtime serves.
+    #[must_use]
+    pub fn account_bare_jid(&self) -> &jid::BareJid {
         match &self.config.auth {
             AuthenticationConfig::OAuthBearer(config) => &config.account,
         }
     }
 }
 
-/// XEP-0280 carbons namespace (`<sent/>` / `<received/>` envelopes).
-const NS_CARBONS: &str = "urn:xmpp:carbons:2";
 /// XEP-0297 stanza forwarding namespace (`<forwarded/>`).
 const NS_FORWARD: &str = "urn:xmpp:forward:0";
 /// XEP-0203 delayed delivery namespace (forwarded-level `<delay/>`).

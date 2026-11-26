@@ -623,6 +623,21 @@ async fn subscribe_with_jid(
     )
     .await;
     assert!(resp.contains(r#"type='result'"#), "subscribe: {resp}");
+    // XEP-0060 §12.20 / XEP-0163 §4: with `send_last_published_item` at its
+    // default `on_sub_and_presence`, the new subscriber is sent the last
+    // published item (here the seed from `auto_create_node`) with a XEP-0203
+    // delay, after the subscription result.
+    let replay = wait_for_event_message(client, node, Duration::from_secs(2))
+        .await
+        .expect("new subscriber receives the last published item");
+    assert!(
+        replay.contains(r#"id='seed'"#),
+        "last item is the seed: {replay}"
+    );
+    assert!(
+        replay.contains("urn:xmpp:delay") && replay.contains("stamp="),
+        "replayed item carries a delay: {replay}"
+    );
 }
 
 #[tokio::test]

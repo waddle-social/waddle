@@ -2165,6 +2165,7 @@ describe("client send readiness", () => {
     await messaging.editMessage("outbound-1", "edited");
     await messaging.toggleReaction("outbound-1", "👍");
     await messaging.retractMessage("outbound-1");
+    messaging.onChatState({ peerJid: occupant, state: "active" });
     messaging.notifyComposing();
     await Promise.resolve();
 
@@ -2215,7 +2216,6 @@ describe("client keepalive lifecycle", () => {
         enableKeepAlive: mock((_opts: { interval: number; timeout: number }) => undefined),
         disableKeepAlive: mock(() => undefined),
         getTime: mock(async () => ({ utc: new Date("2024-01-01T00:00:00Z") })),
-        enableCarbons: mock(async () => undefined),
         getRoster: mock(async () => ({ items: [] })),
       }) as unknown as Agent;
       (client as unknown as { xmpp: Agent }).xmpp = xmpp;
@@ -4703,11 +4703,9 @@ describe("optimistic UI waits for successful sends", () => {
     expect(actionError.value).toBe("");
   });
 
-  test("room composer ignores chat-state failures after the message send succeeds", async () => {
+  test("room composer sends <active/> inside the content message, never a standalone one", async () => {
     const sendGroupMessage = mock(async () => ({ id: "msg-1", state: "sending" as const }));
-    const sendChatState = mock(async () => {
-      throw new Error("typing unavailable");
-    });
+    const sendChatState = mock(async () => undefined);
     const actionError = ref("");
     const messaging = useChannelMessages(
       ref(session()),
@@ -4726,9 +4724,11 @@ describe("optimistic UI waits for successful sends", () => {
     await Promise.resolve();
 
     expect(sendGroupMessage).toHaveBeenCalledTimes(1);
-    expect(sendChatState).toHaveBeenCalledTimes(1);
+    expect(sendGroupMessage.mock.calls[0]?.[3]).toMatchObject({ chatStateActive: true });
+    expect(sendChatState).not.toHaveBeenCalled();
     expect(messaging.messages.value).toHaveLength(1);
     expect(messaging.messages.value[0]?.id).toBe("msg-1");
     expect(actionError.value).toBe("");
   });
+
 });

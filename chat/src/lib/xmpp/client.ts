@@ -510,12 +510,10 @@ async function loadWasmModule(): Promise<WasmModule> {
       if (typeof mod.default === "function") {
         await mod.default();
       }
-      // Swap the chat-ui consistent-color implementation over to the
-      // spec-conformant SHA-1 hue (XEP-0392 §5.1). The chat-ui module's
-      // own DJB2 fallback covers the first-paint window before this
-      // runs.
+      // Install the spec-conformant XEP-0392 colour (SHA-1 hue through
+      // HSLuv). Until this runs, chat-ui renders the static colour.
       const { setConsistentColorBackend } = await import("@/lib/chat-ui");
-      setConsistentColorBackend(mod.xep0392_consistent_hue);
+      setConsistentColorBackend(mod.xep0392_consistent_color);
       return mod;
     });
   }
@@ -1410,15 +1408,6 @@ export class BrowserXmppClient {
       return;
     }
     this.onlineRecoveryListener?.();
-  }
-
-  private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
-    if (xmpp.enableCarbons) {
-      try { await xmpp.enableCarbons(); } catch {}
-      return;
-    }
-    if (!xmpp.send_raw_iq) return;
-    try { await xmpp.send_raw_iq(`<iq type="set" id="${crypto.randomUUID()}"><enable xmlns="urn:xmpp:carbons:2"/></iq>`); } catch {}
   }
 
   /** Seam for tests: instance-level indirection over the module-level
@@ -2713,9 +2702,7 @@ export class BrowserXmppClient {
 
   setMdsDisplayedHandler(handler: ((entry: MdsDisplayedEntry) => void) | null) { this.events.set("mdsDisplayed", handler); }
 
-  async subscribeStoryReactionSummaries(communityJid: string): Promise<void> { return this.pubsub.subscribeStoryReactionSummaries(communityJid); }
 
-  async subscribeStories(communityJid: string): Promise<void> { return this.pubsub.subscribeStories(communityJid); }
 
   addPubsubEventHandler(handler: (event: PubsubEvent) => void): () => void {
     return this.events.on("pubsubEvent", handler);
@@ -3256,17 +3243,17 @@ export class BrowserXmppClient {
 
   async fetchFeed(communityJid: string, maxItems: number | undefined = undefined): Promise<FeedEntry[]> { return this.pubsub.fetchFeed(communityJid, maxItems); }
   async publishFeedPost(communityJid: string, post: FeedPostInput): Promise<FeedEntry> { return this.pubsub.publishFeedPost(communityJid, post); }
-  async fetchStories(communityJid: string, maxItems: number | undefined = undefined): Promise<Story[]> { return this.pubsub.fetchStories(communityJid, maxItems); }
+  async fetchStories(authorJid: string, maxItems: number | undefined = undefined): Promise<Story[]> { return this.pubsub.fetchStories(authorJid, maxItems); }
   async fetchStoryReads(): Promise<StoryReads> { return this.pubsub.fetchStoryReads(); }
   async publishStoryReads(reads: StoryReads): Promise<StoryReads> { return this.pubsub.publishStoryReads(reads); }
   async publishStatusPreference(pref: StatusPreferenceWire): Promise<void> { return this.pubsub.publishStatusPreference(pref); }
   async fetchStatusPreference(): Promise<StatusPreferenceWire | null> { return this.pubsub.fetchStatusPreference(); }
-  async publishStory(communityJid: string, input: StoryPostInput): Promise<Story> { return this.pubsub.publishStory(communityJid, input); }
-  async fetchStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem[]> { return this.pubsub.fetchStoryReactions(communityJid, storyId); }
-  async fetchMyStoryReactions(communityJid: string, storyId: string): Promise<StoryReactionItem | null> { return this.pubsub.fetchMyStoryReactions(communityJid, storyId); }
-  async fetchStoryReactionSummary(communityJid: string, storyId: string): Promise<StoryReactionSummary> { return this.pubsub.fetchStoryReactionSummary(communityJid, storyId); }
-  async publishStoryReactions(communityJid: string, storyId: string, emojis: readonly string[], unknownChildrenXml: readonly string[] = []): Promise<void> { return this.pubsub.publishStoryReactions(communityJid, storyId, emojis, unknownChildrenXml); }
-  async retractStoryReactions(communityJid: string, storyId: string): Promise<void> { return this.pubsub.retractStoryReactions(communityJid, storyId); }
+  async publishStory(input: StoryPostInput): Promise<Story> { return this.pubsub.publishStory(input); }
+  async fetchStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem[]> { return this.pubsub.fetchStoryReactions(hostJid, storyId); }
+  async fetchMyStoryReactions(hostJid: string, storyId: string): Promise<StoryReactionItem | null> { return this.pubsub.fetchMyStoryReactions(hostJid, storyId); }
+  async fetchStoryReactionSummary(hostJid: string, storyId: string): Promise<StoryReactionSummary> { return this.pubsub.fetchStoryReactionSummary(hostJid, storyId); }
+  async publishStoryReactions(hostJid: string, storyId: string, emojis: readonly string[], unknownChildrenXml: readonly string[] = []): Promise<void> { return this.pubsub.publishStoryReactions(hostJid, storyId, emojis, unknownChildrenXml); }
+  async retractStoryReactions(hostJid: string, storyId: string): Promise<void> { return this.pubsub.retractStoryReactions(hostJid, storyId); }
   async fetchCommunityEvents(communityJid: string, maxItems: number | undefined = undefined): Promise<CommunityEvent[]> { return this.pubsub.fetchCommunityEvents(communityJid, maxItems); }
   async publishCommunityEvent(communityJid: string, input: CommunityEventInput): Promise<CommunityEvent> { return this.pubsub.publishCommunityEvent(communityJid, input); }
   async updateCommunityEvent(communityJid: string, itemId: string, input: CommunityEventInput): Promise<CommunityEvent> { return this.pubsub.updateCommunityEvent(communityJid, itemId, input); }
@@ -3712,7 +3699,6 @@ export class BrowserXmppClient {
       // occupant presence, so the caches must survive the disconnect.
       this.clearRoomPresenceCaches();
       this.outboundQueue.clearOrdinaryInflight();
-      void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
       // to future +notify events. Both are best-effort and fully
       // fail-silent (chat works without MDS). Bound to the specific
@@ -4262,6 +4248,14 @@ export class BrowserXmppClient {
       });
       if (!message.body && !message.subject) return;
     }
+    // XEP-0085 §5.1: a content message carrying a chat state shows the
+    // sender supports the protocol. The message itself continues down the
+    // normal path.
+    if (message.chat_state && message.body && !message.is_muc && !message.carbon?.sent
+      && bareJidKey(message.from ?? "") !== bareJidKey(this.session.jid)) {
+      const occupant = this.mucPmOccupant(message);
+      this.events.emit("dmChatState", { peerJid: occupant?.occupantJid ?? barePeerJid(message.from ?? message.to ?? ""), state: message.chat_state as ChatStateType });
+    }
     if (message.chat_state && !message.body) {
       if (message.is_muc) { const roomJid = barePeerJid(message.from ?? message.to ?? ""); const nick = (message.from ?? "").includes("/") ? resourceOf(message.from ?? "") : "unknown"; if (roomJid === this.currentRoom && nick !== this.session.username) this.events.emit("chatState", { roomJid, nick, state: message.chat_state as ChatStateType }); }
       else {
@@ -4485,10 +4479,10 @@ export class BrowserXmppClient {
   }
   private wireEvents(xmpp: XmppClientInstance & { enableKeepAlive?: (opts: { interval: number; timeout: number }) => void; disableKeepAlive?: () => void }) {
     if (!this.xmpp && !this.destroying) this.xmpp = xmpp;
-    // #754: carbons enable lives in the fresh branch of `runSessionReady`
-    // only — enabling from `on_connected` too doubled the IQ on every
-    // fresh connect and re-enabled on XEP-0198 resume, where the server
-    // already preserves carbon state for the resumed session.
+    // XEP-0280 carbons are asked for by the shared core, once after every
+    // fresh bind and not after a XEP-0198 resume, where the server keeps
+    // the setting (`finish_binding` in waddle-xmpp-client). Nothing here
+    // enables them: a second IQ per connect was #754.
     xmpp.set_on_session_lifecycle?.((event: string) => {
       if (!this.isCurrentXmpp(xmpp)) return;
       // A fresh bind proves the resume path failed and clears its witness.

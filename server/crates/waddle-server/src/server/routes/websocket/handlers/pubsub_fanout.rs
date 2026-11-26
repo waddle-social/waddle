@@ -45,7 +45,7 @@ mod caps;
 mod last_item;
 
 use caps::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
-pub(crate) use last_item::replay_last_published_items;
+pub(crate) use last_item::{last_item_for_new_subscription, replay_last_published_items};
 
 mod implementation;
 pub use implementation::fan_out_publish;
@@ -54,4 +54,92 @@ pub use implementation::fan_out_service_retract;
 use implementation::FanOutMetrics;
 pub use implementation::FanOutRequest;
 pub use implementation::FanOutRetractRequest;
-pub use implementation::{fan_out_delete, fan_out_pep_retract, fan_out_purge};
+pub use implementation::{
+    fan_out_configuration, fan_out_delete, fan_out_pep_retract, fan_out_purge,
+    fan_out_subscription_change,
+};
+
+/// What became of an event for a resource this node holds no socket for.
+pub(super) enum BeyondThisNode {
+    /// Carried to the resource's node, or kept for its resumable session.
+    Delivered,
+    /// The resource's node or session refused or may already have it.
+    Dropped,
+    /// No node hosts the resource and no resumable session keeps it.
+    NotConnected,
+}
+
+/// Deliver an event to a resource whose socket is not on this node.
+///
+/// The local registry holds only this node's sockets, so a resource it does
+/// not know is hosted on another node, is detached, or is gone. The account
+/// coordinator's binding names which; the event is carried to the hosting
+/// node or kept for the detached session, and only when neither holds the
+/// resource is it stashed against a resumable session.
+pub(super) async fn deliver_beyond_this_node(
+    state: &WebSocketState,
+    resource: &FullJid,
+    stanza: &Stanza,
+) -> BeyondThisNode {
+    use crate::server::routes::interpret::{
+        deliver_to_bound_resource, BoundReach, FullJidDeliveryOutcome,
+    };
+    let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None);
+    match deliver_to_bound_resource(
+        &deps,
+        resource,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+        None,
+        BoundReach::ANY,
+    )
+    .await
+    {
+        Some(FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached) => {
+            return BeyondThisNode::Delivered;
+        }
+        Some(FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted) => {
+            return BeyondThisNode::Dropped;
+        }
+        Some(FullJidDeliveryOutcome::Unavailable) | None => {}
+    }
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .record_stanza_for_detached_bound_resource(resource, stanza, chrono::Utc::now())
+        .await
+    {
+        Ok(true) => BeyondThisNode::Delivered,
+        Ok(false) => BeyondThisNode::NotConnected,
+        Err(error) => {
+            warn!(
+                resource = %resource,
+                error = %error,
+                "Failed to stash fan-out for not-connected detached resource"
+            );
+            BeyondThisNode::NotConnected
+        }
+    }
+}
+
+/// Cancel `contact`'s subscriptions to `owner`'s PEP nodes that its current
+/// roster standing no longer allows (XEP-0163, XEP-0060 §4.5.1). Failures are
+/// logged; the fan-out re-check keeps delivery closed regardless.
+pub(crate) async fn revoke_lost_pep_subscriptions(
+    state: &WebSocketState,
+    owner: &jid::BareJid,
+    contact: &jid::BareJid,
+) {
+    let contacts = crate::pubsub_authz::ContactDirectory::new(&state.deps.app_state.db_pool);
+    if let Err(error) = crate::pubsub_authz::revoke_lost_pep_subscriptions(
+        &state.deps.protocol.pubsub_storage,
+        &contacts,
+        owner,
+        contact,
+    )
+    .await
+    {
+        tracing::warn!(owner = %owner, contact = %contact, error = %error, "Failed to cancel PEP subscriptions after access loss");
+    }
+}

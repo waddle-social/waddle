@@ -154,6 +154,7 @@ async fn successful_resume_preserves_room_generation_without_leave_or_rejoin() {
             .expect("observer occupant JID"),
     )
     .await;
+    waddle_ws_test_support::iq::unlock_created_room(&mut observer, room.as_str()).await;
     send(
         &mut original,
         Element::builder("enable", SM_NS)
@@ -283,6 +284,7 @@ async fn fresh_bind_retires_previous_room_generation(detach_for_resume: bool) {
     let room: BareJid = "replacement-contract@muc.localhost".parse().unwrap();
     let alice_occupant = room.with_resource_str("alice").unwrap();
     join(&mut observer, &room.with_resource_str("observer").unwrap()).await;
+    waddle_ws_test_support::iq::unlock_created_room(&mut observer, room.as_str()).await;
     let stream = if detach_for_resume {
         send(
             &mut original,

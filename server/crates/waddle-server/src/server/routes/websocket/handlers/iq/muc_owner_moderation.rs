@@ -2,8 +2,8 @@ use super::{
     add_stanza_id_xep0359, bad_request_iq_error, build_iq_error_xml_typed, build_iq_result_xml,
     build_moderation_result_message, build_muc_owner_config_response, chrono, debug,
     forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error, is_muc_room_jid,
-    item_not_found_iq_error, jid_malformed_iq_error, muc_owner_authorized, not_authorized_iq_error,
-    parse_moderation_iq, response_batch_from_inline_room_effect_frames, stanza_to_xml, warn,
+    item_not_found_iq_error, jid_malformed_iq_error, not_authorized_iq_error, parse_moderation_iq,
+    response_batch_from_inline_room_effect_frames, room_action_authorized, stanza_to_xml, warn,
     ArchivedMessage, ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload, BareJid,
     ConnectionPhase, FullJid, GetAdminContext, GetSnapshot, IqHandlerContext, Jid, ResponseBatch,
     RichMessageId, RichText, Session, Stanza, WebSocketState, Xep0359StanzaId,
@@ -238,6 +238,15 @@ async fn wipe_destroyed_room_durable_state(
             error = %error,
             "Failed to delete outstanding invites for destroyed room"
         );
+        return Err(());
+    }
+    if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
+        return Ok(false);
+    }
+    // XEP-0486: the room's avatar vCard is keyed by the room JID, which a
+    // later room of that name must not inherit.
+    if let Err(error) = super::muc_avatar::delete_room_avatar(state, room_jid).await {
+        warn!(room = %room_jid, %error, "Failed to delete avatar for destroyed room");
         return Err(());
     }
     if !destroyed_lifecycle_is_current(state, room_jid, lifecycle).await? {
@@ -1383,41 +1392,19 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         // canonical grants' `manage` and destroyed by their `delete`, which
         // no room affiliation confers: such a room ends only when its scope
         // is retired. The room actor's affiliations decide nothing there.
-        let authorized = {
-            use crate::permissions::host_grant::{HostGrantAction, RoomBinding, RoomGate};
-            let action = if has_destroy {
-                HostGrantAction::Delete
+        let authorized = room_action_authorized(
+            state,
+            &room_jid,
+            sender_jid,
+            authenticated_session,
+            evidence,
+            if has_destroy {
+                crate::permissions::host_grant::HostGrantAction::Delete
             } else {
-                HostGrantAction::Manage
-            };
-            match state
-                .deps
-                .app_state
-                .host_grants
-                .allows_as(
-                    RoomBinding::Room(&room_jid),
-                    &sender_jid.to_bare(),
-                    evidence,
-                    action,
-                )
-                .await
-            {
-                RoomGate::Unmanaged => {
-                    muc_owner_authorized(
-                        state,
-                        &room_jid,
-                        sender_jid,
-                        authenticated_session,
-                        evidence,
-                    )
-                    .await
-                }
-                RoomGate::Managed(allowed) => Ok(allowed),
-                RoomGate::Unavailable => Err(waddle_xmpp::XmppError::internal(
-                    "the host-grant authority is unavailable",
-                )),
-            }
-        };
+                crate::permissions::host_grant::HostGrantAction::Manage
+            },
+        )
+        .await;
         match authorized {
             Ok(true) => {}
             Ok(false) => {
@@ -1445,7 +1432,61 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
             }
         }
 
-        if has_destroy {
+        // XEP-0045 §10.1.3: a cancelled form while the room awaits its
+        // initial configuration destroys the room. Cancelling a later
+        // configuration leaves the room as it is (§10.2).
+        let mut cancels_initial_configuration = false;
+        if super::muc_owner_config::owner_form_type(iq)
+            == Some(xmpp_parsers::data_forms::DataFormType::Cancel)
+        {
+            let locked = match get_room_actor_result(state, &room_jid).await {
+                Ok(Some(room_actor)) => match room_actor.ask(GetSnapshot).await {
+                    Ok(snapshot) => snapshot.room.is_locked(),
+                    Err(error) => {
+                        warn!(room = %room_jid, ?error, "MUC owner cancel snapshot failed");
+                        return vec![build_iq_error_xml_typed(
+                            id,
+                            response_from,
+                            response_to,
+                            internal_server_error_iq_error("Internal server error."),
+                        )]
+                        .into();
+                    }
+                },
+                Ok(None) => {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        item_not_found_iq_error("Requested item not found."),
+                    )]
+                    .into();
+                }
+                Err(error) => {
+                    warn!(room = %room_jid, %error, "MUC owner cancel room lookup failed");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                    .into();
+                }
+            };
+            if !locked {
+                let room_jid_string = room_jid.to_string();
+                return vec![build_iq_result_xml(
+                    id,
+                    Some(room_jid_string.as_str()),
+                    response_to,
+                    None,
+                )]
+                .into();
+            }
+            cancels_initial_configuration = true;
+        }
+
+        if has_destroy || cancels_initial_configuration {
             // XEP-0045 §10.9: parse the optional alternate venue and
             // reason out of the `<destroy/>` payload. Admission is then
             // sealed before capturing the recipient snapshot, so every
@@ -1912,6 +1953,31 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .into();
             }
         };
+        // XEP-0424 §Business rules: a retraction that refers to a correction
+        // retracts the original message and all of its corrections, so a
+        // moderated correction resolves to its original; the broadcast, the
+        // archived event and the tombstone all name that original.
+        let moderated_target =
+            match crate::server::routes::interpret::correction_target::resolve_correction_original(
+                &state.deps.protocol.mam_storage,
+                &room_jid,
+                moderated_target,
+            )
+            .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to resolve moderation target");
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                    .into();
+                }
+            };
+        let target_message_id = moderated_target.id.clone();
 
         let moderator_nick = context
             .nick
@@ -1929,11 +1995,18 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         );
         let mut moderation = build_moderation_result_message(
             Some(jid::Jid::from(room_jid.clone())),
-            &request.target_id,
+            &target_message_id,
             &moderated_by,
             Some(moderator_occupant_id.as_str()),
             request.reason.as_deref(),
         );
+        // XEP-0421 §Business Rules: the moderation notice is a message the
+        // MUC itself sends, so it carries the room's own occupant-id.
+        let room_occupant_id = waddle_xmpp::xep::xep0421::generate_room_occupant_id(
+            &room_jid,
+            &state.deps.occupant_id_secret,
+        );
+        waddle_xmpp::xep::xep0421::set_occupant_id_on_message(&mut moderation, &room_occupant_id);
         let archive_id = uuid::Uuid::now_v7().to_string();
         let room_jid_full = jid::Jid::from(room_jid.clone());
         add_stanza_id_xep0359(
@@ -1942,7 +2015,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
         );
 
         if let (Some(target_id), Ok(moderator_jid)) = (
-            RichMessageId::try_new(request.target_id.clone()),
+            RichMessageId::try_new(target_message_id.clone()),
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
@@ -1977,9 +2050,11 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                     references: Vec::new(),
                     mentions: Vec::new(),
                     subjects: Default::default(),
-                    // Room-authored moderation event row: no occupant
-                    // sender to identify.
-                    occupant_id: None,
+                    // Room-authored moderation event row: the room's own
+                    // occupant-id (XEP-0421 §Business Rules).
+                    occupant_id: waddle_xmpp_core::mam::ArchivedOccupantId::try_new(
+                        room_occupant_id.as_str(),
+                    ),
                     muc_sender: None,
                 }),
                 nickname_generation: None,
@@ -1991,7 +2066,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .store_message(&room_jid, &archived)
                 .await
             {
-                warn!(room = %room_jid, target = %request.target_id, error = %error, "Failed to archive moderation event");
+                warn!(room = %room_jid, target = %target_message_id, error = %error, "Failed to archive moderation event");
             }
 
             // XEP-0425 §"the archiving service MAY replace the
@@ -2003,7 +2078,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 .deps
                 .protocol
                 .mam_storage
-                .get_message(&request.target_id)
+                .get_message(&target_message_id)
                 .await;
             match original_lookup {
                 Ok(Some(original)) if original.to.to_string() == room_jid.to_string() => {
@@ -2020,7 +2095,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         stamp: stamp_time,
                         moderation: Some(ArchivedModeration {
                             target_id: waddle_xmpp::mam::RichMessageId::try_new(
-                                request.target_id.clone(),
+                                target_message_id.clone(),
                             )
                             .expect("target id is non-empty here"),
                             moderated_by: moderated_by
@@ -2032,7 +2107,12 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         // Internal tombstone-retry identity only; the
                         // MAM response builders never read this field.
                         reason: None,
-                        replaces_id: None,
+                        // XEP-0425 §Tombstones: keep the <replace/> of a retracted correction.
+                        replaces_id: original
+                            .rich
+                            .as_ref()
+                            .and_then(|rich| rich.correction_replaces_id())
+                            .cloned(),
                         sender_scope: original
                             .rich
                             .as_ref()
@@ -2058,13 +2138,13 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         }
                         Ok(false) => warn!(
                             room = %room_jid,
-                            target = %request.target_id,
+                            target = %target_message_id,
                             "Moderation tombstone target disappeared before replacement"
                         ),
                         Err(error) => {
                             warn!(
                                 room = %room_jid,
-                                target = %request.target_id,
+                                target = %target_message_id,
                                 error = %error,
                                 "Failed to replace original with moderation tombstone"
                             );
@@ -2082,14 +2162,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                     // accidentally scrubbed (Codex P1, Copilot review
                     // on PR #305).
                     use waddle_xmpp::stream_management::SmSessionRegistry as _;
-                    let target_id = request.target_id.as_str();
+                    let target_id = target_message_id.as_str();
                     // XEP-0425 moderation targets the room-assigned
                     // XEP-0359 stanza-id: cached reflections are
                     // matched ONLY on `<stanza-id by=room/>`, never on
                     // the client-chosen wire id (which any occupant
                     // could mint to collide with another reflection).
                     let scrub_target = waddle_xmpp::tombstone::TombstoneTarget::Groupchat {
-                        stanza_id: request.target_id.clone(),
+                        stanza_id: target_message_id.clone(),
                         room: room_jid.clone(),
                     };
                     match state
@@ -2142,7 +2222,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                 Ok(_) => {}
                 Err(error) => warn!(
                     room = %room_jid,
-                    target = %request.target_id,
+                    target = %target_message_id,
                     error = %error,
                     "Failed to look up moderation target for tombstone"
                 ),
@@ -2171,11 +2251,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         frames.push(stanza_to_xml(&Stanza::Message(outbound)));
                         continue;
                     }
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .try_send_to(&occupant_jid, Stanza::Message(outbound));
+                    // The occupant's connection may be on another node.
+                    crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                        state,
+                        &room_jid,
+                        &occupant_jid,
+                        Stanza::Message(outbound),
+                    )
+                    .await;
                 }
             }
         }

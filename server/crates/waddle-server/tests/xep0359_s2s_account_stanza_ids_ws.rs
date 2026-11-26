@@ -5,10 +5,12 @@
 //! before it is delivered or stored, since only this deployment assigns
 //! those and a client takes one in its account's name for its archive's
 //! (§3: an entity that assigns stanza ids deletes one whose `by` it would
-//! set). A `<stanza-id/>` a remote entity assigned in its own name is
-//! left, as a routing entity leaves it (§3). A stored message is the
-//! recipient's archived copy, which carries the one id in the account's
-//! name that this deployment assigned: its archive's. Through the
+//! set). A `<stanza-id/>` a remote entity assigned in the name of a third
+//! party is left, as a routing entity leaves it (§3), but the one in the
+//! sender's own account name is its archive's: XEP-0313 §4.1.1 withholds
+//! it from the recipient. A stored message is the recipient's archived
+//! copy, which carries the one id in the account's name that this
+//! deployment assigned: its archive's. Through the
 //! production `/ws` router, the real S2S router and a loopback peer.
 #![cfg(feature = "test-support")]
 
@@ -92,7 +94,8 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_delivery() {
     federated.peer_sends(with_ids("ids-online")).await;
 
     // The recipient pass may stamp the id Alice's archive gives the
-    // message; none of the sender's ids in the deployment's name is left.
+    // message; none of the sender's ids in the deployment's name is left,
+    // and neither is the one in the name of the sender's own archive.
     let delivered = receive(&mut phone, "message", "ids-online").await;
     let delivered_ids = ids(delivered.children());
     assert!(
@@ -100,7 +103,7 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_delivery() {
         "{delivered:?}"
     );
     assert!(
-        delivered_ids.contains(&"bobs-archive".to_owned()),
+        !delivered_ids.contains(&"bobs-archive".to_owned()),
         "{delivered:?}"
     );
 }
@@ -126,13 +129,11 @@ async fn stanza_ids_in_the_deployments_name_are_removed_before_storage() {
         .expect("the stored row refers to Alice's archive");
     assert_eq!(stamp.by, jid(ALICE));
     // Of the ids in the deployment's name only the one Alice's archive
-    // assigned is left, and Bob's own archive's id is kept.
-    let mut stamps = support::stanza_ids(message.payloads.iter());
-    stamps.sort();
-    let mut expected = vec![
-        (ALICE.to_owned(), stamp.id.clone()),
-        (BOB.to_owned(), "bobs-archive".to_owned()),
-    ];
-    expected.sort();
-    assert_eq!(stamps, expected, "{message:?}");
+    // assigned is left; Bob's own archive's id is withheld (XEP-0313 §4.1.1).
+    let stamps = support::stanza_ids(message.payloads.iter());
+    assert_eq!(
+        stamps,
+        vec![(ALICE.to_owned(), stamp.id.clone())],
+        "{message:?}"
+    );
 }

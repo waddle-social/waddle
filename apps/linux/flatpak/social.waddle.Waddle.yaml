@@ -1,0 +1,120 @@
+# Flatpak manifest for Waddle for Linux. Build from this directory:
+#
+#   python3 flatpak-cargo-generator.py ../Cargo.lock -o cargo-sources.json
+#   flatpak-builder --user --install --force-clean build-dir social.waddle.Waddle.yaml
+#
+# Written without running flatpak-builder (no network or flatpak in the
+# authoring environment), so it is buildable in principle and unproven.
+# Open items are marked TODO and listed in apps/linux/README.md.
+id: social.waddle.Waddle
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libwebrtc's C++ bridges need clang 21 or later (see README). TODO:
+  # confirm a llvm21 extension exists for this runtime's freedesktop branch.
+  - org.freedesktop.Sdk.Extension.llvm21
+command: waddle-linux
+
+finish-args:
+  # Display: Wayland first, X11 only when there is no Wayland.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU rendering (GTK's GL renderer).
+  - --device=dri
+  # Calls: libwebrtc opens the microphone and speakers through the
+  # PulseAudio protocol (PipeWire answers it on current desktops).
+  - --socket=pulseaudio
+  # XMPP, HTTP uploads, the sign-in provider and LiveKit.
+  - --share=network
+  # Deliberately absent:
+  #  - no --filesystem: the file chooser and drag and drop go through the
+  #    document portal, which hands the app only the files the person picks;
+  #  - no --talk-name=org.freedesktop.Notifications: GNotification uses the
+  #    notification portal inside the sandbox;
+  #  - no --talk-name=org.freedesktop.secrets: oo7 uses the secret portal.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  prepend-path: /usr/lib/sdk/llvm21/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm21/lib
+  env:
+    CC: clang
+    CXX: clang++
+    CARGO_HOME: /run/build/waddle-linux/cargo
+    # The build script must not download anything: libwebrtc comes from
+    # the archive source below (see "libwebrtc" in README.md).
+  arch:
+    x86_64:
+      env:
+        LK_CUSTOM_WEBRTC: /run/build/waddle-linux/webrtc/linux-x64-release
+    aarch64:
+      env:
+        LK_CUSTOM_WEBRTC: /run/build/waddle-linux/webrtc/linux-arm64-release
+
+modules:
+  # `gtk4` with the `blueprint` feature compiles window.blp while rustc
+  # runs. TODO: drop this module if org.gnome.Sdk//50 ships it.
+  - name: blueprint-compiler
+    buildsystem: meson
+    cleanup:
+      - '*'
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+        tag: v0.16.0
+
+  - name: waddle-linux
+    buildsystem: simple
+    build-options:
+      # The release profile is LTO: give it room.
+      env:
+        CARGO_BUILD_JOBS: '4'
+    build-commands:
+      - cd apps/linux && cargo --offline build --release --locked
+      - install -Dm755 apps/linux/target/release/waddle-linux /app/bin/waddle-linux
+      - install -Dm644 apps/linux/data/social.waddle.Waddle.desktop
+        /app/share/applications/social.waddle.Waddle.desktop
+      - install -Dm644 apps/linux/data/social.waddle.Waddle.metainfo.xml
+        /app/share/metainfo/social.waddle.Waddle.metainfo.xml
+      - install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
+        /app/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
+      # Symbolic icons for themes that lack them (hicolor is the fallback).
+      # The Polar Huddle fonts; the Flatpak's fontconfig reads /app/share/fonts.
+      - install -Dm644 -t /app/share/fonts/waddle apps/linux/data/fonts/*.ttf
+      - mkdir -p /app/share/icons/hicolor/symbolic/actions
+      - install -m644 apps/linux/data/icons/hicolor/symbolic/actions/*.svg
+        /app/share/icons/hicolor/symbolic/actions/
+    sources:
+      # The Linux crate links the shared client crates in server/ by path,
+      # so the source is the repository, not apps/linux alone.
+      - type: dir
+        path: ../../..
+        skip:
+          - .git
+          - target
+          - node_modules
+      # Crate sources for `cargo --offline`, generated from Cargo.lock by
+      # flatpak-cargo-generator.py (flatpak-builder-tools). TODO: generate
+      # and commit, or generate in CI. The server crates' own Cargo.lock is
+      # not used: apps/linux is its own workspace.
+      - cargo-sources.json
+      # libwebrtc, prebuilt by LiveKit. The livekit crate's build script
+      # would download this over the network, which the build sandbox
+      # forbids; LK_CUSTOM_WEBRTC above points it at the unpacked copy.
+      # The tag is webrtc-sys-build's WEBRTC_TAG for the locked
+      # webrtc-sys (0.3.55). Update both when `cargo update` moves it.
+      - type: archive
+        url: https://github.com/livekit/rust-sdks/releases/download/webrtc-a545de4/webrtc-linux-x64-release.zip
+        sha256: 2ece73b9a72a2cacd73d0c62ac3a414e202f37885c3c8f49dddb43c1443ac0bd
+        strip-components: 0
+        dest: webrtc
+        only-arches: [x86_64]
+      - type: archive
+        url: https://github.com/livekit/rust-sdks/releases/download/webrtc-a545de4/webrtc-linux-arm64-release.zip
+        sha256: e87dff71422c5cb1470f6cf00ecc4ad6964e746c5039831b7206b946b5d13c5f
+        strip-components: 0
+        dest: webrtc
+        only-arches: [aarch64]

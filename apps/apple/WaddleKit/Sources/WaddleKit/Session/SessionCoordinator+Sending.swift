@@ -37,6 +37,7 @@ extension SessionCoordinator {
         if conversation.isRoom, directory.hasLeft(conversation.jid) { return nil }
         noteActivity()
         var options = composed.options
+        options.chatStateActive = sendsChatStates
         // A sticker's text is its pack's description, not something the
         // sender typed, so nothing in it is taken as a mention.
         if options.sticker == nil {
@@ -433,16 +434,6 @@ extension SessionCoordinator {
     public func canModerate(in conversation: ConversationID) -> Bool {
         guard conversation.isRoom else { return false }
         return selfOccupant(in: conversation.jid)?.canModerate == true
-    }
-
-    public func setPinned(_ pinned: Bool, _ item: TimelineItem) async -> Bool {
-        guard let target = item.actionTargetID else { return false }
-        return await port.setPinned(pinned, targetID: target, in: item.conversation)
-    }
-
-    public func isPinned(_ item: TimelineItem) -> Bool {
-        guard item.conversation.isRoom, let target = item.actionTargetID else { return false }
-        return pins.isPinned(target, in: item.conversation.jid)
     }
 
     // MARK: - Typing (XEP-0085)

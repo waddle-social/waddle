@@ -1,9 +1,5 @@
 use super::community_rsvp::{handle_community_rsvp_publish, is_well_formed_rsvp_item};
 use super::session_jid::session_bare_jid;
-use super::story_attachments::{
-    ensure_story_attachment_summary_node, handle_story_attachment_publish,
-    is_story_attachment_node, is_story_attachment_summary_node,
-};
 use super::{
     build_pubsub_error, build_pubsub_publish_result, iq_to_xml, spaces_node_mutation_allowed, warn,
     BareJid, PubSubError, PubSubItem, Session, WebSocketState,
@@ -11,14 +7,14 @@ use super::{
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
-/// Publish to a community pubsub node — XEP-0472 social feed at
-/// `urn:xmpp:pubsub-social-feed:1` or XEP-0501 stories at
-/// `urn:xmpp:pubsub-social-feed:stories:0`. Both live on `community.<domain>` (distinct
-/// from the spaces service so the spaces enumeration only returns
-/// real spaces). Feed and stories are member-postable (gated by each
-/// node's pubsub publish-model); calendar event creation keeps the
-/// owner-only spaces gate. The standard pubsub fan-out runs either
-/// way so subscribers see new posts in real time.
+/// Publish to a community pubsub node — the XEP-0472 social feed at
+/// `urn:xmpp:pubsub-social-feed:1` or the xCal events node. Both live on
+/// `community.<domain>` (distinct from the spaces service so the spaces
+/// enumeration only returns real spaces). The feed is member-postable
+/// (gated by the node's pubsub publish-model); calendar event creation
+/// keeps the owner-only spaces gate. The standard pubsub fan-out runs
+/// either way so subscribers see new posts in real time. XEP-0501 stories
+/// are not here: they live on each author's own PEP service.
 pub(super) async fn handle_community_publish(
     iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
@@ -28,15 +24,7 @@ pub(super) async fn handle_community_publish(
     principal: Option<ResolvedPrincipal<'_>>,
 ) -> Vec<String> {
     let session = principal.map(ResolvedPrincipal::session);
-    if is_story_attachment_node(node, community_domain) {
-        return handle_story_attachment_publish(iq, state, community_domain, node, item, session)
-            .await;
-    }
-    if is_story_attachment_summary_node(node) {
-        return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
-    }
     if node != waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-        && node != waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
         && node != waddle_xmpp_core::xcal::PUBSUB_NODE_EVENTS
     {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
@@ -60,7 +48,7 @@ pub(super) async fn handle_community_publish(
 /// The authenticated publisher permitted to post to an open community
 /// node, or `None` if the request is not authorized.
 ///
-/// Feed and stories are member-postable: any authenticated member may
+/// The feed is member-postable: any authenticated member may
 /// post when the node's `publish_model` is Open. This honors the node's
 /// configured pubsub publish-model via `can_publish` rather than the
 /// owner-only Spaces structural gate, while still requiring an
@@ -92,8 +80,8 @@ pub(super) async fn community_member_publisher(
 }
 
 /// Publish a non-bookmark item to a community pubsub node. Used by
-/// `handle_community_publish` (feed + stories + calendar events on
-/// `community.<domain>`). Feed and stories are member-postable (gated
+/// `handle_community_publish` (feed + calendar events on
+/// `community.<domain>`). The feed is member-postable (gated
 /// by the node's pubsub publish-model via `community_member_publisher`)
 /// and the item is stamped with the server-derived publisher; calendar
 /// events keep the owner-only Spaces gate except for validated RSVP
@@ -128,13 +116,11 @@ async fn handle_community_non_bookmark_publish(
             return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
         }
     }
-    // Feed and stories are member-postable and the service stamps the
+    // The feed is member-postable and the service stamps the
     // authenticated publisher on each item. Calendar events stay owner-only
     // and carry no publisher attribution here. A storage/permission backend
     // failure is an internal error, not an authorization denial.
-    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED
-        || node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES
-    {
+    let publisher = if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
         match community_member_publisher(state, session, &community_jid, node).await {
             Ok(Some(entity)) => Some(entity),
             Ok(None) => return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))],
@@ -166,11 +152,11 @@ async fn handle_community_non_bookmark_publish(
         }
     };
 
-    // Feed and stories are shared, open-publish nodes, so the service binds
+    // The feed is a shared, open-publish node, so the service binds
     // each item to its author: stamp the authenticated JID into Atom author
     // fields so a member cannot impersonate another. The storage write below
     // atomically refuses cross-publisher item-id clobbering.
-    // `publisher` is `Some` only for open member-postable community nodes.
+    // `publisher` is `Some` only for the open member-postable feed node.
     if let Some(entity) = publisher.as_ref() {
         if node == waddle_xmpp_core::xep0472::PUBSUB_NODE_FEED {
             let Some(payload) = item.payload.as_ref() else {
@@ -179,42 +165,31 @@ async fn handle_community_non_bookmark_publish(
                     PubSubError::PayloadRequired,
                 ))];
             };
-            let item_id = item.id.as_deref().unwrap_or_default();
-            if waddle_xmpp_core::xep0472::parse_feed_entry(item_id, payload).is_none() {
+            // The service assigns the item id when the publisher omits it
+            // (XEP-0060 §7.1.2.1) so the alternate link below can name it.
+            let item_id = item
+                .id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            if waddle_xmpp_core::xep0472::parse_feed_entry(&item_id, payload).is_none() {
                 return vec![iq_to_xml(build_pubsub_error(
                     iq,
                     PubSubError::InvalidPayload,
                 ))];
             }
-            item.payload = Some(waddle_xmpp_core::xep0472::stamp_feed_entry_author(
-                payload,
-                &entity.to_string(),
-            ));
-        } else if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
-            let Some(payload) = item.payload.as_ref() else {
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::PayloadRequired,
-                ))];
-            };
-            let item_id = item.id.as_deref().unwrap_or_default();
-            let Some(story) = waddle_xmpp_core::xep0501::parse_story(item_id, payload) else {
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InvalidPayload,
-                ))];
-            };
-            if story.media_url.is_none() {
-                return vec![iq_to_xml(build_pubsub_error(
-                    iq,
-                    PubSubError::InvalidPayload,
-                ))];
-            }
-            item.payload = waddle_xmpp_core::xep0501::stamp_story_author(
-                item_id,
-                payload,
-                &entity.to_string(),
+            let stamped =
+                waddle_xmpp_core::xep0472::stamp_feed_entry_author(payload, &entity.to_string());
+            // XEP-0472 §"Publishing a Post": the `xmpp:` alternate link
+            // "SHOULD be inserted at server side".
+            let href = format!(
+                "xmpp:{community_domain}?;node={};item={}",
+                urlencoding::encode(node),
+                urlencoding::encode(&item_id)
             );
+            item.payload = Some(waddle_xmpp_core::xep0472::ensure_feed_entry_xmpp_link(
+                &stamped, &href,
+            ));
+            item.id = Some(item_id);
         }
     }
 
@@ -235,17 +210,6 @@ async fn handle_community_non_bookmark_publish(
     };
     match publish_result {
         Ok(result) => {
-            if node == waddle_xmpp_core::xep0501::PUBSUB_NODE_STORIES {
-                if let Err(error) =
-                    ensure_story_attachment_summary_node(state, &community_jid).await
-                {
-                    warn!(
-                        node,
-                        error = ?error,
-                        "Failed to ensure story attachment summary node after story publish"
-                    );
-                }
-            }
             pubsub_fanout::fan_out_publish(
                 state,
                 pubsub_fanout::FanOutRequest {

@@ -126,6 +126,7 @@ describe("useDmChatStates", () => {
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
       activePeerJid: ref("bob@example.com"),
     }));
+    states.notePeerChatState("bob@example.com");
     states.notifyComposing();
     expect(sendDmChatState).toHaveBeenCalledTimes(1);
     expect(sendDmChatState.mock.calls[0]![0]).toBe("bob@example.com");
@@ -138,9 +139,26 @@ describe("useDmChatStates", () => {
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
       activePeerJid: ref("bob@example.com"),
     }));
+    states.notePeerChatState("bob@example.com");
     states.notifyComposing({ id: "dm-child-thread", parent: "dm-root-thread" });
     expect(sendDmChatState).toHaveBeenCalledTimes(1);
     expect(sendDmChatState.mock.calls[0]![2]).toEqual({ id: "dm-child-thread", parent: "dm-root-thread" });
+  });
+
+  test("notifyComposing sends nothing until the peer has sent a chat state (XEP-0085 §5.1)", () => {
+    const sendDmChatState = mock(async () => undefined);
+    const states = withScope(() => useDmChatStates({
+      xmppClient: ref<BrowserXmppClient | null>(makeDmClient(sendDmChatState)),
+      activePeerJid: ref("bob@example.com"),
+    }));
+    states.notifyComposing();
+    expect(sendDmChatState).not.toHaveBeenCalled();
+    states.notePeerChatState("carol@example.com");
+    states.notifyComposing();
+    expect(sendDmChatState).not.toHaveBeenCalled();
+    states.notePeerChatState("bob@example.com");
+    states.notifyComposing();
+    expect(sendDmChatState).toHaveBeenCalledTimes(1);
   });
 
   test("addTypingUser + clearTypingState surfaces and clears typingUsers", () => {
@@ -195,6 +213,7 @@ describe("XEP-0085 §5.1 — user can disable chat state notifications", () => {
         xmppClient: ref<BrowserXmppClient | null>(makeDmClient(send)),
         activePeerJid: ref("alice@example.com"),
       }));
+      states.notePeerChatState("alice@example.com");
       states.notifyComposing();
       await new Promise((resolve) => setTimeout(resolve, 3100));
       expect(send).not.toHaveBeenCalled();
@@ -211,6 +230,7 @@ describe("XEP-0085 §5.1 — user can disable chat state notifications", () => {
       xmppClient: ref<BrowserXmppClient | null>(makeDmClient(send)),
       activePeerJid: ref("alice@example.com"),
     }));
+    states.notePeerChatState("alice@example.com");
     states.notifyComposing();
     expect(send).toHaveBeenCalledTimes(1);
     pref.setChatStatePreference("suppress");

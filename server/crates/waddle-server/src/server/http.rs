@@ -1845,6 +1845,7 @@ async fn create_websocket_state(
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,
         room_listings: Default::default(),
+        muji_session_rooms: Default::default(),
         local_space_publications: Arc::new(tokio::sync::Semaphore::new(8)),
         deps: WebSocketDeps {
             app_state: state.clone(),
@@ -1939,6 +1940,11 @@ async fn create_websocket_state(
         .ingress
         .bind_recovery_environment(Arc::downgrade(&websocket_state)
             as std::sync::Weak<dyn crate::ingress::RecoveryEnvironment>);
+    websocket_state
+        .deps
+        .protocol
+        .ingress
+        .bind_occupant_id_secret(server_config.occupant_id_secret.clone());
     room_effect_arm_supervisor.attach_drain_state(&websocket_state);
     // The revocation fence drives this replica's sweep of the rooms it
     // hosts: a seated occupant the grants no longer admit is removed.
@@ -2099,6 +2105,7 @@ fn promote_to_serving_and_spawn_janitors(
         );
     }
     spawn_sm_expiry_janitor(websocket_state);
+    crate::pubsub_item_expiry::spawn_pubsub_item_expiry_janitor(websocket_state);
     spawn_orphan_reaper_janitor(websocket_state, orphan_reaper_interval);
     spawn_pending_delivery_claim_janitor(websocket_state);
     spawn_notification_outbox_janitor(websocket_state);

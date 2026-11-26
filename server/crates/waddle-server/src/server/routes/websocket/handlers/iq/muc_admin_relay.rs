@@ -4,7 +4,7 @@
 //! room's claim: durable grants plus permission-derived affiliations, which
 //! are never persisted. A requester connected to any other node therefore
 //! forwards its list request to that owner over
-//! `waddle.clustering.relay.muc_admin_query.v1`, and the owner answers through
+//! `waddle.clustering.relay.muc_admin_query.v2`, and the owner answers through
 //! [`super::muc_admin::answer_admin_list_get`], the same function that answers
 //! a local GET. The answer travels as typed data and the origin builds the
 //! response stanza itself, so it leaves with the local wire shape. Only GETs
@@ -261,7 +261,11 @@ fn encoded_size_bound(answer: &AdminListAnswer) -> usize {
     match answer {
         AdminListAnswer::Affiliations(items) => items
             .iter()
-            .map(|(jid, _)| jid.as_str().len() + ENTRY_OVERHEAD_BYTES)
+            .map(|entry| {
+                entry.jid.as_str().len()
+                    + entry.nick.as_ref().map_or(0, String::len)
+                    + ENTRY_OVERHEAD_BYTES
+            })
             .sum(),
         AdminListAnswer::Roles(entries) => entries
             .iter()

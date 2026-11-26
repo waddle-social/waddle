@@ -1586,7 +1586,17 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
         &vcard_get(&format!("unknown-plugin@{extensions}")),
     )
     .await;
-    assert_item_not_found_for_test(&reply, "unknown bot vCard");
+    // XEP-0054: viewing another entity's missing vCard is
+    // `<service-unavailable/>`, never `<item-not-found/>`.
+    assert_eq!(reply.attr("type"), Some("error"), "{reply:?}");
+    assert!(
+        reply
+            .get_child("error", waddle_xmpp::ns::JABBER_CLIENT)
+            .is_some_and(|error| error
+                .children()
+                .any(|child| child.name() == "service-unavailable")),
+        "unknown bot vCard must be service-unavailable: {reply:?}"
+    );
 
     let vcard4 = pep_item_for_test(
         &state,

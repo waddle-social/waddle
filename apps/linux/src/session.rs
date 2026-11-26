@@ -1330,6 +1330,7 @@ pub(crate) mod tests {
             parent_thread_id: None,
             markup_spans: Vec::new(),
             broadcast_mention: None,
+            broadcast_spans: Vec::new(),
             mention_uris: Vec::new(),
             references: Vec::new(),
             forum_post_kind: None,
@@ -1348,6 +1349,7 @@ pub(crate) mod tests {
             call_thread: None,
             shared_files: Vec::new(),
             mds_displayed: None,
+            in_call_reaction: None,
         }
     }
 
@@ -1383,6 +1385,7 @@ pub(crate) mod tests {
             reply_fallback_end: None,
             markup_spans: Vec::new(),
             broadcast_mention: None,
+            broadcast_spans: Vec::new(),
             mention_uris: Vec::new(),
             references: Vec::new(),
             forum_post_kind: None,

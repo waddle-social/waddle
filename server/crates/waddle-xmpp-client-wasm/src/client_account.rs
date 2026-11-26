@@ -741,6 +741,7 @@ impl WaddleClient {
                 &activity.general,
                 activity.specific.as_deref(),
                 activity.text.as_deref(),
+                activity.lang.as_deref(),
             );
             let _ = send_iq_command(inner, iq).await?;
             Ok(JsValue::UNDEFINED)

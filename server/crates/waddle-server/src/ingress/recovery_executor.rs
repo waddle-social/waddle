@@ -105,6 +105,7 @@ pub(super) async fn recover_row(
         host_owned_resources,
         departed_occupants: departed.occupants,
         blocked_recipients: &blocked_recipients,
+        occupant_id_secret: uow.occupant_id_secret(),
     })?;
     record_discarded_receipts(uow, key, &rebuilt.discarded_receipts, &blocked_recipients).await?;
     let mut unsupported = !still_owed

@@ -364,6 +364,8 @@ async fn xep_0045_self_kick_delivers_307_before_iq_result() {
     let room = format!("self-kick-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     settle_clients(&mut [&mut admin, &mut alice]).await;
 
@@ -408,6 +410,8 @@ async fn xep_0045_kick_returns_iq_result_to_moderator_before_broadcast_copy() {
     let room = format!("kick-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
     settle_clients(&mut [&mut admin, &mut alice, &mut bob]).await;
@@ -464,6 +468,8 @@ async fn xep_0045_ban_returns_iq_result_before_301_presences() {
     let room = format!("ban-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     join_room(&mut alice, &room, ALICE).await;
     join_room(&mut bob, &room, BOB).await;
     settle_clients(&mut [&mut admin, &mut alice, &mut bob]).await;
@@ -533,6 +539,8 @@ async fn xep_0045_membership_loss_returns_iq_result_before_321_presences() {
     let room = format!("member-loss-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_members_only(&mut admin, &room).await;
@@ -606,6 +614,8 @@ async fn xep_0045_self_membership_loss_delivers_321_before_iq_result() {
     let room = format!("self-member-loss-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_members_only(&mut admin, &room).await;
@@ -674,6 +684,8 @@ async fn xep_0045_voice_change_returns_iq_result_before_role_update_presence() {
     let room = format!("voice-order-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
 
     join_room(&mut admin, &room, ADMIN).await;
+
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
     settle_clients(&mut [&mut admin]).await;
 
     make_moderated(&mut admin, &room).await;
@@ -707,5 +719,96 @@ async fn xep_0045_voice_change_returns_iq_result_before_role_update_presence() {
 
     let _ = admin.close().await;
     let _ = alice.close().await;
+    let _ = bob.close().await;
+}
+
+fn muc_admin_affiliation_get_iq(room: &str, id: &str, affiliation: &str) -> Element {
+    Element::builder("iq", NS_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+        .append(
+            Element::builder("query", NS_MUC_ADMIN)
+                .append(
+                    Element::builder("item", NS_MUC_ADMIN)
+                        .attr(
+                            minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                            affiliation,
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+/// XEP-0045 §9.5: affiliation results MUST NOT carry `role`, MUST carry
+/// `affiliation` and `jid`, and SHOULD carry `nick` except for an outcast.
+#[tokio::test]
+async fn xep_0045_affiliation_list_includes_nick_except_for_outcast() {
+    let _guard = TEST_SERIAL.lock().await;
+    let bob_pass = format!("bob-pass-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[(BOB, &bob_pass)]);
+    let admin_pass = server.fixed_account_password().to_string();
+    let mut admin = connect(&server, ADMIN, &admin_pass, "aff-nick-admin").await;
+    let mut bob = connect(&server, BOB, &bob_pass, "aff-nick-bob").await;
+    let room = format!("aff-nick-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let bob_jid = format!("{BOB}@{DOMAIN}");
+    let away_jid = format!("away@{DOMAIN}");
+    let banned_jid = format!("banned@{DOMAIN}");
+
+    join_room(&mut admin, &room, ADMIN).await;
+    ws_common::iq::unlock_created_room(&mut admin, &room).await;
+    grant_member(&mut admin, &room, &bob_jid).await;
+    grant_member(&mut admin, &room, &away_jid).await;
+    let ban_id = format!("ban-{}", uuid::Uuid::new_v4());
+    send_element(
+        &mut admin,
+        muc_admin_affiliation_iq(&room, &ban_id, &banned_jid, "outcast", None),
+    )
+    .await;
+    let _ = expect_iq_result(&mut admin, &ban_id).await;
+    join_room(&mut bob, &room, "bobby").await;
+    settle_clients(&mut [&mut admin, &mut bob]).await;
+
+    let items_for = |frame: &str| -> Vec<(String, Option<String>)> {
+        let root = parse_frame(frame);
+        let query = find_descendant(&root, "query", NS_MUC_ADMIN).expect("admin query");
+        query
+            .children()
+            .map(|item| {
+                assert!(item.attr("role").is_none(), "no role in affiliation list");
+                assert!(item.attr("affiliation").is_some());
+                (
+                    item.attr("jid").expect("jid").to_owned(),
+                    item.attr("nick").map(str::to_owned),
+                )
+            })
+            .collect()
+    };
+
+    let member_id = format!("members-{}", uuid::Uuid::new_v4());
+    send_element(
+        &mut admin,
+        muc_admin_affiliation_get_iq(&room, &member_id, "member"),
+    )
+    .await;
+    let members = items_for(&expect_iq_result(&mut admin, &member_id).await);
+    assert!(members.contains(&(bob_jid.clone(), Some("bobby".to_owned()))));
+    assert!(
+        members.contains(&(away_jid, None)),
+        "a member who never joined has no nick to report: {members:?}"
+    );
+
+    let outcast_id = format!("outcasts-{}", uuid::Uuid::new_v4());
+    send_element(
+        &mut admin,
+        muc_admin_affiliation_get_iq(&room, &outcast_id, "outcast"),
+    )
+    .await;
+    let outcasts = items_for(&expect_iq_result(&mut admin, &outcast_id).await);
+    assert_eq!(outcasts, vec![(banned_jid, None)]);
+
+    let _ = admin.close().await;
     let _ = bob.close().await;
 }

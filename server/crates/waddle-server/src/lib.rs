@@ -56,6 +56,7 @@ pub mod permissions;
 pub mod profile;
 pub mod pubsub;
 pub mod pubsub_authz;
+pub(crate) mod pubsub_item_expiry;
 pub mod push_registrations;
 pub mod push_service;
 /// Durable, FIFO room-mutation broadcast effect queue (#1646).

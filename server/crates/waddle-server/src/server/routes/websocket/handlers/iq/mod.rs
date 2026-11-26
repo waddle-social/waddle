@@ -36,8 +36,7 @@ use waddle_xmpp::pubsub::{
     build_pubsub_error, build_pubsub_items_result, build_pubsub_owner_subscriptions_result,
     build_pubsub_publish_result, build_pubsub_subscribe_result, build_pubsub_success,
     is_pep_request, is_pep_request_to, is_pubsub_iq, parse_pubsub_iq, pep_features, PubSubError,
-    PubSubItem, PubSubRequest, SubId, SubscriptionState, PEP_NODE_AVATAR_DATA,
-    PEP_NODE_AVATAR_METADATA,
+    PubSubItem, PubSubRequest, SubId, SubscriptionState,
 };
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::roster::{
@@ -64,7 +63,8 @@ use waddle_xmpp::xep::{
     is_last_activity_query, is_search_form_request, is_search_request, is_time_query,
     is_version_query, parse_command_from_iq, parse_moderation_iq, parse_search_request,
     AdHocCommandCondition, ChannelResult, Command, CommandError, CommandStatus, RsmRequest,
-    RsmResponse, Searchable, SpaceAffiliation, Xep0359StanzaId, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+    RsmResponse, SearchRequestError, Searchable, SortKey, SpaceAffiliation, Xep0359StanzaId,
+    NODE_COMMANDS, NS_CHANNEL_SEARCH, SERVICE_TYPE_MUC,
 };
 use waddle_xmpp::{
     Affiliation, SpaceDetails, Stanza, StanzaErrorCondition, StanzaErrorType, XmppError,
@@ -90,6 +90,7 @@ mod disco_info;
 pub(crate) use disco_info::muc_disco_info_for_remote;
 mod disco_items;
 pub(crate) use disco_items::{muc_rooms_for_remote, page_listing, RoomListings};
+mod client_access;
 pub(crate) mod errors;
 mod event_planning;
 pub(crate) mod event_planning_access;
@@ -103,11 +104,11 @@ mod last_activity;
 mod link_preview_lookup;
 pub(crate) mod link_preview_player_embed;
 mod link_preview_resolver;
-mod mentions_permissions;
 mod muc_admin;
 pub(crate) mod muc_admin_host_grant;
 #[cfg(feature = "clustering")]
 pub(crate) mod muc_admin_relay;
+mod muc_avatar;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
 // `handlers::message::muc_invite` persists the granted membership with
 // the exact same tuple write the admin affiliation path uses.
@@ -119,6 +120,8 @@ pub(crate) use spaces_remote::spaces_change_for_remote;
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
+mod muji_session_rooms;
+pub(crate) use muji_session_rooms::MujiSessionRooms;
 #[cfg(test)]
 mod muji_preparation_tests;
 mod pep_addressing;
@@ -142,6 +145,7 @@ mod spaces_publish;
 mod spaces_remote;
 mod spaces_retract;
 mod story_attachments;
+pub(crate) use story_attachments::cleanup_story_attachment_state;
 #[cfg(test)]
 mod test_helpers;
 mod vcard_private;
@@ -149,6 +153,7 @@ mod vcard_private;
 use archive_inbox_upload::handle_archive_inbox_upload_iq;
 use blocking::handle_blocking_iq;
 use caps_result::handle_caps_disco_info_result;
+use client_access::handle_client_access_iq;
 use commands::{handle_command_iq, CommandTargets};
 use community_items::handle_community_items;
 use community_publish::handle_community_publish;
@@ -175,13 +180,12 @@ use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::{outgoing_block_frames, route_full_jid_iq};
 use last_activity::handle_last_activity_iq;
 use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
-use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
 use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
 use muc_self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{
-    build_muc_owner_config_response, build_xmpp_error_response, muc_owner_authorized,
+    build_muc_owner_config_response, build_xmpp_error_response, room_action_authorized,
     server_affiliation_for_requester, space_affiliation_for_requester,
     spaces_node_mutation_allowed,
 };
@@ -200,12 +204,12 @@ pub use test_helpers::handle_iq;
 // IQ-error constructors without each having to re-import the
 // `errors` submodule directly.
 pub(super) use errors::{
-    bad_format_iq_error, bad_request_iq_error, conflict_iq_error, feature_not_implemented_iq_error,
-    forbidden_iq_error, internal_server_error_iq_error, item_not_found_iq_error,
-    jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error, not_authorized_iq_error,
-    service_unavailable_iq_error,
+    bad_format_iq_error, bad_request_iq_error, channel_search_iq_error, conflict_iq_error,
+    feature_not_implemented_iq_error, forbidden_iq_error, internal_server_error_iq_error,
+    item_not_found_iq_error, jid_malformed_iq_error, not_acceptable_iq_error, not_allowed_iq_error,
+    not_authorized_iq_error, service_unavailable_iq_error,
 };
-use muc_admin::handle_muc_admin_iq;
+pub(in crate::server::routes::websocket::handlers) use muc_admin::handle_muc_admin_iq;
 use push::handle_push_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
@@ -217,8 +221,8 @@ use vcard_private::{handle_private_storage_iq, handle_vcard_iq};
 pub(super) use super::super::{build_iq_error_xml_typed, build_iq_error_xml_with_payload};
 
 use super::super::{
-    build_iq_result_xml, element_to_xml, get_room_actor, get_room_actor_result, iq_to_xml,
-    is_muc_room_jid, stanza_to_xml, WebSocketState,
+    build_iq_result_xml, get_room_actor, get_room_actor_result, iq_to_xml, is_muc_room_jid,
+    stanza_to_xml, WebSocketState,
 };
 use super::presence::{
     get_managed_channel_for_room, host_grant_read_still_admitted, resolve_muc_room_archive_access,

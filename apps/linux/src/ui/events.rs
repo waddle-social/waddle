@@ -227,6 +227,7 @@ impl WaddleWindow {
 
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh.set_tooltip_text(Some("Refresh Events"));
+        super::a11y::label(&refresh, "Refresh events");
         refresh.set_valign(gtk::Align::Center);
         let window = self.downgrade();
         refresh.connect_clicked(move |_| {

@@ -3,7 +3,7 @@ package contributors
 import "github.com/cuenv/cuenv/schema"
 
 // CLI and release digests are independent of the CUE schema dependency.
-#CuenvVersion: "0.77.0"
+#CuenvVersion: "0.81.1"
 
 // Bootstrap only materializes pinned VCS dependencies. Explicit per-directory
 // CI and lock checks validate source; do not use partial workspace discovery.
@@ -27,15 +27,15 @@ import "github.com/cuenv/cuenv/schema"
 			case "$cuenv_platform" in
 			  Darwin-arm64|Darwin-aarch64)
 			    cuenv_asset="cuenv-darwin-arm64"
-			    cuenv_sha256="bdb3413abdea0c5617ed5a9ec3c10c5813dd6a3b8233305e81c53d76d5236647"
+			    cuenv_sha256="2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244"
 			    ;;
 			  Linux-aarch64|Linux-arm64)
 			    cuenv_asset="cuenv-linux-arm64"
-			    cuenv_sha256="fde68bff3e2adc383d25bc64530b0c72b53fab32181da97af99dbed52e7a6814"
+			    cuenv_sha256="287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8"
 			    ;;
 			  Linux-x86_64|Linux-amd64)
 			    cuenv_asset="cuenv-linux-x64"
-			    cuenv_sha256="d7a35a14778316c65ff725bd3c1bd776ea1610b09f02cc20badc588110899085"
+			    cuenv_sha256="f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc"
 			    ;;
 			  *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
 			esac

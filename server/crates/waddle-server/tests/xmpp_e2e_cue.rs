@@ -57,7 +57,6 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:time", "XEP-0202"),
     ("jabber:iq:version", "XEP-0092"),
     ("http://jabber.org/protocol/pubsub", "XEP-0060"),
-    ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
     ("http://jabber.org/protocol/pubsub#auto-create", "XEP-0060"),
     (
         "http://jabber.org/protocol/pubsub#persistent-items",
@@ -166,6 +165,7 @@ const ADVERTISED_FEATURE_XEPS: &[(&str, &str)] = &[
     ("urn:xmpp:jingle-message:0", "XEP-0353"),
     ("urn:xmpp:extdisco:2", "XEP-0215"),
     ("urn:xmpp:jingle:muji:0", "XEP-0272"),
+    ("urn:xmpp:coin:1", "XEP-0298"),
     ("urn:xmpp:pubsub-social-feed:1", "XEP-0472"),
     ("urn:xmpp:pubsub-social-feed:stories:0", "XEP-0501"),
     ("urn:xmpp:spaces:0", "XEP-0503"),
@@ -314,6 +314,10 @@ const CUE_ONLY_XEP_TAGS: &[XepCoverageExemption] = &[
         reason: "URL address payload is exercised through the FileShare CUE DSL; no standalone module exists.",
     },
     XepCoverageExemption {
+        xep: "XEP-0163",
+        reason: "PEP is signalled by the pubsub/pep identity plus XEP-0060 features and defines no feature var of its own; exercised by CUE.",
+    },
+    XepCoverageExemption {
         xep: "XEP-0511",
         reason: "Link metadata enrichment is server behavior exercised by CUE; no standalone module exists.",
     },
@@ -349,20 +353,12 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
         reason: "Unread tracker is an in-memory library helper with no advertised server protocol surface.",
     },
     XepCoverageExemption {
-        xep: "XEP-0445",
-        reason: "Pre-auth registration element helper is not wired into a server registration flow yet.",
-    },
-    XepCoverageExemption {
         xep: "XEP-0448",
         reason: "Encrypted SFS payload model is client-carried message XML with no server-specific behavior.",
     },
     XepCoverageExemption {
         xep: "XEP-0449",
         reason: "Sticker payload model is client-carried message XML with no server-specific behavior.",
-    },
-    XepCoverageExemption {
-        xep: "XEP-0452",
-        reason: "Legacy MUC mention-notification payload is not advertised; server behavior uses XEP-0513.",
     },
     XepCoverageExemption {
         xep: "XEP-0469",
@@ -379,10 +375,6 @@ const IMPLEMENTED_XEP_COVERAGE_EXEMPTIONS: &[XepCoverageExemption] = &[
     XepCoverageExemption {
         xep: "XEP-0488",
         reason: "MUC token invite payload helper is not wired into server room invite behavior yet.",
-    },
-    XepCoverageExemption {
-        xep: "XEP-0500",
-        reason: "Slow-mode config/rate-limit helper is not wired into MUC send authorization yet.",
     },
     XepCoverageExemption {
         xep: "XEP-0502",
@@ -578,6 +570,10 @@ enum Step {
         room: String,
         nick: String,
     },
+    /// XEP-0045 §10.1.2: the owner of a room its join created asks for an
+    /// instant room, which unlocks it.
+    #[serde(rename = "unlockMucRoom")]
+    UnlockMucRoom { actor: Actor, room: String },
     #[serde(rename = "setMucAffiliation")]
     SetMucAffiliation {
         actor: Actor,
@@ -1242,6 +1238,7 @@ fn add_step_xep_evidence(step: &Step, evidence: &mut BTreeSet<&'static str>) {
             }
         }
         Step::JoinMuc { .. }
+        | Step::UnlockMucRoom { .. }
         | Step::SetMucAffiliation { .. }
         | Step::ExpectMucAffiliation { .. }
         | Step::ExpectMucAdminDenied { .. } => {
@@ -1361,11 +1358,12 @@ fn add_text_xep_evidence(text: &str, evidence: &mut BTreeSet<&'static str>) {
         ("vcard-temp", "XEP-0054"),
         ("jabber:iq:search", "XEP-0055"),
         ("http://jabber.org/protocol/pubsub", "XEP-0060"),
-        ("http://jabber.org/protocol/pubsub#pep", "XEP-0163"),
         ("urn:xmpp:avatar:metadata", "XEP-0084"),
         ("urn:xmpp:avatar:data", "XEP-0084"),
         ("http://jabber.org/protocol/chatstates", "XEP-0085"),
         ("jabber:iq:version", "XEP-0092"),
+        // XEP-0163 §6: PEP support is the pubsub/pep identity, named here.
+        ("Personal Eventing Protocol", "XEP-0163"),
         ("http://jabber.org/protocol/mood", "XEP-0107"),
         ("http://jabber.org/protocol/activity", "XEP-0108"),
         ("http://jabber.org/protocol/caps", "XEP-0115"),
@@ -1699,6 +1697,7 @@ fn advertised_feature_vars() -> BTreeSet<String> {
             waddle_xmpp_core::types::Moderation::Unmoderated,
         ))
         .chain(waddle_xmpp::disco::info::call_features())
+        .chain(waddle_xmpp::disco::info::calls_mixer_features())
         .chain(waddle_xmpp::pubsub::pep_features())
         .chain([waddle_xmpp::disco::Feature::new("jabber:iq:search")])
         .map(|feature| feature.0)
@@ -2351,11 +2350,17 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             let xml = stanza_xml(Stanza::Presence(presence))?;
             let client = client_mut(ctx, actor)?;
             client.send(&xml).await.map_err(|error| anyhow!(error))?;
-            recv_matching(ctx, actor, |frame| {
+            let self_presence = recv_matching(ctx, actor, |frame| {
                 frame_is_muc_join_self_presence(frame, room, nick)
             })
             .await?;
+            // XEP-0045 §10.1.1: a room the join created (status 201) stays
+            // locked until its owner asks for an instant room (§10.1.2).
+            if self_presence.contains("code='201'") || self_presence.contains("code=\"201\"") {
+                unlock_muc_room(ctx, actor, room).await?;
+            }
         }
+        Step::UnlockMucRoom { actor, room } => unlock_muc_room(ctx, actor, room).await?,
         Step::SetMucAffiliation {
             actor,
             room,
@@ -2772,6 +2777,18 @@ async fn execute_step(ctx: &mut ScenarioContext, step: &Step) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Ask for the instant room (XEP-0045 §10.1.2) and wait for the result.
+/// Frames read past meanwhile (the room subject) stay pending for the
+/// scenario's own expectations.
+async fn unlock_muc_room(ctx: &mut ScenarioContext, actor: &Actor, room: &str) -> Result<()> {
+    let id = ws_common::iq::send_unlock_created_room(client_mut(ctx, actor)?, room).await;
+    recv_matching(ctx, actor, |frame| {
+        frame.contains("type='result'") && frame.contains(id.as_str())
+    })
+    .await?;
     Ok(())
 }
 

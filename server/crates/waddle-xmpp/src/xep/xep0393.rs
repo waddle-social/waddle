@@ -152,13 +152,17 @@ pub fn parse_blocks(input: &str) -> Vec<Block> {
         // Preformatted block
         if line.starts_with("```") {
             let mut code = String::new();
+            let mut first = true;
             for inner in lines.by_ref() {
                 if inner == "```" {
                     break;
                 }
-                if !code.is_empty() {
+                // XEP-0393 implementation note: preformatted text is returned
+                // without modification, so leading empty lines are kept.
+                if !first {
                     code.push('\n');
                 }
+                first = false;
                 code.push_str(inner);
             }
             blocks.push(Block::CodeBlock(code));

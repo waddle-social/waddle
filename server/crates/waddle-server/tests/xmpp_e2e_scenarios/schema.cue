@@ -48,6 +48,7 @@ package xmpp_e2e_scenarios
 	#ExpectMessage |
 	#ExpectCarbon |
 	#JoinMuc |
+	#UnlockMucRoom |
 	#SetMucAffiliation |
 	#ExpectMucAffiliation |
 	#ExpectMucAdminDenied |
@@ -198,6 +199,13 @@ package xmpp_e2e_scenarios
 	actor: #Actor
 	room:  string
 	nick:  *actor.username | string
+	...
+}
+
+#UnlockMucRoom: {
+	kind:  "unlockMucRoom"
+	actor: #Actor
+	room:  string
 	...
 }
 

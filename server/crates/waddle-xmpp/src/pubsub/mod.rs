@@ -25,8 +25,9 @@ pub use stanzas::{
     PubSubItem, PubSubRequest, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT, NS_PUBSUB_OWNER,
 };
 pub use storage::{
-    InMemoryPubSubStorage, PubSubNode, PubSubStorage, PublicationError, PublicationFingerprint,
-    PublicationNode, PublicationVersion, PublishResult, StoredItem, VersionedPublishResult,
+    ExpiredItem, InMemoryPubSubStorage, PubSubNode, PubSubStorage, PublicationError,
+    PublicationFingerprint, PublicationNode, PublicationVersion, PublishResult, StoredItem,
+    VersionedPublishResult,
 };
 
 // Re-export typed payloads from core for convenience.

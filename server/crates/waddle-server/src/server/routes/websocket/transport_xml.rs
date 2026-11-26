@@ -270,12 +270,21 @@ pub(super) fn build_not_authorized_stream_error() -> String {
 }
 
 pub(super) fn build_stream_features_element(authenticated: bool) -> Element {
-    build_stream_features_element_with_sasl2(authenticated, false)
+    build_stream_features_element_with_sasl2(authenticated, None)
+}
+
+/// What a server offers inside its SASL2 `<authentication/>` feature besides
+/// its mechanisms.
+pub(super) struct Sasl2Offer {
+    /// The extensions a client may request inline with `<authenticate/>`
+    /// (XEP-0388): XEP-0198 resumption and XEP-0386 Bind 2. `None` where the
+    /// connection processes none of them.
+    pub(super) inline: Option<waddle_xmpp_core::xep0388_inline::Sasl2InlineOffer>,
 }
 
 pub(super) fn build_stream_features_element_with_sasl2(
     authenticated: bool,
-    sasl2_enabled: bool,
+    sasl2: Option<Sasl2Offer>,
 ) -> Element {
     let mut features = Element::builder("features", waddle_xmpp::ns::STREAM);
     if authenticated {
@@ -301,14 +310,16 @@ pub(super) fn build_stream_features_element_with_sasl2(
                 )
                 .build(),
         );
-        if sasl2_enabled {
+        if let Some(offer) = sasl2 {
             features = features.append(
                 waddle_xmpp_core::xep0388::Sasl2Feature {
                     mechanisms: vec![
                         waddle_xmpp_core::xep0388::Sasl2Mechanism::ScramSha256,
                         waddle_xmpp_core::xep0388::Sasl2Mechanism::OAuthBearer,
                     ],
-                    inline: None,
+                    inline: offer.inline.as_ref().map(
+                        waddle_xmpp_core::xep0388_inline::Sasl2InlineOffer::to_inline_features,
+                    ),
                 }
                 .to_element()
                 .expect("SASL2 fixture feature has one supported mechanism"),
@@ -326,9 +337,9 @@ pub(super) fn build_stream_features_xml(authenticated: bool) -> String {
 
 pub(super) fn build_stream_features_for_phase_element(
     phase: &ConnectionPhase,
-    sasl2_enabled: bool,
+    sasl2: Option<Sasl2Offer>,
 ) -> Element {
-    build_stream_features_element_with_sasl2(phase.is_authenticated(), sasl2_enabled)
+    build_stream_features_element_with_sasl2(phase.is_authenticated(), sasl2)
 }
 
 pub(super) fn sasl2_failure_element(
