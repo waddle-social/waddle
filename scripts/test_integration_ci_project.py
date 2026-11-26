@@ -103,6 +103,57 @@ class DiscoveryContracts(unittest.TestCase):
             self.verify()
 
 
+class ExecutionCacheContracts(unittest.TestCase):
+    def test_only_operator_queue_gets_a_private_write_only_store(self):
+        previous = {"CUENV_CACHE": "read", "CUENV_CACHE_DIR": "/unused/shared-cache",
+                    "CUENV_REMOTE_CACHE": "https://unused.invalid", "CUENV_REMOTE_CACHE_UPLOAD": "true"}
+        private_stores = []
+        for path, project, pipeline in (("operator", "waddle-operator", "queueChecks"),
+                                        ("operator", "waddle-operator", "queueChecks"),
+                                        ("operator", "waddle-operator", "pullRequest"),
+                                        ("apps/linux", "waddle-linux", "queueChecks")):
+            def executor(command, **kwargs):
+                if command[0] == "git":
+                    return subprocess.CompletedProcess(command, 0, "head")
+                if command[1:] == ["--version"]:
+                    return subprocess.CompletedProcess(command, 0, "cuenv 0.81.1")
+                if "--help" in command:
+                    return subprocess.CompletedProcess(command, 0, "  --all   run all tasks")
+                env = kwargs["env"]
+                self.assertEqual(env["NIX_CONFIG"], "sandbox = true")
+                if path == "operator" and pipeline == "queueChecks":
+                    self.assertEqual((env["CUENV_CACHE"], env["CUENV_REMOTE_CACHE"], env["CUENV_REMOTE_CACHE_UPLOAD"]),
+                                     ("write", "", "false"))
+                    store = Path(env["CUENV_CACHE_DIR"])
+                    self.assertTrue(store.is_dir())
+                    self.assertFalse(list(store.iterdir()))
+                    if "--dry-run" in command:
+                        private_stores.append(store)
+                    else:
+                        self.assertEqual(store, private_stores[-1])
+                else:
+                    self.assertEqual(env["CUENV_CACHE"], "off")
+                    for key in ("CUENV_CACHE_DIR", "CUENV_REMOTE_CACHE", "CUENV_REMOTE_CACHE_UPLOAD"):
+                        self.assertEqual(env[key], previous[key])
+                if "--dry-run" in command:
+                    Path(command[command.index("--output") + 1]).write_text(json.dumps({
+                        "projects": [{"project": path, "pipeline": pipeline, "tasks": ["verify"]}]}))
+                    return subprocess.CompletedProcess(command, 0)
+                raise subprocess.CalledProcessError(17, command)
+
+            result = {"path": path, "project": project, "pipeline": pipeline,
+                      "task_names": ["verify"], "report_project": str(Path(path).resolve())}
+            with self.subTest(path=path, pipeline=pipeline), tempfile.TemporaryDirectory() as tmp:
+                with patch.dict(os.environ, {**previous, "NIX_CONFIG": "sandbox = true"}), \
+                     patch.object(module, "expected_context", return_value={"provider": "local", "sha": "current"}), \
+                     patch.object(module, "report_path", return_value=Path(tmp) / "report.json"), \
+                     patch.object(module.subprocess, "run", side_effect=executor), \
+                     self.assertRaises(subprocess.CalledProcessError):
+                    module.execute_pipeline(result, path)
+        self.assertEqual(len(set(private_stores)), 2)
+        self.assertTrue(all(not store.exists() for store in private_stores))
+
+
 class ReportContracts(unittest.TestCase):
     def setUp(self):
         self.context = {"provider": "github", "event": "merge_group", "ref_name": "gh-readonly-queue/main/example", "base_ref": "", "sha": "a" * 40}
