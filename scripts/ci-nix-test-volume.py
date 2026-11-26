@@ -76,6 +76,10 @@ def probe(args):
         "source_before": source_hash(),
     }
     try:
+        # The Determinate installer appends its own substituter to nix.conf.
+        # Scope every Nix client in this measurement to the upstream cache.
+        config = os.environ.get("NIX_CONFIG", "")
+        os.environ["NIX_CONFIG"] = config + "\nsubstituters = https://cache.nixos.org/\n"
         if args.edit != (args.phase != "seed"):
             raise ValueError("invalid mutation selection")
         unedited_path = volume.evaluate(LANE)
