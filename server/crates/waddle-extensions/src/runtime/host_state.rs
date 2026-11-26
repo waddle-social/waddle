@@ -46,8 +46,10 @@ impl AggregateStoreLimits {
         max_total_memory_bytes: usize,
         tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
     ) -> Self {
+        // Aggregate ceiling across all store memories is enforced below by `ResourceLimiter`.
+        let single_memory_cap = max_total_memory_bytes;
         let inner = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(max_total_memory_bytes)
+            .memory_size(single_memory_cap)
             .table_elements(20_000)
             .tables(8)
             .memories(4)

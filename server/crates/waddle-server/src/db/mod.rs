@@ -24,6 +24,8 @@ pub(crate) mod runtime_store_acl;
 pub mod s2s_accounts;
 pub mod s2s_spaces;
 mod schema;
+pub mod tenant_registry;
+pub mod turso_tenant_store;
 mod value;
 
 use sqlx::postgres::PgPool;

@@ -14,7 +14,8 @@ use waddle_xmpp::protocol::handlers::session_initiate_rate_limit::{
 use waddle_xmpp::protocol::{ConnectionPhase, KeepaliveConfig, StanzaDispatcher};
 use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::registry::{
-    ConnectionRegistry, OutboundStanza, RegisterUserResource, UserRegistryActor,
+    ConnectionRegistry, OutboundStanza, RegisterUserResource, SocketOutboundEndpoint,
+    UserRegistryActor,
 };
 use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -427,8 +428,8 @@ pub async fn run_extension_command_decoupled_for_test(
     let user_registry = websocket_state.deps.protocol.user_registry.clone();
     let inference_stream_tasks = websocket_state.deps.inference_stream_tasks.clone();
 
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(16);
-    let owner = connection_registry.register(requester.clone(), outbound_tx);
+    let (endpoint, outbound_rx) = SocketOutboundEndpoint::channel(16);
+    let owner = connection_registry.register(requester.clone(), endpoint);
     let entry = connection_registry.entry(&requester).expect("entry");
     user_registry
         .ask(RegisterUserResource {

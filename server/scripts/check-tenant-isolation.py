@@ -233,6 +233,68 @@ def check_repo(root: Path) -> tuple[int, list[str]]:
     return len(scanned_files), errors
 
 
+def run_self_test() -> int:
+    """Verify each isolation detector triggers on synthetic negative boundary probes."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="waddle_tenant_guard_selftest_") as tmp:
+        root = Path(tmp)
+        srv = root / "crates" / "waddle-server" / "src" / "server" / "routes"
+        db_dir = root / "crates" / "waddle-server" / "src" / "db"
+        ext_rt = root / "crates" / "waddle-extensions" / "src" / "runtime"
+        xmpp_src = root / "crates" / "waddle-xmpp" / "src"
+        scripts_dir = root / "scripts"
+        for d in (srv, db_dir, ext_rt, xmpp_src, scripts_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "tenant-isolation-allowlist.txt").write_text("", encoding="utf-8")
+
+        # 1. Negative probe: hardcoded local waddle id
+        (xmpp_src / "probe_local.rs").write_text(
+            'fn probe() { let _ = WaddleId::try_new("local"); }\n', encoding="utf-8"
+        )
+        # 2. Negative probe: unscoped store/registry constructors
+        (db_dir / "probe_ctor.rs").write_text(
+            "fn probe() { let _ = RoomRegistryActor::new(); let _ = TursoTenantStore::open_raw(); }\n",
+            encoding="utf-8",
+        )
+        (srv / "probe_route.rs").write_text(
+            "fn probe() { let _ = ConnectionRegistry::new(); }\n", encoding="utf-8"
+        )
+        # 3. Negative probe: global BareJid static map
+        (xmpp_src / "probe_static.rs").write_text(
+            "static GLOBAL_SESSIONS: DashMap<BareJid, String> = DashMap::new();\n",
+            encoding="utf-8",
+        )
+        # 4. Negative probe: unbounded StoreLimitsBuilder + missing epoch_interruption
+        (ext_rt / "bad_limits.rs").write_text(
+            "fn probe() { let _ = StoreLimitsBuilder::new(); }\n", encoding="utf-8"
+        )
+        (ext_rt / "loader.rs").write_text(
+            "fn engine() { let _cfg = wasmtime::Config::new(); }\n", encoding="utf-8"
+        )
+
+        _, errors = check_repo(root)
+        error_blob = "\n".join(errors)
+        expected_fragments = (
+            f"probe_local.rs: {HARDCODED_LOCAL_WADDLE}:",
+            f"probe_ctor.rs: {UNSCOPED_STORE_CTOR}:",
+            f"probe_route.rs: {UNSCOPED_STORE_CTOR}:",
+            f"probe_static.rs: {GLOBAL_BAREJID_STATIC}:",
+            f"bad_limits.rs: {UNBOUNDED_WASM_MEMORIES}:",
+            f"loader.rs: {UNBOUNDED_WASM_MEMORIES}:",
+        )
+        missing = [frag for frag in expected_fragments if frag not in error_blob]
+        if missing:
+            print(
+                f"ERROR: self-test missed expected boundary violations: {missing}\n{error_blob}",
+                file=sys.stderr,
+            )
+            return 1
+
+    print("tenant isolation guard self-test passed (all 4 negative boundary classes rejected)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -241,7 +303,19 @@ def main(argv: list[str] | None = None) -> int:
         default=".",
         help="Repository root or server workspace root (default: .)",
     )
+    parser.add_argument(
+        "--server-only",
+        action="store_true",
+        help="Scope check to server crates (default behavior; accepted for script consistency)",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run negative boundary self-tests in an isolated temporary directory",
+    )
     args = parser.parse_args(argv)
+    if args.self_test:
+        return run_self_test()
     count, errors = check_repo(Path(args.root).resolve())
     if errors:
         for err in errors:

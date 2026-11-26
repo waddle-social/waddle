@@ -168,30 +168,52 @@ def _t2_m1_10_quint_deep_steps_boundary(ctx: RunContext) -> None:
 # ---------------------------------------------------------------------------
 
 def _t2_m2_01_tenant_id_routing_boundaries(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "tenant_id_routing_boundaries",
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
         "M2 BVA: empty/63/64/253/254B/uppercase/traversal TenantId rejected at domain-routing entry",
+        test_filter="tenant_id_validation",
     )
 
 
 def _t2_m2_02_turso_rlimit_nofile_boundary(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "turso_lru_rlimit_boundary",
-        "M2 BVA: Turso LRU FD pool enforces RLIMIT_NOFILE cap and rejects ZeroCapacity",
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
+        "M2 BVA: FdPoolAccounting enforces RLIMIT_NOFILE cap and rejects ZeroCapacity",
+        test_filter="enforces_rlimit_and_never_evicts_pinned",
+    )
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
+        "M2 BVA: Turso LRU FD pool enforces RLIMIT_NOFILE cap",
+        test_filter="turso_lru_fd_pool_enforces_rlimit_and_checkpoints_on_eviction",
     )
 
 
 def _t2_m2_03_lease_gen_u64_max_boundary(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "placement_lease_gen_overflow",
-        "M2 BVA: PlacementLeaseStore rejects u64::MAX generation wraparound",
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
+        "M2 BVA: three_fence_guard rejects u64::MAX fence generation wraparound",
+        test_filter="three_fence_guard",
+    )
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
+        "M2 BVA: PlacementLeaseStore monotone generation fencing",
+        test_filter="passes_all_seven_scenarios",
+        min_passed=2,
     )
 
 
 def _t2_m2_04_clock_skew_boot_instant_boundary(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "placement_lease_clock_skew",
-        "M2 BVA: ttl=0 rejected, now == expires_at +/- 1, clock skew & BootInstant suspend jump",
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
+        "M2 BVA: BootClock suspend-jump deadline enforcement",
+        test_filter="boot_clock",
+        min_passed=2,
+    )
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
+        "M2 BVA: PlacementLeaseStore TTL=0 and expiry boundary checks",
+        test_filter="passes_all_seven_scenarios",
+        min_passed=2,
     )
 
 

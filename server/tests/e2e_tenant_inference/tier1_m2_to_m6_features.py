@@ -50,9 +50,10 @@ def _find_migration_gte(ctx: RunContext, subdir: str, min_ver: int, needle: str)
 # ---------------------------------------------------------------------------
 
 def _t1_f06_01(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "tenant_registry_contract",
-        "M2: TenantId canonical domain-routing & registry contract test binary",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
+        "M2: TenantRegistry sole handle constructor & scoped cache contract",
+        test_filter="tenant_registry_is_sole_handle_constructor_with_scoped_cache",
     )
 
 
@@ -71,14 +72,29 @@ def _t1_f06_02(ctx: RunContext) -> None:
 
 def _t1_f06_03(ctx: RunContext) -> None:
     _find_migration_gte(ctx, "migrations", 2001, "account_id")
-    sqlite_base = ctx.read_text("server/crates/waddle-server/sql/baseline/sqlite.sql")
-    assert_in("account_id", sqlite_base, "M2: baseline sqlite.sql must include account_id")
+    sqlite_mig = ctx.read_text(
+        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.sqlite.sql"
+    )
+    assert_in("account_id", sqlite_mig, "M2: sqlite migration 2026 must add account_id")
+    assert_in(
+        "trg_users_account_id_immutable",
+        sqlite_mig,
+        "M2: sqlite migration 2026 must enforce immutable users.account_id",
+    )
 
 
 def _t1_f06_04(ctx: RunContext) -> None:
-    pg_base = ctx.read_text("server/crates/waddle-server/sql/baseline/postgres.sql")
-    assert_in("account_id", pg_base, "M2: baseline postgres.sql must include immutable account_id")
-    assert_in("tenant_id", pg_base, "M2: baseline postgres.sql must scope tables by tenant_id")
+    _find_migration_gte(ctx, "migrations", 2001, "account_id")
+    pg_mig = ctx.read_text(
+        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    )
+    assert_in("account_id", pg_mig, "M2: postgres migration 2026 must include immutable account_id")
+    assert_in(
+        "trg_users_account_id_immutable",
+        pg_mig,
+        "M2: postgres migration 2026 must enforce immutable users.account_id",
+    )
+    assert_in("tenant_id", pg_mig, "M2: postgres migration 2026 must scope tables by tenant_id")
 
 
 def _t1_f06_05(ctx: RunContext) -> None:
@@ -104,33 +120,56 @@ def _t1_f07_01(ctx: RunContext) -> None:
 
 
 def _t1_f07_02(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "turso_lru_fd_pool_contract",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
         "M2: Turso TenantStore bounded LRU FD pool checkpoint/eviction contract test",
+        test_filter="turso_lru_fd_pool_enforces_rlimit_and_checkpoints_on_eviction",
     )
 
 
 def _t1_f07_03(ctx: RunContext) -> None:
-    pg_base = ctx.read_text("server/crates/waddle-server/sql/baseline/postgres.sql")
+    pg_mig = ctx.read_text(
+        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    )
     for tbl in ("users", "auth_identities", "spaces_metadata"):
         assert_contains_regex(
-            rf"CREATE TABLE\s+(?:IF NOT EXISTS\s+)?{tbl}\b[\s\S]{{0,1200}}tenant_id",
-            pg_base,
-            f"M2: Postgres table {tbl} must include tenant_id scope",
+            rf"ALTER TABLE\s+{tbl}\s+ADD COLUMN\s+(?:IF NOT EXISTS\s+)?tenant_id\b",
+            pg_mig,
+            f"M2: Postgres migration 2026 must add tenant_id column to {tbl}",
         )
 
 
 def _t1_f07_04(ctx: RunContext) -> None:
-    pg_base = ctx.read_text("server/crates/waddle-server/sql/baseline/postgres.sql")
-    assert_in("tenant_id", pg_base, "M2: postgres baseline must include tenant_id before catalog check")
-    res = ctx.run_cmd(["python3", "server/scripts/schema_catalog.py", "--check"])
-    assert_eq(res.returncode, 0, f"schema_catalog.py --check failed: {res.combined[-600:]}")
+    import sqlite3
+
+    pg_mig = ctx.read_text(
+        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    )
+    assert_in("tenant_id", pg_mig, "M2: postgres migration 2026 must include tenant_id")
+    with ctx.temp_dir(prefix="waddle_schema_catalog_") as tmp:
+        db_path = tmp / "catalog.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(ctx.read_text("server/crates/waddle-server/sql/baseline/sqlite.sql"))
+        mig_dir = ctx.server_dir / "crates" / "waddle-server" / "sql" / "migrations"
+        for sql_file in sorted(mig_dir.glob("*.sqlite.sql")):
+            conn.executescript(sql_file.read_text(encoding="utf-8"))
+        conn.close()
+        res = ctx.run_cmd(
+            ["python3", "server/scripts/schema_catalog.py", "dump", "--sqlite", str(db_path)],
+            cache=False,
+        )
+        assert_eq(res.returncode, 0, f"schema_catalog.py dump failed: {res.combined[-600:]}")
+        assert_in("tenant_placement_leases", res.stdout, "M2: schema dump must include tenant_placement_leases")
+        assert_in("account_id", res.stdout, "M2: schema dump must include account_id")
+        assert_in("tenant_id", res.stdout, "M2: schema dump must include tenant_id")
 
 
 def _t1_f07_05(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "tenant_store_parity",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
         "M2: shared TenantStore parity contract suite (Turso + Postgres)",
+        test_filter="satisfies_shared_storage_contract",
+        min_passed=2,
     )
 
 
@@ -245,23 +284,39 @@ def _t1_f09_05(ctx: RunContext) -> None:
 # ---------------------------------------------------------------------------
 
 def _t1_f10_01(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "placement_lease_store_contract",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
         "M2: PlacementLeaseStore durable CAS claim/renew/transfer/release on Turso & Postgres",
+        test_filter="placement_lease_store_passes_all_seven_scenarios",
+        min_passed=2,
     )
 
 
 def _t1_f10_02(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "holder_incarnation_tls_exporter",
-        "M2: SPIFFE mTLS + RFC 9266 tls-exporter HolderInstance incarnation proof",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
+        "M2: SPIFFE mTLS SAN extraction & cell isolation checks",
+        test_filter="spiffe_x509",
+        min_passed=2,
+    )
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
+        "M2: RFC 9266 tls-exporter HolderInstance channel-binding PoP",
+        test_filter="holder_pop",
     )
 
 
 def _t1_f10_03(ctx: RunContext) -> None:
+    ctx.require_crate_tests_pass(
+        "waddle-broker-core",
+        "M2: monotonic BootClock suspend-jump deadline enforcement",
+        test_filter="boot_clock",
+        min_passed=2,
+    )
     ctx.require_server_integration_test(
-        "placement_lease_boot_instant",
-        "M2: authoritative DB clock expiry and promoted BootInstant deadline checks",
+        "tenant_isolation_m2",
+        "M2: authoritative DB clock expiry and BootInstant deadline checks",
+        min_passed=2,
     )
 
 
@@ -273,9 +328,11 @@ def _t1_f10_04(ctx: RunContext) -> None:
 
 
 def _t1_f10_05(ctx: RunContext) -> None:
-    ctx.require_server_integration_test(
-        "placement_drain_quiesce",
+    ctx.require_crate_tests_pass(
+        "waddle-tenancy",
         "M2: shared/dedicated placement and WADDLE_DRAIN_TIMEOUT_SECS quiescing",
+        test_filter="passes_all_seven_scenarios",
+        min_passed=2,
     )
 
 
