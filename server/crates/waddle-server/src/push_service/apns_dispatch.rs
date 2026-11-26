@@ -221,6 +221,8 @@ pub(super) async fn dispatch_apns_device(
             content: parsed.content.as_ref().map(|content| ApnsAlertContent {
                 sender: &content.sender,
                 body: content.body.as_deref(),
+                sender_name: content.names.sender.as_ref(),
+                room_name: content.names.room.as_ref(),
             }),
         })
         .and_then(|payload| payload.encode())

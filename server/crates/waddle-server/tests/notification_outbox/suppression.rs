@@ -89,7 +89,7 @@ async fn assert_inbox_witness_unchanged(
 
 /// Upsert a per-conversation rich-payload opt-in for a DM so the
 /// drain's T1 evaluator resolves rich XEP-0357 summaries.
-async fn opt_in_rich_payload(
+pub(super) async fn opt_in_rich_payload(
     projection: &waddle_server::notification_settings_projection::NotificationSettingsProjectionStore,
     recipient: &BareJid,
     conversation: &BareJid,

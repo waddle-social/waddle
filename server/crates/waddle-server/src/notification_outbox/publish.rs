@@ -470,7 +470,8 @@ impl NotificationOutboxStore {
         // XEP-0357 `message-count` stays scoped to this conversation and
         // thread. APNs reads the account-wide total immediately before send
         // so a delayed retry cannot replay an old absolute app-icon badge.
-        let item = job.to_xep0357_pubsub_item_with_count(message_count);
+        let names = self.resolve_push_display_names(job).await;
+        let item = job.to_xep0357_pubsub_item_with_count(message_count, names.as_ref());
         let Some((item, publish_options)) = self
             .freeze_approved_item(job, &item, registration.publish_options.as_ref())
             .await?
@@ -1070,7 +1071,7 @@ mod tests {
             .await
             .expect("current unread")
             .expect("inbox entry present");
-        let item = claimed.to_xep0357_pubsub_item_with_count(current_count);
+        let item = claimed.to_xep0357_pubsub_item_with_count(current_count, None);
         let payload = item.payload.expect("payload");
         let summary = payload
             .children()

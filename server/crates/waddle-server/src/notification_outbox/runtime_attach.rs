@@ -201,6 +201,7 @@ pub(super) async fn attach_existing(
         db,
         owner_preparation: None,
         remote_publisher: Default::default(),
+        push_display_names: Default::default(),
     })
 }
 

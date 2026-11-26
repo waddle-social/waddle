@@ -3,6 +3,7 @@
 use super::routes;
 use super::run_ingress_custody_sweep;
 use crate::notification_outbox::{DrainBatch, DrainScope};
+use crate::push_display_names::PublishedPushDisplayNames;
 
 #[cfg(feature = "clustering")]
 use super::error;
@@ -3930,6 +3931,20 @@ pub(in crate::server::session_janitors) async fn run_push_service_publish_job_sw
 }
 
 pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketState>) {
+    let deps = &websocket_state.deps;
+    deps.protocol
+        .notification_outbox
+        .attach_push_display_names(Arc::new(PublishedPushDisplayNames {
+            registry: deps.protocol.room_registry.clone(),
+            pubsub: deps.protocol.pubsub_storage.clone(),
+            db_pool: deps.app_state.db_pool.clone(),
+            local_domain: deps
+                .auth_state
+                .caps_server_domain
+                .as_jid()
+                .domain()
+                .to_owned(),
+        }));
     let weak_state = Arc::downgrade(websocket_state);
     let interval_secs = std::env::var("WADDLE_NOTIFICATION_OUTBOX_JANITOR_INTERVAL")
         .ok()

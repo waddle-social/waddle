@@ -10,8 +10,9 @@
 //!   id, key id, and collapse id newtypes.
 //! - [`provider_token`]: ES256 provider authentication token signer
 //!   with a 50-minute reuse cache and an injectable clock.
-//! - [`payload`]: the minimal alert payload (no sender, no body) built
-//!   from serde structs and bounded by Apple's 4096-byte limit.
+//! - [`payload`]: generic alerts by default, with message content and
+//!   display names for opted-in conversations. Serde structs keep the
+//!   payload within Apple's 4096-byte limit.
 //! - [`outcome`]: Apple's documented rejection reasons and the typed
 //!   delivery outcome the worker maps to attempt statuses.
 //! - [`sender`]: the object-safe [`ApnsSender`] trait and the reqwest

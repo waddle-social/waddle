@@ -1,7 +1,9 @@
 //! XEP-0357 notification payload building and the Waddle push context.
 
+use waddle_xmpp::push::names::PushNames;
+
 use super::{
-    BareJid, Element, Jid, NotificationCandidate, NotificationOutboxError,
+    BareJid, Element, Jid, NotificationCandidate, NotificationClass, NotificationOutboxError,
     NotificationOutboxTarget, PushServiceNodeName, NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS,
 };
 
@@ -94,11 +96,21 @@ pub fn build_xep0357_notification_payload(
     message_count: u32,
     rich: &RichSummary,
     context: &Element,
+    names: Option<&PushNames>,
 ) -> Element {
-    Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
+    let mut notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
         .append(build_xep0357_summary_form(message_count, rich))
-        .append(context.clone())
-        .build()
+        .append(context.clone());
+    if let Some(names) = names
+        .filter(|_| {
+            rich.sender.is_some()
+                && context.attr("class") != Some(NotificationClass::Call.as_db_value())
+        })
+        .and_then(PushNames::to_element)
+    {
+        notification = notification.append(names);
+    }
+    notification.build()
 }
 
 fn build_xep0357_summary_form(message_count: u32, rich: &RichSummary) -> Element {

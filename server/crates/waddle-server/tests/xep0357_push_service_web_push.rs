@@ -451,7 +451,7 @@ async fn subscription_gone_marks_device_disabled_per_xep0357_6() {
 }
 
 #[tokio::test]
-async fn delivered_outcome_keeps_device_active() {
+async fn notification_with_names_is_delivered_and_keeps_web_device_active() {
     let (store, sender) =
         store_with_web_push_provider(WebPushOutcome::Delivered { status: 201 }).await;
     let owner = owner();
@@ -469,12 +469,37 @@ async fn delivered_outcome_keeps_device_active() {
         )
         .await
         .expect("device");
+    let mut item = web_push_notification_item("delivered-item-1", "alice@example.com", "dm", 1);
+    let notification = item.payload.as_mut().expect("notification");
+    let form_ns = waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
+    notification
+        .get_child_mut("x", form_ns)
+        .expect("summary")
+        .append_child(
+            Element::builder("field", form_ns)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "last-message-sender",
+                )
+                .append(
+                    Element::builder("value", form_ns)
+                        .append("alice@example.com/phone")
+                        .build(),
+                )
+                .build(),
+        );
+    let names_ns = waddle_xmpp::push::names::NS_PUSH_NAMES;
+    notification.append_child(
+        Element::builder("names", names_ns)
+            .append(
+                Element::builder("sender", names_ns)
+                    .append("Alice Liddell")
+                    .build(),
+            )
+            .build(),
+    );
     store
-        .publish_notification_from_user_server(
-            node.node(),
-            &web_push_notification_item("delivered-item-1", "alice@example.com", "dm", 1),
-            &owner,
-        )
+        .publish_notification_from_user_server(node.node(), &item, &owner)
         .await
         .expect("publish");
     store

@@ -40,6 +40,7 @@ use waddle_xmpp::push::apns::{
     ApnsTeamId, ApnsTopic, ApnsTransient, CachingApnsTokenSigner, SystemApnsClock,
     APNS_PROVIDER_TOKEN_MIN_REFRESH,
 };
+use waddle_xmpp::push::names::NS_PUSH_NAMES;
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0357::NS_PUSH;
@@ -681,6 +682,88 @@ async fn xep0357_apns_alert_carries_the_sender_and_body_of_an_opted_in_summary()
             },
         }),
     );
+}
+
+#[tokio::test]
+async fn xep0357_apns_room_names_are_optional_sanitized_and_require_summary_sender() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+
+    let hostile_name = format!("  Alice\n Liddell\u{202e} {}  ", "x".repeat(10_000));
+    let names = |display_name: &str| {
+        Element::builder("names", NS_PUSH_NAMES)
+            .append(
+                Element::builder("sender", NS_PUSH_NAMES)
+                    .append(display_name)
+                    .build(),
+            )
+            .append(
+                Element::builder("room", NS_PUSH_NAMES)
+                    .append("General")
+                    .build(),
+            )
+            .build()
+    };
+    let rich = Some(("general@rooms.example.com/Wonderland", "hello"));
+    for (id, content, extension, expected) in [
+        (
+            "room-named",
+            rich,
+            Some(names("Alice Liddell")),
+            serde_json::json!({ "title": "#General", "subtitle": "Alice Liddell", "body": "hello" }),
+        ),
+        (
+            "room-legacy",
+            rich,
+            None,
+            serde_json::json!({ "title": "Wonderland", "body": "hello" }),
+        ),
+        (
+            "room-private",
+            None,
+            Some(names("Alice Liddell")),
+            serde_json::json!({ "loc-key": "WADDLE_PUSH_PERSONAL_MENTION" }),
+        ),
+        (
+            "room-hostile",
+            rich,
+            Some(names(&hostile_name)),
+            serde_json::json!({
+                "title": "#General",
+                "subtitle": format!("Alice Liddell {}", "x".repeat(50)),
+                "body": "hello",
+            }),
+        ),
+    ] {
+        let mut item = notification_item_with_content(id, 1, content);
+        let payload = item.payload.as_mut().expect("payload");
+        let context = payload
+            .get_child_mut("context", "urn:waddle:push:context:0")
+            .expect("context");
+        context.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("class").to_owned(),
+            "personal_mention",
+        );
+        context.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("conversation").to_owned(),
+            "general@rooms.example.com",
+        );
+        if let Some(extension) = extension {
+            payload.append_child(extension);
+        }
+        publish(&store, &owner, node.node(), item).await;
+        let calls = sender.calls();
+        let call = calls.last().expect("APNs request");
+        assert_eq!(call.payload["aps"]["alert"], expected, "{id}");
+        assert!(call.raw_payload.len() <= 4096);
+        assert!(call.payload["aps"].get("mutable-content").is_none());
+    }
+    assert_eq!(sender.calls().len(), 4);
 }
 
 /// The content is optional: a summary whose sender is not a JID is

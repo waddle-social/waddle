@@ -1,6 +1,8 @@
 //! Typed identifiers, classes, reasons, statuses, outcomes, and errors
 //! for the notification outbox.
 
+use waddle_xmpp::push::names::PushNames;
+
 use super::{
     build_xep0357_notification_payload, BareJid, BlockingStorageError, DatabaseError, Element,
     Error, Jid, NotificationActivityError, PubSubItem, RichSummary,
@@ -472,17 +474,26 @@ impl NotificationOutboxJob {
         &self.rich_summary
     }
 
-    pub fn to_xep0357_pubsub_item_with_count(&self, message_count: u32) -> PubSubItem {
+    pub fn to_xep0357_pubsub_item_with_count(
+        &self,
+        message_count: u32,
+        names: Option<&PushNames>,
+    ) -> PubSubItem {
         PubSubItem::new(
             Some(self.job_id.as_str().to_string()),
             Some(self.approved_payload.clone().unwrap_or_else(|| {
-                build_xep0357_notification_payload(message_count, &self.rich_summary, &self.context)
+                build_xep0357_notification_payload(
+                    message_count,
+                    &self.rich_summary,
+                    &self.context,
+                    names,
+                )
             })),
         )
     }
 
     pub fn to_xep0357_pubsub_item(&self) -> PubSubItem {
-        self.to_xep0357_pubsub_item_with_count(self.message_count)
+        self.to_xep0357_pubsub_item_with_count(self.message_count, None)
     }
 }
 

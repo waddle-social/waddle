@@ -3,20 +3,27 @@
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
 use crate::calls::call_candidate;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use crate::support::{
-    bare, candidate, enqueue_jobs_for_test, failed_outbox_jobs_count, groupchat_candidate_for,
-    inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
+    bare, candidate, drain_deps_with_noop_activity, enqueue_jobs_for_test,
+    failed_outbox_jobs_count, groupchat_candidate_for, inbox_with_unread, noop_activity_reader,
+    settings_projection, store, target, target_named, FailingBlockingStorage, TestStore,
 };
-use jid::Jid;
+use crate::suppression::opt_in_rich_payload;
+use jid::{BareJid, Jid};
 use opentelemetry::trace::TraceContextExt;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    DrainBatch, DrainScope, NotificationClass, NotificationOutboxJob,
-    NotificationOutboxPublishOutcome, NotificationOutboxStatus, NotificationOutboxStore,
-    NotificationOutboxTarget, PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
+    DrainBatch, DrainScope, NoopDndReader, NoopRoomPolicy, NotificationClass,
+    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
+    NotificationOutboxStore, NotificationOutboxTarget, PushDisplayNames, PushServiceNodeName,
+    WADDLE_PUSH_CONTEXT_NS,
 };
+use waddle_xmpp::push::names::{DisplayName, PushNames, NS_PUSH_NAMES};
 use waddle_xmpp::push::PushSubscriptionStore;
 
 #[tokio::test]
@@ -315,18 +322,62 @@ async fn claimed_outbox_job_builds_stable_xep0357_pubsub_item() {
     );
 }
 
+#[derive(Default)]
+struct ChangingNames(AtomicUsize);
+
+#[async_trait::async_trait]
+impl PushDisplayNames for ChangingNames {
+    async fn resolve(
+        &self,
+        recipient: &BareJid,
+        conversation: &BareJid,
+        sender: &Jid,
+        class: NotificationClass,
+    ) -> PushNames {
+        assert_eq!(recipient, &bare("alice@example.com"));
+        assert_eq!(conversation, &bare("bob@example.com"));
+        assert_eq!(sender.to_string(), "bob@example.com/test-resource");
+        assert_eq!(class, NotificationClass::DirectMessage);
+        let name = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            "Bob Before"
+        } else {
+            "Bob After"
+        };
+        PushNames {
+            sender: DisplayName::parse(name),
+            room: None,
+        }
+    }
+}
+
 #[tokio::test]
 async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_work() {
     let store = store().await;
     let recipient = bare("alice@example.com");
     let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-    enqueue_jobs_for_test(
-        &store,
-        &candidate("archive-first"),
-        std::slice::from_ref(&target),
-    )
-    .await;
+    let names = Arc::new(ChangingNames::default());
+    assert!(store.attach_push_display_names(names.clone()));
+    let projection = settings_projection().await;
+    opt_in_rich_payload(&projection, &recipient, &bare("bob@example.com")).await;
+    store
+        .insert_candidate(&candidate("archive-first"))
+        .await
+        .expect("candidate");
+    store
+        .drain_pending_candidates_into_outbox(
+            &push_store,
+            &blocking,
+            &projection,
+            drain_deps_with_noop_activity(&NoopRoomPolicy, &NoopDndReader, noop_activity_reader()),
+            &bare("push.example.com"),
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("drain opted-in candidate");
     let claimed = store
         .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
@@ -368,7 +419,22 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
             .expect("same identity"),
     );
     assert_eq!(retry.message_count(), 1);
-    let original = retry.to_xep0357_pubsub_item_with_count(99);
+    let replacement = PushNames {
+        sender: DisplayName::parse("Bob After"),
+        room: None,
+    };
+    let original = retry.to_xep0357_pubsub_item_with_count(99, Some(&replacement));
+    let approved_payload = original.payload.as_ref().expect("frozen payload");
+    let approved_names = approved_payload
+        .get_child("names", NS_PUSH_NAMES)
+        .expect("frozen names");
+    assert_eq!(
+        approved_names
+            .get_child("sender", NS_PUSH_NAMES)
+            .expect("sender")
+            .text(),
+        "Bob Before"
+    );
     let read_inbox = inbox_with_read_entry(
         &recipient,
         &bare("bob@example.com"),
@@ -414,10 +480,8 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
         .expect("accepted")
         .get(0)
         .expect("payload");
-    assert_eq!(
-        payload,
-        String::from(original.payload.as_ref().expect("frozen payload"))
-    );
+    assert_eq!(payload, String::from(approved_payload));
+    assert_eq!(names.0.load(Ordering::SeqCst), 1);
     assert!(
         push_service
             .delivery_attempts_for_node(retry.node().as_str())

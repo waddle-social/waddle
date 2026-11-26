@@ -18,6 +18,7 @@ use minidom::Element;
 use url::Url;
 use waddle_xmpp::push::apns::ApnsCall;
 use waddle_xmpp::push::envelope::{push_topic_for, NotificationClass, PushEnvelope};
+use waddle_xmpp::push::names::PushNames;
 use waddle_xmpp::push::types::{SubscriptionKeys, TransientFailure, VapidSub, WebPushOutcome};
 use waddle_xmpp::push::vapid::{aud_for, vapid_k_header, VapidSigner};
 use waddle_xmpp::push::{encrypt, WebPushRequest, WebPushSender};
@@ -131,11 +132,12 @@ pub(crate) struct ParsedPushPayload {
     pub content: Option<SummaryContent>,
 }
 
-/// XEP-0357 §4 `last-message-sender` and `last-message-body`.
+/// XEP-0357 §4 sender and body, with optional Waddle display names.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SummaryContent {
     pub sender: Jid,
     pub body: Option<String>,
+    pub names: PushNames,
 }
 
 /// Message content stays out of logs.
@@ -254,7 +256,7 @@ pub(crate) fn parse_publish_payload(payload_xml: &str) -> Result<ParsedPushPaylo
     } else {
         None
     };
-    let summary = parse_summary(&payload);
+    let summary = parse_summary(&payload, class);
     Ok(ParsedPushPayload {
         message_count: summary.message_count,
         content: summary.content,
@@ -285,7 +287,7 @@ struct Summary {
 /// Reads the XEP-0357 §4 summary form. Fields of a form with another
 /// `FORM_TYPE` are not trusted. The optional content never fails the
 /// publish: a sender that is not a JID leaves the notification minimal.
-fn parse_summary(notification: &Element) -> Summary {
+fn parse_summary(notification: &Element, class: NotificationClass) -> Summary {
     let Some(form) = notification
         .children()
         .find(|child| child.is("x", NS_DATA_FORMS))
@@ -309,6 +311,11 @@ fn parse_summary(notification: &Element) -> Summary {
             .map(|sender| SummaryContent {
                 sender,
                 body: value_of(SUMMARY_LAST_MESSAGE_BODY).filter(|body| !body.is_empty()),
+                names: if class == NotificationClass::Call {
+                    PushNames::default()
+                } else {
+                    PushNames::parse(notification, class.is_room())
+                },
             }),
     }
 }
