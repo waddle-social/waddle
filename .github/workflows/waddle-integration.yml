@@ -642,10 +642,10 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_federationgrantfence == 'true' }}"
-  waddle_server_namespacerustchecks__test:
+  waddle_server_namespacerustchecks__nixdefaulttest:
     permissions:
       contents: read
-    name: waddle-server-namespaceRustChecks / test
+    name: waddle-server-namespaceRustChecks / nixDefaultTest
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
@@ -668,7 +668,7 @@ jobs:
         run: "set -euo pipefail\n: \"${GITHUB_ENV:?GITHUB_ENV is required}\"\n: \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\nif [ \"$(uname -s)\" != \"Linux\" ]; then\n  printf 'CUENV_REMOTE_CACHE=\\nCUENV_REMOTE_CACHE_UPLOAD=false\\n' >> \"$GITHUB_ENV\"\n  exit 0\nfi\npython3 - \"$GITHUB_ENV\" <<'PY'\nimport json, os, re, shutil, subprocess, sys\nfrom pathlib import Path\n\ngithub_env = Path(sys.argv[1])\ntrusted = (\n    os.environ.get(\"GITHUB_EVENT_NAME\") == \"push\"\n    and os.environ.get(\"GITHUB_REF\") == \"refs/heads/main\"\n)\nrunner_temp = os.environ[\"RUNNER_TEMP\"]\nvalues = {\n    \"CUENV_REMOTE_CACHE_UPLOAD\": \"true\" if trusted else \"false\",\n    \"CUENV_CACHE_DIR\": os.path.join(\n        runner_temp, \"cuenv-cache\", \"trusted\" if trusted else \"untrusted\"\n    ),\n}\n\ndef normalize_endpoint(endpoint: str) -> str:\n    if endpoint.startswith(\"grpcs://\"):\n        return \"https://\" + endpoint[len(\"grpcs://\"):]\n    if endpoint.startswith(\"grpc://\"):\n        return \"http://\" + endpoint[len(\"grpc://\"):]\n    return endpoint\n\ndef parse_bazelrc(path: Path) -> bool:\n    text = path.read_text(encoding=\"utf-8\", errors=\"replace\")\n    endpoint = \"\"\n    parsed = {}\n    for raw_line in text.splitlines():\n        line = raw_line.split(\"#\", 1)[0].strip()\n        if not line:\n            continue\n        if m := re.search(r\"--remote_cache=(\\S+)\", line):\n            endpoint = m.group(1)\n        if m := re.search(r\"--tls_certificate=(\\S+)\", line):\n            parsed[\"CUENV_REMOTE_CACHE_CA_CERT\"] = m.group(1)\n        if m := re.search(r\"--tls_client_certificate=(\\S+)\", line):\n            parsed[\"CUENV_REMOTE_CACHE_CLIENT_CERT\"] = m.group(1)\n        if m := re.search(r\"--tls_client_key=(\\S+)\", line):\n            parsed[\"CUENV_REMOTE_CACHE_CLIENT_KEY\"] = m.group(1)\n        if m := re.search(r\"--credential_helper=[^=\\s]+=(\\S+)\", line):\n            parsed[\"CUENV_REMOTE_CACHE_CREDENTIAL_HELPER\"] = m.group(1)\n    if not endpoint:\n        return False\n    values[\"CUENV_REMOTE_CACHE\"] = normalize_endpoint(endpoint)\n    values[\"CUENV_REMOTE_CACHE_PROTOCOL\"] = \"grpc\"\n    values.update(parsed)\n    return True\n\nconfigured = False\nfor candidate in (os.environ.get(\"BAZELRC\", \"\"), \"/etc/bazel.bazelrc\"):\n    if candidate:\n        p = Path(candidate)\n        if p.is_file():\n            configured = parse_bazelrc(p)\n            if configured:\n                break\n\nif not configured and shutil.which(\"nsc\"):\n    try:\n        proc = subprocess.run(\n            [\"nsc\", \"cache\", \"bazel\", \"setup\", \"--disable_build_events\", \"-o\", \"json\"],\n            capture_output=True,\n            text=True,\n            timeout=20,\n            check=True,\n        )\n        data = json.loads(proc.stdout)\n        endpoint = (data.get(\"endpoint\") or \"\").strip()\n        if endpoint:\n            values[\"CUENV_REMOTE_CACHE\"] = normalize_endpoint(endpoint)\n            values[\"CUENV_REMOTE_CACHE_PROTOCOL\"] = \"grpc\"\n            if data.get(\"server_ca_cert\"):\n                values[\"CUENV_REMOTE_CACHE_CA_CERT\"] = data[\"server_ca_cert\"]\n            if data.get(\"client_cert\") and data.get(\"client_key\"):\n                values[\"CUENV_REMOTE_CACHE_CLIENT_CERT\"] = data[\"client_cert\"]\n                values[\"CUENV_REMOTE_CACHE_CLIENT_KEY\"] = data[\"client_key\"]\n            if data.get(\"credential_helper_domains\"):\n                helper = shutil.which(\"bazel-credential-nsc\")\n                if helper:\n                    values[\"CUENV_REMOTE_CACHE_CREDENTIAL_HELPER\"] = helper\n            configured = True\n    except Exception:\n        pass\n\nif not configured:\n    values[\"CUENV_REMOTE_CACHE\"] = \"\"\n\nwith github_env.open(\"a\", encoding=\"utf-8\") as handle:\n    for k, v in values.items():\n        if \"\\n\" in v or \"\\r\" in v:\n            raise SystemExit(f\"Invalid newline in {k}\")\n        handle.write(f\"{k}={v}\\n\")\nPY"
       - name: Check Namespace Bazel Remote Cache
         run: "set -euo pipefail\nif [ -z \"${CUENV_REMOTE_CACHE:-}\" ]; then\n  echo \"Namespace Bazel remote cache not configured on this runner; using local cache only.\"\n  exit 0\nfi\ncuenv cache status || true"
-      - name: test
+      - name: nixDefaultTest
         run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-default-test"
         working-directory: server
         env:
@@ -1072,7 +1072,7 @@ jobs:
       - waddle_operator_queuechecks__waddle-operator-queuechecks
       - waddle_server_authzidcodec__checkauthzidcodec
       - waddle_server_federationgrantfence__federationgrantfenceproof
-      - waddle_server_namespacerustchecks__test
+      - waddle_server_namespacerustchecks__nixdefaulttest
       - waddle_server_pullrequest__pullrequestchecks
       - waddle_server_queuechecks__nixbuildci
       - waddle_server_queuechecks__nixbuildextensionmodules

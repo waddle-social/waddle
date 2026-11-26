@@ -118,6 +118,59 @@
         ];
         xmpp = base ++ [ "crates/waddle-xmpp" ];
       };
+      # Fail evaluation when a workspace member or first-party path
+      # dependency is in no member layer: the layers would stub it, every
+      # lane would recompile it, and the test archive's reuse guard would
+      # fail with a misleading fingerprint message.
+      memberLayerCoverage =
+        lib:
+        let
+          covered = memberLayerPaths.xmpp ++ [ "crates/waddle-server" ];
+          isCovered = path: lib.any (prefix: path == prefix || lib.hasPrefix "${prefix}/" path) covered;
+          normalize =
+            path:
+            lib.concatStringsSep "/" (
+              lib.foldl' (
+                parts: part:
+                if part == "." || part == "" then
+                  parts
+                else if part == ".." then
+                  lib.init parts
+                else
+                  parts ++ [ part ]
+              ) [ ] (lib.splitString "/" path)
+            );
+          manifest = dir: builtins.fromTOML (builtins.readFile (./server + "/${dir}/Cargo.toml"));
+          dependencyTables =
+            toml:
+            lib.concatMap (table: lib.attrValues (toml.${table} or { })) [
+              "dependencies"
+              "dev-dependencies"
+              "build-dependencies"
+            ]
+            ++ lib.concatMap (
+              target:
+              lib.concatMap (table: lib.attrValues (target.${table} or { })) [
+                "dependencies"
+                "dev-dependencies"
+                "build-dependencies"
+              ]
+            ) (lib.attrValues (toml.target or { }));
+          pathDependencies =
+            dir:
+            map (dependency: normalize "${dir}/${dependency.path}") (
+              lib.filter (dependency: builtins.isAttrs dependency && dependency ? path) (
+                dependencyTables (manifest dir)
+              )
+            );
+          members = (manifest ".").workspace.members;
+          required = lib.filter (path: !(lib.hasPrefix "vendor/" path)) (
+            lib.unique (members ++ lib.concatMap pathDependencies members)
+          );
+          missing = lib.filter (path: !(isCovered path)) required;
+        in
+        lib.assertMsg (missing == [ ])
+          "flake.nix memberLayerPaths is missing ${lib.concatStringsSep ", " missing}; add each to a member layer (base, or xmpp if it depends on waddle-xmpp).";
       # Crane builds third-party dependencies once, but a lane that consumes
       # only that artifact recompiles all 16 workspace members whenever any
       # source file changes. Member layers sit between the two: a layer is
@@ -183,6 +236,7 @@
             );
           base = mkLayer "members-base" memberLayerPaths.base cargoArtifacts;
         in
+        assert memberLayerCoverage lib;
         mkLayer "members-xmpp" memberLayerPaths.xmpp base;
     in
     {

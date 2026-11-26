@@ -43,7 +43,7 @@ BATCHED_CHECKS = [
 # Each main-only gate runs the command of the task pull requests run.
 ALIASES = {
     "mainClippy": "nixClippy",
-    "mainTest": "test",
+    "mainTest": "nixDefaultTest",
     "mainDoctest": "nixDoctest",
     "mainBuildImageStream": "nixBuildImageStream",
     "mainBuildExtensionModules": "nixBuildExtensionModules",

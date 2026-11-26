@@ -8,11 +8,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
+  nixDefaultTest:
     permissions:
       contents: read
       id-token: write
-    name: test
+    name: nixDefaultTest
     runs-on: namespace-profile-linux-x86
     steps:
     - name: Checkout
@@ -144,7 +144,7 @@ jobs:
           exit 0
         fi
         cuenv cache status || true
-    - name: test
+    - name: nixDefaultTest
       run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-default-test
       working-directory: server
       env:

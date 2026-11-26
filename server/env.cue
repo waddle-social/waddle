@@ -330,7 +330,7 @@ schema.#Project & {
 			}
 			// The queue runs the default-feature, no-Postgres suite; mainTest
 			// repeats that configuration on the revision eligible to publish.
-			tasks: [_t.test]
+			tasks: [_t.nixDefaultTest]
 		}
 		// The manual-only rustTests workflow (workflow_dispatch) runs the same
 		// archives and shards; it is generated from ci/rust-tests/workflow.cue.
@@ -926,13 +926,20 @@ schema.#Project & {
 			inputs: _namespaceRustTaskInputs
 		}
 
-		// The default-feature, no-Postgres suite as a Nix check. Third-party
-		// dependencies and unchanged workspace member layers come from cached
-		// artifacts, so a server-only change compiles one crate instead of
-		// all 675 packages, and main reuses the result a merge group built
-		// for the same tree. The namespace project's `test` task runs the
-		// same selection with plain Cargo.
 		test: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace test"]
+			inputs: _namespaceRustTaskInputs
+		}
+
+		// The default-feature, no-Postgres suite of `test` as an x86_64-linux
+		// Nix check, for CI. Third-party dependencies and unchanged workspace
+		// member layers come from cached artifacts, so a server-only change
+		// compiles one crate instead of all 675 packages, and main reuses
+		// the result a merge group built for the same tree. `test` stays the
+		// plain Cargo task for local runs on any host.
+		nixDefaultTest: schema.#Task & {
 			hermetic: false
 			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-default-test"]
@@ -991,9 +998,9 @@ schema.#Project & {
 
 		mainTest: schema.#Task & {
 			hermetic: false
-			command:  tasks.test.command
-			args:     tasks.test.args
-			inputs:   tasks.test.inputs
+			command:  tasks.nixDefaultTest.command
+			args:     tasks.nixDefaultTest.args
+			inputs:   tasks.nixDefaultTest.inputs
 			dependsOn: [tasks.fmt]
 		}
 

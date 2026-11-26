@@ -555,7 +555,7 @@ The `default` pipeline now has eight gates instead of thirteen:
 | `nixTestLocal` | 32-core builder | nothing | helper contracts, then the four shards |
 | `mainChecks` | profile | `fmt` | `checkCiDrift`, `checkSwitchableAlternativeProgram`, `checkAlertRules`, `checkXmppClientFfiBindings`, `renderDeployment` |
 | `mainClippy` | profile | `fmt` | the Nix Clippy check that merge groups build (`nixClippy`) |
-| `mainTest` | profile | `fmt` | the default-feature Nix test check (`test`, `waddle-server-default-test`) |
+| `mainTest` | profile | `fmt` | the default-feature Nix test check (`nixDefaultTest`, `waddle-server-default-test`) |
 | `mainDoctest` | profile | `fmt` | the Nix doctest check that pull requests build (`nixDoctest`) |
 | `mainBuildImageStream`, `mainBuildExtensionModules` | profile | `fmt` | the release image and extension runtime builds |
 | `publishContainerImage` | profile | every job above | publication |
@@ -590,9 +590,9 @@ crates for about 8 minutes to run 18 doctests; the Nix check takes its
 dependencies from the shared artifact and is a cache hit when a pull request
 already checked the same tree.
 
-The measurements below describe the namespace `test` task, which `test` and
-`mainTest` ran until 2026-11-25; both now build the `waddle-server-default-test`
-Nix check (see [Workspace member layers](#workspace-member-layers-2026-11)).
+The measurements below describe the namespace `test` task, which
+`namespaceRustChecks` and `mainTest` ran until 2026-11-25; both now build the
+`waddle-server-default-test` Nix check (task `nixDefaultTest`) (see [Workspace member layers](#workspace-member-layers-2026-11)).
 The namespace `test` task sets `CARGO_INCREMENTAL=0`. Its build is bounded by
 one compiler process: `waddle-server` compiled with its unit tests takes about
 7 minutes on a 4 vCPU runner and runs to the end of the build, after the plain
@@ -618,7 +618,8 @@ Each separate job spent about 75 seconds on Nix, cache and cuenv setup before
 its command started, and a server pull request held eight of the 20 concurrent
 GitHub job slots for these checks.
 
-`namespaceRustChecks` keeps `test` on pull requests: it is the only pull-request
+`namespaceRustChecks` keeps the default-feature suite on pull requests (since
+2026-11-25 as the `nixDefaultTest` job): it is the only pull-request
 lane that builds the default features, and it is a publish gate on `main`.
 On `main`, `roomChildContract`, `spaceFanoutContract` and
 `xmppServerCompliance` use GitHub runners, so they no longer take Namespace
@@ -636,7 +637,7 @@ builder) no longer has a `pull_request` trigger, and `waddle-integration` no
 longer contains it.
 
 - **On pull requests:** the per-project `pullRequest` pipelines (server Nix
-  lanes, `namespaceRustChecks` `test`, chat, apps, website, design, colony,
+  lanes, `namespaceRustChecks` `nixDefaultTest`, chat, apps, website, design, colony,
   infrastructure) and `checkCiDrift`.
 - **After merge:** the same shards run as `nixTestLocal` in the server `default`
   pipeline. It gates image publishing, including every test in
@@ -692,7 +693,7 @@ base crate rebuilds both layers, as dependents must.
 | `nixClippy`, `mainClippy` | `cargo clippy` with the lane's lints | `waddle-server-check-deps` |
 | `nixDoctest`, `mainDoctest` | `cargo test --doc` | `waddle-server-check-deps` |
 | `nixXmppServerTests` | its nextest arguments and mold | `waddle-server-test-deps` |
-| `test`, `mainTest` (new Nix check) | `cargo nextest run --all-targets`, `test` profile | new default-feature artifact |
+| `nixDefaultTest`, `mainTest` (new Nix check) | `cargo nextest run --all-targets`, `test` profile | new default-feature artifact |
 
 Cargo reuses a layer only when the fingerprint matches, so each layer receives
 the lane's arguments from one shared definition. Freshness compares source
@@ -710,8 +711,14 @@ and overflow checks on), its `--all-targets` selection and one Cargo job for
 the 16 GB profile runner. It runs with the same test environment and fixture
 files as the other Nix test lanes. Pull requests, merge groups and `main` now
 build the same derivation, so `main` reuses a result the merge group built for
-the same tree. The namespace project's `test` and `clippy` tasks remain for
-manual runs.
+the same tree. The server `test` and `clippy` tasks still run plain Cargo
+through the namespace project, so they work locally on any host.
+
+`flake.nix` checks at evaluation time that every workspace member and every
+first-party path dependency in `server/Cargo.toml` is either in a member layer
+or `waddle-server`. A new crate must be added to `memberLayerPaths`; otherwise
+evaluation fails with that instruction rather than the archive's reuse guard
+failing later.
 
 The new dependency artifact compiles once on its first run and after any
 `Cargo.lock` or toolchain change. Layer derivations are uploaded with the other
