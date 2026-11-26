@@ -16,6 +16,8 @@ final class AppDelegate: NSObject {
     #if os(iOS)
     private let voipRegistrar = PushTokenRegistrar(kind: .voip)
     private var voipRegistry: VoIPPushRegistry?
+    #elseif os(macOS)
+    private var isWaitingForCallHangUp = false
     #endif
 
     func attach(_ appState: AppState) {
@@ -267,6 +269,17 @@ extension AppDelegate: UIApplicationDelegate {
         return true
     }
 
+    func applicationWillTerminate(_ application: UIApplication) {
+        var finished = false
+        guard let deadline = appState?.session?.coordinator.calls.hangUpForTermination(onComplete: { finished = true }) else { return }
+
+        // UIKit needs this callback to return. Pump the run loop so the
+        // main-actor hang-up can progress while UIKit waits.
+        while !finished, ContinuousClock.now < deadline {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         alertRegistrar.didRegister(deviceToken: deviceToken)
     }
@@ -279,6 +292,15 @@ extension AppDelegate: UIApplicationDelegate {
 extension AppDelegate: NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launched()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isWaitingForCallHangUp { return .terminateLater }
+        guard appState?.session?.coordinator.calls.hangUpForTermination(runLoopMode: .modalPanel, onComplete: {
+            sender.reply(toApplicationShouldTerminate: true)
+        }) != nil else { return .terminateNow }
+        isWaitingForCallHangUp = true
+        return .terminateLater
     }
 
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
