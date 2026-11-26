@@ -2,9 +2,12 @@
 resolver = "2"
 exclude = ["vendor/kameo", "vendor/libp2p-swarm", "vendor/minidom", "vendor/sqlx-postgres", "experiments/native-fixture"]
 members = [
+    "crates/waddle-broker",
+    "crates/waddle-broker-core",
     "crates/waddle-ecdysis",
     "crates/waddle-server",
     "crates/waddle-sfu",
+    "crates/waddle-tenancy",
     "crates/waddle-xmpp",
     "crates/waddle-extensions",
     "crates/waddle-xmpp-core",

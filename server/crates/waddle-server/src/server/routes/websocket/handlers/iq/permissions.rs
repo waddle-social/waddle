@@ -51,7 +51,7 @@ pub(super) fn build_xmpp_error_response(
 /// omitting the `<text/>` child entirely when no diagnostic is supplied
 /// (matching the prior wire shape) and attaching an optional
 /// protocol-specific extension element (e.g. a XEP-0050 §4.4 condition).
-fn stanza_error_from_parts(
+pub(super) fn stanza_error_from_parts(
     error_type: StanzaErrorType,
     condition: StanzaErrorCondition,
     text: Option<String>,

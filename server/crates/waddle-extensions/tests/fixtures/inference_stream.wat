@@ -1,0 +1,1226 @@
+(component
+  (type $ty-waddle:extension/types@4.0.0 (;0;)
+    (instance
+      (type (;0;) (record (field "value" string)))
+      (export (;1;) "plugin-id" (type (eq 0)))
+      (type (;2;) (record (field "value" string)))
+      (export (;3;) "display-text" (type (eq 2)))
+      (type (;4;) (record (field "value" string)))
+      (export (;5;) "plugin-version" (type (eq 4)))
+      (type (;6;) (enum "room-result" "message-enrichment" "launch-payload" "pubsub-item"))
+      (export (;7;) "payload-surface" (type (eq 6)))
+      (type (;8;) (record (field "value" string)))
+      (export (;9;) "payload-namespace" (type (eq 8)))
+      (type (;10;) (record (field "namespace" 9) (field "local-name" string)))
+      (export (;11;) "payload-root" (type (eq 10)))
+      (type (;12;) (record (field "surface" 7) (field "root" 11)))
+      (export (;13;) "payload-rule" (type (eq 12)))
+      (type (;14;) (enum "room-result-publish" "message-enrich" "message-observe" "host-channels-read" "host-spaces-read" "host-members-read" "host-presence-read" "host-mam-read" "host-roster-read" "host-message-send" "outbound-http-request" "commands" "launch" "pubsub-publish" "artifact-reference" "ui-declarative"))
+      (export (;15;) "extension-capability" (type (eq 14)))
+      (type (;16;) (record (field "value" string)))
+      (export (;17;) "command-node" (type (eq 16)))
+      (type (;18;) (enum "global" "channel"))
+      (export (;19;) "command-scope" (type (eq 18)))
+      (type (;20;) (option string))
+      (type (;21;) (record (field "node" 17) (field "name" 3) (field "scope" 19) (field "composer-prefix" 20) (field "inline-field" 20) (field "composer-execute" bool)))
+      (export (;22;) "command-descriptor" (type (eq 21)))
+      (type (;23;) (record (field "value" string)))
+      (export (;24;) "route-id" (type (eq 23)))
+      (type (;25;) (enum "channel"))
+      (export (;26;) "extension-route-scope" (type (eq 25)))
+      (type (;27;) (enum "gallery" "list-view"))
+      (export (;28;) "extension-route-surface" (type (eq 27)))
+      (type (;29;) (record (field "value" string)))
+      (export (;30;) "pubsub-node" (type (eq 29)))
+      (type (;31;) (record (field "plugin" 1) (field "id" 24) (field "label" 3) (field "scope" 26) (field "surface" 28) (field "state-node" 30) (field "payload-namespace" 9)))
+      (export (;32;) "extension-route-descriptor" (type (eq 31)))
+      (type (;33;) (record (field "value" string)))
+      (export (;34;) "artifact-uri" (type (eq 33)))
+      (type (;35;) (record (field "value" string)))
+      (export (;36;) "sha256-digest" (type (eq 35)))
+      (type (;37;) (record (field "value" string)))
+      (export (;38;) "media-type" (type (eq 37)))
+      (type (;39;) (option 38))
+      (type (;40;) (record (field "uri" 34) (field "sha256" 36) (field "media-type" 39)))
+      (export (;41;) "artifact-reference" (type (eq 40)))
+      (type (;42;) (option 3))
+      (type (;43;) (option 41))
+      (type (;44;) (record (field "display-name" 3) (field "description" 42) (field "accent" 20) (field "avatar" 43) (field "bot-hat-label" 42)))
+      (export (;45;) "extension-profile" (type (eq 44)))
+      (type (;46;) (list 13))
+      (type (;47;) (list 15))
+      (type (;48;) (list 22))
+      (type (;49;) (list 32))
+      (type (;50;) (list 30))
+      (type (;51;) (option 45))
+      (type (;52;) (record (field "id" 1) (field "name" 3) (field "version" 5) (field "payloads" 46) (field "capabilities" 47) (field "commands" 48) (field "routes" 49) (field "pubsub-nodes" 50) (field "profile" 51) (field "artifact" 43)))
+      (export (;53;) "extension-manifest" (type (eq 52)))
+      (type (;54;) (enum "unsupported-event" "invalid-request" "denied" "temporary-failure"))
+      (export (;55;) "extension-error-code" (type (eq 54)))
+      (type (;56;) (record (field "code" 55) (field "message" 3)))
+      (export (;57;) "extension-error" (type (eq 56)))
+      (type (;58;) (record (field "value" string)))
+      (export (;59;) "room-jid" (type (eq 58)))
+      (type (;60;) (record (field "value" string)))
+      (export (;61;) "stanza-id" (type (eq 60)))
+      (type (;62;) (record (field "value" string)))
+      (export (;63;) "origin-id" (type (eq 62)))
+      (type (;64;) (record (field "value" string)))
+      (export (;65;) "bare-jid" (type (eq 64)))
+      (type (;66;) (record (field "value" string)))
+      (export (;67;) "timestamp" (type (eq 66)))
+      (type (;68;) (option 63))
+      (type (;69;) (record (field "room" 59) (field "stanza-id" 61) (field "revision-stanza-id" 61) (field "origin-id" 68) (field "sender" 65) (field "revision" u64) (field "body-digest" 36) (field "observed-at" 67)))
+      (export (;70;) "room-message-source" (type (eq 69)))
+      (type (;71;) (record (field "source" 70) (field "body" 3)))
+      (export (;72;) "room-message-observe" (type (eq 71)))
+      (type (;73;) (record (field "value" string)))
+      (export (;74;) "waddle-id" (type (eq 73)))
+      (type (;75;) (record (field "value" string)))
+      (export (;76;) "full-jid" (type (eq 75)))
+      (type (;77;) (record (field "value" string)))
+      (export (;78;) "thread-id" (type (eq 77)))
+      (type (;79;) (option 76))
+      (type (;80;) (record (field "id" 61) (field "to" 79)))
+      (export (;81;) "reply-target" (type (eq 80)))
+      (type (;82;) (option 61))
+      (type (;83;) (option 59))
+      (type (;84;) (option 78))
+      (type (;85;) (option 81))
+      (type (;86;) (record (field "waddle-id" 74) (field "stanza-id" 82) (field "room" 83) (field "sender" 79) (field "thread-id" 84) (field "reply-to" 85)))
+      (export (;87;) "message-context" (type (eq 86)))
+      (type (;88;) (record (field "value" string)))
+      (export (;89;) "url" (type (eq 88)))
+      (type (;90;) (record (field "start" u32) (field "end" u32)))
+      (export (;91;) "body-range" (type (eq 90)))
+      (type (;92;) (record (field "url" 89) (field "range" 91)))
+      (export (;93;) "link-target" (type (eq 92)))
+      (type (;94;) (list 93))
+      (type (;95;) (record (field "context" 87) (field "body" 3) (field "links" 94)))
+      (export (;96;) "message-hook" (type (eq 95)))
+      (type (;97;) (record (field "value" string)))
+      (export (;98;) "command-session-id" (type (eq 97)))
+      (type (;99;) (enum "execute" "next" "prev" "complete" "cancel"))
+      (export (;100;) "command-action" (type (eq 99)))
+      (type (;101;) (enum "form" "submit" "cancel" "result-form"))
+      (export (;102;) "data-form-type" (type (eq 101)))
+      (type (;103;) (record (field "value" string)))
+      (export (;104;) "ui-action-id" (type (eq 103)))
+      (type (;105;) (enum "boolean" "fixed" "hidden" "jid-multi" "jid-single" "list-multi" "list-single" "text-multi" "text-private" "text-single"))
+      (export (;106;) "form-field-type" (type (eq 105)))
+      (type (;107;) (record (field "value" string)))
+      (export (;108;) "data-form-value" (type (eq 107)))
+      (type (;109;) (record (field "label" 42) (field "value" 108)))
+      (export (;110;) "form-field-option" (type (eq 109)))
+      (type (;111;) (list 108))
+      (type (;112;) (list 110))
+      (type (;113;) (record (field "name" 104) (field "field-type" 106) (field "label" 42) (field "required" bool) (field "values" 111) (field "options" 112)))
+      (export (;114;) "data-form-field" (type (eq 113)))
+      (type (;115;) (list 3))
+      (type (;116;) (list 114))
+      (type (;117;) (record (field "form-type" 102) (field "title" 42) (field "instructions" 115) (field "fields" 116)))
+      (export (;118;) "data-form" (type (eq 117)))
+      (type (;119;) (record (field "name" 104) (field "values" 111)))
+      (export (;120;) "form-field-value" (type (eq 119)))
+      (type (;121;) (option 98))
+      (type (;122;) (option 100))
+      (type (;123;) (option 118))
+      (type (;124;) (list 120))
+      (type (;125;) (record (field "waddle-id" 74) (field "room" 83) (field "requester" 76) (field "command-node" 17) (field "session-id" 121) (field "action" 122) (field "form" 123) (field "fields" 124)))
+      (export (;126;) "command-invocation" (type (eq 125)))
+      (type (;127;) (record (field "waddle-id" 74) (field "room" 83) (field "source-stanza-id" 82)))
+      (export (;128;) "launch-context" (type (eq 127)))
+      (type (;129;) (record (field "value" string)))
+      (export (;130;) "launch-id" (type (eq 129)))
+      (type (;131;) (record (field "context" 128) (field "requester" 76) (field "launch-id" 130) (field "session-id" 121) (field "action" 122) (field "form" 123) (field "fields" 124)))
+      (export (;132;) "launch-invocation" (type (eq 131)))
+      (type (;133;) (record (field "value" string)))
+      (export (;134;) "provider-id" (type (eq 133)))
+      (type (;135;) (record (field "value" string)))
+      (export (;136;) "provider-event-type" (type (eq 135)))
+      (type (;137;) (record (field "value" string)))
+      (export (;138;) "provider-delivery-id" (type (eq 137)))
+      (type (;139;) (record (field "value" string)))
+      (export (;140;) "provider-field-name" (type (eq 139)))
+      (type (;141;) (record (field "value" string)))
+      (export (;142;) "provider-field-number" (type (eq 141)))
+      (type (;143;) (record (field "value" string)))
+      (export (;144;) "provider-field-text" (type (eq 143)))
+      (type (;145;) (variant (case "null") (case "boolean" bool) (case "number" 142) (case "text" 144)))
+      (export (;146;) "provider-field-value" (type (eq 145)))
+      (type (;147;) (list 140))
+      (type (;148;) (record (field "path" 147) (field "value" 146)))
+      (export (;149;) "provider-field" (type (eq 148)))
+      (type (;150;) (list 149))
+      (type (;151;) (record (field "fields" 150)))
+      (export (;152;) "provider-payload" (type (eq 151)))
+      (type (;153;) (record (field "waddle-id" 74) (field "provider" 134) (field "event-type" 136) (field "delivery-id" 138) (field "payload" 152)))
+      (export (;154;) "provider-webhook" (type (eq 153)))
+      (type (;155;) (variant (case "room-message-observe" 72) (case "message-hook" 96) (case "command" 126) (case "launch" 132) (case "provider-webhook" 154)))
+      (export (;156;) "extension-event" (type (eq 155)))
+      (type (;157;) (option 9))
+      (type (;158;) (record (field "namespace" 157) (field "local-name" string) (field "value" string)))
+      (export (;159;) "xml-attribute" (type (eq 158)))
+      (type (;160;) (list 159))
+      (type (;161;) (record (field "namespace" 9) (field "local-name" string) (field "attributes" 160)))
+      (export (;162;) "xml-element" (type (eq 161)))
+      (type (;163;) (variant (case "start-element" 162) (case "end-element") (case "text" string)))
+      (export (;164;) "xml-token" (type (eq 163)))
+      (type (;165;) (list 164))
+      (type (;166;) (record (field "namespace" 9) (field "root" 11) (field "tokens" 165)))
+      (export (;167;) "extension-payload" (type (eq 166)))
+      (type (;168;) (record (field "value" string)))
+      (export (;169;) "enrichment-id" (type (eq 168)))
+      (type (;170;) (option 91))
+      (type (;171;) (record (field "stanza-id" 61) (field "body-range" 170)))
+      (export (;172;) "message-source" (type (eq 171)))
+      (type (;173;) (record (field "value" string)))
+      (export (;174;) "ui-view-id" (type (eq 173)))
+      (type (;175;) (enum "body" "heading" "muted" "code"))
+      (export (;176;) "text-style" (type (eq 175)))
+      (type (;177;) (record (field "text" 3) (field "style" 176)))
+      (export (;178;) "text-block" (type (eq 177)))
+      (type (;179;) (record (field "artifact" 41) (field "alt" 3)))
+      (export (;180;) "image-block" (type (eq 179)))
+      (type (;181;) (record (field "launch-id" 130) (field "label" 3)))
+      (export (;182;) "action-block" (type (eq 181)))
+      (type (;183;) (record (field "value" string)))
+      (export (;184;) "list-id" (type (eq 183)))
+      (type (;185;) (record (field "value" string)))
+      (export (;186;) "list-item-id" (type (eq 185)))
+      (type (;187;) (option 130))
+      (type (;188;) (record (field "id" 186) (field "label" 3) (field "description" 42) (field "image" 43) (field "launch-id" 187)))
+      (export (;189;) "list-item" (type (eq 188)))
+      (type (;190;) (list 189))
+      (type (;191;) (record (field "id" 184) (field "title" 42) (field "items" 190)))
+      (export (;192;) "list-view" (type (eq 191)))
+      (type (;193;) (variant (case "text" 178) (case "image" 180) (case "action" 182) (case "form" 118) (case "list-block" 192)))
+      (export (;194;) "ui-block" (type (eq 193)))
+      (type (;195;) (list 194))
+      (type (;196;) (record (field "id" 174) (field "title" 42) (field "blocks" 195)))
+      (export (;197;) "ui-view" (type (eq 196)))
+      (type (;198;) (record (field "value" string)))
+      (export (;199;) "action-id" (type (eq 198)))
+      (type (;200;) (list 167))
+      (type (;201;) (option 197))
+      (type (;202;) (option 67))
+      (type (;203;) (record (field "id" 130) (field "plugin" 1) (field "action" 199) (field "command-node" 17) (field "label" 3) (field "context" 128) (field "payloads" 200) (field "fallback" 201) (field "expires-at" 202)))
+      (export (;204;) "launch-descriptor" (type (eq 203)))
+      (type (;205;) (option 172))
+      (type (;206;) (list 197))
+      (type (;207;) (list 204))
+      (type (;208;) (record (field "id" 169) (field "plugin" 1) (field "capability" 15) (field "payload-namespace" 9) (field "created-at" 67) (field "source" 205) (field "ui" 206) (field "payloads" 200) (field "launches" 207)))
+      (export (;209;) "message-enrichment" (type (eq 208)))
+      (type (;210;) (list 209))
+      (type (;211;) (record (field "version" u32) (field "enrichments" 210)))
+      (export (;212;) "extension-envelope" (type (eq 211)))
+      (type (;213;) (record (field "value" string)))
+      (export (;214;) "pubsub-item-id" (type (eq 213)))
+      (type (;215;) (option 214))
+      (type (;216;) (record (field "node" 30) (field "item-id" 215) (field "payload" 167)))
+      (export (;217;) "pubsub-publish" (type (eq 216)))
+      (type (;218;) (variant (case "publish-room-result" 167) (case "enrich-message" 212) (case "publish-pubsub" 217) (case "reference-artifact" 41) (case "command-form" 118) (case "host-warning" 3) (case "noop")))
+      (export (;219;) "extension-effect" (type (eq 218)))
+      (type (;220;) (record (field "value" string)))
+      (export (;221;) "model-id" (type (eq 220)))
+      (type (;222;) (record (field "provider" 134) (field "model" 221) (field "cost-micro-usd" u64)))
+      (export (;223;) "invocation-usage" (type (eq 222)))
+      (type (;224;) (list 219))
+      (type (;225;) (option 223))
+      (type (;226;) (record (field "effects" 224) (field "usage" 225)))
+      (export (;227;) "extension-response" (type (eq 226)))
+    )
+  )
+  (import "waddle:extension/types@4.0.0" (instance $waddle:extension/types@4.0.0 (;0;) (type $ty-waddle:extension/types@4.0.0)))
+  (type $ty-waddle:extension/delivery@4.0.0 (;1;)
+    (instance
+      (export (;0;) "delivery-key" (type (sub resource)))
+    )
+  )
+  (import "waddle:extension/delivery@4.0.0" (instance $waddle:extension/delivery@4.0.0 (;1;) (type $ty-waddle:extension/delivery@4.0.0)))
+  (alias export $waddle:extension/types@4.0.0 "provider-id" (type $ty-inf-provider-id (;1;)))
+  (alias export $waddle:extension/types@4.0.0 "model-id" (type $ty-inf-model-id (;2;)))
+  (type $ty-waddle:extension/inference@4.0.0 (;2;)
+    (instance
+      (alias outer 1 $ty-inf-provider-id (type $provider-id-inner (;0;)))
+      (export (;1;) "provider-id" (type (eq 0)))
+      (alias outer 1 $ty-inf-model-id (type $model-id-inner (;2;)))
+      (export (;3;) "model-id" (type (eq 2)))
+      (type (;4;) (variant (case "tenant" string) (case "invoking-user" string)))
+      (export (;5;) "credential-ref" (type (eq 4)))
+      (type (;6;) (record (field "role" string) (field "content" string)))
+      (export (;7;) "inference-message" (type (eq 6)))
+      (type (;8;) (list 7))
+      (type (;9;) (option u32))
+      (type (;10;) (record (field "credential" 5) (field "provider" 1) (field "deployment" string) (field "model" 3) (field "messages" 8) (field "max-output-tokens" 9)))
+      (export (;11;) "inference-request" (type (eq 10)))
+      (type (;12;) (list u8))
+      (type (;13;) (option string))
+      (type (;14;) (record (field "delta" 12) (field "sequence" u64) (field "finish-reason" 13)))
+      (export (;15;) "inference-chunk" (type (eq 14)))
+      (type (;16;) (record (field "provider" 1) (field "model" 3) (field "input-tokens" u64) (field "output-tokens" u64) (field "cost-microcents" u64)))
+      (export (;17;) "verified-usage" (type (eq 16)))
+      (type (;18;) (enum "denied" "invalid-request" "canceled" "rate-limited" "temporary-failure" "chunk-limit-exceeded"))
+      (export (;19;) "inference-error-code" (type (eq 18)))
+      (type (;20;) (record (field "code" 19) (field "message" string)))
+      (export (;21;) "inference-error" (type (eq 20)))
+      (export (;22;) "inference-stream" (type (sub resource)))
+      (type (;23;) (borrow 22))
+      (type (;24;) (option 15))
+      (type (;25;) (result 24 (error 21)))
+      (type (;26;) (func (param "self" 23) (result 25)))
+      (export (;0;) "[method]inference-stream.next-chunk" (func (type 26)))
+      (type (;27;) (option 17))
+      (type (;28;) (func (param "self" 23) (result 27)))
+      (export (;1;) "[method]inference-stream.terminal-usage" (func (type 28)))
+      (type (;29;) (own 22))
+      (type (;30;) (result 29 (error 21)))
+      (type (;31;) (func (param "request" 11) (result 30)))
+      (export (;2;) "start-stream" (func (type 31)))
+    )
+  )
+  (import "waddle:extension/inference@4.0.0" (instance $waddle:extension/inference@4.0.0 (;2;) (type $ty-waddle:extension/inference@4.0.0)))
+  (core module $main (;0;)
+    (type (;0;) (func (param i32 i32) (result i32)))
+    (type (;1;) (func (param i32)))
+    (type (;2;) (func (param i32) (result i32)))
+    (type (;3;) (func (param i32 i32 i32 i32) (result i32)))
+    (type (;4;) (func))
+    (type (;5;) (func (param i32 i32)))
+    (type (;6;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+    (import "cm32p2|waddle:extension/delivery@4" "delivery-key_drop" (func $drop-delivery (;0;) (type 1) (param i32)))
+    (import "cm32p2|waddle:extension/inference@4" "start-stream" (func $start-stream (;1;) (type 6) (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+    (import "cm32p2|waddle:extension/inference@4" "[method]inference-stream.next-chunk" (func $next-chunk (;2;) (type 5) (param i32 i32)))
+    (import "cm32p2|waddle:extension/inference@4" "[method]inference-stream.terminal-usage" (func $terminal-usage (;3;) (type 5) (param i32 i32)))
+    (import "cm32p2|waddle:extension/inference@4" "inference-stream_drop" (func $drop-stream (;4;) (type 1) (param i32)))
+    (memory (;0;) 4)
+    (global $heap (;0;) (mut i32) i32.const 32768)
+    (export "cm32p2|waddle:extension/lifecycle@4|init" (func $f0))
+    (export "cm32p2|waddle:extension/lifecycle@4|init_post" (func $f1))
+    (export "cm32p2|waddle:extension/framework@4|handle-event" (func $f2))
+    (export "cm32p2|waddle:extension/framework@4|handle-event_post" (func $f3))
+    (export "cm32p2_memory" (memory 0))
+    (export "cm32p2_realloc" (func $f4))
+    (export "cm32p2_initialize" (func $f5))
+
+    ;; init(config) -> ok(ExtensionManifest)
+    (func $f0 (;5;) (type 0) (param i32 i32) (result i32)
+      ;; result<manifest, string> at addr 0: disc = 0 (ok)
+      ;; plugin-id = "ai-chatbot" (512, len 10)
+      i32.const 4
+      i32.const 512
+      i32.store
+      i32.const 8
+      i32.const 10
+      i32.store
+      ;; name = "ai-chatbot" (512, len 10)
+      i32.const 12
+      i32.const 512
+      i32.store
+      i32.const 16
+      i32.const 10
+      i32.store
+      ;; version = "1.0.0" (540, len 5)
+      i32.const 20
+      i32.const 540
+      i32.store
+      i32.const 24
+      i32.const 5
+      i32.store
+      ;; capabilities list at 1600, len 1: extension-capability::commands (11)
+      i32.const 1600
+      i32.const 11
+      i32.store8
+      i32.const 36
+      i32.const 1600
+      i32.store
+      i32.const 40
+      i32.const 1
+      i32.store
+      ;; commands list at 1664, len 1 (CommandDescriptor size 36 bytes):
+      ;; node: "urn:waddle:extension:1:ai-chatbot" (560, len 33)
+      i32.const 1664
+      i32.const 560
+      i32.store
+      i32.const 1668
+      i32.const 33
+      i32.store
+      ;; name: "AI" (600, len 2)
+      i32.const 1672
+      i32.const 600
+      i32.store
+      i32.const 1676
+      i32.const 2
+      i32.store
+      ;; scope = channel (1) at offset 1680 (1 byte + 3 pad)
+      i32.const 1680
+      i32.const 1
+      i32.store8
+      ;; composer-prefix = none (0), inline-field = none (0), composer-execute = false (0)
+      i32.const 44
+      i32.const 1664
+      i32.store
+      i32.const 48
+      i32.const 1
+      i32.store
+      i32.const 0
+    )
+    (func $f1 (;6;) (type 1) (param i32))
+
+    ;; handle-event(event, delivery) -> result<extension-response, extension-error>
+    ;; event ptr at param 0. If command (disc == 2):
+    ;;   Reads fields list at event + 48 (ptr), event + 52 (len).
+    ;;   Default mode: normal stream until EOF + check terminal-usage;
+    ;;   If fields len > 0 and first field name starts with 'h' ("hang"), reads first chunk then loops forever.
+    (func $f2 (;7;) (type 2) (param i32) (result i32)
+      (local $stream i32)
+      (local $hang i32)
+      (local $out_ptr i32)
+      (local $out_len i32)
+      (local $usage_tokens i64)
+
+      ;; Check if event is command (tag == 2) and fields[0].name[0] == 'h' (104)
+      i32.const 0
+      local.set $hang
+      local.get 0
+      i32.load8_u
+      i32.const 2
+      i32.eq
+      if
+        local.get 0
+        i32.load offset=100
+        i32.const 0
+        i32.gt_u
+        if
+          local.get 0
+          i32.load offset=96
+          i32.load
+          i32.load8_u
+          i32.const 104
+          i32.eq
+          if
+            i32.const 1
+            local.set $hang
+          end
+        end
+      end
+
+      ;; 4200: role = "user" (660, 4), content = "hi" (670, 2)
+      i32.const 4200
+      i32.const 660
+      i32.store
+      i32.const 4204
+      i32.const 4
+      i32.store
+      i32.const 4208
+      i32.const 670
+      i32.store
+      i32.const 4212
+      i32.const 2
+      i32.store
+
+      ;; Call start-stream(cred_disc=0, tenant="default"(610,7), provider="openai"(620,6), deployment="prod"(630,4), model="gpt-4o-mini"(640,11), msgs=(4200,1), max_out=some(64), retptr=5000)
+      i32.const 0
+      i32.const 610
+      i32.const 7
+      i32.const 620
+      i32.const 6
+      i32.const 630
+      i32.const 4
+      i32.const 640
+      i32.const 11
+      i32.const 4200
+      i32.const 1
+      i32.const 1
+      i32.const 64
+      i32.const 5000
+      call $start-stream
+      ;; retptr 5000: disc(u8) at 5000, handle(i32) at 5004
+      i32.const 5000
+      i32.load8_u
+      if
+        ;; start-stream error -> return extension-error(denied)
+        i32.const 8000
+        i32.const 1
+        i32.store8
+        i32.const 8004
+        i32.const 2
+        i32.store8
+        i32.const 8008
+        i32.const 680
+        i32.store
+        i32.const 8012
+        i32.const 18
+        i32.store
+        i32.const 8000
+        return
+      end
+      i32.const 5004
+      i32.load
+      local.set $stream
+
+      ;; Buffer assembled delta starting at 12000
+      i32.const 12000
+      local.set $out_ptr
+      i32.const 0
+      local.set $out_len
+
+      ;; Loop next-chunk until option::none (or spin if hang == 1 after 1st chunk)
+      block $done
+        loop $chunk_loop
+          local.get $stream
+          i32.const 6000
+          call $next-chunk
+          ;; retptr 6000: result<option<inference-chunk>, inference-error>
+          ;; 6000: result disc (0 = ok, 1 = err)
+          i32.const 6000
+          i32.load8_u
+          if
+            local.get $stream
+            call $drop-stream
+            i32.const 8000
+            i32.const 1
+            i32.store8
+            i32.const 8008
+            i32.const 2
+            i32.store8
+            i32.const 8012
+            i32.const 680
+            i32.store
+            i32.const 8016
+            i32.const 18
+            i32.store
+            i32.const 8000
+            return
+          end
+          ;; 6008: option<inference-chunk> disc (0 = none, 1 = some)
+          i32.const 6008
+          i32.load8_u
+          i32.eqz
+          if
+            ;; EOF reached -> break out of $done block
+            br $done
+          end
+          ;; Copy delta bytes (ptr at 6016, len at 6020) into out_ptr + out_len
+          local.get $out_ptr
+          local.get $out_len
+          i32.add
+          i32.const 6016
+          i32.load
+          i32.const 6020
+          i32.load
+          memory.copy
+          local.get $out_len
+          i32.const 6020
+          i32.load
+          i32.add
+          local.set $out_len
+
+          ;; If hang == 1, check terminal-usage is none pre-EOF and then spin until epoch trap!
+          local.get $hang
+          if
+            local.get $stream
+            i32.const 7000
+            call $terminal-usage
+            loop $spin
+              br $spin
+            end
+          end
+          br $chunk_loop
+        end
+      end
+
+      ;; Read terminal-usage at EOF: retptr 7000 (option<verified-usage>)
+      local.get $stream
+      i32.const 7000
+      call $terminal-usage
+      i64.const 0
+      local.set $usage_tokens
+      i32.const 7000
+      i32.load8_u
+      if
+        ;; output_tokens is at 7008 + 24 = 7032 (provider 8B, model 8B, input_tokens 8B)
+        i32.const 7032
+        i64.load
+        local.set $usage_tokens
+      end
+
+      local.get $stream
+      call $drop-stream
+
+      ;; Build Ok(ExtensionResponse) at 8000 (align 8 because InvocationUsage has u64):
+      ;; 8000: result disc = 0 (ok)
+      ;; 8008: effects ptr = 8100, 8012: effects len = 1
+      ;; 8016: usage option = 0 (none)
+      i32.const 8000
+      i32.const 0
+      i32.store8
+      i32.const 8008
+      i32.const 8100
+      i32.store
+      i32.const 8012
+      i32.const 1
+      i32.store
+      i32.const 8016
+      i32.const 0
+      i32.store8
+
+      ;; Effect[0] at 8100: HostWarning(DisplayText) -> variant disc 5 at 8100, str ptr at 8104, str len at 8108
+      i32.const 8100
+      i32.const 5
+      i32.store8
+      i32.const 8104
+      local.get $out_ptr
+      i32.store
+      i32.const 8108
+      local.get $out_len
+      i32.store
+      i32.const 8000
+    )
+    (func $f3 (;8;) (type 1) (param i32))
+    (func $f4 (;9;) (type 3) (param i32 i32 i32 i32) (result i32)
+      (local $ptr i32)
+      global.get $heap
+      local.get 2
+      i32.const 1
+      i32.sub
+      i32.add
+      i32.const 0
+      local.get 2
+      i32.sub
+      i32.and
+      local.set $ptr
+      local.get $ptr
+      local.get 3
+      i32.add
+      global.set $heap
+      local.get $ptr
+    )
+    (func $f5 (;10;) (type 4))
+    (data (;0;) (i32.const 512) "ai-chatbot")
+    (data (;1;) (i32.const 540) "1.0.0")
+    (data (;2;) (i32.const 560) "urn:waddle:extension:1:ai-chatbot")
+    (data (;3;) (i32.const 600) "AI")
+    (data (;4;) (i32.const 610) "default")
+    (data (;5;) (i32.const 620) "openai")
+    (data (;6;) (i32.const 630) "prod")
+    (data (;7;) (i32.const 640) "gpt-4o-mini")
+    (data (;8;) (i32.const 660) "user")
+    (data (;9;) (i32.const 670) "hi")
+    (data (;10;) (i32.const 680) "stream-call-failed")
+  )
+  (alias export $waddle:extension/types@4.0.0 "extension-manifest" (type $extension-manifest (;3;)))
+  (alias export $waddle:extension/delivery@4.0.0 "delivery-key" (type $delivery-key (;4;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-error" (type $extension-error (;5;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-event" (type $extension-event (;6;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-response" (type $extension-response (;7;)))
+  (alias export $waddle:extension/delivery@4.0.0 "delivery-key" (type $"#type8 delivery-key" (@name "delivery-key") (;8;)))
+  (alias export $waddle:extension/inference@4.0.0 "inference-stream" (type $"#type9 inference-stream" (@name "inference-stream") (;9;)))
+  (core func $drop_delivery (;0;) (canon resource.drop $"#type8 delivery-key"))
+  (core func $drop_inference_stream (;1;) (canon resource.drop $"#type9 inference-stream"))
+
+  (core module $wit-component-shim-module (;1;)
+    (type (;0;) (func (param i32 i32)))
+    (type (;1;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+    (table (;0;) 1 funcref)
+    (table (;1;) 2 2 funcref)
+    (export "0" (func $ind0))
+    (export "1" (func $ind1))
+    (export "2" (func $ind2))
+    (export "$imports0" (table 0))
+    (export "$imports1" (table 1))
+    (func $ind0 (;0;) (type 1) (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)
+      local.get 0
+      local.get 1
+      local.get 2
+      local.get 3
+      local.get 4
+      local.get 5
+      local.get 6
+      local.get 7
+      local.get 8
+      local.get 9
+      local.get 10
+      local.get 11
+      local.get 12
+      local.get 13
+      i32.const 0
+      call_indirect 0 (type 1)
+    )
+    (func $ind1 (;1;) (type 0) (param i32 i32)
+      local.get 0
+      local.get 1
+      i32.const 0
+      call_indirect 1 (type 0)
+    )
+    (func $ind2 (;2;) (type 0) (param i32 i32)
+      local.get 0
+      local.get 1
+      i32.const 1
+      call_indirect 1 (type 0)
+    )
+  )
+  (core instance $shim_inst (;0;) (instantiate $wit-component-shim-module))
+  (alias core export $shim_inst "0" (core func $shim_start (;2;)))
+  (alias core export $shim_inst "1" (core func $shim_next (;3;)))
+  (alias core export $shim_inst "2" (core func $shim_usage (;4;)))
+  (core instance $cm32p2|waddle:extension/delivery@4 (;1;)
+    (export "delivery-key_drop" (func $drop_delivery))
+  )
+  (core instance $cm32p2|waddle:extension/inference@4 (;2;)
+    (export "start-stream" (func $shim_start))
+    (export "[method]inference-stream.next-chunk" (func $shim_next))
+    (export "[method]inference-stream.terminal-usage" (func $shim_usage))
+    (export "inference-stream_drop" (func $drop_inference_stream))
+  )
+  (core instance $main (;3;) (instantiate $main
+      (with "cm32p2|waddle:extension/delivery@4" (instance $cm32p2|waddle:extension/delivery@4))
+      (with "cm32p2|waddle:extension/inference@4" (instance $cm32p2|waddle:extension/inference@4))
+    )
+  )
+  (alias core export $main "cm32p2_memory" (core memory $memory (;0;)))
+  (alias core export $main "cm32p2_realloc" (core func $cm32p2_realloc (;5;)))
+
+  (alias export $waddle:extension/inference@4.0.0 "start-stream" (func $inf_start_stream (;0;)))
+  (alias export $waddle:extension/inference@4.0.0 "[method]inference-stream.next-chunk" (func $inf_next_chunk (;1;)))
+  (alias export $waddle:extension/inference@4.0.0 "[method]inference-stream.terminal-usage" (func $inf_terminal_usage (;2;)))
+  (core func $lower_start (;6;) (canon lower (func $inf_start_stream) (memory $memory) (realloc $cm32p2_realloc) string-encoding=utf8))
+  (core func $lower_next (;7;) (canon lower (func $inf_next_chunk) (memory $memory) (realloc $cm32p2_realloc) string-encoding=utf8))
+  (core func $lower_usage (;8;) (canon lower (func $inf_terminal_usage) (memory $memory) (realloc $cm32p2_realloc) string-encoding=utf8))
+
+  (core module $wit-component-fixup (;2;)
+    (type (;0;) (func))
+    (type (;1;) (func (param i32 i32)))
+    (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+    (import "main" "cm32p2_initialize" (func $cm32p2_initialize (;0;) (type 0)))
+    (import "actual" "0" (func $a0 (;1;) (type 2) (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+    (import "actual" "1" (func $a1 (;2;) (type 1) (param i32 i32)))
+    (import "actual" "2" (func $a2 (;3;) (type 1) (param i32 i32)))
+    (import "shim" "$imports0" (table (;0;) 1 funcref))
+    (import "shim" "$imports1" (table (;1;) 2 2 funcref))
+    (elem (;0;) (table 0) (i32.const 0) func $a0)
+    (elem (;1;) (table 1) (i32.const 0) func $a1 $a2)
+    (start $cm32p2_initialize)
+  )
+  (core instance $actual_inf (;4;)
+    (export "0" (func $lower_start))
+    (export "1" (func $lower_next))
+    (export "2" (func $lower_usage))
+  )
+  (core instance $fixup (;5;) (instantiate $wit-component-fixup
+      (with "main" (instance $main))
+      (with "actual" (instance $actual_inf))
+      (with "shim" (instance $shim_inst))
+    )
+  )
+
+  (type $ty_init_res (result $extension-manifest (error string)))
+  (type $ty_init_fn (func (param "config" string) (result $ty_init_res)))
+  (alias core export $main "cm32p2|waddle:extension/lifecycle@4|init" (core func $cm32p2|waddle:extension/lifecycle@4|init (;9;)))
+  (alias core export $main "cm32p2|waddle:extension/lifecycle@4|init_post" (core func $cm32p2|waddle:extension/lifecycle@4|init_post (;10;)))
+  (func $init (;3;) (type $ty_init_fn) (canon lift (core func $cm32p2|waddle:extension/lifecycle@4|init) (memory $memory) (realloc $cm32p2_realloc) string-encoding=utf8 (post-return $cm32p2|waddle:extension/lifecycle@4|init_post)))
+
+  (alias export $waddle:extension/types@4.0.0 "plugin-id" (type $plugin-id (;12;)))
+  (alias export $waddle:extension/types@4.0.0 "display-text" (type $display-text (;13;)))
+  (alias export $waddle:extension/types@4.0.0 "plugin-version" (type $plugin-version (;14;)))
+  (alias export $waddle:extension/types@4.0.0 "payload-surface" (type $payload-surface (;15;)))
+  (alias export $waddle:extension/types@4.0.0 "payload-namespace" (type $payload-namespace (;16;)))
+  (alias export $waddle:extension/types@4.0.0 "payload-root" (type $payload-root (;17;)))
+  (alias export $waddle:extension/types@4.0.0 "payload-rule" (type $payload-rule (;18;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-capability" (type $extension-capability (;19;)))
+  (alias export $waddle:extension/types@4.0.0 "command-node" (type $command-node (;20;)))
+  (alias export $waddle:extension/types@4.0.0 "command-scope" (type $command-scope (;21;)))
+  (alias export $waddle:extension/types@4.0.0 "command-descriptor" (type $command-descriptor (;22;)))
+  (alias export $waddle:extension/types@4.0.0 "route-id" (type $route-id (;23;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-route-scope" (type $extension-route-scope (;24;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-route-surface" (type $extension-route-surface (;25;)))
+  (alias export $waddle:extension/types@4.0.0 "pubsub-node" (type $pubsub-node (;26;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-route-descriptor" (type $extension-route-descriptor (;27;)))
+  (alias export $waddle:extension/types@4.0.0 "artifact-uri" (type $artifact-uri (;28;)))
+  (alias export $waddle:extension/types@4.0.0 "sha256-digest" (type $sha256-digest (;29;)))
+  (alias export $waddle:extension/types@4.0.0 "media-type" (type $media-type (;30;)))
+  (alias export $waddle:extension/types@4.0.0 "artifact-reference" (type $artifact-reference (;31;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-profile" (type $extension-profile (;32;)))
+  (component $waddle:extension/lifecycle@4.0.0-shim-component (;0;)
+    (type (;0;) (record (field "value" string)))
+    (import "import-type-plugin-id" (type (;1;) (eq 0)))
+    (type (;2;) (record (field "value" string)))
+    (import "import-type-display-text" (type (;3;) (eq 2)))
+    (type (;4;) (record (field "value" string)))
+    (import "import-type-plugin-version" (type (;5;) (eq 4)))
+    (type (;6;) (enum "room-result" "message-enrichment" "launch-payload" "pubsub-item"))
+    (import "import-type-payload-surface" (type (;7;) (eq 6)))
+    (type (;8;) (record (field "value" string)))
+    (import "import-type-payload-namespace" (type (;9;) (eq 8)))
+    (type (;10;) (record (field "namespace" 9) (field "local-name" string)))
+    (import "import-type-payload-root" (type (;11;) (eq 10)))
+    (type (;12;) (record (field "surface" 7) (field "root" 11)))
+    (import "import-type-payload-rule" (type (;13;) (eq 12)))
+    (type (;14;) (enum "room-result-publish" "message-enrich" "message-observe" "host-channels-read" "host-spaces-read" "host-members-read" "host-presence-read" "host-mam-read" "host-roster-read" "host-message-send" "outbound-http-request" "commands" "launch" "pubsub-publish" "artifact-reference" "ui-declarative"))
+    (import "import-type-extension-capability" (type (;15;) (eq 14)))
+    (type (;16;) (record (field "value" string)))
+    (import "import-type-command-node" (type (;17;) (eq 16)))
+    (type (;18;) (enum "global" "channel"))
+    (import "import-type-command-scope" (type (;19;) (eq 18)))
+    (type (;20;) (option string))
+    (type (;21;) (record (field "node" 17) (field "name" 3) (field "scope" 19) (field "composer-prefix" 20) (field "inline-field" 20) (field "composer-execute" bool)))
+    (import "import-type-command-descriptor" (type (;22;) (eq 21)))
+    (type (;23;) (record (field "value" string)))
+    (import "import-type-route-id" (type (;24;) (eq 23)))
+    (type (;25;) (enum "channel"))
+    (import "import-type-extension-route-scope" (type (;26;) (eq 25)))
+    (type (;27;) (enum "gallery" "list-view"))
+    (import "import-type-extension-route-surface" (type (;28;) (eq 27)))
+    (type (;29;) (record (field "value" string)))
+    (import "import-type-pubsub-node" (type (;30;) (eq 29)))
+    (type (;31;) (record (field "plugin" 1) (field "id" 24) (field "label" 3) (field "scope" 26) (field "surface" 28) (field "state-node" 30) (field "payload-namespace" 9)))
+    (import "import-type-extension-route-descriptor" (type (;32;) (eq 31)))
+    (type (;33;) (record (field "value" string)))
+    (import "import-type-artifact-uri" (type (;34;) (eq 33)))
+    (type (;35;) (record (field "value" string)))
+    (import "import-type-sha256-digest" (type (;36;) (eq 35)))
+    (type (;37;) (record (field "value" string)))
+    (import "import-type-media-type" (type (;38;) (eq 37)))
+    (type (;39;) (option 38))
+    (type (;40;) (record (field "uri" 34) (field "sha256" 36) (field "media-type" 39)))
+    (import "import-type-artifact-reference" (type (;41;) (eq 40)))
+    (type (;42;) (option 3))
+    (type (;43;) (option 41))
+    (type (;44;) (record (field "display-name" 3) (field "description" 42) (field "accent" 20) (field "avatar" 43) (field "bot-hat-label" 42)))
+    (import "import-type-extension-profile" (type (;45;) (eq 44)))
+    (type (;46;) (list 13))
+    (type (;47;) (list 15))
+    (type (;48;) (list 22))
+    (type (;49;) (list 32))
+    (type (;50;) (list 30))
+    (type (;51;) (option 45))
+    (type (;52;) (record (field "id" 1) (field "name" 3) (field "version" 5) (field "payloads" 46) (field "capabilities" 47) (field "commands" 48) (field "routes" 49) (field "pubsub-nodes" 50) (field "profile" 51) (field "artifact" 43)))
+    (import "import-type-extension-manifest" (type (;53;) (eq 52)))
+    (import "import-type-extension-manifest0" (type (;54;) (eq 53)))
+    (type (;55;) (result 54 (error string)))
+    (type (;56;) (func (param "config" string) (result 55)))
+    (import "import-func-init" (func (;0;) (type 56)))
+    (export (;57;) "extension-manifest" (type 53))
+    (type (;58;) (result 57 (error string)))
+    (type (;59;) (func (param "config" string) (result 58)))
+    (export (;1;) "init" (func 0) (func (type 59)))
+  )
+  (instance $waddle:extension/lifecycle@4.0.0-shim-instance (;6;) (instantiate $waddle:extension/lifecycle@4.0.0-shim-component
+      (with "import-func-init" (func $init))
+      (with "import-type-plugin-id" (type $plugin-id))
+      (with "import-type-display-text" (type $display-text))
+      (with "import-type-plugin-version" (type $plugin-version))
+      (with "import-type-payload-surface" (type $payload-surface))
+      (with "import-type-payload-namespace" (type $payload-namespace))
+      (with "import-type-payload-root" (type $payload-root))
+      (with "import-type-payload-rule" (type $payload-rule))
+      (with "import-type-extension-capability" (type $extension-capability))
+      (with "import-type-command-node" (type $command-node))
+      (with "import-type-command-scope" (type $command-scope))
+      (with "import-type-command-descriptor" (type $command-descriptor))
+      (with "import-type-route-id" (type $route-id))
+      (with "import-type-extension-route-scope" (type $extension-route-scope))
+      (with "import-type-extension-route-surface" (type $extension-route-surface))
+      (with "import-type-pubsub-node" (type $pubsub-node))
+      (with "import-type-extension-route-descriptor" (type $extension-route-descriptor))
+      (with "import-type-artifact-uri" (type $artifact-uri))
+      (with "import-type-sha256-digest" (type $sha256-digest))
+      (with "import-type-media-type" (type $media-type))
+      (with "import-type-artifact-reference" (type $artifact-reference))
+      (with "import-type-extension-profile" (type $extension-profile))
+      (with "import-type-extension-manifest" (type $extension-manifest))
+      (with "import-type-extension-manifest0" (type $extension-manifest))
+    )
+  )
+  (export $waddle:extension/lifecycle@4.0.0 (;7;) "waddle:extension/lifecycle@4.0.0" (instance $waddle:extension/lifecycle@4.0.0-shim-instance))
+
+  (type $ty_he_borrow (borrow $delivery-key))
+  (type $ty_he_opt (option $ty_he_borrow))
+  (type $ty_he_res (result $extension-response (error $extension-error)))
+  (type $ty_he_fn (func (param "event" $extension-event) (param "delivery" $ty_he_opt) (result $ty_he_res)))
+  (alias core export $main "cm32p2|waddle:extension/framework@4|handle-event" (core func $cm32p2|waddle:extension/framework@4|handle-event (;11;)))
+  (alias core export $main "cm32p2|waddle:extension/framework@4|handle-event_post" (core func $cm32p2|waddle:extension/framework@4|handle-event_post (;12;)))
+  (func $handle-event (;4;) (type $ty_he_fn) (canon lift (core func $cm32p2|waddle:extension/framework@4|handle-event) (memory $memory) (realloc $cm32p2_realloc) string-encoding=utf8 (post-return $cm32p2|waddle:extension/framework@4|handle-event_post)))
+
+  (alias export $waddle:extension/types@4.0.0 "extension-error-code" (type $extension-error-code (;35;)))
+  (alias export $waddle:extension/types@4.0.0 "room-jid" (type $room-jid (;36;)))
+  (alias export $waddle:extension/types@4.0.0 "stanza-id" (type $stanza-id (;37;)))
+  (alias export $waddle:extension/types@4.0.0 "origin-id" (type $origin-id (;38;)))
+  (alias export $waddle:extension/types@4.0.0 "bare-jid" (type $bare-jid (;39;)))
+  (alias export $waddle:extension/types@4.0.0 "timestamp" (type $timestamp (;40;)))
+  (alias export $waddle:extension/types@4.0.0 "room-message-source" (type $room-message-source (;41;)))
+  (alias export $waddle:extension/types@4.0.0 "room-message-observe" (type $room-message-observe (;42;)))
+  (alias export $waddle:extension/types@4.0.0 "waddle-id" (type $waddle-id (;43;)))
+  (alias export $waddle:extension/types@4.0.0 "full-jid" (type $full-jid (;44;)))
+  (alias export $waddle:extension/types@4.0.0 "thread-id" (type $thread-id (;45;)))
+  (alias export $waddle:extension/types@4.0.0 "reply-target" (type $reply-target (;46;)))
+  (alias export $waddle:extension/types@4.0.0 "message-context" (type $message-context (;47;)))
+  (alias export $waddle:extension/types@4.0.0 "url" (type $url (;48;)))
+  (alias export $waddle:extension/types@4.0.0 "body-range" (type $body-range (;49;)))
+  (alias export $waddle:extension/types@4.0.0 "link-target" (type $link-target (;50;)))
+  (alias export $waddle:extension/types@4.0.0 "message-hook" (type $message-hook (;51;)))
+  (alias export $waddle:extension/types@4.0.0 "command-session-id" (type $command-session-id (;52;)))
+  (alias export $waddle:extension/types@4.0.0 "command-action" (type $command-action (;53;)))
+  (alias export $waddle:extension/types@4.0.0 "data-form-type" (type $data-form-type (;54;)))
+  (alias export $waddle:extension/types@4.0.0 "ui-action-id" (type $ui-action-id (;55;)))
+  (alias export $waddle:extension/types@4.0.0 "form-field-type" (type $form-field-type (;56;)))
+  (alias export $waddle:extension/types@4.0.0 "data-form-value" (type $data-form-value (;57;)))
+  (alias export $waddle:extension/types@4.0.0 "form-field-option" (type $form-field-option (;58;)))
+  (alias export $waddle:extension/types@4.0.0 "data-form-field" (type $data-form-field (;59;)))
+  (alias export $waddle:extension/types@4.0.0 "data-form" (type $data-form (;60;)))
+  (alias export $waddle:extension/types@4.0.0 "form-field-value" (type $form-field-value (;61;)))
+  (alias export $waddle:extension/types@4.0.0 "command-invocation" (type $command-invocation (;62;)))
+  (alias export $waddle:extension/types@4.0.0 "launch-context" (type $launch-context (;63;)))
+  (alias export $waddle:extension/types@4.0.0 "launch-id" (type $launch-id (;64;)))
+  (alias export $waddle:extension/types@4.0.0 "launch-invocation" (type $launch-invocation (;65;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-id" (type $provider-id (;66;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-event-type" (type $provider-event-type (;67;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-delivery-id" (type $provider-delivery-id (;68;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-field-name" (type $provider-field-name (;69;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-field-number" (type $provider-field-number (;70;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-field-text" (type $provider-field-text (;71;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-field-value" (type $provider-field-value (;72;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-field" (type $provider-field (;73;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-payload" (type $provider-payload (;74;)))
+  (alias export $waddle:extension/types@4.0.0 "provider-webhook" (type $provider-webhook (;75;)))
+  (alias export $waddle:extension/types@4.0.0 "xml-attribute" (type $xml-attribute (;76;)))
+  (alias export $waddle:extension/types@4.0.0 "xml-element" (type $xml-element (;77;)))
+  (alias export $waddle:extension/types@4.0.0 "xml-token" (type $xml-token (;78;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-payload" (type $extension-payload (;79;)))
+  (alias export $waddle:extension/types@4.0.0 "enrichment-id" (type $enrichment-id (;80;)))
+  (alias export $waddle:extension/types@4.0.0 "message-source" (type $message-source (;81;)))
+  (alias export $waddle:extension/types@4.0.0 "ui-view-id" (type $ui-view-id (;82;)))
+  (alias export $waddle:extension/types@4.0.0 "text-style" (type $text-style (;83;)))
+  (alias export $waddle:extension/types@4.0.0 "text-block" (type $text-block (;84;)))
+  (alias export $waddle:extension/types@4.0.0 "image-block" (type $image-block (;85;)))
+  (alias export $waddle:extension/types@4.0.0 "action-block" (type $action-block (;86;)))
+  (alias export $waddle:extension/types@4.0.0 "list-id" (type $list-id (;87;)))
+  (alias export $waddle:extension/types@4.0.0 "list-item-id" (type $list-item-id (;88;)))
+  (alias export $waddle:extension/types@4.0.0 "list-item" (type $list-item (;89;)))
+  (alias export $waddle:extension/types@4.0.0 "list-view" (type $list-view (;90;)))
+  (alias export $waddle:extension/types@4.0.0 "ui-block" (type $ui-block (;91;)))
+  (alias export $waddle:extension/types@4.0.0 "ui-view" (type $ui-view (;92;)))
+  (alias export $waddle:extension/types@4.0.0 "action-id" (type $action-id (;93;)))
+  (alias export $waddle:extension/types@4.0.0 "launch-descriptor" (type $launch-descriptor (;94;)))
+  (alias export $waddle:extension/types@4.0.0 "message-enrichment" (type $message-enrichment (;95;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-envelope" (type $extension-envelope (;96;)))
+  (alias export $waddle:extension/types@4.0.0 "pubsub-item-id" (type $pubsub-item-id (;97;)))
+  (alias export $waddle:extension/types@4.0.0 "pubsub-publish" (type $pubsub-publish (;98;)))
+  (alias export $waddle:extension/types@4.0.0 "extension-effect" (type $extension-effect (;99;)))
+  (alias export $waddle:extension/types@4.0.0 "model-id" (type $model-id (;100;)))
+  (alias export $waddle:extension/types@4.0.0 "invocation-usage" (type $invocation-usage (;101;)))
+  (component $waddle:extension/framework@4.0.0-shim-component (;1;)
+    (import "import-type-delivery-key" (type (;0;) (sub resource)))
+    (type (;1;) (enum "unsupported-event" "invalid-request" "denied" "temporary-failure"))
+    (import "import-type-extension-error-code" (type (;2;) (eq 1)))
+    (type (;3;) (record (field "value" string)))
+    (import "import-type-display-text" (type (;4;) (eq 3)))
+    (type (;5;) (record (field "code" 2) (field "message" 4)))
+    (import "import-type-extension-error" (type (;6;) (eq 5)))
+    (type (;7;) (record (field "value" string)))
+    (import "import-type-room-jid" (type (;8;) (eq 7)))
+    (type (;9;) (record (field "value" string)))
+    (import "import-type-stanza-id" (type (;10;) (eq 9)))
+    (type (;11;) (record (field "value" string)))
+    (import "import-type-origin-id" (type (;12;) (eq 11)))
+    (type (;13;) (record (field "value" string)))
+    (import "import-type-bare-jid" (type (;14;) (eq 13)))
+    (type (;15;) (record (field "value" string)))
+    (import "import-type-sha256-digest" (type (;16;) (eq 15)))
+    (type (;17;) (record (field "value" string)))
+    (import "import-type-timestamp" (type (;18;) (eq 17)))
+    (type (;19;) (option 12))
+    (type (;20;) (record (field "room" 8) (field "stanza-id" 10) (field "revision-stanza-id" 10) (field "origin-id" 19) (field "sender" 14) (field "revision" u64) (field "body-digest" 16) (field "observed-at" 18)))
+    (import "import-type-room-message-source" (type (;21;) (eq 20)))
+    (type (;22;) (record (field "source" 21) (field "body" 4)))
+    (import "import-type-room-message-observe" (type (;23;) (eq 22)))
+    (type (;24;) (record (field "value" string)))
+    (import "import-type-waddle-id" (type (;25;) (eq 24)))
+    (type (;26;) (record (field "value" string)))
+    (import "import-type-full-jid" (type (;27;) (eq 26)))
+    (type (;28;) (record (field "value" string)))
+    (import "import-type-thread-id" (type (;29;) (eq 28)))
+    (type (;30;) (option 27))
+    (type (;31;) (record (field "id" 10) (field "to" 30)))
+    (import "import-type-reply-target" (type (;32;) (eq 31)))
+    (type (;33;) (option 10))
+    (type (;34;) (option 8))
+    (type (;35;) (option 29))
+    (type (;36;) (option 32))
+    (type (;37;) (record (field "waddle-id" 25) (field "stanza-id" 33) (field "room" 34) (field "sender" 30) (field "thread-id" 35) (field "reply-to" 36)))
+    (import "import-type-message-context" (type (;38;) (eq 37)))
+    (type (;39;) (record (field "value" string)))
+    (import "import-type-url" (type (;40;) (eq 39)))
+    (type (;41;) (record (field "start" u32) (field "end" u32)))
+    (import "import-type-body-range" (type (;42;) (eq 41)))
+    (type (;43;) (record (field "url" 40) (field "range" 42)))
+    (import "import-type-link-target" (type (;44;) (eq 43)))
+    (type (;45;) (list 44))
+    (type (;46;) (record (field "context" 38) (field "body" 4) (field "links" 45)))
+    (import "import-type-message-hook" (type (;47;) (eq 46)))
+    (type (;48;) (record (field "value" string)))
+    (import "import-type-command-node" (type (;49;) (eq 48)))
+    (type (;50;) (record (field "value" string)))
+    (import "import-type-command-session-id" (type (;51;) (eq 50)))
+    (type (;52;) (enum "execute" "next" "prev" "complete" "cancel"))
+    (import "import-type-command-action" (type (;53;) (eq 52)))
+    (type (;54;) (enum "form" "submit" "cancel" "result-form"))
+    (import "import-type-data-form-type" (type (;55;) (eq 54)))
+    (type (;56;) (record (field "value" string)))
+    (import "import-type-ui-action-id" (type (;57;) (eq 56)))
+    (type (;58;) (enum "boolean" "fixed" "hidden" "jid-multi" "jid-single" "list-multi" "list-single" "text-multi" "text-private" "text-single"))
+    (import "import-type-form-field-type" (type (;59;) (eq 58)))
+    (type (;60;) (record (field "value" string)))
+    (import "import-type-data-form-value" (type (;61;) (eq 60)))
+    (type (;62;) (option 4))
+    (type (;63;) (record (field "label" 62) (field "value" 61)))
+    (import "import-type-form-field-option" (type (;64;) (eq 63)))
+    (type (;65;) (list 61))
+    (type (;66;) (list 64))
+    (type (;67;) (record (field "name" 57) (field "field-type" 59) (field "label" 62) (field "required" bool) (field "values" 65) (field "options" 66)))
+    (import "import-type-data-form-field" (type (;68;) (eq 67)))
+    (type (;69;) (list 4))
+    (type (;70;) (list 68))
+    (type (;71;) (record (field "form-type" 55) (field "title" 62) (field "instructions" 69) (field "fields" 70)))
+    (import "import-type-data-form" (type (;72;) (eq 71)))
+    (type (;73;) (record (field "name" 57) (field "values" 65)))
+    (import "import-type-form-field-value" (type (;74;) (eq 73)))
+    (type (;75;) (option 51))
+    (type (;76;) (option 53))
+    (type (;77;) (option 72))
+    (type (;78;) (list 74))
+    (type (;79;) (record (field "waddle-id" 25) (field "room" 34) (field "requester" 27) (field "command-node" 49) (field "session-id" 75) (field "action" 76) (field "form" 77) (field "fields" 78)))
+    (import "import-type-command-invocation" (type (;80;) (eq 79)))
+    (type (;81;) (record (field "waddle-id" 25) (field "room" 34) (field "source-stanza-id" 33)))
+    (import "import-type-launch-context" (type (;82;) (eq 81)))
+    (type (;83;) (record (field "value" string)))
+    (import "import-type-launch-id" (type (;84;) (eq 83)))
+    (type (;85;) (record (field "context" 82) (field "requester" 27) (field "launch-id" 84) (field "session-id" 75) (field "action" 76) (field "form" 77) (field "fields" 78)))
+    (import "import-type-launch-invocation" (type (;86;) (eq 85)))
+    (type (;87;) (record (field "value" string)))
+    (import "import-type-provider-id" (type (;88;) (eq 87)))
+    (type (;89;) (record (field "value" string)))
+    (import "import-type-provider-event-type" (type (;90;) (eq 89)))
+    (type (;91;) (record (field "value" string)))
+    (import "import-type-provider-delivery-id" (type (;92;) (eq 91)))
+    (type (;93;) (record (field "value" string)))
+    (import "import-type-provider-field-name" (type (;94;) (eq 93)))
+    (type (;95;) (record (field "value" string)))
+    (import "import-type-provider-field-number" (type (;96;) (eq 95)))
+    (type (;97;) (record (field "value" string)))
+    (import "import-type-provider-field-text" (type (;98;) (eq 97)))
+    (type (;99;) (variant (case "null") (case "boolean" bool) (case "number" 96) (case "text" 98)))
+    (import "import-type-provider-field-value" (type (;100;) (eq 99)))
+    (type (;101;) (list 94))
+    (type (;102;) (record (field "path" 101) (field "value" 100)))
+    (import "import-type-provider-field" (type (;103;) (eq 102)))
+    (type (;104;) (list 103))
+    (type (;105;) (record (field "fields" 104)))
+    (import "import-type-provider-payload" (type (;106;) (eq 105)))
+    (type (;107;) (record (field "waddle-id" 25) (field "provider" 88) (field "event-type" 90) (field "delivery-id" 92) (field "payload" 106)))
+    (import "import-type-provider-webhook" (type (;108;) (eq 107)))
+    (type (;109;) (variant (case "room-message-observe" 23) (case "message-hook" 47) (case "command" 80) (case "launch" 86) (case "provider-webhook" 108)))
+    (import "import-type-extension-event" (type (;110;) (eq 109)))
+    (type (;111;) (record (field "value" string)))
+    (import "import-type-payload-namespace" (type (;112;) (eq 111)))
+    (type (;113;) (record (field "namespace" 112) (field "local-name" string)))
+    (import "import-type-payload-root" (type (;114;) (eq 113)))
+    (type (;115;) (option 112))
+    (type (;116;) (record (field "namespace" 115) (field "local-name" string) (field "value" string)))
+    (import "import-type-xml-attribute" (type (;117;) (eq 116)))
+    (type (;118;) (list 117))
+    (type (;119;) (record (field "namespace" 112) (field "local-name" string) (field "attributes" 118)))
+    (import "import-type-xml-element" (type (;120;) (eq 119)))
+    (type (;121;) (variant (case "start-element" 120) (case "end-element") (case "text" string)))
+    (import "import-type-xml-token" (type (;122;) (eq 121)))
+    (type (;123;) (list 122))
+    (type (;124;) (record (field "namespace" 112) (field "root" 114) (field "tokens" 123)))
+    (import "import-type-extension-payload" (type (;125;) (eq 124)))
+    (type (;126;) (record (field "value" string)))
+    (import "import-type-enrichment-id" (type (;127;) (eq 126)))
+    (type (;128;) (record (field "value" string)))
+    (import "import-type-plugin-id" (type (;129;) (eq 128)))
+    (type (;130;) (enum "room-result-publish" "message-enrich" "message-observe" "host-channels-read" "host-spaces-read" "host-members-read" "host-presence-read" "host-mam-read" "host-roster-read" "host-message-send" "outbound-http-request" "commands" "launch" "pubsub-publish" "artifact-reference" "ui-declarative"))
+    (import "import-type-extension-capability" (type (;131;) (eq 130)))
+    (type (;132;) (option 42))
+    (type (;133;) (record (field "stanza-id" 10) (field "body-range" 132)))
+    (import "import-type-message-source" (type (;134;) (eq 133)))
+    (type (;135;) (record (field "value" string)))
+    (import "import-type-ui-view-id" (type (;136;) (eq 135)))
+    (type (;137;) (enum "body" "heading" "muted" "code"))
+    (import "import-type-text-style" (type (;138;) (eq 137)))
+    (type (;139;) (record (field "text" 4) (field "style" 138)))
+    (import "import-type-text-block" (type (;140;) (eq 139)))
+    (type (;141;) (record (field "value" string)))
+    (import "import-type-artifact-uri" (type (;142;) (eq 141)))
+    (type (;143;) (record (field "value" string)))
+    (import "import-type-media-type" (type (;144;) (eq 143)))
+    (type (;145;) (option 144))
+    (type (;146;) (record (field "uri" 142) (field "sha256" 16) (field "media-type" 145)))
+    (import "import-type-artifact-reference" (type (;147;) (eq 146)))
+    (type (;148;) (record (field "artifact" 147) (field "alt" 4)))
+    (import "import-type-image-block" (type (;149;) (eq 148)))
+    (type (;150;) (record (field "launch-id" 84) (field "label" 4)))
+    (import "import-type-action-block" (type (;151;) (eq 150)))
+    (type (;152;) (record (field "value" string)))
+    (import "import-type-list-id" (type (;153;) (eq 152)))
+    (type (;154;) (record (field "value" string)))
+    (import "import-type-list-item-id" (type (;155;) (eq 154)))
+    (type (;156;) (option 147))
+    (type (;157;) (option 84))
+    (type (;158;) (record (field "id" 155) (field "label" 4) (field "description" 62) (field "image" 156) (field "launch-id" 157)))
+    (import "import-type-list-item" (type (;159;) (eq 158)))
+    (type (;160;) (list 159))
+    (type (;161;) (record (field "id" 153) (field "title" 62) (field "items" 160)))
+    (import "import-type-list-view" (type (;162;) (eq 161)))
+    (type (;163;) (variant (case "text" 140) (case "image" 149) (case "action" 151) (case "form" 72) (case "list-block" 162)))
+    (import "import-type-ui-block" (type (;164;) (eq 163)))
+    (type (;165;) (list 164))
+    (type (;166;) (record (field "id" 136) (field "title" 62) (field "blocks" 165)))
+    (import "import-type-ui-view" (type (;167;) (eq 166)))
+    (type (;168;) (record (field "value" string)))
+    (import "import-type-action-id" (type (;169;) (eq 168)))
+    (type (;170;) (list 125))
+    (type (;171;) (option 167))
+    (type (;172;) (option 18))
+    (type (;173;) (record (field "id" 84) (field "plugin" 129) (field "action" 169) (field "command-node" 49) (field "label" 4) (field "context" 82) (field "payloads" 170) (field "fallback" 171) (field "expires-at" 172)))
+    (import "import-type-launch-descriptor" (type (;174;) (eq 173)))
+    (type (;175;) (option 134))
+    (type (;176;) (list 167))
+    (type (;177;) (list 174))
+    (type (;178;) (record (field "id" 127) (field "plugin" 129) (field "capability" 131) (field "payload-namespace" 112) (field "created-at" 18) (field "source" 175) (field "ui" 176) (field "payloads" 170) (field "launches" 177)))
+    (import "import-type-message-enrichment" (type (;179;) (eq 178)))
+    (type (;180;) (list 179))
+    (type (;181;) (record (field "version" u32) (field "enrichments" 180)))
+    (import "import-type-extension-envelope" (type (;182;) (eq 181)))
+    (type (;183;) (record (field "value" string)))
+    (import "import-type-pubsub-node" (type (;184;) (eq 183)))
+    (type (;185;) (record (field "value" string)))
+    (import "import-type-pubsub-item-id" (type (;186;) (eq 185)))
+    (type (;187;) (option 186))
+    (type (;188;) (record (field "node" 184) (field "item-id" 187) (field "payload" 125)))
+    (import "import-type-pubsub-publish" (type (;189;) (eq 188)))
+    (type (;190;) (variant (case "publish-room-result" 125) (case "enrich-message" 182) (case "publish-pubsub" 189) (case "reference-artifact" 147) (case "command-form" 72) (case "host-warning" 4) (case "noop")))
+    (import "import-type-extension-effect" (type (;191;) (eq 190)))
+    (type (;192;) (record (field "value" string)))
+    (import "import-type-model-id" (type (;193;) (eq 192)))
+    (type (;194;) (record (field "provider" 88) (field "model" 193) (field "cost-micro-usd" u64)))
+    (import "import-type-invocation-usage" (type (;195;) (eq 194)))
+    (type (;196;) (list 191))
+    (type (;197;) (option 195))
+    (type (;198;) (record (field "effects" 196) (field "usage" 197)))
+    (import "import-type-extension-response" (type (;199;) (eq 198)))
+    (import "import-type-extension-event0" (type (;200;) (eq 110)))
+    (import "import-type-delivery-key0" (type (;201;) (eq 0)))
+    (type (;202;) (borrow 201))
+    (type (;203;) (option 202))
+    (import "import-type-extension-response0" (type (;204;) (eq 199)))
+    (import "import-type-extension-error0" (type (;205;) (eq 6)))
+    (type (;206;) (result 204 (error 205)))
+    (type (;207;) (func (param "event" 200) (param "delivery" 203) (result 206)))
+    (import "import-func-handle-event" (func (;0;) (type 207)))
+    (export (;208;) "delivery-key" (type 0))
+    (export (;209;) "extension-error" (type 6))
+    (export (;210;) "extension-event" (type 110))
+    (export (;211;) "extension-response" (type 199))
+    (type (;212;) (borrow 208))
+    (type (;213;) (option 212))
+    (type (;214;) (result 211 (error 209)))
+    (type (;215;) (func (param "event" 210) (param "delivery" 213) (result 214)))
+    (export (;1;) "handle-event" (func 0) (func (type 215)))
+  )
+  (instance $waddle:extension/framework@4.0.0-shim-instance (;8;) (instantiate $waddle:extension/framework@4.0.0-shim-component
+      (with "import-func-handle-event" (func $handle-event))
+      (with "import-type-delivery-key" (type $delivery-key))
+      (with "import-type-extension-error-code" (type $extension-error-code))
+      (with "import-type-display-text" (type $display-text))
+      (with "import-type-extension-error" (type $extension-error))
+      (with "import-type-room-jid" (type $room-jid))
+      (with "import-type-stanza-id" (type $stanza-id))
+      (with "import-type-origin-id" (type $origin-id))
+      (with "import-type-bare-jid" (type $bare-jid))
+      (with "import-type-sha256-digest" (type $sha256-digest))
+      (with "import-type-timestamp" (type $timestamp))
+      (with "import-type-room-message-source" (type $room-message-source))
+      (with "import-type-room-message-observe" (type $room-message-observe))
+      (with "import-type-waddle-id" (type $waddle-id))
+      (with "import-type-full-jid" (type $full-jid))
+      (with "import-type-thread-id" (type $thread-id))
+      (with "import-type-reply-target" (type $reply-target))
+      (with "import-type-message-context" (type $message-context))
+      (with "import-type-url" (type $url))
+      (with "import-type-body-range" (type $body-range))
+      (with "import-type-link-target" (type $link-target))
+      (with "import-type-message-hook" (type $message-hook))
+      (with "import-type-command-node" (type $command-node))
+      (with "import-type-command-session-id" (type $command-session-id))
+      (with "import-type-command-action" (type $command-action))
+      (with "import-type-data-form-type" (type $data-form-type))
+      (with "import-type-ui-action-id" (type $ui-action-id))
+      (with "import-type-form-field-type" (type $form-field-type))
+      (with "import-type-data-form-value" (type $data-form-value))
+      (with "import-type-form-field-option" (type $form-field-option))
+      (with "import-type-data-form-field" (type $data-form-field))
+      (with "import-type-data-form" (type $data-form))
+      (with "import-type-form-field-value" (type $form-field-value))
+      (with "import-type-command-invocation" (type $command-invocation))
+      (with "import-type-launch-context" (type $launch-context))
+      (with "import-type-launch-id" (type $launch-id))
+      (with "import-type-launch-invocation" (type $launch-invocation))
+      (with "import-type-provider-id" (type $provider-id))
+      (with "import-type-provider-event-type" (type $provider-event-type))
+      (with "import-type-provider-delivery-id" (type $provider-delivery-id))
+      (with "import-type-provider-field-name" (type $provider-field-name))
+      (with "import-type-provider-field-number" (type $provider-field-number))
+      (with "import-type-provider-field-text" (type $provider-field-text))
+      (with "import-type-provider-field-value" (type $provider-field-value))
+      (with "import-type-provider-field" (type $provider-field))
+      (with "import-type-provider-payload" (type $provider-payload))
+      (with "import-type-provider-webhook" (type $provider-webhook))
+      (with "import-type-extension-event" (type $extension-event))
+      (with "import-type-payload-namespace" (type $payload-namespace))
+      (with "import-type-payload-root" (type $payload-root))
+      (with "import-type-xml-attribute" (type $xml-attribute))
+      (with "import-type-xml-element" (type $xml-element))
+      (with "import-type-xml-token" (type $xml-token))
+      (with "import-type-extension-payload" (type $extension-payload))
+      (with "import-type-enrichment-id" (type $enrichment-id))
+      (with "import-type-plugin-id" (type $plugin-id))
+      (with "import-type-extension-capability" (type $extension-capability))
+      (with "import-type-message-source" (type $message-source))
+      (with "import-type-ui-view-id" (type $ui-view-id))
+      (with "import-type-text-style" (type $text-style))
+      (with "import-type-text-block" (type $text-block))
+      (with "import-type-artifact-uri" (type $artifact-uri))
+      (with "import-type-media-type" (type $media-type))
+      (with "import-type-artifact-reference" (type $artifact-reference))
+      (with "import-type-image-block" (type $image-block))
+      (with "import-type-action-block" (type $action-block))
+      (with "import-type-list-id" (type $list-id))
+      (with "import-type-list-item-id" (type $list-item-id))
+      (with "import-type-list-item" (type $list-item))
+      (with "import-type-list-view" (type $list-view))
+      (with "import-type-ui-block" (type $ui-block))
+      (with "import-type-ui-view" (type $ui-view))
+      (with "import-type-action-id" (type $action-id))
+      (with "import-type-launch-descriptor" (type $launch-descriptor))
+      (with "import-type-message-enrichment" (type $message-enrichment))
+      (with "import-type-extension-envelope" (type $extension-envelope))
+      (with "import-type-pubsub-node" (type $pubsub-node))
+      (with "import-type-pubsub-item-id" (type $pubsub-item-id))
+      (with "import-type-pubsub-publish" (type $pubsub-publish))
+      (with "import-type-extension-effect" (type $extension-effect))
+      (with "import-type-model-id" (type $model-id))
+      (with "import-type-invocation-usage" (type $invocation-usage))
+      (with "import-type-extension-response" (type $extension-response))
+      (with "import-type-extension-event0" (type $extension-event))
+      (with "import-type-delivery-key0" (type $delivery-key))
+      (with "import-type-extension-response0" (type $extension-response))
+      (with "import-type-extension-error0" (type $extension-error))
+    )
+  )
+  (export $waddle:extension/framework@4.0.0 (;9;) "waddle:extension/framework@4.0.0" (instance $waddle:extension/framework@4.0.0-shim-instance))
+  (@producers
+    (processed-by "wit-component" "0.261.0")
+  )
+)

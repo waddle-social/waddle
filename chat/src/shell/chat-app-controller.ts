@@ -610,7 +610,6 @@ export function useChatAppController() {
     confirmRemoveMember: workspaceDialogs.confirmRemoveMember,
     openChannelEdit: workspaceDialogs.openChannelEdit,
     sendActiveMessage: send.sendActiveMessage,
-    sendPublicChannelMessage: send.sendPublicChannelMessage,
     sendThreadMessage: send.sendThreadMessage,
     sendCallChatMessage: send.sendCallChatMessage,
     sendGif: send.sendGif,

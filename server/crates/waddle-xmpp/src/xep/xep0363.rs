@@ -296,7 +296,9 @@ pub fn build_upload_error(original_iq: &Iq, error: &UploadError) -> Iq {
 
 fn upload_error_payload(original_iq: &Iq) -> Option<Element> {
     match original_iq {
-        Iq::Get { payload, .. } | Iq::Set { payload, .. } => Some(payload.clone()),
+        Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
+            crate::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(payload)
+        }
         Iq::Result { .. } | Iq::Error { .. } => None,
     }
 }

@@ -378,7 +378,6 @@ impl ResponseBatch {
         batch
     }
 
-    #[cfg(test)]
     pub(crate) fn into_serialized_frames(self) -> Vec<String> {
         self.frames
             .into_iter()
@@ -626,7 +625,7 @@ pub(super) async fn handle_xmpp_frame(
     .into_serialized_frames()
 }
 
-pub(super) async fn handle_xmpp_frame_with_admission(
+pub(crate) async fn handle_xmpp_frame_with_admission(
     frame: &str,
     domain: &str,
     state: &WebSocketState,
@@ -736,6 +735,7 @@ async fn handle_xmpp_frame_impl(
         state_machine,
         registry_owner,
         resume_endpoint_handoff_blocked,
+        active_inference_sessions,
         ..
     } = conn;
     if let Some((permit, shutdown)) = admission {
@@ -1372,6 +1372,7 @@ async fn handle_xmpp_frame_impl(
                             registry_owner: registry_owner.as_ref(),
                             state_machine: state_machine.as_mut(),
                             ordered_relay_origin: ordered_relay_origin.clone(),
+                            active_inference_sessions: Some(active_inference_sessions),
                         };
                         handlers::iq::handle_iq_with_conn_state(
                             *iq,

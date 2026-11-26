@@ -1,49 +1,38 @@
 use std::fmt;
 
 use serde::Deserialize;
-use url::Url;
 
-pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+pub const DEFAULT_PROVIDER: &str = "openrouter";
+pub const DEFAULT_DEPLOYMENT: &str = "zdr";
 pub const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
+pub const DEFAULT_CREDENTIAL_NAME: &str = "tenant-default";
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
-#[derive(Clone)]
-pub struct Secret(String);
-
-impl Secret {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JevConfig {
-    pub endpoint: Url,
+    pub provider: String,
+    pub deployment: String,
     pub model: String,
-    pub api_key: Secret,
+    pub credential_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidJson,
-    InvalidEndpoint,
+    LegacySecretForbidden,
     MissingModel,
-    MissingApiKey,
+    InvalidField,
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidJson => f.write_str("Jev config must be a JSON object"),
-            Self::InvalidEndpoint => f.write_str("Jev endpoint must be an HTTPS URL"),
+            Self::LegacySecretForbidden => {
+                f.write_str("legacy plaintext api_key/endpoint config is forbidden")
+            }
             Self::MissingModel => f.write_str("Jev model must be non-empty"),
-            Self::MissingApiKey => f.write_str("Jev API key is not configured"),
+            Self::InvalidField => f.write_str("Jev provider/deployment/credential_name invalid"),
         }
     }
 }
@@ -52,37 +41,50 @@ impl std::error::Error for ConfigError {}
 
 #[derive(Deserialize)]
 struct RawConfig {
-    endpoint: Option<String>,
+    provider: Option<String>,
+    deployment: Option<String>,
     model: Option<String>,
-    api_key: Option<String>,
+    credential_name: Option<String>,
+    endpoint: Option<String>,
+    api_key: Option<serde_json::Value>,
 }
 
 impl JevConfig {
     pub fn parse(input: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = serde_json::from_str(input).map_err(|_| ConfigError::InvalidJson)?;
-        let endpoint = raw.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
-        let endpoint = Url::parse(endpoint).map_err(|_| ConfigError::InvalidEndpoint)?;
-        if endpoint.scheme() != "https"
-            || endpoint.host_str().is_none()
-            || !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-        {
-            return Err(ConfigError::InvalidEndpoint);
+        if raw.api_key.is_some() || raw.endpoint.is_some() {
+            return Err(ConfigError::LegacySecretForbidden);
+        }
+        let provider = raw
+            .provider
+            .as_deref()
+            .unwrap_or(DEFAULT_PROVIDER)
+            .trim()
+            .to_string();
+        let deployment = raw
+            .deployment
+            .as_deref()
+            .unwrap_or(DEFAULT_DEPLOYMENT)
+            .trim()
+            .to_string();
+        let credential_name = raw
+            .credential_name
+            .as_deref()
+            .unwrap_or(DEFAULT_CREDENTIAL_NAME)
+            .trim()
+            .to_string();
+        if provider.is_empty() || deployment.is_empty() || credential_name.is_empty() {
+            return Err(ConfigError::InvalidField);
         }
         let model = raw.model.as_deref().unwrap_or(DEFAULT_MODEL).trim();
         if model.is_empty() {
             return Err(ConfigError::MissingModel);
         }
-        let api_key = raw
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or(ConfigError::MissingApiKey)?;
         Ok(Self {
-            endpoint,
+            provider,
+            deployment,
             model: model.to_string(),
-            api_key: Secret(api_key.to_string()),
+            credential_name,
         })
     }
 }

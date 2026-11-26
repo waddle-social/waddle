@@ -30,6 +30,7 @@ async fn quota_refusal(f: IngressFixture) {
     .await;
     use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
     let context = host::InvocationContext {
+        tenant_id: None,
         waddle_id: WaddleId::try_new("quota-boundary").expect("waddle"),
         plugin_id: plugin(),
         requester: Some(invocation().actor_jid.to_bare()),

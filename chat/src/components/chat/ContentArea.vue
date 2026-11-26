@@ -121,7 +121,6 @@ const props = defineProps<{
   reactionMode?: { selectedMessageId: string | null } | null;
   ensureMessageLoaded?: (messageId: string) => Promise<boolean>;
   invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
-  sendPublicChannelMessage?: (body: string) => Promise<void>;
   sendCallChatMessage?: (
     body: string,
     markup: MarkupSpan[],
@@ -361,7 +360,6 @@ const extensionLauncher = useExtensionLauncher({
   xmppClient: computed(() => props.xmppClient),
   roomJid: extensionRoomJid,
   invokeExtensionAction: computed(() => props.invokeExtensionAction),
-  sendPublicChannelMessage: computed(() => props.sendPublicChannelMessage),
   focusPalette: () => extensionPaletteRef.value?.focus(),
   focusComposerExtensions: () => composerRef.value?.focusExtensions(),
 });

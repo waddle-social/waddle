@@ -6,7 +6,8 @@ wasmtime::component::bindgen!({
     imports: { default: async | tracing | trappable },
     exports: { default: async },
     with: {
-        "waddle:extension/delivery@3.0.0.delivery-key": crate::runtime::DeliveryKey,
+        "waddle:extension/delivery@4.0.0.delivery-key": crate::runtime::DeliveryKey,
+        "waddle:extension/inference@4.0.0.inference-stream": crate::runtime::InferenceStream,
         "wasi:io": wasmtime_wasi::p2::bindings::io,
         "wasi:clocks": wasmtime_wasi::p2::bindings::clocks,
         "wasi:random": wasmtime_wasi::p2::bindings::random,

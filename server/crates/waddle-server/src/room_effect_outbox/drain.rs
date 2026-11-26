@@ -53,6 +53,15 @@ pub struct RoomEffectDrainSummary {
     pub dead_lettered: u64,
 }
 
+/// Check whether a tenant's suspend-aware `BootInstant` placement lease guard
+/// permits claiming or delivering durable room effects. Returns `true` when
+/// unscoped (`None`) or when the active lease guard is still valid.
+pub fn check_room_effect_lease_fence(
+    local_guard: Option<&waddle_tenancy::quiesce::LocalLeaseGuard>,
+) -> bool {
+    local_guard.is_none_or(waddle_tenancy::quiesce::LocalLeaseGuard::is_valid)
+}
+
 /// Completion retained for initiator-stream frames.  The handler must call
 /// [`complete_after_write`] only after its response batch enters the
 /// connection writer; keeping this token leased across the response-vector

@@ -144,16 +144,20 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         query: ext_host::MamQuery,
     ) -> Result<ext_host::MamQueryResponse, ext_host::HostToolError> {
         let invocation = self.invocation_for_context(context).await?;
-        let requester = invocation.actor_jid.to_bare();
         let (archive, archive_kind, with) = match query.target {
             ext_host::MamTarget::Room(jid) => {
+                if context
+                    .source_room
+                    .as_ref()
+                    .is_none_or(|source_room| source_room != &jid)
+                {
+                    return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
+                }
                 (jid, waddle_xmpp::mam::MamArchiveKind::Room, query.sender)
             }
-            ext_host::MamTarget::Conversation(peer) => (
-                requester,
-                waddle_xmpp::mam::MamArchiveKind::Personal,
-                Some(peer),
-            ),
+            ext_host::MamTarget::Conversation(_) => {
+                return Err(host_tool_error(ExtensionHostAdapterError::NotAuthorized));
+            }
         };
         self.authorize_archive(&invocation, &archive)
             .await

@@ -96,7 +96,7 @@ mod event_planning;
 pub(crate) mod event_planning_access;
 mod extension_forms;
 mod extension_route_items;
-mod full_jid_forward;
+pub(crate) mod full_jid_forward;
 mod jingle_muji_gate;
 #[cfg(feature = "clustering")]
 pub(crate) mod jingle_muji_relay;

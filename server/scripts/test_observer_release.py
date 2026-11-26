@@ -70,21 +70,20 @@ class ObserverReleaseTests(unittest.TestCase):
         return {
             'name': 'jev-judgments', 'registry': self.release['registry'],
             'digest': self.release['manifest_digest'], 'namespace': 'urn:waddle:safety-scores:1',
-            'config': {'model': 'fixture', 'endpoint': 'https://example.org'},
-            'configSecretFiles': {'api_key': '/mounted/secret'},
-            'capabilityGrants': ['message.observe'],
-            'roomObservation': {'generation': self.release['generation'], 'scope': {'kind': 'all-hosted-rooms'}},
+            'config': {'provider': 'openrouter', 'deployment': 'default', 'model': 'fixture', 'credential_name': 'default'},
+            'capabilityGrants': ['message.observe', 'room.result.publish'],
+            'roomObservation': {'generation': self.release['generation'], 'scope': {'kind': 'rooms', 'rooms': []}},
         }
 
     def validate(self, modules: object) -> None:
         observer.validate(self.release, modules)
 
-    def test_checked_in_release_matches_actual_generation_two_manifest(self) -> None:
+    def test_checked_in_release_matches_actual_generation_manifest(self) -> None:
         release = observer.load_release(SERVER / 'observer-release.json')
         path = self.directory / 'actual-manifest.json'
         path.write_bytes(OLD_MANIFEST)
         layer = observer.manifest_layer(path, release)
-        self.assertEqual(release['generation'], 2)
+        self.assertEqual(release['generation'], 3)
         self.assertEqual(layer['digest'], 'sha256:1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df')
         self.assertEqual(layer['size'], 446651)
 
@@ -173,7 +172,7 @@ class ObserverReleaseTests(unittest.TestCase):
         self.validate([module])
         for key, value in (('config', {'model': 'changed'}), ('capabilityGrants', ['outbound.http.request']),
                            ('configSecretFiles', {'api_key': '/different/path'}), ('newPublicField', True),
-                           ('roomObservation', dict(module['roomObservation'], generation=3))):
+                           ('roomObservation', dict(module['roomObservation'], generation=self.release['generation'] + 1))):
             with self.subTest(key=key):
                 with self.assertRaises(observer.ReleaseError):
                     self.validate([dict(module, **{key: value})])
@@ -186,10 +185,11 @@ class ObserverReleaseTests(unittest.TestCase):
 
     def test_explicit_new_release_accepts_new_generation_artifact_and_policy(self) -> None:
         module = self.module()
-        module['roomObservation']['generation'] = 3
+        next_gen = self.release['generation'] + 1
+        module['roomObservation']['generation'] = next_gen
         module['config']['model'] = 'deliberately-released-model'
         module['digest'] = 'sha256:' + '1' * 64
-        self.release.update(generation=3, manifest_digest=module['digest'],
+        self.release.update(generation=next_gen, manifest_digest=module['digest'],
                             policy_sha256=observer.policy_sha256(module))
         self.validate([module])
 

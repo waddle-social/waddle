@@ -5,12 +5,14 @@
 use crate::xep::xep0050::AllowedActions;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use jid::Jid;
 use tokio::sync::RwLock;
 use tracing::debug;
 use uuid::Uuid;
+use waddle_broker_core::boot_clock::{BootClock, BootInstant, SystemBootClock};
+use waddle_broker_core::identity::TenantId;
 use xmpp_parsers::iq::Iq;
 
 use crate::error::StanzaErrorType;
@@ -77,6 +79,14 @@ pub struct CommandContext {
     pub iq: Iq,
     /// The parsed command
     pub command: Command,
+    /// Canonical tenant scoping this command execution when tenant-scoped.
+    pub tenant_id: Option<TenantId>,
+    /// Active placement lease generation fencing this command execution.
+    pub placement_generation: Option<u64>,
+    /// Cancellation signal propagated to decoupled long-running handlers.
+    pub cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Progressive chunk stream channel for decoupled inference handlers.
+    pub chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 /// A command handler function.
@@ -110,14 +120,18 @@ pub struct CommandMetadata {
 pub struct CommandSession {
     /// Session ID
     pub id: String,
-    /// When this session was created
-    pub created_at: Instant,
-    /// When this session was last accessed
-    pub last_accessed: Instant,
+    /// When this session was created (suspend-aware boot clock)
+    pub created_at: BootInstant,
+    /// When this session was last accessed (suspend-aware boot clock)
+    pub last_accessed: BootInstant,
     /// Command node identifier
     pub node: String,
     /// Requester JID
     pub from: Jid,
+    /// Canonical tenant owning this session when tenant-scoped.
+    pub tenant_id: Option<TenantId>,
+    /// Placement lease generation active when this session was created.
+    pub placement_generation: Option<u64>,
     /// Custom session state (opaque to the registry)
     pub state: HashMap<String, String>,
     /// Actions advertised by the responder at the current stage.
@@ -125,32 +139,42 @@ pub struct CommandSession {
 }
 
 impl CommandSession {
-    fn new(id: String, node: String, from: Jid) -> Self {
-        let now = Instant::now();
+    fn new(
+        id: String,
+        node: String,
+        from: Jid,
+        now: BootInstant,
+        tenant_id: Option<TenantId>,
+        placement_generation: Option<u64>,
+    ) -> Self {
         Self {
             id,
             created_at: now,
             last_accessed: now,
             node,
             from,
+            tenant_id,
+            placement_generation,
             state: HashMap::new(),
             allowed_actions: None,
         }
     }
 
-    fn touch(&mut self) {
-        self.last_accessed = Instant::now();
+    fn touch(&mut self, now: BootInstant) {
+        self.last_accessed = now;
     }
 
-    fn is_expired(&self) -> bool {
-        self.last_accessed.elapsed() > SESSION_TTL
+    fn is_expired(&self, now: BootInstant) -> bool {
+        now.saturating_duration_since(self.last_accessed) > SESSION_TTL
     }
 }
 
 struct ExpiredCommandSession {
-    expired_at: Instant,
+    expired_at: BootInstant,
     node: String,
     from: Jid,
+    tenant_id: Option<TenantId>,
+    placement_generation: Option<u64>,
 }
 
 /// Registry for ad-hoc commands.
@@ -162,16 +186,88 @@ pub struct CommandRegistry {
     /// Recently timed-out sessions retained to distinguish
     /// `<session-expired/>` from unknown or foreign session ids.
     recently_expired_sessions: RwLock<HashMap<String, ExpiredCommandSession>>,
+    /// Canonical tenant bound to this command registry when tenant-scoped.
+    tenant_id: Option<TenantId>,
+    /// Active placement lease generation fencing sessions in this registry.
+    placement_generation: RwLock<Option<u64>>,
+    /// Suspend-aware boot clock for session TTLs.
+    clock: Arc<dyn BootClock>,
 }
 
 impl CommandRegistry {
     /// Create a new command registry.
     pub fn new() -> Self {
+        Self::new_inner(None, None, Arc::new(SystemBootClock))
+    }
+
+    /// Create a new command registry explicitly scoped to `tenant_id`.
+    pub fn for_tenant(tenant_id: TenantId) -> Self {
+        Self::new_inner(Some(tenant_id), None, Arc::new(SystemBootClock))
+    }
+
+    /// Create a tenant-scoped command registry with an injectable [`BootClock`]
+    /// and optional initial placement lease generation.
+    pub fn for_tenant_with_clock(
+        tenant_id: TenantId,
+        placement_generation: Option<u64>,
+        clock: Arc<dyn BootClock>,
+    ) -> Self {
+        Self::new_inner(Some(tenant_id), placement_generation, clock)
+    }
+
+    fn new_inner(
+        tenant_id: Option<TenantId>,
+        placement_generation: Option<u64>,
+        clock: Arc<dyn BootClock>,
+    ) -> Self {
         Self {
             commands: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
             recently_expired_sessions: RwLock::new(HashMap::new()),
+            tenant_id,
+            placement_generation: RwLock::new(placement_generation),
+            clock,
         }
+    }
+
+    /// Canonical tenant bound to this command registry, if configured.
+    pub fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
+    }
+
+    /// Update the active placement lease generation for this registry.
+    /// Existing sessions created under an older generation will be rejected
+    /// with `<session-expired/>`.
+    pub async fn set_placement_generation(&self, generation: Option<u64>) {
+        *self.placement_generation.write().await = generation;
+    }
+
+    /// Evict all active command sessions belonging to `tenant_id` (used during
+    /// tenant quiesce, drain, or lease loss), recording them as expired so any
+    /// subsequent continuation receives XEP-0050 `<session-expired/>`.
+    pub async fn evict_tenant(&self, tenant_id: &TenantId) -> usize {
+        let mut sessions = self.sessions.write().await;
+        let to_evict: Vec<String> = sessions
+            .iter()
+            .filter(|(_, session)| session.tenant_id.as_ref() == Some(tenant_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut evicted = Vec::with_capacity(to_evict.len());
+        for id in to_evict {
+            if let Some(session) = sessions.remove(&id) {
+                evicted.push(session);
+            }
+        }
+        drop(sessions);
+        let count = evicted.len();
+        self.record_expired_sessions(evicted).await;
+        count
+    }
+
+    fn now_boot(&self) -> BootInstant {
+        self.clock
+            .now()
+            .unwrap_or_else(|| BootInstant::from_raw_duration(Duration::ZERO))
     }
 
     /// Register a command handler.
@@ -225,6 +321,28 @@ impl CommandRegistry {
     /// 3. Calls the handler
     /// 4. Cleans up expired sessions
     pub async fn dispatch(&self, mut ctx: CommandContext) -> CommandResult {
+        // Fail closed if this registry is tenant-scoped and the request carries
+        // a missing or mismatched tenant_id.
+        if let Some(expected_tenant) = &self.tenant_id {
+            if ctx.tenant_id.as_ref() != Some(expected_tenant) {
+                return CommandResult::Error(XmppError::forbidden(Some(
+                    "command tenant mismatch".to_string(),
+                )));
+            }
+        }
+        let active_gen = *self.placement_generation.read().await;
+        if let Some(expected_gen) = active_gen {
+            if ctx.placement_generation.is_some_and(|g| g != expected_gen) {
+                return CommandResult::Error(XmppError::ad_hoc_command(
+                    AdHocCommandCondition::SessionExpired,
+                    Some("Command placement generation mismatch".to_string()),
+                ));
+            }
+        }
+        let effective_tenant = self.tenant_id.clone().or_else(|| ctx.tenant_id.clone());
+        let effective_gen = active_gen.or(ctx.placement_generation);
+        let now = self.now_boot();
+
         let node = &ctx.command.node;
         let from = &ctx.from;
 
@@ -257,9 +375,23 @@ impl CommandRegistry {
         if action == Action::Execute {
             if let Some(ref session_id) = ctx.command.session_id {
                 let session = self.sessions.read().await.get(session_id).cloned();
-                if !session_matches_request(session.as_ref(), node, from) {
+                if !session_matches_request(
+                    session.as_ref(),
+                    node,
+                    from,
+                    effective_tenant.as_ref(),
+                    effective_gen,
+                    now,
+                ) {
                     return CommandResult::Error(
-                        self.session_id_error(session_id, node, from).await,
+                        self.session_id_error(
+                            session_id,
+                            node,
+                            from,
+                            effective_tenant.as_ref(),
+                            effective_gen,
+                        )
+                        .await,
                     );
                 }
                 let allowed = session.and_then(|session| session.allowed_actions);
@@ -289,7 +421,14 @@ impl CommandRegistry {
                 }
                 // Create a new session
                 let session_id = Uuid::new_v4().to_string();
-                let session = CommandSession::new(session_id.clone(), node.clone(), from.clone());
+                let session = CommandSession::new(
+                    session_id.clone(),
+                    node.clone(),
+                    from.clone(),
+                    now,
+                    effective_tenant.clone(),
+                    effective_gen,
+                );
                 self.sessions
                     .write()
                     .await
@@ -307,9 +446,23 @@ impl CommandRegistry {
                 // Cancel and clean up session
                 if let Some(ref session_id) = ctx.command.session_id {
                     let session = self.sessions.read().await.get(session_id).cloned();
-                    if !session_matches_request(session.as_ref(), node, from) {
+                    if !session_matches_request(
+                        session.as_ref(),
+                        node,
+                        from,
+                        effective_tenant.as_ref(),
+                        effective_gen,
+                        now,
+                    ) {
                         return CommandResult::Error(
-                            self.session_id_error(session_id, node, from).await,
+                            self.session_id_error(
+                                session_id,
+                                node,
+                                from,
+                                effective_tenant.as_ref(),
+                                effective_gen,
+                            )
+                            .await,
                         );
                     }
                     self.sessions.write().await.remove(session_id);
@@ -341,17 +494,47 @@ impl CommandRegistry {
                     let session_matches = {
                         let mut sessions = self.sessions.write().await;
                         match sessions.get_mut(session_id) {
-                            Some(session) if session_matches_request(Some(session), node, from) => {
-                                session.touch();
+                            Some(session)
+                                if session_matches_request(
+                                    Some(session),
+                                    node,
+                                    from,
+                                    effective_tenant.as_ref(),
+                                    effective_gen,
+                                    now,
+                                ) =>
+                            {
+                                session.touch(now);
                                 true
                             }
-                            Some(_) => false,
-                            None => false,
+                            Some(session)
+                                if session.node == *node
+                                    && session.from == *from
+                                    && session.tenant_id.as_ref() == effective_tenant.as_ref()
+                                    && session.placement_generation != effective_gen =>
+                            {
+                                // Placement generation advanced: evict stale session
+                                // so caller receives `<session-expired/>`.
+                                let evicted = sessions.remove(session_id);
+                                drop(sessions);
+                                if let Some(s) = evicted {
+                                    self.record_expired_sessions(vec![s]).await;
+                                }
+                                false
+                            }
+                            Some(_) | None => false,
                         }
                     };
                     if !session_matches {
                         return CommandResult::Error(
-                            self.session_id_error(session_id, node, from).await,
+                            self.session_id_error(
+                                session_id,
+                                node,
+                                from,
+                                effective_tenant.as_ref(),
+                                effective_gen,
+                            )
+                            .await,
                         );
                     }
                 }
@@ -447,10 +630,11 @@ impl CommandRegistry {
 
     /// Clean up expired sessions.
     async fn cleanup_expired_sessions(&self) {
+        let now = self.now_boot();
         let mut sessions = self.sessions.write().await;
         let expired: Vec<String> = sessions
             .iter()
-            .filter(|(_, session)| session.is_expired())
+            .filter(|(_, session)| session.is_expired(now))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -471,7 +655,7 @@ impl CommandRegistry {
             return;
         }
 
-        let now = Instant::now();
+        let now = self.now_boot();
         let mut recently_expired = self.recently_expired_sessions.write().await;
         prune_recently_expired_sessions(&mut recently_expired, now);
 
@@ -482,6 +666,8 @@ impl CommandRegistry {
                     expired_at: now,
                     node: session.node,
                     from: session.from,
+                    tenant_id: session.tenant_id,
+                    placement_generation: session.placement_generation,
                 },
             );
         }
@@ -494,19 +680,42 @@ impl CommandRegistry {
         session_id: &str,
         node: &str,
         from: &Jid,
+        tenant_id: Option<&TenantId>,
+        placement_generation: Option<u64>,
     ) -> bool {
-        let now = Instant::now();
+        let now = self.now_boot();
         let mut recently_expired = self.recently_expired_sessions.write().await;
         prune_recently_expired_sessions(&mut recently_expired, now);
 
-        recently_expired
-            .get(session_id)
-            .is_some_and(|session| session.node == node && session.from == *from)
+        recently_expired.get(session_id).is_some_and(|session| {
+            let gen_ok = match (session.placement_generation, placement_generation) {
+                (Some(old_g), Some(cur_g)) => old_g <= cur_g,
+                (None, None) => true,
+                _ => false,
+            };
+            session.node == node
+                && session.from == *from
+                && session.tenant_id.as_ref() == tenant_id
+                && gen_ok
+        })
     }
 
-    async fn session_id_error(&self, session_id: &str, node: &str, from: &Jid) -> XmppError {
+    async fn session_id_error(
+        &self,
+        session_id: &str,
+        node: &str,
+        from: &Jid,
+        tenant_id: Option<&TenantId>,
+        placement_generation: Option<u64>,
+    ) -> XmppError {
         if self
-            .recently_expired_session_matches_request(session_id, node, from)
+            .recently_expired_session_matches_request(
+                session_id,
+                node,
+                from,
+                tenant_id,
+                placement_generation,
+            )
             .await
         {
             XmppError::ad_hoc_command(
@@ -535,10 +744,11 @@ fn is_correctable(error: &XmppError) -> bool {
 
 fn prune_recently_expired_sessions(
     recently_expired: &mut HashMap<String, ExpiredCommandSession>,
-    now: Instant,
+    now: BootInstant,
 ) {
-    recently_expired
-        .retain(|_, session| now.duration_since(session.expired_at) <= EXPIRED_SESSION_GRACE);
+    recently_expired.retain(|_, session| {
+        now.saturating_duration_since(session.expired_at) <= EXPIRED_SESSION_GRACE
+    });
 }
 
 fn cap_recently_expired_sessions(recently_expired: &mut HashMap<String, ExpiredCommandSession>) {
@@ -549,7 +759,7 @@ fn cap_recently_expired_sessions(recently_expired: &mut HashMap<String, ExpiredC
         return;
     }
 
-    let mut oldest: Vec<(String, Instant)> = recently_expired
+    let mut oldest: Vec<(String, BootInstant)> = recently_expired
         .iter()
         .map(|(id, session)| (id.clone(), session.expired_at))
         .collect();
@@ -560,10 +770,22 @@ fn cap_recently_expired_sessions(recently_expired: &mut HashMap<String, ExpiredC
     }
 }
 
-fn session_matches_request(session: Option<&CommandSession>, node: &str, from: &Jid) -> bool {
+fn session_matches_request(
+    session: Option<&CommandSession>,
+    node: &str,
+    from: &Jid,
+    tenant_id: Option<&TenantId>,
+    placement_generation: Option<u64>,
+    now: BootInstant,
+) -> bool {
     session
-        .filter(|session| !session.is_expired())
-        .is_some_and(|session| session.node == node && session.from == *from)
+        .filter(|session| !session.is_expired(now))
+        .is_some_and(|session| {
+            session.node == node
+                && session.from == *from
+                && session.tenant_id.as_ref() == tenant_id
+                && session.placement_generation == placement_generation
+        })
 }
 
 impl Default for CommandRegistry {
@@ -600,13 +822,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_expiry() {
+        let now = BootInstant::from_raw_duration(Duration::from_secs(10));
         let session = CommandSession::new(
             "test-session".to_string(),
             "test:node".to_string(),
             "user@localhost".parse().unwrap(),
+            now,
+            None,
+            None,
         );
 
-        assert!(!session.is_expired());
+        assert!(!session.is_expired(now));
     }
 
     #[tokio::test]
@@ -639,6 +865,10 @@ mod tests {
                     payload: "<query xmlns='urn:test'/>".parse().unwrap(),
                 },
                 command: Command::new("test:command").with_action(Action::Execute),
+                tenant_id: None,
+                placement_generation: None,
+                cancel_rx: None,
+                chunk_tx: None,
             })
             .await;
 
@@ -653,7 +883,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_expired_session_returns_session_expired() {
-        let registry = CommandRegistry::new();
+        let clock = Arc::new(waddle_broker_core::boot_clock::FakeBootClock::new(
+            Duration::from_secs(1_000),
+        ));
+        let registry = CommandRegistry::new_inner(None, None, clock.clone());
 
         registry
             .register(
@@ -680,13 +913,8 @@ mod tests {
             _ => panic!("expected executing result"),
         };
 
-        {
-            let mut sessions = registry.sessions.write().await;
-            let session = sessions
-                .get_mut(&session_id)
-                .expect("execute created a session");
-            session.last_accessed = Instant::now() - SESSION_TTL - Duration::from_secs(1);
-        }
+        // Simulate host suspend past SESSION_TTL using suspend-aware BootClock.
+        clock.advance_suspend(SESSION_TTL + Duration::from_secs(1));
 
         let result = registry
             .dispatch(test_context(
@@ -738,6 +966,86 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_tenant_isolation_eviction_and_placement_generation_fencing() {
+        let tenant_a = TenantId::parse("tenant-a.example").expect("valid");
+        let tenant_b = TenantId::parse("tenant-b.example").expect("valid");
+        let clock = Arc::new(waddle_broker_core::boot_clock::FakeBootClock::new(
+            Duration::from_secs(100),
+        ));
+        let registry = CommandRegistry::for_tenant_with_clock(tenant_a.clone(), Some(1), clock);
+
+        registry
+            .register("test:wizard", "Wizard", |ctx: CommandContext| async move {
+                CommandResult::Executing {
+                    form: DataForm::new(crate::xep::xep0004::FormType::Form),
+                    session_id: ctx.command.session_id.unwrap_or_default(),
+                    notes: vec![],
+                    actions: None,
+                }
+            })
+            .await;
+
+        // Cross-tenant dispatch rejected with forbidden.
+        let mut wrong_tenant_ctx =
+            test_context(Command::new("test:wizard").with_action(Action::Execute));
+        wrong_tenant_ctx.tenant_id = Some(tenant_b);
+        wrong_tenant_ctx.placement_generation = Some(1);
+        assert!(matches!(
+            registry.dispatch(wrong_tenant_ctx).await,
+            CommandResult::Error(XmppError::Stanza { .. })
+        ));
+
+        // Tenant A starts wizard under generation 1.
+        let mut ctx_a = test_context(Command::new("test:wizard").with_action(Action::Execute));
+        ctx_a.tenant_id = Some(tenant_a.clone());
+        ctx_a.placement_generation = Some(1);
+        let session_id = match registry.dispatch(ctx_a).await {
+            CommandResult::Executing { session_id, .. } => session_id,
+            _ => panic!("expected executing"),
+        };
+
+        // Placement generation advances to 2 -> continuing gen-1 session returns <session-expired/>.
+        registry.set_placement_generation(Some(2)).await;
+        let mut next_ctx = test_context(
+            Command::new("test:wizard")
+                .with_action(Action::Next)
+                .with_session_id(session_id),
+        );
+        next_ctx.tenant_id = Some(tenant_a.clone());
+        next_ctx.placement_generation = Some(2);
+        match registry.dispatch(next_ctx).await {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::SessionExpired);
+            }
+            _ => panic!("expected session-expired after placement generation bump"),
+        }
+
+        // Start a fresh session at gen 2, then evict_tenant -> subsequent step returns <session-expired/>.
+        let mut ctx_a2 = test_context(Command::new("test:wizard").with_action(Action::Execute));
+        ctx_a2.tenant_id = Some(tenant_a.clone());
+        ctx_a2.placement_generation = Some(2);
+        let session_id2 = match registry.dispatch(ctx_a2).await {
+            CommandResult::Executing { session_id, .. } => session_id,
+            _ => panic!("expected executing"),
+        };
+        assert_eq!(registry.evict_tenant(&tenant_a).await, 1);
+
+        let mut after_evict = test_context(
+            Command::new("test:wizard")
+                .with_action(Action::Next)
+                .with_session_id(session_id2),
+        );
+        after_evict.tenant_id = Some(tenant_a);
+        after_evict.placement_generation = Some(2);
+        match registry.dispatch(after_evict).await {
+            CommandResult::Error(XmppError::AdHocCommand { condition, .. }) => {
+                assert_eq!(condition, AdHocCommandCondition::SessionExpired);
+            }
+            _ => panic!("expected session-expired after evict_tenant"),
+        }
+    }
+
     fn test_context(command: Command) -> CommandContext {
         CommandContext {
             from: "user@localhost".parse().expect("test jid"),
@@ -749,6 +1057,10 @@ mod tests {
                 payload: "<query xmlns='urn:test'/>".parse().expect("test payload"),
             },
             command,
+            tenant_id: None,
+            placement_generation: None,
+            cancel_rx: None,
+            chunk_tx: None,
         }
     }
 }

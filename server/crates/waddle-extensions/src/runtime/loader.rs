@@ -12,40 +12,93 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store};
 
 use super::exports::waddle::extension as wit_exports;
+use super::host_state::HostStateSpec;
+use super::inference::{DenyingExtensionInferenceHost, ExtensionInferenceHost};
 use super::{waddle, wasi, HostState, WaddleExtension};
 use crate::host_tools::{
     DeliveryInvocation, ExtensionDeliveryCapability, ExtensionHostTools, InvocationContext,
 };
 use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, ExtensionResponse};
+use std::sync::mpsc;
+use std::time::Duration;
+use waddle_broker_core::quotas::TenantMemoryTracker;
+use wasmtime_wasi::clocks::{WasiClocks, WasiClocksView as _};
+use wasmtime_wasi::p2::bindings::{clocks as wasi_clocks, random as wasi_random};
+use wasmtime_wasi::random::WasiRandom;
+use wasmtime_wasi::WasiView;
+
+/// Interval at which the Wasmtime engine epoch counter advances.
+const EPOCH_TICK_INTERVAL_MS: u64 = 50;
+
+/// Background epoch ticker stopped cleanly when the last [`WasmRuntime`] and
+/// [`LoadedExtension`] drop.
+struct EpochTickerGuard {
+    stop_tx: mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for EpochTickerGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochTickerGuard").finish_non_exhaustive()
+    }
+}
+
+impl Drop for EpochTickerGuard {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Shared wasmtime engine used for all loaded extensions.
 #[derive(Clone, Debug)]
 pub struct WasmRuntime {
     engine: Engine,
     http: super::http::HttpRuntime,
+    _epoch_ticker: Arc<EpochTickerGuard>,
 }
 
 impl WasmRuntime {
-    /// Create the fuel-metered component engine and policy-constrained HTTP client shared
-    /// by loaded extensions.
+    /// Create the fuel-metered, epoch-interruptible component engine and policy-constrained
+    /// HTTP client shared by loaded extensions.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Wasmtime engine or HTTP client cannot be initialized.
+    /// Returns an error if the Wasmtime engine, epoch ticker thread, or HTTP client cannot
+    /// be initialized.
     pub fn try_new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)
             .map_err(anyhow::Error::from)
             .context("failed to create wasmtime engine")?;
+        let ticker_engine = engine.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("wasm-epoch-ticker".to_owned())
+            .spawn(move || {
+                let interval = Duration::from_millis(EPOCH_TICK_INTERVAL_MS);
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(interval) {
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .context("failed to spawn wasm epoch ticker thread")?;
         Ok(Self {
             engine,
             http: super::http::HttpRuntime::try_new()?,
+            _epoch_ticker: Arc::new(EpochTickerGuard {
+                stop_tx,
+                handle: Some(handle),
+            }),
         })
     }
 
-    /// Borrow the shared Wasmtime engine configured for components and fuel metering.
+    /// Borrow the shared Wasmtime engine configured for components, fuel metering, and
+    /// epoch interruption.
     #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -59,6 +112,7 @@ pub struct LoadedExtension {
     linker: Linker<HostState>,
     http: super::http::HttpRuntime,
     limits: RuntimeLimits,
+    _epoch_ticker: Arc<EpochTickerGuard>,
 }
 
 impl std::fmt::Debug for LoadedExtension {
@@ -84,9 +138,9 @@ impl LoadedExtension {
             })?;
 
         let mut linker = Linker::<HostState>::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        add_narrow_wasi_to_linker(&mut linker)
             .map_err(anyhow::Error::from)
-            .context("failed to add wasi linker imports")?;
+            .context("failed to add narrow wasi linker imports")?;
         wasi::logging::logging::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add wasi:logging linker imports")?;
@@ -96,6 +150,9 @@ impl LoadedExtension {
         waddle::extension::delivery::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add delivery capability linker imports")?;
+        waddle::extension::inference::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(anyhow::Error::from)
+            .context("failed to add waddle inference linker imports")?;
         waddle::extension::runtime::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add waddle runtime linker imports")?;
@@ -106,7 +163,20 @@ impl LoadedExtension {
             linker,
             http: runtime.http.clone(),
             limits: RuntimeLimits::default(),
+            _epoch_ticker: Arc::clone(&runtime._epoch_ticker),
         })
+    }
+
+    /// Borrow the compiled Wasmtime [`Component`] for testing or inspection.
+    #[must_use]
+    pub fn component(&self) -> &Component {
+        &self.component
+    }
+
+    /// Borrow the narrowed [`Linker<HostState>`] configured for this extension.
+    #[must_use]
+    pub fn linker(&self) -> &Linker<HostState> {
+        &self.linker
     }
 
     /// Replace the execution and network resource limits used when creating invocation stores.
@@ -124,6 +194,11 @@ impl LoadedExtension {
         store.limiter(|state| &mut state.limits);
         store.set_fuel(self.limits.wasm_fuel)?;
         store.fuel_async_yield_interval(Some(10_000))?;
+        let deadline_ticks = u64::from(self.limits.invocation_timeout_ms)
+            .div_ceil(EPOCH_TICK_INTERVAL_MS)
+            .max(1);
+        store.set_epoch_deadline(deadline_ticks);
+        store.epoch_deadline_trap();
         Ok(())
     }
 
@@ -186,24 +261,93 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> Result<ExtensionResponse> {
-        self.invoke_with_deadline(
+        self.call_handle_event_with_memory_tracker(
             event,
             tools,
-            InvocationBinding {
-                context,
-                delivery: None,
-            },
+            context,
             config,
             grants,
             allowed_http_origins,
+            None,
         )
         .await
-        .map_err(|(failure, message)| match message {
-            Some(message) => {
-                anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
-            }
-            None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
+    }
+
+    /// Same as [`Self::call_handle_event`], charging linear memory growth against an
+    /// optional per-tenant [`TenantMemoryTracker`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_handle_event_with_memory_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> Result<ExtensionResponse> {
+        self.call_handle_event_with_inference(InferenceInvocationParams {
+            event,
+            tools,
+            inference: Arc::new(DenyingExtensionInferenceHost),
+            chunk_tx: None,
+            context,
+            config,
+            grants,
+            allowed_http_origins,
+            tenant_memory_tracker,
+            inference_invocation: false,
         })
+        .await
+    }
+
+    /// Invoke a guest with an explicit brokered [`ExtensionInferenceHost`],
+    /// rejecting `outbound.http.request` and suppressing guest logs/stderr when
+    /// `inference_invocation` is `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    pub async fn call_handle_event_with_inference(
+        &self,
+        params: InferenceInvocationParams,
+    ) -> Result<ExtensionResponse> {
+        self.call_handle_event_with_inference_classified(params)
+            .await
+            .map_err(|(failure, message)| match message {
+                Some(message) => {
+                    anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
+                }
+                None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
+            })
+    }
+
+    pub(crate) async fn call_handle_event_with_inference_classified(
+        &self,
+        params: InferenceInvocationParams,
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
+        self.invoke_with_deadline(
+            params.event,
+            params.tools,
+            InvocationBinding {
+                context: params.context,
+                delivery: None,
+                inference: params.inference,
+                chunk_tx: params.chunk_tx,
+                tenant_memory_tracker: params.tenant_memory_tracker,
+                inference_invocation: params.inference_invocation,
+            },
+            params.config,
+            params.grants,
+            params.allowed_http_origins,
+        )
+        .await
     }
 
     /// Dispatch an event in a fresh bounded store, returning a stable observation failure
@@ -228,6 +372,10 @@ impl LoadedExtension {
             InvocationBinding {
                 context,
                 delivery: None,
+                inference: Arc::new(DenyingExtensionInferenceHost),
+                chunk_tx: None,
+                tenant_memory_tracker: None,
+                inference_invocation: false,
             },
             config,
             grants,
@@ -252,12 +400,81 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
+        self.call_handle_event_typed_with_delivery_and_tracker(
+            event,
+            tools,
+            invocation,
+            Arc::new(DenyingExtensionInferenceHost),
+            false,
+            config,
+            grants,
+            allowed_http_origins,
+            None,
+        )
+        .await
+    }
+
+    /// Invoke with server-owned authority and optional per-tenant memory tracking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_handle_event_typed_with_delivery_and_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        invocation: DeliveryInvocation,
+        inference: Arc<dyn ExtensionInferenceHost>,
+        inference_invocation: bool,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
             InvocationBinding {
                 context: invocation.context,
                 delivery: Some(invocation.capability),
+                inference,
+                chunk_tx: None,
+                tenant_memory_tracker,
+                inference_invocation,
+            },
+            config,
+            grants,
+            allowed_http_origins,
+        )
+        .await
+        .map_err(|(failure, _)| failure)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_handle_event_typed_with_tracker(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        context: InvocationContext,
+        inference: Arc<dyn ExtensionInferenceHost>,
+        inference_invocation: bool,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+        tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
+        self.invoke_with_deadline(
+            event,
+            tools,
+            InvocationBinding {
+                context,
+                delivery: None,
+                inference,
+                chunk_tx: None,
+                tenant_memory_tracker,
+                inference_invocation,
             },
             config,
             grants,
@@ -302,18 +519,31 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
-        use crate::types::ObservationFailure;
+        let is_inference_invocation = invocation.inference_invocation
+            || super::host_state::is_inference_plugin(&invocation.context.plugin_id);
+        if is_inference_invocation
+            && (grants.contains(&ExtensionCapability::OutboundHttpRequest)
+                || !allowed_http_origins.is_empty())
+        {
+            return Err((ObservationFailure::Denied, Some(
+                "outbound.http.request and allowed_http_origins are forbidden for inference invocations".to_owned(),
+            )));
+        }
         let mut store = Store::new(
             &self.engine,
-            HostState::new(
+            HostState::from_spec(HostStateSpec {
                 tools,
-                invocation.context,
+                inference: invocation.inference,
+                chunk_tx: invocation.chunk_tx,
+                context: invocation.context,
                 config,
                 grants,
                 allowed_http_origins,
-                self.limits.clone(),
-                self.http.clone(),
-            ),
+                runtime_limits: self.limits.clone(),
+                http: self.http.clone(),
+                tenant_memory_tracker: invocation.tenant_memory_tracker,
+                inference_invocation: invocation.inference_invocation,
+            }),
         );
         if let Some(capability) = invocation.delivery {
             let ExtensionEvent::RoomMessageObserve(observation) = &event else {
@@ -367,9 +597,62 @@ impl LoadedExtension {
     }
 }
 
+/// Parameters for invoking a Wasm extension with an explicit brokered
+/// [`ExtensionInferenceHost`].
+pub struct InferenceInvocationParams {
+    /// Event payload delivered to `handle-event`.
+    pub event: ExtensionEvent,
+    /// Host tool service implementation.
+    pub tools: Arc<dyn ExtensionHostTools>,
+    /// Brokered inference stream host implementation.
+    pub inference: Arc<dyn ExtensionInferenceHost>,
+    /// Optional bounded channel forwarding progressive inference chunks.
+    pub chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// Invocation authority and room/tenant context.
+    pub context: InvocationContext,
+    /// Serialized extension configuration JSON.
+    pub config: String,
+    /// Granted capabilities for this extension module.
+    pub grants: HashSet<ExtensionCapability>,
+    /// Allowed HTTPS origins for non-inference HTTP calls.
+    pub allowed_http_origins: Vec<String>,
+    /// Optional per-tenant linear memory quota tracker.
+    pub tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    /// Whether this invocation is an inference invocation (`outbound.http.request`
+    /// and guest log forwarding disabled).
+    pub inference_invocation: bool,
+}
+
 struct InvocationBinding {
     context: InvocationContext,
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
+    inference: Arc<dyn ExtensionInferenceHost>,
+    chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    tenant_memory_tracker: Option<Arc<TenantMemoryTracker>>,
+    inference_invocation: bool,
+}
+
+struct HasIo;
+
+impl wasmtime::component::HasData for HasIo {
+    type Data<'a> = &'a mut wasmtime::component::ResourceTable;
+}
+
+/// Narrow WASI linking: exposes ONLY `wasi:clocks`, `wasi:io`, and `wasi:random`.
+/// Deliberately omits `wasi:filesystem`, `wasi:sockets`, and `wasi:cli`.
+fn add_narrow_wasi_to_linker(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+    use wasmtime_wasi::p2::bindings::io;
+
+    io::error::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    io::poll::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    io::streams::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    wasi_clocks::wall_clock::add_to_linker::<HostState, WasiClocks>(linker, HostState::clocks)?;
+    wasi_clocks::monotonic_clock::add_to_linker::<HostState, WasiClocks>(
+        linker,
+        HostState::clocks,
+    )?;
+    wasi_random::random::add_to_linker::<HostState, WasiRandom>(linker, |t| t.ctx().ctx.random())?;
+    Ok(())
 }
 
 fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
@@ -385,13 +668,10 @@ fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
 }
 
 fn classify_runtime_error(error: wasmtime::Error) -> ObservationFailure {
-    if matches!(
-        error.downcast_ref::<wasmtime::Trap>(),
-        Some(wasmtime::Trap::OutOfFuel)
-    ) {
-        ObservationFailure::ResourceLimit
-    } else {
-        ObservationFailure::RuntimeFailure
+    match error.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::OutOfFuel) => ObservationFailure::ResourceLimit,
+        Some(wasmtime::Trap::Interrupt) => ObservationFailure::DeadlineExceeded,
+        _ => ObservationFailure::RuntimeFailure,
     }
 }
 
@@ -410,6 +690,7 @@ mod limit_tests {
         let mut store = Store::new(runtime.engine(), HostState::for_init());
         store.set_fuel(20_000).expect("fuel");
         store.fuel_async_yield_interval(Some(1_000)).expect("yield");
+        store.set_epoch_deadline(100);
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .expect("instance");
@@ -439,13 +720,12 @@ mod limit_tests {
         )
         .expect("module");
         let mut state = HostState::for_init();
-        state.limits = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(65_536)
-            .trap_on_grow_failure(true)
-            .build();
+        state.limits = super::super::host_state::AggregateStoreLimits::new(65_536, None);
         let mut store = Store::new(runtime.engine(), state);
         store.limiter(|state| &mut state.limits);
         store.set_fuel(10_000).expect("fuel");
+        store.set_epoch_deadline(100);
+        store.epoch_deadline_trap();
         let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
             .await
             .expect("instance");
@@ -453,5 +733,117 @@ mod limit_tests {
             .get_typed_func::<(), i32>(&mut store, "grow")
             .expect("grow");
         assert!(grow.call_async(&mut store, ()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn multi_memory_wasm_module_is_capped_by_aggregate_limit() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        // Two 1-page memories = 131,072 bytes > 65,536 byte aggregate cap.
+        let module = wasmtime::Module::new(runtime.engine(), r#"(module (memory 1) (memory 1))"#)
+            .expect("module");
+        let tenant = waddle_broker_core::identity::TenantId::parse("mem.example").expect("valid");
+        let tracker = Arc::new(TenantMemoryTracker::new(tenant, 65_536));
+        let mut state = HostState::for_init();
+        state.limits =
+            super::super::host_state::AggregateStoreLimits::new(65_536, Some(Arc::clone(&tracker)));
+        let mut store = Store::new(runtime.engine(), state);
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(100_000).expect("fuel");
+        store.set_epoch_deadline(100);
+        store.epoch_deadline_trap();
+
+        let err = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect_err("second memory must exceed aggregate store limit");
+        assert!(
+            err.to_string().contains("aggregate") || err.to_string().contains("memory"),
+            "unexpected error: {err}"
+        );
+        drop(store);
+        assert_eq!(
+            tracker.allocated_bytes(),
+            0,
+            "tenant memory tracker must release all reserved bytes on store drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_interruption_traps_abundant_fuel_guest_as_deadline_exceeded() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        let module = wasmtime::Module::new(
+            runtime.engine(),
+            r#"(module (func (export "spin") (loop br 0)))"#,
+        )
+        .expect("module");
+        let mut store = Store::new(runtime.engine(), HostState::for_init());
+        // Abundant fuel so fuel cannot exhaust before epoch deadline fires.
+        store.set_fuel(1_000_000_000).expect("fuel");
+        store
+            .fuel_async_yield_interval(Some(10_000))
+            .expect("yield");
+        store.set_epoch_deadline(2);
+        store.epoch_deadline_trap();
+
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin");
+        let error = tokio::time::timeout(Duration::from_secs(2), spin.call_async(&mut store, ()))
+            .await
+            .expect("epoch ticker must interrupt spinning guest")
+            .expect_err("epoch deadline must trap");
+        assert_eq!(
+            classify_runtime_error(error),
+            crate::types::ObservationFailure::DeadlineExceeded
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_interruption_remains_active_after_wasm_runtime_is_dropped() {
+        let runtime = WasmRuntime::try_new().expect("runtime");
+        let wat_path = std::env::temp_dir().join(format!(
+            "waddle-epoch-ticker-drop-test-{}.wat",
+            std::process::id()
+        ));
+        std::fs::write(&wat_path, "(component)").expect("write minimal component");
+        let loaded = LoadedExtension::load(&runtime, &wat_path)
+            .expect("load component")
+            .with_limits(RuntimeLimits {
+                invocation_timeout_ms: 100,
+                http_timeout_ms: 100,
+                wasm_fuel: 1_000_000_000,
+                ..RuntimeLimits::default()
+            })
+            .expect("limits");
+        let _ = std::fs::remove_file(&wat_path);
+
+        // Mirrors ExtensionManager::from_config_with_host_tools dropping WasmRuntime
+        // immediately after loading all extensions.
+        drop(runtime);
+
+        let module = wasmtime::Module::new(
+            &loaded.engine,
+            r#"(module (func (export "spin") (loop br 0)))"#,
+        )
+        .expect("module");
+        let mut store = Store::new(&loaded.engine, HostState::for_init());
+        loaded.configure_store(&mut store).expect("configure store");
+
+        let instance = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("instance");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin");
+        let error = tokio::time::timeout(Duration::from_secs(2), spin.call_async(&mut store, ()))
+            .await
+            .expect("epoch ticker must remain alive after WasmRuntime is dropped")
+            .expect_err("epoch deadline must trap");
+        assert_eq!(
+            classify_runtime_error(error),
+            crate::types::ObservationFailure::DeadlineExceeded
+        );
     }
 }

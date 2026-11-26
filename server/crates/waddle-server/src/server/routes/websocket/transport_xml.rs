@@ -112,8 +112,14 @@ pub(crate) fn build_iq_error_xml_with_payload(
     if let Some(to) = to {
         iq = iq.attr(minidom::rxml::xml_ncname!("to").to_owned(), to);
     }
+    if let Some(sanitized) =
+        waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(
+            &payload,
+        )
+    {
+        iq = iq.append(sanitized);
+    }
     let iq = iq
-        .append(payload)
         .append(xmpp_parsers::minidom::Element::from(error))
         .build();
     element_to_xml(iq)

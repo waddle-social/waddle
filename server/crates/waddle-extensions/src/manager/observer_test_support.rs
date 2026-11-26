@@ -35,6 +35,9 @@ impl ExtensionManager {
             feature_namespaces: Vec::new(),
             route_descriptors: Vec::new(),
             launch_signing_key: None,
+            tenant_id: None,
+            resource_controller: None,
+            inference_host: Arc::new(crate::runtime::DenyingExtensionInferenceHost),
         }
     }
 
@@ -50,6 +53,9 @@ impl ExtensionManager {
             feature_namespaces: Vec::new(),
             route_descriptors: routes,
             launch_signing_key: None,
+            tenant_id: None,
+            resource_controller: None,
+            inference_host: Arc::new(crate::runtime::DenyingExtensionInferenceHost),
         }
     }
 }

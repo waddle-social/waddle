@@ -211,28 +211,29 @@
 {{- fail (printf "extensions.modules[%d].configSecretFiles[%s] must be an absolute file path" $index $key) -}}
 {{- end -}}
 {{- end -}}
-{{- if eq $name "ai-chatbot" -}}
+{{- if or (eq $name "ai-chatbot") (eq $name "jev-judgments") -}}
 {{- $moduleConfig := default (dict) $module.config -}}
-{{- $endpoint := toString (required (printf "extensions.modules[%d].config.endpoint is required for ai-chatbot" $index) (get $moduleConfig "endpoint")) -}}
-{{- if not (hasPrefix "https://" $endpoint) -}}
-{{- fail (printf "extensions.modules[%d].config.endpoint for ai-chatbot must use HTTPS" $index) -}}
-{{- end -}}
-{{- $_ := required (printf "extensions.modules[%d].config.model is required for ai-chatbot" $index) (get $moduleConfig "model") -}}
-{{- if and (not (get $moduleConfig "api_key")) (not (get $configSecretFiles "api_key")) -}}
-{{- fail (printf "extensions.modules[%d] ai-chatbot requires config.api_key or configSecretFiles.api_key" $index) -}}
+{{- if or (hasKey $moduleConfig "api_key") (hasKey $configSecretFiles "api_key") -}}
+{{- fail (printf "extensions.modules[%d] %s uses brokered inference and must not configure plaintext api_key" $index $name) -}}
 {{- end -}}
 {{- $allowedOrigins := default (list) $module.allowedHttpOrigins -}}
-{{- if eq (len $allowedOrigins) 0 -}}
-{{- fail (printf "extensions.modules[%d].allowedHttpOrigins is required for ai-chatbot" $index) -}}
+{{- if gt (len $allowedOrigins) 0 -}}
+{{- fail (printf "extensions.modules[%d] %s uses brokered inference and must not declare allowedHttpOrigins" $index $name) -}}
 {{- end -}}
-{{- $endpointAllowed := false -}}
-{{- range $origin := $allowedOrigins -}}
-{{- if hasPrefix (toString $origin) $endpoint -}}
-{{- $endpointAllowed = true -}}
+{{- range $grant := (default (list) $module.capabilityGrants) -}}
+{{- if eq (toString $grant) "outbound.http.request" -}}
+{{- fail (printf "extensions.modules[%d] %s uses brokered inference and must not grant outbound.http.request" $index $name) -}}
 {{- end -}}
 {{- end -}}
-{{- if not $endpointAllowed -}}
-{{- fail (printf "extensions.modules[%d].allowedHttpOrigins must include the ai-chatbot provider origin" $index) -}}
+{{- if eq $name "ai-chatbot" -}}
+{{- $_ := required (printf "extensions.modules[%d].config.model is required for ai-chatbot" $index) (get $moduleConfig "model") -}}
+{{- end -}}
+{{- if eq $name "jev-judgments" -}}
+{{- $obs := default (dict) $module.roomObservation -}}
+{{- $scope := default (dict) $obs.scope -}}
+{{- if eq (toString (default "" $scope.kind)) "all-hosted-rooms" -}}
+{{- fail (printf "extensions.modules[%d] jev-judgments must use explicit rooms scope and reject all-hosted-rooms" $index) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -478,6 +478,7 @@ fn host_state_with_kind(
     HostState::new(
         tools,
         InvocationContext {
+            tenant_id: None,
             waddle_id: WaddleId::try_new("test").expect("waddle id"),
             plugin_id: PluginId::try_new("test-extension").expect("plugin id"),
             requester: Some("alice@example.com".parse().expect("requester jid")),
@@ -490,6 +491,7 @@ fn host_state_with_kind(
         Vec::new(),
         crate::config::RuntimeLimits::default(),
         super::http::HttpRuntime::try_new().expect("HTTP runtime"),
+        None,
     )
 }
 
@@ -687,6 +689,7 @@ async fn wasm_delivery_resource_is_issued_borrowed_and_cannot_be_forged_or_retai
         .expect("host issues key");
     let mut store = Store::new(runtime.engine(), state);
     store.set_fuel(1_000_000).expect("fuel");
+    store.set_epoch_deadline(100);
     let instance = linker
         .instantiate_async(&mut store, &component)
         .await
@@ -753,6 +756,7 @@ async fn wasm_observer_receives_delivery_without_claiming_provider_acceptance() 
             Arc::new(MockHostTools::default()),
             host_domain::DeliveryInvocation {
                 context: InvocationContext {
+                    tenant_id: None,
                     waddle_id: WaddleId::try_new("test").expect("waddle"),
                     plugin_id: PluginId::try_new("test-extension").expect("plugin"),
                     requester: None,

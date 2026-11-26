@@ -13,11 +13,15 @@ use crate::types::{
     DisplayText, ExtensionEnvelope, ExtensionPayload, PubSubItemId, PubSubNode, ReplyTarget,
     RoomJid, StanzaId, ThreadId,
 };
+use waddle_broker_core::identity::TenantId;
 
 /// Serializable because a clustered host forwards room sends to the room's
 /// owning node with this context; a wire change needs a new relay message id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationContext {
+    /// Canonical tenant identifier scoping this invocation when known.
+    #[serde(default)]
+    pub tenant_id: Option<TenantId>,
     /// Identifier of the Waddle community providing invocation context.
     pub waddle_id: WaddleId,
     /// Identifier of the extension owning this value.

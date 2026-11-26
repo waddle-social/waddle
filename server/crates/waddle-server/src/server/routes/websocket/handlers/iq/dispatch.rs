@@ -454,6 +454,7 @@ pub async fn handle_iq_with_conn_state(
             },
             authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
             phase.bound_jid(),
+            conn_state.active_inference_sessions.as_deref_mut(),
         )
         .await
         .into();

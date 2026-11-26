@@ -48,6 +48,7 @@ use crate::server::extension_bot_avatar::BotAvatars;
 use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
 use crate::server::extension_host_adapter;
 use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::extension_inference_host::DeferredExtensionInferenceHost;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
@@ -1282,10 +1283,12 @@ async fn create_websocket_state(
     let pubsub_storage = Arc::clone(&state.pubsub_storage);
 
     let deferred_extension_host_tools = Arc::new(DeferredExtensionHostTools::default());
+    let deferred_extension_inference_host = Arc::new(DeferredExtensionInferenceHost::default());
     let extension_manager = build_extension_manager(
         server_config,
         &xmpp_domain,
         Arc::clone(&deferred_extension_host_tools),
+        Arc::clone(&deferred_extension_inference_host),
     )
     .await?;
     crate::server::extension_bot::install_bot_hats(
@@ -1921,6 +1924,7 @@ async fn create_websocket_state(
             ws_keepalive: server_config.ws_keepalive,
             provider_ingress,
             provider_dispatch_tasks,
+            inference_stream_tasks: tokio_util::task::TaskTracker::new(),
             shutdown: shutdown_handle,
         },
     });
@@ -2005,6 +2009,13 @@ async fn create_websocket_state(
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
+    let inference_host =
+        crate::server::extension_inference_host::build_startup_extension_inference_host(
+            &websocket_state,
+            &xmpp_domain,
+        )
+        .await?;
+    deferred_extension_inference_host.set(inference_host);
     // Start the SFU ghost-reconciliation backstop: periodically ask
     // LiveKit who is actually connected and sweep registry entries (and
     // their MUC Muji presence) left behind by a lost

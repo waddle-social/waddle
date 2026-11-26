@@ -342,6 +342,7 @@ async fn execute_adapter(
                 registry_owner: None,
                 state_machine: None,
                 ordered_relay_origin: None,
+                active_inference_sessions: None,
             };
             super::sans_io::handle_sans_io_iq(
                 IqHandlerContext {

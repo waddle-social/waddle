@@ -2,6 +2,7 @@
 
 use crate::mam::{FULLTEXT_MAM_NS, WADDLE_MAM_THREAD_NS};
 use crate::waddle_call_lifecycle::NS_WADDLE_CALL_LIFECYCLE;
+use crate::waddle_credential::NS_WADDLE_CREDENTIAL;
 
 use super::{DISCO_INFO_NS, NS_CHATSTATES, NS_COMMANDS, NS_MUC_SELF_PING_OPTIMIZATION};
 
@@ -580,6 +581,12 @@ impl Feature {
     #[must_use]
     pub fn waddle_call_lifecycle() -> Self {
         Self::new(NS_WADDLE_CALL_LIFECYCLE)
+    }
+
+    /// Custom: versioned brokered inference credential lifecycle IQs.
+    #[must_use]
+    pub fn waddle_credential() -> Self {
+        Self::new(NS_WADDLE_CREDENTIAL)
     }
 
     /// XEP-0272: Multiparty Jingle (Muji). MUC group-call presence

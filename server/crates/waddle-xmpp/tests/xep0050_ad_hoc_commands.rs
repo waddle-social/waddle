@@ -285,6 +285,10 @@ mod session_flow {
                 payload: Element::builder("query", "urn:test").build(),
             },
             command,
+            tenant_id: None,
+            placement_generation: None,
+            cancel_rx: None,
+            chunk_tx: None,
         }
     }
 

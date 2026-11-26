@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use crate::config::{ConfigError, JevConfig, DEFAULT_ENDPOINT, DEFAULT_MODEL, MAX_RESPONSE_BYTES};
+use crate::config::{
+    ConfigError, JevConfig, DEFAULT_CREDENTIAL_NAME, DEFAULT_DEPLOYMENT, DEFAULT_MODEL,
+    DEFAULT_PROVIDER, MAX_RESPONSE_BYTES,
+};
 use crate::decisions::{parse_http_response, request_body, Failure, InvalidResponse, JudgmentKind};
 
 const KINDS: [JudgmentKind; 8] = [
@@ -152,24 +155,30 @@ fn status_and_size_failures_never_include_provider_text() {
 }
 
 #[test]
-fn config_defaults_validate_https_and_redact_key() {
-    let config = JevConfig::parse(r#"{"api_key":" super-secret-token\n"}"#).expect("config");
-    assert_eq!(config.endpoint.as_str(), DEFAULT_ENDPOINT);
+fn config_defaults_and_rejects_legacy_plaintext_secrets() {
+    let config = JevConfig::parse("{}").expect("brokered defaults parse cleanly");
+    assert_eq!(config.provider, DEFAULT_PROVIDER);
+    assert_eq!(config.deployment, DEFAULT_DEPLOYMENT);
     assert_eq!(config.model, DEFAULT_MODEL);
-    assert_eq!(config.api_key.as_str(), "super-secret-token");
-    assert_eq!(format!("{:?}", config.api_key), "<redacted>");
+    assert_eq!(config.credential_name, DEFAULT_CREDENTIAL_NAME);
     assert_eq!(MAX_RESPONSE_BYTES, 64 * 1024);
 
+    let custom = JevConfig::parse(
+        r#"{"provider":"openrouter","deployment":"zdr","model":"typesafe/jev-1.13","credential_name":"custom-tenant"}"#,
+    )
+    .expect("custom broker config parses");
+    assert_eq!(custom.credential_name, "custom-tenant");
+
     assert!(matches!(
-        JevConfig::parse(r#"{"api_key":"", "endpoint":"https://openrouter.ai"}"#),
-        Err(ConfigError::MissingApiKey)
+        JevConfig::parse(r#"{"api_key":"secret"}"#),
+        Err(ConfigError::LegacySecretForbidden)
     ));
     assert!(matches!(
-        JevConfig::parse(r#"{"api_key":"key", "endpoint":"http://openrouter.ai"}"#),
-        Err(ConfigError::InvalidEndpoint)
+        JevConfig::parse(r#"{"endpoint":"https://openrouter.ai"}"#),
+        Err(ConfigError::LegacySecretForbidden)
     ));
     assert!(matches!(
-        JevConfig::parse(r#"{"api_key":"key", "model":" "}"#),
+        JevConfig::parse(r#"{"model":" "}"#),
         Err(ConfigError::MissingModel)
     ));
     assert!(matches!(

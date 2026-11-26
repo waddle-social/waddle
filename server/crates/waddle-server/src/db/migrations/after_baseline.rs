@@ -98,6 +98,9 @@ pub const PUBSUB_ITEM_EXPIRE_VERSION: i64 = 2028;
 /// Version of the migration that creates the verified XEP-0115 entity
 /// capabilities every replica shares.
 pub const ENTITY_CAPS_VERSION: i64 = 2029;
+/// Version of the migration that adds `tenant_id` scoping, immutable `account_id`
+/// UUIDs on `users` and `native_users`, and `tenant_placement_leases`.
+pub const TENANT_ISOLATION_ACCOUNT_ID_VERSION: i64 = 2030;
 
 /// The migrations after the baseline, in version order.
 pub fn all() -> Vec<Migration> {
@@ -360,6 +363,16 @@ pub fn all() -> Vec<Migration> {
             sql_sqlite: include_str!("../../../sql/migrations/2029_entity_caps.sqlite.sql"),
             sql_postgres: include_str!("../../../sql/migrations/2029_entity_caps.postgres.sql"),
         },
+        Migration {
+            version: TENANT_ISOLATION_ACCOUNT_ID_VERSION,
+            description: "tenant isolation, immutable account_id, and placement leases".to_owned(),
+            sql_sqlite: include_str!(
+                "../../../sql/migrations/2026_tenant_isolation_and_account_id.sqlite.sql"
+            ),
+            sql_postgres: include_str!(
+                "../../../sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+            ),
+        },
     ]
 }
 
@@ -606,7 +619,8 @@ mod tests {
         S2S_FEDERATED_SPACES_VERSION, S2S_IQ_CORRELATIONS_VERSION, S2S_LOCAL_ROOM_SEATS_VERSION,
         S2S_REMOTE_OFFLINE_ADMISSIONS_VERSION, S2S_REMOTE_ROOMS_VERSION,
         S2S_SPACE_SUBSCRIPTIONS_VERSION, S2S_SPACE_SUBSCRIPTION_GRANTS_VERSION,
-        SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION, XMPP_OAUTH_GRANTS_VERSION,
+        SM_DURABLE_SESSIONS_BARE_STATE_INDEX_VERSION, TENANT_ISOLATION_ACCOUNT_ID_VERSION,
+        XMPP_OAUTH_GRANTS_VERSION,
     };
 
     #[test]
@@ -652,6 +666,7 @@ mod tests {
                 PUBSUB_ROSTER_GROUPS_VERSION,
                 PUBSUB_ITEM_EXPIRE_VERSION,
                 ENTITY_CAPS_VERSION,
+                TENANT_ISOLATION_ACCOUNT_ID_VERSION,
             ]
         );
     }

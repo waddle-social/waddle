@@ -157,7 +157,6 @@ function createLauncher(
   executeResults: ExtensionCommandResult[],
   options: {
     roomJid?: string | null;
-    sendPublicChannelMessage?: (body: string) => Promise<void>;
     invokeExtensionAction?: (action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>;
     events?: string[] | undefined;
     invokeError?: Error | undefined;
@@ -178,7 +177,6 @@ function createLauncher(
     xmppClient: fake.client as never,
     roomJid,
     invokeExtensionAction: ref(options.invokeExtensionAction),
-    sendPublicChannelMessage: ref(options.sendPublicChannelMessage),
     focusPalette: () => {},
     focusComposerExtensions: () => {},
   });
@@ -226,7 +224,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(submitCalls[0].roomJid).toBe("pub@muc.example.com");
   });
 
-  test("makes inline /ai public in channel context", async () => {
+  test("makes inline /ai public in channel context without premature client prompt broadcast", async () => {
     const events: string[] = [];
     const { launcher, submitCalls } = createLauncher([
       executingResult([
@@ -244,9 +242,6 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     ], {
       roomJid: "pub@muc.example.com",
       events,
-      sendPublicChannelMessage: async (body) => {
-        events.push(`public:${body}`);
-      },
     });
 
     const ok = await launcher.dispatchSlashInvocation({
@@ -257,50 +252,11 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     });
 
     expect(ok).toBe(true);
-    expect(events).toEqual(["public:tell the room", "submit"]);
+    expect(events).toEqual(["submit"]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].fields.find((f) => f.name === "output")?.values).toEqual([
       "channel",
     ]);
-  });
-
-  test("does not submit inline /ai when the public prompt fails to send", async () => {
-    const events: string[] = [];
-    const { launcher, submitCalls } = createLauncher([
-      executingResult([
-        field("prompt", { required: true }),
-        field("output", {
-          type: "list-single",
-          value: "private",
-          values: ["private"],
-          options: [
-            { label: "Private", value: "private" },
-            { label: "Post to channel", value: "channel" },
-          ],
-        }),
-      ], ["complete", "cancel"]),
-    ], {
-      roomJid: "pub@muc.example.com",
-      events,
-      sendPublicChannelMessage: async () => {
-        events.push("public-failed");
-        throw new Error("channel send failed");
-      },
-    });
-
-    const ok = await launcher.dispatchSlashInvocation({
-      kind: "inline-submit",
-      command: aiCommand,
-      fieldName: "prompt",
-      value: "tell the room",
-    });
-
-    expect(ok).toBe(false);
-    expect(events).toEqual(["public-failed"]);
-    expect(submitCalls).toEqual([]);
-    expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
-    expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("channel send failed");
-    expect(launcher.open.value).toBe(true);
   });
 
   test("returns false and surfaces an error state when the XMPP client is null", async () => {
@@ -497,7 +453,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     expect(launcher.open.value).toBe(true);
   });
 
-  test("returns false after posting public /ai prompt when command submission fails", async () => {
+  test("returns false on inline /ai when command submission fails", async () => {
     const events: string[] = [];
     const { launcher, submitCalls } = createLauncher([
       executingResult([
@@ -516,9 +472,6 @@ describe("dispatchSlashInvocation: inline-submit", () => {
       roomJid: "pub@muc.example.com",
       events,
       submitError: new Error("submit failed"),
-      sendPublicChannelMessage: async (body) => {
-        events.push(`public:${body}`);
-      },
     });
 
     const ok = await launcher.dispatchSlashInvocation({
@@ -529,7 +482,7 @@ describe("dispatchSlashInvocation: inline-submit", () => {
     });
 
     expect(ok).toBe(false);
-    expect(events).toEqual(["public:tell the room", "submit"]);
+    expect(events).toEqual(["submit"]);
     expect(submitCalls).toHaveLength(1);
     expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
     expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("submit failed");
@@ -1010,7 +963,7 @@ describe("submitForm: public channel output", () => {
     roomJid.value = "room-b@muc.example.com";
     launcher.updateField(aiCommand.node, "prompt", ["stay in room a"]);
 
-    const ok = await launcher.submitForm(aiCommand, "complete", { skipPublicPrompt: true });
+    const ok = await launcher.submitForm(aiCommand, "complete");
 
     expect(ok).toBe(true);
     expect(submitCalls).toHaveLength(1);
@@ -1029,14 +982,14 @@ describe("submitForm: public channel output", () => {
     await launcher.invokeCommand(aiCommand);
     launcher.updateField(aiCommand.node, "prompt", ["continue"]);
 
-    const ok = await launcher.submitForm(aiCommand, "complete", { skipPublicPrompt: true });
+    const ok = await launcher.submitForm(aiCommand, "complete");
 
     expect(ok).toBe(true);
     expect(launcher.open.value).toBe(true);
     expect(launcher.commandForms.value[aiCommand.node]?.fields[0]?.name).toBe("confirm");
   });
 
-  test("posts the user's prompt to the room before submitting the command", async () => {
+  test("submits room /ai directly without premature client-side room prompt broadcast", async () => {
     const events: string[] = [];
     const { launcher, submitCalls } = createLauncher([
       executingResult([
@@ -1046,9 +999,6 @@ describe("submitForm: public channel output", () => {
     ], {
       roomJid: "pub@muc.example.com",
       events,
-      sendPublicChannelMessage: async (body) => {
-        events.push(`public:${body}`);
-      },
     });
     await launcher.invokeCommand(aiCommand);
     launcher.updateField(aiCommand.node, "prompt", ["what changed?"]);
@@ -1057,39 +1007,10 @@ describe("submitForm: public channel output", () => {
     const ok = await launcher.submitForm(aiCommand, "complete");
 
     expect(ok).toBe(true);
-    expect(events).toEqual(["public:what changed?", "submit"]);
+    expect(events).toEqual(["submit"]);
     expect(submitCalls).toHaveLength(1);
     expect(submitCalls[0].roomJid).toBe("pub@muc.example.com");
     expect(launcher.open.value).toBe(false);
-  });
-
-  test("does not submit the command when posting the public prompt fails", async () => {
-    const events: string[] = [];
-    const { launcher, submitCalls } = createLauncher([
-      executingResult([
-        field("prompt", { required: true }),
-        field("output", { required: true, value: "private", values: ["private"] }),
-      ]),
-    ], {
-      roomJid: "pub@muc.example.com",
-      events,
-      sendPublicChannelMessage: async () => {
-        events.push("public-failed");
-        throw new Error("could not send prompt");
-      },
-    });
-    await launcher.invokeCommand(aiCommand);
-    launcher.updateField(aiCommand.node, "prompt", ["what changed?"]);
-    launcher.updateField(aiCommand.node, "output", ["channel"]);
-
-    const ok = await launcher.submitForm(aiCommand, "complete");
-
-    expect(ok).toBe(false);
-    expect(events).toEqual(["public-failed"]);
-    expect(submitCalls).toEqual([]);
-    expect(launcher.commandStates.value[aiCommand.node]?.state).toBe("error");
-    expect(launcher.commandStates.value[aiCommand.node]?.detail).toBe("could not send prompt");
-    expect(launcher.open.value).toBe(true);
   });
 
   test("does not echo non-AI extension prompts with output=channel", async () => {
@@ -1102,9 +1023,6 @@ describe("submitForm: public channel output", () => {
     ], {
       roomJid: "pub@muc.example.com",
       events,
-      sendPublicChannelMessage: async (body) => {
-        events.push(`public:${body}`);
-      },
     });
     await launcher.invokeCommand(genericCommand);
     launcher.updateField(genericCommand.node, "prompt", ["generic public text"]);

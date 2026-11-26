@@ -41,6 +41,26 @@ use crate::xep::xep0421::OccupantIdSecret;
 mod durable_restore;
 pub use durable_restore::GetOrRestoreDurableRoom;
 
+/// Query the canonical [`waddle_broker_core::identity::TenantId`] bound to a
+/// [`RoomRegistryActor`] instance.
+pub struct GetTenantId;
+
+/// Kameo reply wrapper carrying the room registry's canonical [`waddle_broker_core::identity::TenantId`].
+#[derive(Debug, Clone, PartialEq, Eq, Reply)]
+pub struct TenantIdReply(pub waddle_broker_core::identity::TenantId);
+
+impl kameo::message::Message<GetTenantId> for RoomRegistryActor {
+    type Reply = TenantIdReply;
+
+    async fn handle(
+        &mut self,
+        _msg: GetTenantId,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        TenantIdReply(self.tenant_id.clone())
+    }
+}
+
 /// Test seam: set (or age) the handoff marker for a room as if a handoff had
 /// retired its actor `age` ago without publishing a successor.
 #[cfg(test)]
