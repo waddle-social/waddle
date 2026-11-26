@@ -709,9 +709,9 @@ dependency artifact, so their timings remain comparable with earlier runs.
 The default-feature check keeps that suite's `test` profile (debug assertions
 and overflow checks on), its `--all-targets` selection and one Cargo job for
 the 16 GB profile runner. It runs with the same test environment and fixture
-files as the other Nix test lanes. Pull requests, merge groups and `main` now
-build the same derivation, so `main` reuses a result the merge group built for
-the same tree. The server `test` and `clippy` tasks still run plain Cargo
+files as the other Nix test lanes. Selected integration runs and `main` build
+the same derivation. A runner can substitute a prior result when the source
+inputs match and the output is available in a configured binary cache. The server `test` and `clippy` tasks still run plain Cargo
 through the namespace project, so they work locally on any host.
 
 `flake.nix` checks at evaluation time that every workspace member and every
@@ -720,9 +720,9 @@ or `waddle-server`. A new crate must be added to `memberLayerPaths`; otherwise
 evaluation fails with that instruction rather than the archive's reuse guard
 failing later.
 
-The new dependency artifact compiles once on its first run and after any
-`Cargo.lock` or toolchain change. Layer derivations are uploaded with the other
-outputs; their restore and compression cost has not yet been measured in CI.
+The dependency artifact changes when its inputs change, including `Cargo.lock`
+and the toolchain. The default suite writes a Cargo freshness report for every
+workspace member and a JUnit report for the executed tests to its Nix output.
 
 ### Sandboxed builds are required
 
@@ -762,3 +762,41 @@ minute there; the larger saving is the dependency artifact and layers, about
 five minutes on this runner, which a warm volume supplies. Lanes that build
 test targets reuse more, because the other members' test binaries are a larger
 share of their work.
+
+### Default-feature suite on fresh runners (2026-11-26)
+
+The `namespace-test-volume` experiment used an unedited seed and four fresh
+16-core, 32 GB runners with the same one-file `waddle-server` test change.
+The seed reported `/nix` cached. All three probes requested its exact volume
+tag. Each received an empty store before the build.
+
+| Run | Workspace layers and deps present at start | Full job |
+| --- | --- | ---: |
+| [Cold control](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139867426289) | None | 25m 24s |
+| [Immediately after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139881129699) | None | 24m 36s |
+| [10 minutes after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139886248328) | None | 24m 48s |
+| [37 minutes after seed](https://github.com/waddle-social/waddle/actions/runs/45807772159/job/139899701838) | None | 26m 45s |
+
+All four edited runs passed the original 13,670 tests and the added test,
+with 10 skipped. Each built the workspace layers locally and then compiled
+only `waddle-server` in the final derivation. These timings measure cold
+builds. Production Rust jobs use FlakeHub and Hestia for binary substitution.
+
+The [explicit-transfer trial](https://github.com/waddle-social/waddle/actions/runs/45821545253)
+measured the same edit on two fresh runners with identical CPU and memory.
+The seed exported the workspace layers and their dependencies in
+7s and uploaded a 4.11 GiB artifact in 24s.
+The consumer checked that the three outputs were absent, downloaded the
+artifact in 38s, verified and imported its closure in
+34s, then built the edited test output.
+
+| Fresh runner | Input layers present at build start | Nix build and tests | Full job |
+| --- | ---: | ---: | ---: |
+| [Cold](https://github.com/waddle-social/waddle/actions/runs/45821545253/job/139914791736) | 0 of 3 | 25m 22s | 25m 55s |
+| [Warm](https://github.com/waddle-social/waddle/actions/runs/45821545253/job/139928721794) | 3 of 3 | 19m 12s | 20m 50s |
+
+The warm consumer saved **5m 05s (19.6%)**, including setup,
+download, import and cleanup. Both ran the same 13,671 tests with 10 skipped.
+Only `waddle-server` compiled in the warm run. All 15 other workspace members
+were fresh. This comparison measures the combined third-party and workspace
+layers. Queue wait and the separate seed job are excluded.
