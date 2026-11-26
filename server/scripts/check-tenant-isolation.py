@@ -47,15 +47,10 @@ TEST_FILE = re.compile(
 TEST_MODULE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 
 COMMENTS_ONLY = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
-NON_CODE = re.compile(
-    r"""//[^\n]*
-      | /\*.*?\*/
-      | (?:b|c|br|cr)?r(?P<hashes>\#{0,255})".*?"(?P=hashes)
-      | (?:b|c)?"(?:\\.|[^"\\])*"
-      | b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'
-    """,
-    re.DOTALL | re.VERBOSE,
-)
+TOKEN_START = re.compile(r'/[/*]|[bc]?r#*"|[bc]?"|b?\'')
+UNICODE_CHAR_LITERAL = re.compile(r"b?'\\u\{[0-9a-fA-F_]+\}'")
+HEX_CHAR_LITERAL = re.compile(r"b?'\\x[0-9a-fA-F]{2}'")
+SIMPLE_CHAR_LITERAL = re.compile(r"b?'(?:\\.|[^'\\\n])'")
 
 HARDCODED_WADDLE_RE = re.compile(
     r'WaddleId\s*::\s*try_new\s*\(\s*"(?:local|room-observation)"\s*\)'
@@ -81,9 +76,76 @@ def strip_comments(source: str) -> str:
     return COMMENTS_ONLY.sub(lambda match: blank(match[0]), source)
 
 
+def _line_comment_end(source: str, start: int) -> int:
+    end = source.find("\n", start)
+    return len(source) if end == -1 else end
+
+
+def _block_comment_end(source: str, start: int) -> int | None:
+    end = source.find("*/", start + 2)
+    return None if end == -1 else end + 2
+
+
+def _raw_string_end(source: str, match: re.Match[str]) -> int | None:
+    hashes = match[0].count("#")
+    if hashes > 255:
+        return None
+    closing = '"' + ("#" * hashes)
+    end = source.find(closing, match.end())
+    return None if end == -1 else end + len(closing)
+
+
+def _quoted_string_end(source: str, start: int) -> int | None:
+    idx = start
+    length = len(source)
+    while idx < length:
+        char = source[idx]
+        if char == "\\":
+            idx += 2
+        elif char == '"':
+            return idx + 1
+        else:
+            idx += 1
+    return None
+
+
+def _char_literal_end(source: str, start: int) -> int | None:
+    for pattern in (UNICODE_CHAR_LITERAL, HEX_CHAR_LITERAL, SIMPLE_CHAR_LITERAL):
+        if match := pattern.match(source, start):
+            return match.end()
+    return None
+
+
+def _non_code_span_end(source: str, match: re.Match[str]) -> int | None:
+    token = match[0]
+    start = match.start()
+    if token == "//":
+        return _line_comment_end(source, start)
+    if token == "/*":
+        return _block_comment_end(source, start)
+    if token.endswith("'"):
+        return _char_literal_end(source, start)
+    if "r" in token:
+        return _raw_string_end(source, match)
+    return _quoted_string_end(source, match.end())
+
+
 def code_only(source: str) -> str:
     """Blank comments and literals while preserving newlines."""
-    return NON_CODE.sub(lambda match: blank(match[0]), source)
+    parts: list[str] = []
+    cursor = 0
+    while match := TOKEN_START.search(source, cursor):
+        start = match.start()
+        parts.append(source[cursor:start])
+        end = _non_code_span_end(source, match)
+        if end is None:
+            parts.append(source[start])
+            cursor = start + 1
+        else:
+            parts.append(blank(source[start:end]))
+            cursor = end
+    parts.append(source[cursor:])
+    return "".join(parts)
 
 
 def without_test_modules(code: str) -> str:
@@ -103,7 +165,7 @@ def is_test_file(relative: Path) -> bool:
     return bool(TEST_FILE.search(relative.as_posix()))
 
 
-def find_hardcoded_local_waddle(source: str) -> list[int]:
+def find_hardcoded_local_waddle(source: str, _relative: Path | None = None) -> list[int]:
     """Return 1-based line numbers of hardcoded local/room-observation WaddleIds."""
     cleaned = without_test_modules(strip_comments(source))
     return [
@@ -112,7 +174,7 @@ def find_hardcoded_local_waddle(source: str) -> list[int]:
     ]
 
 
-def find_unscoped_store_ctors(source: str) -> list[int]:
+def find_unscoped_store_ctors(source: str, _relative: Path | None = None) -> list[int]:
     """Return 1-based line numbers of unscoped registry/store constructor calls."""
     cleaned = without_test_modules(code_only(source))
     return [
@@ -121,7 +183,7 @@ def find_unscoped_store_ctors(source: str) -> list[int]:
     ]
 
 
-def find_global_barejid_statics(source: str) -> list[int]:
+def find_global_barejid_statics(source: str, _relative: Path | None = None) -> list[int]:
     """Return 1-based line numbers of static HashMap/DashMap keyed by bare BareJid."""
     cleaned = without_test_modules(code_only(source))
     return [
@@ -143,6 +205,40 @@ def find_unbounded_wasm_memories(source: str, relative: Path) -> list[int]:
     if rel_posix.endswith("runtime/loader.rs") and not EPOCH_INTERRUPTION_RE.search(cleaned):
         violations.append(1)
     return violations
+
+
+SCAN_RULES = (
+    (
+        HARDCODED_LOCAL_WADDLE,
+        find_hardcoded_local_waddle,
+        (
+            Path("crates/waddle-extensions/src"),
+            Path("crates/waddle-xmpp/src"),
+            Path("crates/waddle-server/src"),
+        ),
+    ),
+    (
+        UNSCOPED_STORE_CTOR,
+        find_unscoped_store_ctors,
+        (
+            Path("crates/waddle-server/src/db"),
+            Path("crates/waddle-server/src/server/routes"),
+        ),
+    ),
+    (
+        GLOBAL_BAREJID_STATIC,
+        find_global_barejid_statics,
+        (
+            Path("crates/waddle-server/src"),
+            Path("crates/waddle-xmpp/src"),
+        ),
+    ),
+    (
+        UNBOUNDED_WASM_MEMORIES,
+        find_unbounded_wasm_memories,
+        (Path("crates/waddle-extensions/src/runtime"),),
+    ),
+)
 
 
 def load_allowlist(path: Path) -> dict[tuple[str, str], int]:
@@ -169,51 +265,31 @@ def resolve_server_root(root: Path) -> Path:
     raise FileNotFoundError(f"could not locate server crates under {root}")
 
 
-def check_repo(root: Path) -> tuple[int, list[str]]:
-    server_root = resolve_server_root(root)
-    allowlist = load_allowlist(server_root / ALLOWLIST)
-    observed: dict[tuple[str, str], list[int]] = {}
-    scanned_files: set[Path] = set()
+def scan_tree(
+    server_root: Path,
+    rel_dir: Path,
+    kind: str,
+    finder,
+    observed: dict[tuple[str, str], list[int]],
+    scanned_files: set[Path],
+) -> None:
+    base = server_root / rel_dir
+    if not base.is_dir():
+        return
+    for path in sorted(base.rglob("*.rs")):
+        rel = path.relative_to(server_root)
+        if is_test_file(rel):
+            continue
+        scanned_files.add(rel)
+        lines = finder(path.read_text(encoding="utf-8"), rel)
+        if lines:
+            observed[(rel.as_posix(), kind)] = lines
 
-    def scan_tree(rel_dir: Path, kind: str, finder) -> None:
-        base = server_root / rel_dir
-        if not base.is_dir():
-            return
-        for path in sorted(base.rglob("*.rs")):
-            rel = path.relative_to(server_root)
-            if is_test_file(rel):
-                continue
-            scanned_files.add(rel)
-            source = path.read_text(encoding="utf-8")
-            lines = finder(source, rel) if kind == UNBOUNDED_WASM_MEMORIES else finder(source)
-            if lines:
-                observed[(rel.as_posix(), kind)] = lines
 
-    for crate_src in (
-        Path("crates/waddle-extensions/src"),
-        Path("crates/waddle-xmpp/src"),
-        Path("crates/waddle-server/src"),
-    ):
-        scan_tree(crate_src, HARDCODED_LOCAL_WADDLE, find_hardcoded_local_waddle)
-
-    for scoped_dir in (
-        Path("crates/waddle-server/src/db"),
-        Path("crates/waddle-server/src/server/routes"),
-    ):
-        scan_tree(scoped_dir, UNSCOPED_STORE_CTOR, find_unscoped_store_ctors)
-
-    for static_src in (
-        Path("crates/waddle-server/src"),
-        Path("crates/waddle-xmpp/src"),
-    ):
-        scan_tree(static_src, GLOBAL_BAREJID_STATIC, find_global_barejid_statics)
-
-    scan_tree(
-        Path("crates/waddle-extensions/src/runtime"),
-        UNBOUNDED_WASM_MEMORIES,
-        find_unbounded_wasm_memories,
-    )
-
+def collect_allowlist_errors(
+    observed: dict[tuple[str, str], list[int]],
+    allowlist: dict[tuple[str, str], int],
+) -> list[str]:
     errors: list[str] = []
     for key, lines in sorted(observed.items()):
         expected = allowlist.get(key, 0)
@@ -222,15 +298,26 @@ def check_repo(root: Path) -> tuple[int, list[str]]:
             errors.append(
                 f"{rel_path}: {kind}: found {len(lines)} (lines {lines}), allowlist expects {expected}"
             )
-
     for key, expected in sorted(allowlist.items()):
         if key not in observed and expected > 0:
             rel_path, kind = key
             errors.append(
                 f"{rel_path}: {kind}: stale allowlist entry expects {expected}, found 0"
             )
+    return errors
 
-    return len(scanned_files), errors
+
+def check_repo(root: Path) -> tuple[int, list[str]]:
+    server_root = resolve_server_root(root)
+    allowlist = load_allowlist(server_root / ALLOWLIST)
+    observed: dict[tuple[str, str], list[int]] = {}
+    scanned_files: set[Path] = set()
+
+    for kind, finder, rel_dirs in SCAN_RULES:
+        for rel_dir in rel_dirs:
+            scan_tree(server_root, rel_dir, kind, finder, observed, scanned_files)
+
+    return len(scanned_files), collect_allowlist_errors(observed, allowlist)
 
 
 def run_self_test() -> int:

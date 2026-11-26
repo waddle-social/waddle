@@ -75,114 +75,20 @@ impl ExtensionManager {
         let runtime = WasmRuntime::try_new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
-        let mut feature_namespaces = Vec::new();
-        let mut route_descriptors = Vec::new();
-        let mut plugin_ids = HashSet::new();
-        let mut command_nodes = HashSet::new();
-        let mut payload_namespaces: HashMap<PayloadNamespace, PluginId> = HashMap::new();
+        let mut registry = ExtensionRegistry::default();
 
         for module in &config.modules {
-            let config_json = match effective_module_config_json(module) {
-                Ok(config_json) => config_json,
-                Err(error) => {
-                    return Err(anyhow::Error::new(error).context(format!(
-                        "failed to prepare extension config for {}",
-                        module.name
-                    )));
-                }
-            };
-
-            let wasm_path = match puller.resolve_wasm_path(module).await {
-                Ok(path) => path,
-                Err(error) => {
-                    return Err(error.context(format!(
-                        "failed to resolve extension WASM path for {}",
-                        module.name
-                    )));
-                }
-            };
-
-            let loaded = match LoadedExtension::load(&runtime, &wasm_path) {
-                Ok(loaded) => loaded.with_limits(module.runtime_limits.clone())?,
-                Err(error) => {
-                    if module.local_path.is_none() {
-                        remove_invalid_cached_extension(module, &wasm_path);
-                    }
-                    return Err(error.context(format!(
-                        "failed to compile extension component for {}",
-                        module.name
-                    )));
-                }
-            };
-
-            let actor = match WasmExtensionActor::initialize(loaded, &config_json).await {
-                Ok(actor) => actor,
-                Err(error) => {
-                    return Err(
-                        error.context(format!("extension init() failed for {}", module.name))
-                    );
-                }
-            }
-            .with_host_tools(Arc::clone(&host_tools))
-            .with_inference_host(Arc::clone(&inference_host));
-
-            let manifest = actor.manifest();
-            validate_manifest_against_module(module, &manifest)?;
-            let observer = configured_room_observer(module, &manifest, &wasm_path, &config_json)?;
-            let actor = actor
-                .with_room_observer(observer)
-                .with_grants(runtime_grants_for_module(module, &manifest))
-                .with_allowed_http_origins(module.allowed_http_origins.clone())
-                .with_provider_room_grants(parse_provider_room_grants(module)?);
-            if !plugin_ids.insert(manifest.id.clone()) {
-                bail!(
-                    "extension plugin id {} is declared by multiple modules",
-                    manifest.id
-                );
-            }
-            for command in &manifest.commands {
-                if command.node == CommandNode::invoke() {
-                    continue;
-                }
-                if !command_nodes.insert(command.node.clone()) {
-                    bail!(
-                        "extension command node {} is declared by multiple modules",
-                        command.node
-                    );
-                }
-            }
-            for rule in &manifest.payloads {
-                match payload_namespaces.get(&rule.root.namespace) {
-                    Some(owner) if owner != &manifest.id => {
-                        bail!(
-                            "extension payload namespace {} is declared by multiple modules",
-                            rule.root.namespace
-                        );
-                    }
-                    Some(_) => {}
-                    None => {
-                        payload_namespaces.insert(rule.root.namespace.clone(), manifest.id.clone());
-                    }
-                }
-                push_feature_namespace(
-                    module,
-                    &mut feature_namespaces,
-                    rule.root.namespace.as_str(),
-                );
-            }
-            if manifest.declares_capability(ExtensionCapability::UiDeclarative)
-                && actor.has_grant(ExtensionCapability::UiDeclarative)
-            {
-                route_descriptors.extend(manifest.routes.iter().cloned());
-            }
-
+            let actor =
+                load_extension_actor(module, &runtime, &puller, &host_tools, &inference_host)
+                    .await?;
+            registry.register(module, &actor)?;
             actors.push(Arc::new(actor));
         }
 
         Ok(Self {
             actors,
-            feature_namespaces,
-            route_descriptors,
+            feature_namespaces: registry.feature_namespaces,
+            route_descriptors: registry.route_descriptors,
             launch_signing_key: None,
             tenant_id: None,
             resource_controller: None,
@@ -425,6 +331,132 @@ impl ExtensionManager {
             .set_profile_avatar(avatar);
         self
     }
+}
+
+#[derive(Default)]
+struct ExtensionRegistry {
+    feature_namespaces: Vec<String>,
+    route_descriptors: Vec<ExtensionRouteDescriptor>,
+    plugin_ids: HashSet<PluginId>,
+    command_nodes: HashSet<CommandNode>,
+    payload_namespaces: HashMap<PayloadNamespace, PluginId>,
+}
+
+impl ExtensionRegistry {
+    fn register(
+        &mut self,
+        module: &ExtensionModuleConfig,
+        actor: &WasmExtensionActor,
+    ) -> Result<()> {
+        let manifest = actor.manifest();
+        if !self.plugin_ids.insert(manifest.id.clone()) {
+            bail!(
+                "extension plugin id {} is declared by multiple modules",
+                manifest.id
+            );
+        }
+        self.register_commands(&manifest)?;
+        self.register_payloads(module, &manifest)?;
+        if manifest.declares_capability(ExtensionCapability::UiDeclarative)
+            && actor.has_grant(ExtensionCapability::UiDeclarative)
+        {
+            self.route_descriptors
+                .extend(manifest.routes.iter().cloned());
+        }
+        Ok(())
+    }
+
+    fn register_commands(&mut self, manifest: &ExtensionManifest) -> Result<()> {
+        for command in &manifest.commands {
+            if command.node == CommandNode::invoke() {
+                continue;
+            }
+            if !self.command_nodes.insert(command.node.clone()) {
+                bail!(
+                    "extension command node {} is declared by multiple modules",
+                    command.node
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn register_payloads(
+        &mut self,
+        module: &ExtensionModuleConfig,
+        manifest: &ExtensionManifest,
+    ) -> Result<()> {
+        for rule in &manifest.payloads {
+            match self.payload_namespaces.get(&rule.root.namespace) {
+                Some(owner) if owner != &manifest.id => {
+                    bail!(
+                        "extension payload namespace {} is declared by multiple modules",
+                        rule.root.namespace
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    self.payload_namespaces
+                        .insert(rule.root.namespace.clone(), manifest.id.clone());
+                }
+            }
+            push_feature_namespace(
+                module,
+                &mut self.feature_namespaces,
+                rule.root.namespace.as_str(),
+            );
+        }
+        Ok(())
+    }
+}
+
+async fn load_extension_actor(
+    module: &ExtensionModuleConfig,
+    runtime: &WasmRuntime,
+    puller: &OciExtensionPuller,
+    host_tools: &Arc<dyn ExtensionHostTools>,
+    inference_host: &Arc<dyn ExtensionInferenceHost>,
+) -> Result<WasmExtensionActor> {
+    let config_json = effective_module_config_json(module).map_err(|error| {
+        anyhow::Error::new(error).context(format!(
+            "failed to prepare extension config for {}",
+            module.name
+        ))
+    })?;
+
+    let wasm_path = puller.resolve_wasm_path(module).await.map_err(|error| {
+        error.context(format!(
+            "failed to resolve extension WASM path for {}",
+            module.name
+        ))
+    })?;
+
+    let loaded = LoadedExtension::load(runtime, &wasm_path)
+        .map_err(|error| {
+            if module.local_path.is_none() {
+                remove_invalid_cached_extension(module, &wasm_path);
+            }
+            error.context(format!(
+                "failed to compile extension component for {}",
+                module.name
+            ))
+        })?
+        .with_limits(module.runtime_limits.clone())?;
+
+    let actor = WasmExtensionActor::initialize(loaded, &config_json)
+        .await
+        .map_err(|error| error.context(format!("extension init() failed for {}", module.name)))?
+        .with_host_tools(Arc::clone(host_tools))
+        .with_inference_host(Arc::clone(inference_host));
+
+    let manifest = actor.manifest();
+    validate_manifest_against_module(module, &manifest)?;
+    let observer = configured_room_observer(module, &manifest, &wasm_path, &config_json)?;
+    Ok(actor
+        .with_room_observer(observer)
+        .with_grants(runtime_grants_for_module(module, &manifest))
+        .with_allowed_http_origins(module.allowed_http_origins.clone())
+        .with_provider_room_grants(parse_provider_room_grants(module)?))
 }
 
 fn parse_provider_room_grants(module: &ExtensionModuleConfig) -> Result<Vec<BareJid>> {

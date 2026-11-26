@@ -25,15 +25,18 @@ use uuid::Uuid;
 use waddle_broker::{
     authorize_admin_policy_mutation, enforce_not_scram, AuthError, AuthProvenance,
     BrokerCustodyService, BrokerError, BrokerSubkeyRing, CellAssertedAdminFlags, ClientSealContext,
-    ClientSealedBlob, ColonyJwtVerifier, CredentialLifecycleStatus, DeviceKeyRegistry,
-    EnrollCredentialInput, EnrollDeviceKeyInput, SignedDeviceCommand, VerifiedIdpIntent,
+    ClientSealedBlob, ColonyJwtVerifier, CredentialLifecycleStatus, CredentialReceipt,
+    DeviceKeyRegistry, EnrollCredentialInput, EnrollDeviceKeyInput, SecretBytes,
+    SignedDeviceCommand, VerifiedIdpIntent,
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_xmpp::waddle_credential::{
     CredentialProtocolVersion, CredentialPurpose, CredentialReceiptXml, CredentialRequest,
-    CredentialResponse, CredentialStatus, CredentialStatusEntry, DeviceReceiptXml,
-    DeviceSignatureXml, IdpProofXml, PolicyReceiptXml, SealedPayloadXml, SigningAlg, SubkeyAlg,
-    SubkeyBundleXml, MAX_CREDENTIAL_IQ_BYTES,
+    CredentialResponse, CredentialStatus, CredentialStatusEntry, CredentialStatusQuery,
+    DeviceReceiptXml, DeviceSignatureXml, EnrollCredentialRequest, EnrollDeviceRequest,
+    IdpProofXml, MutatePolicyRequest, PolicyReceiptXml, RevokeCredentialRequest,
+    RotateCredentialRequest, SealedPayloadXml, SigningAlg, SubkeyAlg, SubkeyBundleXml,
+    MAX_CREDENTIAL_IQ_BYTES,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -85,44 +88,35 @@ impl CredentialIqHandler {
     /// (`payload: None`) containing zero echoed secrets.
     pub async fn handle_raw_iq_xml(&self, raw_xml: &str, ctx: &CredentialIqContext) -> String {
         if raw_xml.len() > MAX_CREDENTIAL_IQ_BYTES {
-            let err_iq = opaque_error(
-                None,
-                None,
+            return opaque_error_xml(
                 "oversized",
                 ErrorType::Modify,
                 DefinedCondition::PolicyViolation,
                 "credential IQ exceeds maximum permitted size",
             );
-            return ws_stanza_to_xml(&Stanza::Iq(Box::new(err_iq)));
         }
 
         let elem: Element = match raw_xml.parse() {
             Ok(el) => el,
             Err(_) => {
-                let err_iq = opaque_error(
-                    None,
-                    None,
+                return opaque_error_xml(
                     "malformed",
                     ErrorType::Modify,
                     DefinedCondition::BadRequest,
                     "malformed credential IQ XML",
                 );
-                return ws_stanza_to_xml(&Stanza::Iq(Box::new(err_iq)));
             }
         };
 
         let iq = match Iq::try_from(elem) {
             Ok(iq) => iq,
             Err(_) => {
-                let err_iq = opaque_error(
-                    None,
-                    None,
+                return opaque_error_xml(
                     "malformed",
                     ErrorType::Modify,
                     DefinedCondition::BadRequest,
                     "invalid IQ stanza structure",
                 );
-                return ws_stanza_to_xml(&Stanza::Iq(Box::new(err_iq)));
             }
         };
 
@@ -209,440 +203,364 @@ impl CredentialIqHandler {
         &self,
         req: CredentialRequest,
         ctx: &CredentialIqContext,
-    ) -> Result<CredentialResponse, (ErrorType, DefinedCondition, String)> {
+    ) -> Result<CredentialResponse, IqError> {
         match req {
-            CredentialRequest::GetSubkey => {
-                let bundle = self.subkey_ring.active_bundle().ok_or_else(|| {
-                    (
-                        ErrorType::Cancel,
-                        DefinedCondition::ServiceUnavailable,
-                        "no active broker encryption subkey".to_owned(),
-                    )
-                })?;
-                Ok(CredentialResponse::SubkeyBundle(SubkeyBundleXml {
-                    version: CredentialProtocolVersion::V1,
-                    trust_domain: bundle.trust_domain,
-                    root_kid: bundle.root_kid,
-                    subkey_id: bundle.subkey_id.to_string(),
-                    alg: SubkeyAlg::P256Ecdh,
-                    key_epoch: bundle.key_epoch,
-                    not_before_ms: bundle.not_before_ms,
-                    not_after_ms: bundle.not_after_ms,
-                    public_key_b64: STANDARD.encode(&bundle.subkey_public_sec1),
-                    root_sig_alg: SigningAlg::P256Ecdsa,
-                    root_signature_b64: STANDARD.encode(&bundle.root_signature),
-                }))
-            }
-            CredentialRequest::EnrollDevice(r) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&r.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let account_id = parse_account(&r.account_id)?;
-                if account_id != ctx.caller_account_id {
-                    return Err((
-                        ErrorType::Cancel,
-                        DefinedCondition::Forbidden,
-                        "enroll-device account_id does not match authenticated caller".to_owned(),
-                    ));
-                }
-                let device_key_id = parse_uuid(&r.device_key_id)?;
-                let pubkey_sec1 = decode_b64(&r.device_public_key_b64)?;
-                let pop_sig = decode_b64(&r.pop_signature_b64)?;
-                let jkt = waddle_broker::p256_jwk_thumbprint(&pubkey_sec1).map_err(auth_err)?;
-                let intent = self.verify_idp_proof(
-                    &r.idp_proof,
-                    &tenant_id,
-                    ctx.caller_account_id,
-                    &ctx.expected_challenge,
-                    Some(&jkt),
-                    ctx.now_ms,
-                )?;
-                let enrolled = self
-                    .device_registry
-                    .enroll_device_key(EnrollDeviceKeyInput {
-                        provenance: ctx.provenance,
-                        idp_intent: &intent,
-                        trust_domain: &ctx.trust_domain,
-                        device_key_id,
-                        public_key_sec1: pubkey_sec1,
-                        nonce: &r.nonce,
-                        expires_at_ms: r.expires_at_ms,
-                        now_ms: ctx.now_ms,
-                        pop_signature: &pop_sig,
-                    })
-                    .map_err(auth_err)?;
-                Ok(CredentialResponse::DeviceReceipt(DeviceReceiptXml {
-                    device_key_id: enrolled.device_key_id.to_string(),
-                    status: "active".to_owned(),
-                }))
-            }
-            CredentialRequest::EnrollCredential(r) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&r.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                validate_purpose_and_account(r.purpose, account_id, ctx.caller_account_id)?;
-                let intent = self.verify_idp_proof(
-                    &r.idp_proof,
-                    &tenant_id,
-                    ctx.caller_account_id,
-                    &ctx.expected_challenge,
-                    None,
-                    ctx.now_ms,
-                )?;
-                if r.purpose == CredentialPurpose::TenantInference {
-                    authorize_admin_policy_mutation(
-                        ctx.provenance,
-                        Some(&intent),
-                        &ctx.cell_admin_flags,
-                    )
-                    .map_err(auth_err)?;
-                }
-                let payload_digest =
-                    compute_sealed_payload_digest(&r.provider, r.purpose, &r.sealed_payload);
-                if let Some(ref dev_sig) = r.device_signature {
-                    self.verify_device_signature(&VerifyDeviceSigInput {
-                        dev_sig,
-                        ctx,
-                        tenant_id: &tenant_id,
-                        account_id: ctx.caller_account_id,
-                        operation: "enroll-credential",
-                        target_id: "",
-                        provider: &r.provider,
-                        nonce: &r.nonce,
-                        expires_at_ms: r.expires_at_ms,
-                        payload_sha256: payload_digest,
-                    })?;
-                }
-                let blob = decode_sealed_blob(&r.sealed_payload)?;
-                let seal_ctx = ClientSealContext {
-                    trust_domain: ctx.trust_domain.clone(),
-                    tenant_id: tenant_id.clone(),
-                    account_id,
-                    provider: r.provider.clone(),
-                    purpose: r.purpose.as_str().to_owned(),
-                    nonce: r.nonce.clone(),
-                    expires_at_ms: r.expires_at_ms,
-                    version: 1,
-                };
-                let plaintext = self
-                    .subkey_ring
-                    .unseal_client_envelope(&blob, &seal_ctx, ctx.now_ms)
-                    .map_err(|err| {
-                        (
-                            ErrorType::Modify,
-                            DefinedCondition::BadRequest,
-                            err.to_string(),
-                        )
-                    })?;
-                let receipt = self
-                    .custody
-                    .enroll(EnrollCredentialInput {
-                        tenant_id,
-                        account_id,
-                        provider: r.provider,
-                        nonce: r.nonce,
-                        payload_digest_sha256: payload_digest,
-                        expires_at_ms: r.expires_at_ms,
-                        plaintext,
-                    })
-                    .await
-                    .map_err(broker_err)?;
-                Ok(CredentialResponse::CredentialReceipt(
-                    CredentialReceiptXml {
-                        credential_id: receipt.credential_id.to_string(),
-                        version: receipt.version,
-                        status: map_status(receipt.status),
-                    },
-                ))
-            }
-            CredentialRequest::Status(q) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&q.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let records = self
-                    .custody
-                    .ledger()
-                    .list_envelopes_for_tenant(&tenant_id)
-                    .await
-                    .map_err(|err| {
-                        (
-                            ErrorType::Cancel,
-                            DefinedCondition::InternalServerError,
-                            err.to_string(),
-                        )
-                    })?;
-                let mut entries = Vec::new();
-                for rec in records {
-                    if let Some(owner_acct) = rec.account_id {
-                        if owner_acct != ctx.caller_account_id {
-                            continue;
-                        }
-                    }
-                    if let Some(ref p) = q.provider {
-                        if rec.provider != *p {
-                            continue;
-                        }
-                    }
-                    let purpose = if rec.account_id.is_some() {
-                        CredentialPurpose::MemberInference
-                    } else {
-                        CredentialPurpose::TenantInference
-                    };
-                    if let Some(expected_purpose) = q.purpose {
-                        if purpose != expected_purpose {
-                            continue;
-                        }
-                    }
-                    entries.push(CredentialStatusEntry {
-                        id: rec.credential_id.to_string(),
-                        provider: rec.provider,
-                        purpose,
-                        status: CredentialStatus::Active,
-                        version: rec.version,
-                        updated_at_ms: rec.created_at_ms,
-                    });
-                }
-                Ok(CredentialResponse::StatusResult(entries))
-            }
-            CredentialRequest::RotateCredential(r) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&r.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let credential_id = parse_uuid(&r.credential_id)?;
-                let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                validate_purpose_and_account(r.purpose, account_id, ctx.caller_account_id)?;
-                let intent = self.verify_idp_proof(
-                    &r.idp_proof,
-                    &tenant_id,
-                    ctx.caller_account_id,
-                    &ctx.expected_challenge,
-                    None,
-                    ctx.now_ms,
-                )?;
-                if r.purpose == CredentialPurpose::TenantInference {
-                    authorize_admin_policy_mutation(
-                        ctx.provenance,
-                        Some(&intent),
-                        &ctx.cell_admin_flags,
-                    )
-                    .map_err(auth_err)?;
-                }
-                let payload_digest =
-                    compute_sealed_payload_digest(&r.provider, r.purpose, &r.sealed_payload);
-                if let Some(ref dev_sig) = r.device_signature {
-                    self.verify_device_signature(&VerifyDeviceSigInput {
-                        dev_sig,
-                        ctx,
-                        tenant_id: &tenant_id,
-                        account_id: ctx.caller_account_id,
-                        operation: "rotate-credential",
-                        target_id: &r.credential_id,
-                        provider: &r.provider,
-                        nonce: &r.nonce,
-                        expires_at_ms: r.expires_at_ms,
-                        payload_sha256: payload_digest,
-                    })?;
-                }
-                if let Some(existing) = self
-                    .custody
-                    .ledger()
-                    .get_envelope(&tenant_id, credential_id)
-                    .await
-                    .map_err(|err| {
-                        (
-                            ErrorType::Cancel,
-                            DefinedCondition::InternalServerError,
-                            err.to_string(),
-                        )
-                    })?
-                {
-                    if existing.account_id != account_id {
-                        return Err((
-                            ErrorType::Cancel,
-                            DefinedCondition::Forbidden,
-                            "rotation target scope/owner mismatch".to_owned(),
-                        ));
-                    }
-                }
-                let blob = decode_sealed_blob(&r.sealed_payload)?;
-                let seal_ctx = ClientSealContext {
-                    trust_domain: ctx.trust_domain.clone(),
-                    tenant_id: tenant_id.clone(),
-                    account_id,
-                    provider: r.provider.clone(),
-                    purpose: r.purpose.as_str().to_owned(),
-                    nonce: r.nonce.clone(),
-                    expires_at_ms: r.expires_at_ms,
-                    version: 1,
-                };
-                let plaintext = self
-                    .subkey_ring
-                    .unseal_client_envelope(&blob, &seal_ctx, ctx.now_ms)
-                    .map_err(|err| {
-                        (
-                            ErrorType::Modify,
-                            DefinedCondition::BadRequest,
-                            err.to_string(),
-                        )
-                    })?;
-                let receipt = self
-                    .custody
-                    .rotate(&tenant_id, credential_id, &plaintext)
-                    .await
-                    .map_err(broker_err)?;
-                Ok(CredentialResponse::CredentialReceipt(
-                    CredentialReceiptXml {
-                        credential_id: receipt.credential_id.to_string(),
-                        version: receipt.version,
-                        status: map_status(receipt.status),
-                    },
-                ))
-            }
-            CredentialRequest::RevokeCredential(r) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&r.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let credential_id = parse_uuid(&r.credential_id)?;
-                let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
-                if r.idp_proof.is_none() && r.device_signature.is_none() {
-                    return Err((
-                        ErrorType::Auth,
-                        DefinedCondition::NotAuthorized,
-                        "revocation requires IdP proof or enrolled device signature".to_owned(),
-                    ));
-                }
-                let verified_intent = match r.idp_proof {
-                    Some(ref idp) => Some(self.verify_idp_proof(
-                        idp,
-                        &tenant_id,
-                        ctx.caller_account_id,
-                        &ctx.expected_challenge,
-                        None,
-                        ctx.now_ms,
-                    )?),
-                    None => None,
-                };
-                if let Some(ref dev_sig) = r.device_signature {
-                    self.verify_device_signature(&VerifyDeviceSigInput {
-                        dev_sig,
-                        ctx,
-                        tenant_id: &tenant_id,
-                        account_id: ctx.caller_account_id,
-                        operation: "revoke-credential",
-                        target_id: &r.credential_id,
-                        provider: "",
-                        nonce: &r.nonce,
-                        expires_at_ms: r.expires_at_ms,
-                        payload_sha256: compute_revoke_payload_digest(&r.credential_id),
-                    })?;
-                }
-                let existing = self
-                    .custody
-                    .ledger()
-                    .get_envelope(&tenant_id, credential_id)
-                    .await
-                    .map_err(|err| {
-                        (
-                            ErrorType::Cancel,
-                            DefinedCondition::InternalServerError,
-                            err.to_string(),
-                        )
-                    })?;
-                let targets_tenant_cred = account_id.is_none()
-                    || existing.as_ref().is_some_and(|e| e.account_id.is_none());
-                if targets_tenant_cred {
-                    authorize_admin_policy_mutation(
-                        ctx.provenance,
-                        verified_intent.as_ref(),
-                        &ctx.cell_admin_flags,
-                    )
-                    .map_err(auth_err)?;
-                } else {
-                    let is_admin = verified_intent
-                        .as_ref()
-                        .is_some_and(|intent| intent.is_tenant_admin);
-                    if account_id.is_some_and(|a| a != ctx.caller_account_id) && !is_admin {
-                        return Err((
-                            ErrorType::Cancel,
-                            DefinedCondition::Forbidden,
-                            "cannot revoke another member's credential".to_owned(),
-                        ));
-                    }
-                    if existing
-                        .as_ref()
-                        .is_some_and(|e| e.account_id != Some(ctx.caller_account_id))
-                        && !is_admin
-                    {
-                        return Err((
-                            ErrorType::Cancel,
-                            DefinedCondition::Forbidden,
-                            "cannot revoke another member's credential".to_owned(),
-                        ));
-                    }
-                }
-                let receipt = self
-                    .custody
-                    .revoke_and_destroy(&tenant_id, credential_id)
-                    .await
-                    .map_err(broker_err)?;
-                Ok(CredentialResponse::CredentialReceipt(
-                    CredentialReceiptXml {
-                        credential_id: receipt.credential_id.to_string(),
-                        version: receipt.version,
-                        status: map_status(receipt.status),
-                    },
-                ))
-            }
-            CredentialRequest::MutatePolicy(r) => {
-                enforce_not_scram(ctx.provenance).map_err(auth_err)?;
-                let tenant_id = parse_tenant(&r.tenant_id)?;
-                enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
-                let intent = self.verify_idp_proof(
-                    &r.idp_proof,
-                    &tenant_id,
-                    ctx.caller_account_id,
-                    &ctx.expected_challenge,
-                    None,
-                    ctx.now_ms,
-                )?;
-                authorize_admin_policy_mutation(
-                    ctx.provenance,
-                    Some(&intent),
-                    &ctx.cell_admin_flags,
-                )
-                .map_err(auth_err)?;
-
-                let key = (
-                    tenant_id.as_str().to_owned(),
-                    r.scope.clone(),
-                    r.target_id.clone(),
-                );
-                let gen = {
-                    let mut guard = self.policy_generations.write().map_err(|_| {
-                        (
-                            ErrorType::Cancel,
-                            DefinedCondition::InternalServerError,
-                            "policy lock poisoned".to_owned(),
-                        )
-                    })?;
-                    let entry = guard.entry(key).or_insert(0);
-                    *entry += 1;
-                    *entry
-                };
-                Ok(CredentialResponse::PolicyReceipt(PolicyReceiptXml {
-                    policy_id: format!("{}:{}:{}", r.tenant_id, r.scope, r.target_id),
-                    generation: gen,
-                    status: "applied".to_owned(),
-                }))
-            }
+            CredentialRequest::GetSubkey => self.handle_get_subkey(),
+            CredentialRequest::EnrollDevice(r) => self.handle_enroll_device(r, ctx),
+            CredentialRequest::EnrollCredential(r) => self.handle_enroll_credential(r, ctx).await,
+            CredentialRequest::Status(q) => self.handle_status(q, ctx).await,
+            CredentialRequest::RotateCredential(r) => self.handle_rotate_credential(r, ctx).await,
+            CredentialRequest::RevokeCredential(r) => self.handle_revoke_credential(r, ctx).await,
+            CredentialRequest::MutatePolicy(r) => self.handle_mutate_policy(r, ctx),
         }
     }
 
-    fn verify_device_signature(
+    fn handle_get_subkey(&self) -> Result<CredentialResponse, IqError> {
+        let bundle = self.subkey_ring.active_bundle().ok_or_else(|| {
+            (
+                ErrorType::Cancel,
+                DefinedCondition::ServiceUnavailable,
+                "no active broker encryption subkey".to_owned(),
+            )
+        })?;
+        Ok(CredentialResponse::SubkeyBundle(SubkeyBundleXml {
+            version: CredentialProtocolVersion::V1,
+            trust_domain: bundle.trust_domain,
+            root_kid: bundle.root_kid,
+            subkey_id: bundle.subkey_id.to_string(),
+            alg: SubkeyAlg::P256Ecdh,
+            key_epoch: bundle.key_epoch,
+            not_before_ms: bundle.not_before_ms,
+            not_after_ms: bundle.not_after_ms,
+            public_key_b64: STANDARD.encode(&bundle.subkey_public_sec1),
+            root_sig_alg: SigningAlg::P256Ecdsa,
+            root_signature_b64: STANDARD.encode(&bundle.root_signature),
+        }))
+    }
+
+    fn handle_enroll_device(
         &self,
-        input: &VerifyDeviceSigInput<'_>,
-    ) -> Result<(), (ErrorType, DefinedCondition, String)> {
+        r: EnrollDeviceRequest,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&r.tenant_id, ctx)?;
+        let account_id = parse_account(&r.account_id)?;
+        if account_id != ctx.caller_account_id {
+            return Err(forbidden(
+                "enroll-device account_id does not match authenticated caller",
+            ));
+        }
+        let device_key_id = parse_uuid(&r.device_key_id)?;
+        let pubkey_sec1 = decode_b64(&r.device_public_key_b64)?;
+        let pop_sig = decode_b64(&r.pop_signature_b64)?;
+        let jkt = waddle_broker::p256_jwk_thumbprint(&pubkey_sec1).map_err(auth_err)?;
+        let intent = self.verify_idp_proof(
+            &r.idp_proof,
+            &tenant_id,
+            ctx.caller_account_id,
+            &ctx.expected_challenge,
+            Some(&jkt),
+            ctx.now_ms,
+        )?;
+        let enrolled = self
+            .device_registry
+            .enroll_device_key(EnrollDeviceKeyInput {
+                provenance: ctx.provenance,
+                idp_intent: &intent,
+                trust_domain: &ctx.trust_domain,
+                device_key_id,
+                public_key_sec1: pubkey_sec1,
+                nonce: &r.nonce,
+                expires_at_ms: r.expires_at_ms,
+                now_ms: ctx.now_ms,
+                pop_signature: &pop_sig,
+            })
+            .map_err(auth_err)?;
+        Ok(CredentialResponse::DeviceReceipt(DeviceReceiptXml {
+            device_key_id: enrolled.device_key_id.to_string(),
+            status: "active".to_owned(),
+        }))
+    }
+
+    async fn handle_enroll_credential(
+        &self,
+        r: EnrollCredentialRequest,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&r.tenant_id, ctx)?;
+        let (account_id, payload_digest) =
+            self.authorize_sealed_mutation(&SealedMutationAuthInput {
+                ctx,
+                tenant_id: &tenant_id,
+                raw_account_id: r.account_id.as_deref(),
+                purpose: r.purpose,
+                idp_proof: &r.idp_proof,
+                device_signature: r.device_signature.as_ref(),
+                operation: "enroll-credential",
+                target_id: "",
+                provider: &r.provider,
+                nonce: &r.nonce,
+                expires_at_ms: r.expires_at_ms,
+                sealed_payload: &r.sealed_payload,
+            })?;
+        let plaintext = self.unseal_sealed_payload(&UnsealPayloadInput {
+            ctx,
+            tenant_id: &tenant_id,
+            account_id,
+            provider: &r.provider,
+            purpose: r.purpose,
+            nonce: &r.nonce,
+            expires_at_ms: r.expires_at_ms,
+            sealed_payload: &r.sealed_payload,
+        })?;
+        let receipt = self
+            .custody
+            .enroll(EnrollCredentialInput {
+                tenant_id,
+                account_id,
+                provider: r.provider,
+                nonce: r.nonce,
+                payload_digest_sha256: payload_digest,
+                expires_at_ms: r.expires_at_ms,
+                plaintext,
+            })
+            .await
+            .map_err(broker_err)?;
+        Ok(credential_receipt_response(receipt))
+    }
+
+    async fn handle_status(
+        &self,
+        q: CredentialStatusQuery,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&q.tenant_id, ctx)?;
+        let records = self
+            .custody
+            .ledger()
+            .list_envelopes_for_tenant(&tenant_id)
+            .await
+            .map_err(|err| internal_error(err.to_string()))?;
+        let entries = records
+            .into_iter()
+            .filter_map(|rec| build_status_entry(rec, &q, ctx.caller_account_id))
+            .collect();
+        Ok(CredentialResponse::StatusResult(entries))
+    }
+
+    async fn handle_rotate_credential(
+        &self,
+        r: RotateCredentialRequest,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&r.tenant_id, ctx)?;
+        let credential_id = parse_uuid(&r.credential_id)?;
+        let (account_id, _) = self.authorize_sealed_mutation(&SealedMutationAuthInput {
+            ctx,
+            tenant_id: &tenant_id,
+            raw_account_id: r.account_id.as_deref(),
+            purpose: r.purpose,
+            idp_proof: &r.idp_proof,
+            device_signature: r.device_signature.as_ref(),
+            operation: "rotate-credential",
+            target_id: &r.credential_id,
+            provider: &r.provider,
+            nonce: &r.nonce,
+            expires_at_ms: r.expires_at_ms,
+            sealed_payload: &r.sealed_payload,
+        })?;
+        if let Some(existing) = self
+            .custody
+            .ledger()
+            .get_envelope(&tenant_id, credential_id)
+            .await
+            .map_err(|err| internal_error(err.to_string()))?
+        {
+            if existing.account_id != account_id {
+                return Err(forbidden("rotation target scope/owner mismatch"));
+            }
+        }
+        let plaintext = self.unseal_sealed_payload(&UnsealPayloadInput {
+            ctx,
+            tenant_id: &tenant_id,
+            account_id,
+            provider: &r.provider,
+            purpose: r.purpose,
+            nonce: &r.nonce,
+            expires_at_ms: r.expires_at_ms,
+            sealed_payload: &r.sealed_payload,
+        })?;
+        let receipt = self
+            .custody
+            .rotate(&tenant_id, credential_id, &plaintext)
+            .await
+            .map_err(broker_err)?;
+        Ok(credential_receipt_response(receipt))
+    }
+
+    async fn handle_revoke_credential(
+        &self,
+        r: RevokeCredentialRequest,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&r.tenant_id, ctx)?;
+        let credential_id = parse_uuid(&r.credential_id)?;
+        let account_id = r.account_id.as_deref().map(parse_account).transpose()?;
+        if r.idp_proof.is_none() && r.device_signature.is_none() {
+            return Err((
+                ErrorType::Auth,
+                DefinedCondition::NotAuthorized,
+                "revocation requires IdP proof or enrolled device signature".to_owned(),
+            ));
+        }
+        let verified_intent = r
+            .idp_proof
+            .as_ref()
+            .map(|idp| {
+                self.verify_idp_proof(
+                    idp,
+                    &tenant_id,
+                    ctx.caller_account_id,
+                    &ctx.expected_challenge,
+                    None,
+                    ctx.now_ms,
+                )
+            })
+            .transpose()?;
+        if let Some(ref dev_sig) = r.device_signature {
+            self.verify_device_signature(&VerifyDeviceSigInput {
+                dev_sig,
+                ctx,
+                tenant_id: &tenant_id,
+                account_id: ctx.caller_account_id,
+                operation: "revoke-credential",
+                target_id: &r.credential_id,
+                provider: "",
+                nonce: &r.nonce,
+                expires_at_ms: r.expires_at_ms,
+                payload_sha256: compute_revoke_payload_digest(&r.credential_id),
+            })?;
+        }
+        let existing = self
+            .custody
+            .ledger()
+            .get_envelope(&tenant_id, credential_id)
+            .await
+            .map_err(|err| internal_error(err.to_string()))?;
+        authorize_revocation_target(
+            account_id,
+            existing.as_ref().map(|e| e.account_id),
+            verified_intent.as_ref(),
+            ctx,
+        )?;
+        let receipt = self
+            .custody
+            .revoke_and_destroy(&tenant_id, credential_id)
+            .await
+            .map_err(broker_err)?;
+        Ok(credential_receipt_response(receipt))
+    }
+
+    fn handle_mutate_policy(
+        &self,
+        r: MutatePolicyRequest,
+        ctx: &CredentialIqContext,
+    ) -> Result<CredentialResponse, IqError> {
+        let tenant_id = verify_caller_tenant(&r.tenant_id, ctx)?;
+        let intent = self.verify_idp_proof(
+            &r.idp_proof,
+            &tenant_id,
+            ctx.caller_account_id,
+            &ctx.expected_challenge,
+            None,
+            ctx.now_ms,
+        )?;
+        authorize_admin_policy_mutation(ctx.provenance, Some(&intent), &ctx.cell_admin_flags)
+            .map_err(auth_err)?;
+
+        let key = (
+            tenant_id.as_str().to_owned(),
+            r.scope.clone(),
+            r.target_id.clone(),
+        );
+        let gen = {
+            let mut guard = self
+                .policy_generations
+                .write()
+                .map_err(|_| internal_error("policy lock poisoned"))?;
+            let entry = guard.entry(key).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        Ok(CredentialResponse::PolicyReceipt(PolicyReceiptXml {
+            policy_id: format!("{}:{}:{}", r.tenant_id, r.scope, r.target_id),
+            generation: gen,
+            status: "applied".to_owned(),
+        }))
+    }
+
+    fn authorize_sealed_mutation(
+        &self,
+        input: &SealedMutationAuthInput<'_>,
+    ) -> Result<(Option<AccountId>, [u8; 32]), IqError> {
+        let account_id = input.raw_account_id.map(parse_account).transpose()?;
+        validate_purpose_and_account(input.purpose, account_id, input.ctx.caller_account_id)?;
+        let intent = self.verify_idp_proof(
+            input.idp_proof,
+            input.tenant_id,
+            input.ctx.caller_account_id,
+            &input.ctx.expected_challenge,
+            None,
+            input.ctx.now_ms,
+        )?;
+        if input.purpose == CredentialPurpose::TenantInference {
+            authorize_admin_policy_mutation(
+                input.ctx.provenance,
+                Some(&intent),
+                &input.ctx.cell_admin_flags,
+            )
+            .map_err(auth_err)?;
+        }
+        let payload_digest =
+            compute_sealed_payload_digest(input.provider, input.purpose, input.sealed_payload);
+        if let Some(dev_sig) = input.device_signature {
+            self.verify_device_signature(&VerifyDeviceSigInput {
+                dev_sig,
+                ctx: input.ctx,
+                tenant_id: input.tenant_id,
+                account_id: input.ctx.caller_account_id,
+                operation: input.operation,
+                target_id: input.target_id,
+                provider: input.provider,
+                nonce: input.nonce,
+                expires_at_ms: input.expires_at_ms,
+                payload_sha256: payload_digest,
+            })?;
+        }
+        Ok((account_id, payload_digest))
+    }
+
+    fn unseal_sealed_payload(
+        &self,
+        input: &UnsealPayloadInput<'_>,
+    ) -> Result<SecretBytes, IqError> {
+        let blob = decode_sealed_blob(input.sealed_payload)?;
+        let seal_ctx = ClientSealContext {
+            trust_domain: input.ctx.trust_domain.clone(),
+            tenant_id: input.tenant_id.clone(),
+            account_id: input.account_id,
+            provider: input.provider.to_owned(),
+            purpose: input.purpose.as_str().to_owned(),
+            nonce: input.nonce.to_owned(),
+            expires_at_ms: input.expires_at_ms,
+            version: 1,
+        };
+        self.subkey_ring
+            .unseal_client_envelope(&blob, &seal_ctx, input.ctx.now_ms)
+            .map_err(|err| bad_request(err.to_string()))
+    }
+
+    fn verify_device_signature(&self, input: &VerifyDeviceSigInput<'_>) -> Result<(), IqError> {
         let device_key_id = parse_uuid(&input.dev_sig.device_key_id)?;
         let sig_bytes = decode_b64(&input.dev_sig.signature_b64)?;
         let cmd = SignedDeviceCommand {
@@ -670,7 +588,7 @@ impl CredentialIqHandler {
         expected_challenge: &str,
         expected_device_jkt: Option<&str>,
         now_ms: i64,
-    ) -> Result<VerifiedIdpIntent, (ErrorType, DefinedCondition, String)> {
+    ) -> Result<VerifiedIdpIntent, IqError> {
         let now_secs = u64::try_from(now_ms / 1000).unwrap_or(0);
         match proof {
             IdpProofXml::ColonyJwt { token } => self
@@ -693,6 +611,34 @@ impl CredentialIqHandler {
     }
 }
 
+type IqError = (ErrorType, DefinedCondition, String);
+
+struct SealedMutationAuthInput<'a> {
+    ctx: &'a CredentialIqContext,
+    tenant_id: &'a TenantId,
+    raw_account_id: Option<&'a str>,
+    purpose: CredentialPurpose,
+    idp_proof: &'a IdpProofXml,
+    device_signature: Option<&'a DeviceSignatureXml>,
+    operation: &'a str,
+    target_id: &'a str,
+    provider: &'a str,
+    nonce: &'a str,
+    expires_at_ms: i64,
+    sealed_payload: &'a SealedPayloadXml,
+}
+
+struct UnsealPayloadInput<'a> {
+    ctx: &'a CredentialIqContext,
+    tenant_id: &'a TenantId,
+    account_id: Option<AccountId>,
+    provider: &'a str,
+    purpose: CredentialPurpose,
+    nonce: &'a str,
+    expires_at_ms: i64,
+    sealed_payload: &'a SealedPayloadXml,
+}
+
 struct VerifyDeviceSigInput<'a> {
     dev_sig: &'a DeviceSignatureXml,
     ctx: &'a CredentialIqContext,
@@ -706,15 +652,101 @@ struct VerifyDeviceSigInput<'a> {
     payload_sha256: [u8; 32],
 }
 
-fn enforce_caller_tenant(
-    requested: &TenantId,
-    caller: &TenantId,
-) -> Result<(), (ErrorType, DefinedCondition, String)> {
+fn bad_request(msg: impl Into<String>) -> IqError {
+    (ErrorType::Modify, DefinedCondition::BadRequest, msg.into())
+}
+
+fn forbidden(msg: impl Into<String>) -> IqError {
+    (ErrorType::Cancel, DefinedCondition::Forbidden, msg.into())
+}
+
+fn internal_error(msg: impl Into<String>) -> IqError {
+    (
+        ErrorType::Cancel,
+        DefinedCondition::InternalServerError,
+        msg.into(),
+    )
+}
+
+fn verify_caller_tenant(
+    raw_tenant_id: &str,
+    ctx: &CredentialIqContext,
+) -> Result<TenantId, IqError> {
+    enforce_not_scram(ctx.provenance).map_err(auth_err)?;
+    let tenant_id = parse_tenant(raw_tenant_id)?;
+    enforce_caller_tenant(&tenant_id, &ctx.caller_tenant_id)?;
+    Ok(tenant_id)
+}
+
+fn credential_receipt_response(receipt: CredentialReceipt) -> CredentialResponse {
+    CredentialResponse::CredentialReceipt(CredentialReceiptXml {
+        credential_id: receipt.credential_id.to_string(),
+        version: receipt.version,
+        status: map_status(receipt.status),
+    })
+}
+
+fn build_status_entry(
+    rec: waddle_broker::StoredEnvelopeRecord,
+    query: &CredentialStatusQuery,
+    caller_account_id: AccountId,
+) -> Option<CredentialStatusEntry> {
+    if rec
+        .account_id
+        .is_some_and(|owner| owner != caller_account_id)
+    {
+        return None;
+    }
+    if query.provider.as_ref().is_some_and(|p| rec.provider != *p) {
+        return None;
+    }
+    let purpose = if rec.account_id.is_some() {
+        CredentialPurpose::MemberInference
+    } else {
+        CredentialPurpose::TenantInference
+    };
+    if query.purpose.is_some_and(|expected| purpose != expected) {
+        return None;
+    }
+    Some(CredentialStatusEntry {
+        id: rec.credential_id.to_string(),
+        provider: rec.provider,
+        purpose,
+        status: CredentialStatus::Active,
+        version: rec.version,
+        updated_at_ms: rec.created_at_ms,
+    })
+}
+
+fn authorize_revocation_target(
+    account_id: Option<AccountId>,
+    existing_owner: Option<Option<AccountId>>,
+    verified_intent: Option<&VerifiedIdpIntent>,
+    ctx: &CredentialIqContext,
+) -> Result<(), IqError> {
+    let targets_tenant_cred = account_id.is_none() || matches!(existing_owner, Some(None));
+    if targets_tenant_cred {
+        return authorize_admin_policy_mutation(
+            ctx.provenance,
+            verified_intent,
+            &ctx.cell_admin_flags,
+        )
+        .map_err(auth_err);
+    }
+    let is_admin = verified_intent.is_some_and(|intent| intent.is_tenant_admin);
+    let mismatches_requested = account_id.is_some_and(|a| a != ctx.caller_account_id);
+    let mismatches_existing =
+        existing_owner.is_some_and(|owner| owner != Some(ctx.caller_account_id));
+    if (mismatches_requested || mismatches_existing) && !is_admin {
+        return Err(forbidden("cannot revoke another member's credential"));
+    }
+    Ok(())
+}
+
+fn enforce_caller_tenant(requested: &TenantId, caller: &TenantId) -> Result<(), IqError> {
     if requested != caller {
-        return Err((
-            ErrorType::Cancel,
-            DefinedCondition::Forbidden,
-            "requested tenant does not match authenticated caller tenant".to_owned(),
+        return Err(forbidden(
+            "requested tenant does not match authenticated caller tenant",
         ));
     }
     Ok(())
@@ -724,25 +756,19 @@ fn validate_purpose_and_account(
     purpose: CredentialPurpose,
     account_id: Option<AccountId>,
     caller_account_id: AccountId,
-) -> Result<(), (ErrorType, DefinedCondition, String)> {
+) -> Result<(), IqError> {
     match (purpose, account_id) {
         (CredentialPurpose::MemberInference, Some(acct)) if acct == caller_account_id => Ok(()),
-        (CredentialPurpose::MemberInference, Some(_)) => Err((
-            ErrorType::Cancel,
-            DefinedCondition::Forbidden,
-            "member-inference account_id does not match authenticated caller".to_owned(),
+        (CredentialPurpose::MemberInference, Some(_)) => Err(forbidden(
+            "member-inference account_id does not match authenticated caller",
         )),
-        (CredentialPurpose::MemberInference, None) => Err((
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "member-inference requires account-id".to_owned(),
-        )),
+        (CredentialPurpose::MemberInference, None) => {
+            Err(bad_request("member-inference requires account-id"))
+        }
         (CredentialPurpose::TenantInference, None) => Ok(()),
-        (CredentialPurpose::TenantInference, Some(_)) => Err((
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "tenant-inference must not specify account-id".to_owned(),
-        )),
+        (CredentialPurpose::TenantInference, Some(_)) => {
+            Err(bad_request("tenant-inference must not specify account-id"))
+        }
     }
 }
 
@@ -771,9 +797,7 @@ pub fn compute_revoke_payload_digest(credential_id: &str) -> [u8; 32] {
     Sha256::digest(credential_id.as_bytes()).into()
 }
 
-fn decode_sealed_blob(
-    sealed: &SealedPayloadXml,
-) -> Result<ClientSealedBlob, (ErrorType, DefinedCondition, String)> {
+fn decode_sealed_blob(sealed: &SealedPayloadXml) -> Result<ClientSealedBlob, IqError> {
     Ok(ClientSealedBlob {
         subkey_id: parse_uuid(&sealed.subkey_id)?,
         ephemeral_public_sec1: decode_b64(&sealed.ephemeral_key_b64)?,
@@ -781,38 +805,22 @@ fn decode_sealed_blob(
     })
 }
 
-fn decode_b64(raw: &str) -> Result<Vec<u8>, (ErrorType, DefinedCondition, String)> {
-    STANDARD.decode(raw.trim()).map_err(|_| {
-        (
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "invalid base64 payload".to_owned(),
-        )
-    })
+fn decode_b64(raw: &str) -> Result<Vec<u8>, IqError> {
+    STANDARD
+        .decode(raw.trim())
+        .map_err(|_| bad_request("invalid base64 payload"))
 }
 
-fn parse_tenant(raw: &str) -> Result<TenantId, (ErrorType, DefinedCondition, String)> {
-    TenantId::parse(raw).map_err(|err| {
-        (
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            err.to_string(),
-        )
-    })
+fn parse_tenant(raw: &str) -> Result<TenantId, IqError> {
+    TenantId::parse(raw).map_err(|err| bad_request(err.to_string()))
 }
 
-fn parse_account(raw: &str) -> Result<AccountId, (ErrorType, DefinedCondition, String)> {
+fn parse_account(raw: &str) -> Result<AccountId, IqError> {
     parse_uuid(raw).map(AccountId::from_uuid)
 }
 
-fn parse_uuid(raw: &str) -> Result<Uuid, (ErrorType, DefinedCondition, String)> {
-    Uuid::parse_str(raw).map_err(|_| {
-        (
-            ErrorType::Modify,
-            DefinedCondition::BadRequest,
-            "invalid UUID".to_owned(),
-        )
-    })
+fn parse_uuid(raw: &str) -> Result<Uuid, IqError> {
+    Uuid::parse_str(raw).map_err(|_| bad_request("invalid UUID"))
 }
 
 fn map_status(s: CredentialLifecycleStatus) -> CredentialStatus {
@@ -822,22 +830,18 @@ fn map_status(s: CredentialLifecycleStatus) -> CredentialStatus {
     }
 }
 
-fn auth_err(err: AuthError) -> (ErrorType, DefinedCondition, String) {
+fn auth_err(err: AuthError) -> IqError {
     match err {
         AuthError::DeviceKeyAlreadyExists(_) => (
             ErrorType::Cancel,
             DefinedCondition::Conflict,
             err.to_string(),
         ),
-        other => (
-            ErrorType::Cancel,
-            DefinedCondition::Forbidden,
-            other.to_string(),
-        ),
+        other => forbidden(other.to_string()),
     }
 }
 
-fn broker_err(err: BrokerError) -> (ErrorType, DefinedCondition, String) {
+fn broker_err(err: BrokerError) -> IqError {
     match err {
         BrokerError::NoncePayloadConflict => (
             ErrorType::Cancel,
@@ -851,22 +855,24 @@ fn broker_err(err: BrokerError) -> (ErrorType, DefinedCondition, String) {
         ),
         BrokerError::AccountRetired(_)
         | BrokerError::TenantDestroyed(_)
-        | BrokerError::CredentialDestroyed(_) => (
-            ErrorType::Cancel,
-            DefinedCondition::Forbidden,
-            err.to_string(),
-        ),
+        | BrokerError::CredentialDestroyed(_) => forbidden(err.to_string()),
         BrokerError::EgressClosedPendingRestore => (
             ErrorType::Wait,
             DefinedCondition::ServiceUnavailable,
             err.to_string(),
         ),
-        other => (
-            ErrorType::Cancel,
-            DefinedCondition::InternalServerError,
-            other.to_string(),
-        ),
+        other => internal_error(other.to_string()),
     }
+}
+
+fn opaque_error_xml(
+    id: &str,
+    error_type: ErrorType,
+    condition: DefinedCondition,
+    text: &str,
+) -> String {
+    let err_iq = opaque_error(None, None, id, error_type, condition, text);
+    ws_stanza_to_xml(&Stanza::Iq(Box::new(err_iq)))
 }
 
 fn opaque_error(

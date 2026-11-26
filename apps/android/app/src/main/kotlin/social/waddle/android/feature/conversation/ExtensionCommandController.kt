@@ -345,11 +345,6 @@ class ExtensionCommandController(
         }
     }
 
-    private fun fieldValue(fields: List<ExtensionCommandField>, name: String): String? {
-        val field = fields.firstOrNull { it.name == name } ?: return null
-        return field.values.firstOrNull { it.isNotBlank() } ?: field.values.firstOrNull()
-    }
-
     private fun submitFields(fields: List<ExtensionCommandField>): List<ExtensionSubmitField> =
         fields
             .filter { it.type != ExtensionFieldType.FIXED }

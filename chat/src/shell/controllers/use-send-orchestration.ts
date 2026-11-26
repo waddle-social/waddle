@@ -24,7 +24,7 @@ interface SendOrchestrationDeps {
  * markers, composing notifications, search, paging, and extension actions.
  */
 export function useSendOrchestration(deps: SendOrchestrationDeps) {
-  const { ui, xmppClient, waddles, messaging, dmMessaging, isActiveDirectDmSurface, activeTarget, activeDmPeer } = deps;
+  const { ui, xmppClient, messaging, dmMessaging, isActiveDirectDmSurface, activeTarget, activeDmPeer } = deps;
 
   async function sendActiveMessage(
     body?: string,
