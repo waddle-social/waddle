@@ -1,7 +1,7 @@
 # Bumping the Rust Toolchain
 
 Waddle pins one explicit Rust version in `server/rust-toolchain.toml`
-(`channel = "1.98.1"`, plus the rustfmt and clippy components and the wasm and
+(`channel = "1.100.0"`, plus the rustfmt and clippy components and the wasm and
 Android targets). Every build path reads that file:
 
 - Nix and cuenv: `flake.nix` builds the toolchain with
