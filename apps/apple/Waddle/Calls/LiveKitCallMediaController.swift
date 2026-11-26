@@ -57,10 +57,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private var screenTracks: [String: SharedScreen] = [:]
     /// LiveKit can briefly clear our identity during a full reconnect.
     @ObservationIgnored private var joinedIdentity: String?
-    @ObservationIgnored private var remoteAudioTracks: [String: [RemoteAudioTrack]] = [:]
-    /// Choices follow the call even if LiveKit replaces its room or tracks.
-    @ObservationIgnored private var volumeGains: [String: Double] = [:]
-    @ObservationIgnored private let volumeUpdates = CallVolumeUpdates()
+    @ObservationIgnored private let remoteVolumes: CallRemoteVolumes
     /// What the person last asked of each device in this call. It outlives
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
@@ -83,43 +80,32 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func setVolume(_ gain: Double, of identity: String) {
-        guard let room = roomAccess.room, !identity.isEmpty, identity != joinedIdentity,
-              identity != room.localParticipant.identity?.stringValue else { return }
-        let gain = CallVolume.clamp(gain)
-        volumeGains[identity] = gain
-        for track in remoteAudioTracks[identity] ?? [] { applyVolume(gain, to: track) }
-        refreshParticipants()
+        if remoteVolumes.setVolume(gain, of: identity, joinedIdentity: joinedIdentity) {
+            refreshParticipants()
+        }
     }
 
-    /// Changes with `participants`, which every volume change refreshes.
-    var hasChangedVolumes: Bool { volumeGains.values.contains { $0 != 1 } }
+    var hasChangedVolumes: Bool { remoteVolumes.hasChangedVolumes }
 
     func resetVolumes() {
-        for identity in volumeGains.keys {
-            for track in remoteAudioTracks[identity] ?? [] { applyVolume(1, to: track) }
-        }
-        volumeGains.removeAll()
+        remoteVolumes.resetVolumes()
         refreshParticipants()
-    }
-
-    private func applyVolume(_ gain: Double, to track: RemoteAudioTrack) {
-        volumeUpdates.enqueue(for: track) { track.volume = gain }
     }
 
     @ObservationIgnored private let roomAccess = CallRoomAccess()
+    @ObservationIgnored private let videoMeter: CallVideoMeter
     /// The room holds its delegates weakly.
     @ObservationIgnored private var observer: RoomObserver?
 
     // MARK: - Devices
 
-    private(set) var devices = CallDevices()
-    /// What the person chose, kept on this device (web keeps it in local storage).
-    @ObservationIgnored private var devicePreferences: CallDevicePreferences
+    @ObservationIgnored private lazy var deviceCatalog = CallDeviceCatalog(defaults: defaults) { [weak self] in
+        await self?.applyCameraChoice()
+    }
+    var devices: CallDevices { deviceCatalog.devices }
     @ObservationIgnored private let defaults: UserDefaults
     /// Consent, cameras and screens: all the controller has of the hardware.
     @ObservationIgnored private let capture: any CallCaptureSources
-    private static let devicePreferencesKey = "callDevicePreferences"
-    private static let audioProcessingKey = "callAudioProcessing"
     private static let backgroundKey = "callBackground"
     private(set) var background = CallBackground.off
     private(set) var isBackgroundFailing = false
@@ -137,118 +123,60 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// them, and a capturer whose processor has been let go sends its
     /// frames as they are: so they are held until the disconnect is done.
     @ObservationIgnored private var departingBackgroundProcessors: [ObjectIdentifier: [CallBackgroundProcessor]] = [:]
-    private(set) var audioProcessing = CallAudioProcessing()
+    @ObservationIgnored private let microphoneProcessing: CallMicrophoneProcessing
+    var audioProcessing: CallAudioProcessing { microphoneProcessing.audioProcessing }
 
     init(defaults: UserDefaults = .standard, capture: any CallCaptureSources = SystemCaptureSources()) {
         self.defaults = defaults
         self.capture = capture
-        devicePreferences = CallDevicePreferences(stored: defaults.dictionary(forKey: Self.devicePreferencesKey))
-        audioProcessing = CallAudioProcessing(stored: defaults.dictionary(forKey: Self.audioProcessingKey))
+        remoteVolumes = CallRemoteVolumes(roomAccess: roomAccess)
+        microphoneProcessing = CallMicrophoneProcessing(roomAccess: roomAccess, defaults: defaults)
         background = CallBackground(stored: defaults.string(forKey: Self.backgroundKey))
+        videoMeter = CallVideoMeter(roomAccess: roomAccess)
         roomAccess.tracksChanged = { [weak self] in self?.refreshTracks() }
         roomAccess.recordRefusal = { [weak self] kind in self?.mediaRefusals[kind, default: 0] += 1 }
-        #if os(macOS)
-        // A headset plugged in mid-call is offered at once, and one the person chose comes back into use.
-        AudioManager.shared.onDeviceUpdate = { [weak self] _ in
-            Task { @MainActor in await self?.refreshDevices() }
-        }
-        #endif
-        // A camera plugged in or pulled out: the list follows, and so does a camera that is on.
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
-            deviceObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    await self?.refreshDevices()
-                    await self?.applyCameraChoice()
-                }
-            })
-        }
-    }
-
-    @ObservationIgnored private nonisolated(unsafe) var deviceObservers: [any NSObjectProtocol] = []
-
-    deinit {
-        deviceObservers.forEach(NotificationCenter.default.removeObserver)
+        // Install the device observers as soon as the controller is created.
+        _ = deviceCatalog
     }
 
     func refreshDevices() async {
-        let cameras = ((try? await CameraCapturer.captureDevices()) ?? []).filter(Self.isOffered).map {
-            CallDevice(id: $0.uniqueID, name: $0.localizedName)
-        }
-        var found = CallDevices(cameras: CallDeviceList(devices: cameras, preferred: devicePreferences[.camera]))
-        #if os(macOS)
-        // The system's own choice is our "System default" row, not a device of its own.
-        func listed(_ all: [AudioDevice]) -> [CallDevice] {
-            all.filter { !$0.isDefault }.map { CallDevice(id: $0.deviceId, name: $0.name) }
-        }
-        let audio = AudioManager.shared
-        found.microphones = CallDeviceList(devices: listed(audio.inputDevices), preferred: devicePreferences[.microphone])
-        found.speakers = CallDeviceList(devices: listed(audio.outputDevices), preferred: devicePreferences[.speaker])
-        // A chosen device that is gone gives way to the system's, and takes over again when it is back.
-        let input = audio.inputDevices.first { $0.deviceId == found.microphones.chosen?.id } ?? audio.defaultInputDevice
-        if audio.inputDevice.deviceId != input.deviceId { audio.inputDevice = input }
-        let output = audio.outputDevices.first { $0.deviceId == found.speakers.chosen?.id } ?? audio.defaultOutputDevice
-        if audio.outputDevice.deviceId != output.deviceId { audio.outputDevice = output }
-        #endif
-        if devices != found { devices = found }
+        await deviceCatalog.refreshDevices()
     }
 
     func chooseDevice(_ kind: CallDeviceKind, id: String?) async {
-        devicePreferences[kind] = id
-        defaults.set(devicePreferences.stored, forKey: Self.devicePreferencesKey)
-        await refreshDevices()
-        if kind == .camera { await applyCameraChoice() }
+        await deviceCatalog.chooseDevice(kind, id: id)
     }
 
     // MARK: - Diagnostics
 
-    /// The tracks asked to report statistics. Asking one again restarts its
-    /// timer, so each is asked once.
-    @ObservationIgnored private var measuredTracks: [ObjectIdentifier: Track] = [:]
-    /// How many are looking: a Mac can have the settings open in two
-    /// windows, and closing one must not blind the other.
-    @ObservationIgnored private var videoWatchers = 0
-    private var measuresVideo: Bool { videoWatchers > 0 }
-
     func setMeasuresVideo(_ on: Bool) async {
-        videoWatchers = max(0, videoWatchers + (on ? 1 : -1))
-        guard measuresVideo else {
-            let tracks = Array(measuredTracks.values)
-            measuredTracks = [:]
-            for track in tracks { await track.set(reportStatistics: false) }
-            return
-        }
-        await measureNewVideoTracks()
+        await videoMeter.setMeasuresVideo(on, videoStreams: { self.videoStreams })
     }
 
-    /// One video stream of the call and the track that carries it.
-    private struct VideoStream {
-        let key: String
-        let label: String
-        let source: CallVideoSource
-        let direction: CallVideoSample.Direction
-        let track: Track
+    func videoSamples() async -> [CallVideoSample] {
+        await videoMeter.videoSamples(videoStreams: { self.videoStreams })
     }
 
     /// Every video stream of the call now: ours first, then the others'.
-    private var videoStreams: [VideoStream] {
+    private var videoStreams: [CallVideoMeter.VideoStream] {
         guard let room = roomAccess.room else { return [] }
         let own: String = room.localParticipant.identity?.stringValue ?? joinedIdentity ?? ""
-        var streams: [VideoStream] = []
+        var streams: [CallVideoMeter.VideoStream] = []
         for publication in room.localParticipant.localVideoTracks where !publication.isMuted {
             guard let track = publication.track else { continue }
             let source: CallVideoSource = publication.source == .screenShareVideo ? .screen : .camera
-            streams.append(VideoStream(key: "\(own):\(source):sent", label: "You", source: source, direction: .sent, track: track))
+            streams.append(.init(key: "\(own):\(source):sent", label: "You", source: source, direction: .sent, track: track))
         }
         for (identity, camera) in cameraTracks.sorted(by: { $0.key < $1.key }) where identity != own {
             guard let track = camera as? Track else { continue }
-            streams.append(VideoStream(
+            streams.append(.init(
                 key: "\(identity):camera:received", label: Self.name(of: identity), source: .camera, direction: .received,
                 track: track
             ))
         }
         for (identity, screen) in screenTracks.sorted(by: { $0.key < $1.key }) {
             guard let track = screen.track as? Track else { continue }
-            streams.append(VideoStream(
+            streams.append(.init(
                 key: "\(identity):screen:received", label: Self.name(of: identity), source: .screen, direction: .received,
                 track: track
             ))
@@ -258,108 +186,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     private static func name(of identity: String) -> String {
         JID(parsing: identity)?.bare.localpart ?? identity
-    }
-
-    private func measureNewVideoTracks() async {
-        let measuring = roomAccess.room
-        for stream in videoStreams where measuredTracks[ObjectIdentifier(stream.track)] == nil {
-            measuredTracks[ObjectIdentifier(stream.track)] = stream.track
-            await stream.track.set(reportStatistics: true)
-            // The settings closed, or the call ended, while that one was being
-            // switched on: it goes off again and nothing more is switched on.
-            guard measuresVideo, let measuring, roomAccess.holds(measuring) else {
-                measuredTracks[ObjectIdentifier(stream.track)] = nil
-                await stream.track.set(reportStatistics: false)
-                return
-            }
-        }
-        // A track that is no longer a stream, as a camera turned off, stops
-        // being measured: muting does not stop the SDK's timer, and a track
-        // only dropped from here would go on polling for the rest of the call.
-        let live = Set(videoStreams.map { ObjectIdentifier($0.track) })
-        for (id, track) in measuredTracks where !live.contains(id) {
-            measuredTracks[id] = nil
-            await track.set(reportStatistics: false)
-        }
-    }
-
-    func videoSamples() async -> [CallVideoSample] {
-        guard measuresVideo else { return [] }
-        // A camera turned on while someone is looking is measured from then on.
-        await measureNewVideoTracks()
-        guard measuresVideo else { return [] }
-        return videoStreams.map(Self.sample(of:))
-    }
-
-    private static func sample(of stream: VideoStream) -> CallVideoSample {
-        var sample = CallVideoSample(
-            key: stream.key, label: stream.label, source: stream.source, direction: stream.direction, timestamp: 0
-        )
-        guard let statistics = stream.track.statistics else { return sample }
-        let candidate: LocalIceCandidateStatistics? = statistics.localIceCandidate
-        sample.candidateType = candidate?.candidateType?.rawValue
-        // A relay's own protocol is its leg to the peer, nearly always UDP;
-        // what tells a TCP fallback is how we reach the relay (as web `iceCandidatePath`).
-        if candidate?.candidateType == .relay {
-            sample.transport = candidate?.relayProtocol.map { $0 == .udp ? "udp" : "tcp" }
-        } else {
-            sample.transport = candidate?.protocol
-        }
-        switch stream.direction {
-        case .sent: fill(&sample, sentBy: stream.track, statistics)
-        case .received: fill(&sample, received: statistics)
-        }
-        return sample
-    }
-
-    /// The codec a stream is carried in: the one its own entry names. A
-    /// report also lists the retransmission codec, which is "video/rtx" and
-    /// must never be the answer; without a name to go by, it is the first that is not.
-    private static func codec(_ id: String?, in statistics: TrackStatistics) -> String? {
-        let named: String? = id.flatMap { id in statistics.codec.first { $0.id == id }?.mimeType }
-        if let named { return named }
-        return statistics.codec.compactMap(\.mimeType).first { type in
-            type.hasPrefix("video/") && type.lowercased() != "video/rtx"
-        }
-    }
-
-    private static func fill(_ sample: inout CallVideoSample, sentBy track: Track, _ statistics: TrackStatistics) {
-        // Simulcast sends several sizes: the figures are the largest one's, the bytes all of them.
-        let layers: [OutboundRtpStreamStatistics] = statistics.outboundRtpStream
-        func area(_ layer: OutboundRtpStreamStatistics) -> UInt { (layer.frameWidth ?? 0) * (layer.frameHeight ?? 0) }
-        let top: OutboundRtpStreamStatistics? = layers.max { area($0) < area($1) }
-        sample.width = top?.frameWidth.map { Int($0) }
-        sample.height = top?.frameHeight.map { Int($0) }
-        sample.framesPerSecond = top?.framesPerSecond
-        sample.timestamp = top?.timestamp ?? 0
-        sample.codec = codec(top?.codecId, in: statistics)
-        // A backup codec for those who cannot decode the first has a sender of its own.
-        let backups: [OutboundRtpStreamStatistics] = track.simulcastStatistics.values.flatMap(\.outboundRtpStream)
-        let sent: [UInt64] = (layers + backups).compactMap(\.bytesSent)
-        sample.bytes = sent.isEmpty ? nil : sent.reduce(0, +)
-        // The far end's word on what arrived, over every layer as the web
-        // counts it: one layer's report alone jumps about.
-        let reports: [RemoteInboundRtpStreamStatistics] = statistics.remoteInboundRtpStream
-        let lost: Int64 = reports.compactMap(\.packetsLost).reduce(0, +)
-        let packets: UInt64 = layers.compactMap(\.packetsSent).reduce(0, +)
-        if !reports.isEmpty, packets > 0 { sample.lossFraction = Double(max(lost, 0)) / Double(packets) }
-        sample.roundTrip = reports.compactMap(\.roundTripTime).max()
-    }
-
-    private static func fill(_ sample: inout CallVideoSample, received statistics: TrackStatistics) {
-        let stream: InboundRtpStreamStatistics? = statistics.inboundRtpStream.first
-        sample.width = stream?.frameWidth.map { Int($0) }
-        sample.height = stream?.frameHeight.map { Int($0) }
-        sample.framesPerSecond = stream?.framesPerSecond
-        sample.timestamp = stream?.timestamp ?? 0
-        sample.bytes = stream?.bytesReceived
-        sample.codec = codec(stream?.codecId, in: statistics)
-        if let lost = stream?.packetsLost, let received = stream?.packetsReceived {
-            let missing: Int64 = max(lost, 0)
-            let total: Int64 = Int64(received) + missing
-            if total > 0 { sample.lossFraction = Double(missing) / Double(total) }
-        }
-        sample.roundTrip = statistics.iceCandidatePair.first?.currentRoundTripTime
     }
 
     // MARK: - Camera background
@@ -512,65 +338,11 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     // MARK: - Audio processing
 
     func setAudioProcessing(_ processing: CallAudioProcessing) async {
-        guard processing != audioProcessing else { return }
-        audioProcessing = processing
-        defaults.set(processing.stored, forKey: Self.audioProcessingKey)
-        await applyAudioProcessing()
+        await microphoneProcessing.setAudioProcessing(processing)
     }
 
-    private var audioCaptureOptions: AudioCaptureOptions {
-        AudioCaptureOptions(
-            echoCancellation: audioProcessing.echoCancellation, autoGainControl: audioProcessing.autoGainControl,
-            noiseSuppression: audioProcessing.noiseSuppression
-        )
-    }
+    @ObservationIgnored var appliedAudioProcessing: CallAudioProcessing? { microphoneProcessing.appliedAudioProcessing }
 
-    /// Gives the processing chosen to the microphone's track as it is, on
-    /// or muted: the SDK changes it in place, with no new track and no gap
-    /// in what others hear. A track keeps the options it was made with for
-    /// its own restarts, so this runs again after a reconnect.
-    private func applyAudioProcessing() async {
-        guard let room = roomAccess.room else { return }
-        let wanted = audioProcessing
-        let options = AudioProcessingOptions(
-            echoCancellation: wanted.echoCancellation, autoGainControl: wanted.autoGainControl,
-            noiseSuppression: wanted.noiseSuppression
-        )
-        let published = publications(of: .audio, in: room)
-        let tracks = published.compactMap { $0.track as? LocalAudioTrack }
-        let publicationIDs = Set(published.map(\.sid.stringValue))
-        guard !tracks.isEmpty else { return }
-        // The SDK waits on WebRTC's signalling thread for each write, so
-        // they leave the main thread; one queue keeps them in the order asked.
-        let accepted = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
-            Self.audioProcessingWrites.async {
-                let results = tracks.map { (try? $0.setAudioProcessingOptions(options)) != nil }
-                done.resume(returning: !results.contains(false))
-            }
-        }
-        // The latest choice may have moved on while this one was written; its own write follows.
-        if accepted, wanted == audioProcessing {
-            appliedAudioProcessing = wanted
-            audioProcessingPublications = publicationIDs
-        }
-    }
-
-    /// The microphone publications that have the choice. A reconnect takes
-    /// the publication away and publishes the track again, restarted with
-    /// the options it was made with, so one that is not here has yet to be given it.
-    @ObservationIgnored private var audioProcessingPublications: Set<String> = []
-
-    /// Gives the choice to a microphone publication that has not had it: one
-    /// that came back after a reconnect, or appeared while a change found none.
-    private func giveAudioProcessingToNewPublications(in room: Room) {
-        let current = Set(publications(of: .audio, in: room).map(\.sid.stringValue))
-        guard !current.isEmpty, current != audioProcessingPublications || appliedAudioProcessing != audioProcessing else { return }
-        Task { await applyAudioProcessing() }
-    }
-
-    private static let audioProcessingWrites = DispatchQueue(label: "waddle.call-audio-processing", qos: .userInitiated)
-    /// The processing the microphone's track last took, for tests: `nil` until one has.
-    @ObservationIgnored private(set) var appliedAudioProcessing: CallAudioProcessing?
     /// The microphone's publication, for tests: a change of processing must not replace it.
     var microphonePublicationID: String? {
         roomAccess.room.flatMap { publications(of: .audio, in: $0).first?.sid.stringValue }
@@ -624,16 +396,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             }
         }
         if roomAccess.holds(room) { refreshTracks() }
-    }
-
-    /// On iPhone and iPad the system lists every lens, and the combinations
-    /// of them, as cameras of their own: one front and one back is the choice a person has.
-    private static func isOffered(_ camera: AVCaptureDevice) -> Bool {
-        #if os(iOS)
-        camera.deviceType == .builtInWideAngleCamera || camera.deviceType == .external
-        #else
-        true
-        #endif
     }
 
     /// The camera the person chose, while it is connected; `nil` leaves the choice to the system.
@@ -695,8 +457,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     func forgetCaptureChoices() {
         captureChoices = [:]
         if isMicrophoneMutedByChoice { isMicrophoneMutedByChoice = false }
-        volumeUpdates.removeAll()
-        resetVolumes()
+        remoteVolumes.resetCallChoices()
+        refreshParticipants()
     }
 
     func setMicrophone(_ on: Bool) async {
@@ -866,7 +628,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // The person changed their mind while a prompt or a start was pending.
         if enabled, captureChoices[kind] == false { return }
         if kind == .audio {
-            _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? audioCaptureOptions : nil)
+            _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? microphoneProcessing.audioCaptureOptions : nil)
         } else {
             // The SDK's own `setCamera` is never asked to turn a camera on:
             // it looks for the publication again inside its own queue and,
@@ -898,7 +660,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         // for; a choice made while it was starting applies now that it is on.
         if kind == .video, enabled { await applyCameraChoice(droppingIdleTracks: false) }
         // Likewise a change to the processing made while the microphone was starting.
-        if kind == .audio, enabled { await applyAudioProcessing() }
+        if kind == .audio, enabled { await microphoneProcessing.applyAudioProcessing() }
     }
 
     /// Asks for the permission, but only for a call that still owns `room`,
@@ -918,7 +680,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         roomAccess.room = nil
         observer = nil
         joinedIdentity = nil
-        volumeUpdates.removeAll()
+        remoteVolumes.roomDidClose()
         phase = .idle
         connectedSince = nil
         mediaUpSince = nil
@@ -932,7 +694,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         if didScreenShareFail { didScreenShareFail = false }
         connectionSettling?.cancel()
         connectionRating = CallConnectionRatingGate()
-        appliedAudioProcessing = nil
+        microphoneProcessing.roomDidGoAway()
         // Forgotten at once, so nothing stale is heard; let go only when the room is down.
         if let departing, !backgroundProcessors.isEmpty {
             departingBackgroundProcessors[ObjectIdentifier(departing), default: []] += Array(backgroundProcessors.values)
@@ -941,9 +703,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         failingBackgrounds = []
         cameraFailedToStartBlurred = false
         if isBackgroundFailing { isBackgroundFailing = false }
-        measuredTracks = [:]
-        videoWatchers = 0
-        audioProcessingPublications = []
+        videoMeter.roomWentAway()
         #if os(macOS)
         // A share still starting finds its call gone and lets the screen go.
         wantsScreenShare = false
@@ -982,8 +742,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 self.connectionRating.settled()
                 self.refreshParticipants()
             }
-            // A reconnect restarts the microphone's track with the options it was made with.
-            Task { await applyAudioProcessing() }
+            microphoneProcessing.roomDidReconnect()
         case .tracks:
             reconcileTracks(in: changed)
         case .participants:
@@ -1001,7 +760,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         enforceCaptureChoices(in: room)
         // A camera just turned on, or published again after a reconnect, has a capturer that has not been given it.
         giveBackgroundToCameras(in: room)
-        giveAudioProcessingToNewPublications(in: room)
+        microphoneProcessing.tracksDidChange(in: room)
         #if os(macOS)
         // A full reconnect republishes what it had: not a screen the person has stopped sharing since.
         if !wantsScreenShare, room.localParticipant.localVideoTracks.contains(where: { $0.source == .screenShareVideo }) {
@@ -1093,25 +852,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             screenTracks = screens
         }
         if dockCameraIdentities != dockCameras { dockCameraIdentities = dockCameras }
-        refreshRemoteAudio(remotes, restoringVolumes: restoringVolumes)
+        remoteVolumes.tracksChanged(remotes, restoringVolumes: restoringVolumes)
         refreshParticipants()
-    }
-
-    private func refreshRemoteAudio(_ remotes: [RemoteParticipant], restoringVolumes: Bool) {
-        var subscribed: [String: [RemoteAudioTrack]] = [:]
-        for remote in remotes {
-            guard let identity = remote.identity?.stringValue else { continue }
-            let tracks = remote.audioTracks.filter(\.isSubscribed).compactMap { $0.track as? RemoteAudioTrack }
-            guard !tracks.isEmpty else { continue }
-            subscribed[identity] = tracks
-            guard let gain = volumeGains[identity] else { continue }
-            let previous = remoteAudioTracks[identity] ?? []
-            // Set gain even on muted tracks so they have it when unmuted.
-            for track in tracks where restoringVolumes || !previous.contains(where: { $0 === track }) {
-                applyVolume(gain, to: track)
-            }
-        }
-        remoteAudioTracks = subscribed
     }
 
     /// Reads who is in the room, and who of them is speaking, as they are
@@ -1155,7 +897,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
                 identity: identity, isLocal: isLocal, isCameraOn: cameraTracks[identity] != nil,
                 screenPublicationID: screenTracks[identity]?.publicationID,
                 hasMicrophoneTrack: participant.audioTracks.contains { $0.source == .microphone && $0.isLive },
-                isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : volumeGains[identity] ?? 1
+                isSpeaking: participant.isSpeaking, volume: isLocal ? 1 : remoteVolumes.gain(for: identity)
             )
         }
         if participants != rows { participants = rows }
@@ -1196,42 +938,6 @@ private struct SharedScreen: Equatable {
 
 private extension TrackPublication {
     var isLive: Bool { isSubscribed && !isMuted }
-}
-
-/// LiveKit waits on WebRTC's signaling thread for each write. Only one batch
-/// goes to a GCD queue at a time so a slow write can't queue up a slider drag.
-@MainActor
-final class CallVolumeUpdates {
-    private let queue = DispatchQueue(label: "waddle.call-volume", qos: .userInitiated)
-    private var pending: [ObjectIdentifier: @Sendable () -> Void] = [:]
-    private var isFlushing = false
-
-    func enqueue(for track: AnyObject, apply: @escaping @Sendable () -> Void) {
-        pending[ObjectIdentifier(track)] = apply
-        guard !isFlushing else { return }
-        isFlushing = true
-        Task { await flush() }
-    }
-
-    func removeAll() {
-        pending.removeAll()
-    }
-
-    private func flush() async {
-        defer { isFlushing = false }
-        while !pending.isEmpty {
-            try? await Task.sleep(for: .milliseconds(40))
-            let batch = Array(pending.values)
-            pending.removeAll()
-            guard !batch.isEmpty else { return }
-            await withCheckedContinuation { continuation in
-                queue.async {
-                    for apply in batch { apply() }
-                    continuation.resume()
-                }
-            }
-        }
-    }
 }
 
 enum CallMediaError: Error {
