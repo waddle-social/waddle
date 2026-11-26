@@ -375,7 +375,7 @@ pub struct DurableRoomState {
 
 /// Durable backing store for MUC room ownership (ADR-0017 Phase 3 Slice 7).
 ///
-/// Every load, write, and delete is epoch-fenced against the exact claim
+/// Actor restores, writes, and deletes are epoch-fenced against the exact claim
 /// retained by that `RoomActor` incarnation — "epoch-fenced like all
 /// claimed-entity writes" per element 7. The room-JID cache populated by
 /// [`Self::record_claim_fence`] is not an authority for actor-owned writes.
@@ -411,6 +411,15 @@ pub struct DurableRoomState {
 /// `MucDurableStore` is configured there at all, so no durable fence or
 /// save is attempted — today's purely in-memory behavior, byte-identical.
 pub trait MucDurableStore: Send + Sync {
+    /// Read published room configuration for presentation, including from a
+    /// non-owner node. The result carries no authority to restore a room.
+    fn load_published_room_config<'a>(
+        &'a self,
+        _room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<RoomConfig>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Load `room_jid`'s durable state, if a row exists. `None` for a room
     /// that has never been durably written (e.g. a brand-new persistent
     /// room's very first spawn on any node, or a non-persistent instant

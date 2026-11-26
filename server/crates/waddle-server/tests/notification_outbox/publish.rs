@@ -9,19 +9,20 @@ use std::sync::Arc;
 use crate::support::{
     bare, candidate, drain_deps_with_noop_activity, enqueue_jobs_for_test,
     failed_outbox_jobs_count, groupchat_candidate_for, inbox_with_unread, noop_activity_reader,
-    settings_projection, store, target, target_named, FailingBlockingStorage, TestStore,
+    settings_projection, store, target, target_named, FailingBlockingStorage, StubRoomPolicy,
+    TestStore,
 };
 use crate::suppression::opt_in_rich_payload;
-use jid::{BareJid, Jid};
+use jid::Jid;
 use opentelemetry::trace::TraceContextExt;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    DrainBatch, DrainScope, NoopDndReader, NoopRoomPolicy, NotificationClass,
-    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
-    NotificationOutboxStore, NotificationOutboxTarget, PushDisplayNames, PushServiceNodeName,
-    WADDLE_PUSH_CONTEXT_NS,
+    DrainBatch, DrainScope, NoopDndReader, NoopRoomPolicy, NotificationCandidate,
+    NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
+    PushDisplayNameRequest, PushDisplayNameResolver, PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_xmpp::push::names::{DisplayName, PushNames, NS_PUSH_NAMES};
 use waddle_xmpp::push::PushSubscriptionStore;
@@ -326,18 +327,16 @@ async fn claimed_outbox_job_builds_stable_xep0357_pubsub_item() {
 struct ChangingNames(AtomicUsize);
 
 #[async_trait::async_trait]
-impl PushDisplayNames for ChangingNames {
-    async fn resolve(
-        &self,
-        recipient: &BareJid,
-        conversation: &BareJid,
-        sender: &Jid,
-        class: NotificationClass,
-    ) -> PushNames {
-        assert_eq!(recipient, &bare("alice@example.com"));
-        assert_eq!(conversation, &bare("bob@example.com"));
-        assert_eq!(sender.to_string(), "bob@example.com/test-resource");
-        assert_eq!(class, NotificationClass::DirectMessage);
+impl PushDisplayNameResolver for ChangingNames {
+    async fn resolve(&self, request: PushDisplayNameRequest<'_>) -> PushNames {
+        assert_eq!(request.recipient, &bare("alice@example.com"));
+        assert_eq!(request.conversation, &request.sender.to_bare());
+        if request.class.is_room() {
+            assert_eq!(
+                request.archive_stanza_id.as_ref().map(|id| id.as_str()),
+                Some("archive-first")
+            );
+        }
         let name = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
             "Bob Before"
         } else {
@@ -345,31 +344,70 @@ impl PushDisplayNames for ChangingNames {
         };
         PushNames {
             sender: DisplayName::parse(name),
-            room: None,
+            room: if request.class.is_room() {
+                DisplayName::parse("General")
+            } else {
+                None
+            },
         }
     }
 }
 
 #[tokio::test]
 async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_work() {
+    assert_frozen_names_on_retry(
+        candidate("archive-first"),
+        candidate("archive-second"),
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn room_publish_retries_with_both_frozen_display_names() {
+    let room = bare("room@conference.example.com");
+    let message = |id| {
+        groupchat_candidate_for(
+            &bare("alice@example.com"),
+            &room,
+            "room@conference.example.com/bob".parse().expect("occupant"),
+            id,
+            NotificationClass::PersonalMention,
+        )
+    };
+    assert_frozen_names_on_retry(
+        message("archive-first"),
+        message("archive-second"),
+        Some("General"),
+    )
+    .await;
+}
+
+async fn assert_frozen_names_on_retry(
+    first: NotificationCandidate,
+    second: NotificationCandidate,
+    expected_room_name: Option<&str>,
+) {
     let store = store().await;
-    let recipient = bare("alice@example.com");
+    let recipient = first.recipient_bare_jid().clone();
+    let conversation = first.conversation_jid();
     let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
     let names = Arc::new(ChangingNames::default());
     assert!(store.attach_push_display_names(names.clone()));
     let projection = settings_projection().await;
-    opt_in_rich_payload(&projection, &recipient, &bare("bob@example.com")).await;
-    store
-        .insert_candidate(&candidate("archive-first"))
-        .await
-        .expect("candidate");
+    opt_in_rich_payload(&projection, &recipient, conversation).await;
+    store.insert_candidate(&first).await.expect("candidate");
     store
         .drain_pending_candidates_into_outbox(
             &push_store,
             &blocking,
             &projection,
-            drain_deps_with_noop_activity(&NoopRoomPolicy, &NoopDndReader, noop_activity_reader()),
+            drain_deps_with_noop_activity(
+                &StubRoomPolicy::new(),
+                &NoopDndReader,
+                noop_activity_reader(),
+            ),
             &bare("push.example.com"),
             DrainBatch {
                 scope: DrainScope::All,
@@ -383,7 +421,7 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
         .await
         .expect("claim")
         .remove(0);
-    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 2).await;
+    let inbox = inbox_with_unread(&recipient, conversation, 2).await;
     store
         .publish_claimed_job(
             &claimed,
@@ -403,7 +441,7 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
         )
         .await
         .expect("lost reply");
-    enqueue_jobs_for_test(&store, &candidate("archive-second"), &[target]).await;
+    enqueue_jobs_for_test(&store, &second, &[target]).await;
     let mut jobs = store
         .claim_due_outbox_jobs(DrainScope::All, 16)
         .await
@@ -435,12 +473,18 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
             .text(),
         "Bob Before"
     );
-    let read_inbox = inbox_with_read_entry(
-        &recipient,
-        &bare("bob@example.com"),
-        waddle_xmpp::inbox::ConversationKind::Direct,
-    )
-    .await;
+    assert_eq!(
+        approved_names
+            .get_child("room", NS_PUSH_NAMES)
+            .map(minidom::Element::text)
+            .as_deref(),
+        expected_room_name
+    );
+    let kind = match expected_room_name {
+        Some(_) => waddle_xmpp::inbox::ConversationKind::MucRoom,
+        None => waddle_xmpp::inbox::ConversationKind::Direct,
+    };
+    let read_inbox = inbox_with_read_entry(&recipient, conversation, kind).await;
     assert!(
         matches!(
             store
@@ -489,6 +533,80 @@ async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_wor
             .expect("provider attempts")
             .is_empty(),
         "durable queue acceptance is not provider acceptance"
+    );
+}
+
+#[derive(Default)]
+struct SlowDisplayNames(AtomicUsize);
+
+#[async_trait::async_trait]
+impl PushDisplayNameResolver for SlowDisplayNames {
+    async fn resolve(&self, _request: PushDisplayNameRequest<'_>) -> PushNames {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn display_name_timeout_skips_remaining_lookups_in_the_drain() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let (push_service, push_store, _) = first_party_push_setup(&recipient).await;
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let inbox = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
+    let names = Arc::new(SlowDisplayNames::default());
+    assert!(store.attach_push_display_names(names.clone()));
+    let projection = settings_projection().await;
+    for (sender, id) in [
+        ("bob@example.com", "first"),
+        ("charlie@example.com", "second"),
+    ] {
+        let sender = bare(sender);
+        opt_in_rich_payload(&projection, &recipient, &sender).await;
+        store
+            .insert_candidate(&crate::support::candidate_for(&recipient, &sender, id))
+            .await
+            .expect("candidate");
+    }
+    let batch = DrainBatch {
+        scope: DrainScope::All,
+        batch_size: 16,
+    };
+    let service = bare("push.example.com");
+    store
+        .drain_pending_candidates_into_outbox(
+            &push_store,
+            &blocking,
+            &projection,
+            drain_deps_with_noop_activity(&NoopRoomPolicy, &NoopDndReader, noop_activity_reader()),
+            &service,
+            batch,
+        )
+        .await
+        .expect("drain opted-in candidates");
+    let outcomes = store
+        .drain_due_outbox_jobs(
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &service,
+            batch,
+        )
+        .await
+        .expect("publish both jobs");
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, NotificationOutboxPublishOutcome::Published { .. })));
+    assert_eq!(names.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("push jobs")
+            .len(),
+        2
     );
 }
 

@@ -123,6 +123,21 @@ impl NotificationClass {
     }
 }
 
+impl From<NotificationClass> for waddle_xmpp::push::envelope::NotificationClass {
+    fn from(class: NotificationClass) -> Self {
+        match class {
+            NotificationClass::DirectMessage => Self::Dm,
+            NotificationClass::DirectMessageMention => Self::DmMention,
+            NotificationClass::PersonalMention => Self::PersonalMention,
+            NotificationClass::ChannelMention => Self::ChannelMention,
+            NotificationClass::ActiveChannelMention => Self::ActiveChannelMention,
+            NotificationClass::NotifyAll => Self::NotifyAll,
+            NotificationClass::Call => Self::Call,
+            NotificationClass::MissedCall => Self::MissedCall,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationReason {
     OfflineDirectMessage,
@@ -395,6 +410,7 @@ pub struct NotificationOutboxJob {
     pub(super) class: NotificationClass,
     pub(super) message_count: u32,
     pub(super) context: Element,
+    pub(super) room_archive_stanza_id: Option<super::StanzaId>,
     /// Resolved XEP-0357 §5.4 rich summary fields, decided at T1 drain
     /// from the recipient's XEP-0492 opt-in and the candidate's
     /// XEP-0334 hints. Defaults to [`RichSummary::minimal`] (opt-out).
@@ -486,6 +502,7 @@ impl NotificationOutboxJob {
                     message_count,
                     &self.rich_summary,
                     &self.context,
+                    self.class,
                     names,
                 )
             })),

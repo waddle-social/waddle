@@ -296,6 +296,13 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Build the production push display-name resolver over a test server's state.
+pub fn published_push_display_name_resolver(
+    state: &WebSocketState,
+) -> impl crate::notification_outbox::PushDisplayNameResolver {
+    crate::push_display_names::PublishedPushDisplayNameResolver::new(state)
+}
+
 /// [`websocket_state`] whose stream-management session registry keeps its
 /// sessions and their ingress custody in `persistence`, which the caller
 /// keeps to seed and read them.

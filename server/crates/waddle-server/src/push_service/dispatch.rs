@@ -311,11 +311,7 @@ fn parse_summary(notification: &Element, class: NotificationClass) -> Summary {
             .map(|sender| SummaryContent {
                 sender,
                 body: value_of(SUMMARY_LAST_MESSAGE_BODY).filter(|body| !body.is_empty()),
-                names: if class == NotificationClass::Call {
-                    PushNames::default()
-                } else {
-                    PushNames::parse(notification, class.is_room())
-                },
+                names: PushNames::parse(notification, class),
             }),
     }
 }

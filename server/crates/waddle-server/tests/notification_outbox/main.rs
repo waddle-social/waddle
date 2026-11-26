@@ -12,6 +12,8 @@ mod calls;
 mod candidate_drain;
 mod candidates;
 #[cfg(feature = "test-support")]
+mod display_names;
+#[cfg(feature = "test-support")]
 #[path = "../ingress_support.rs"]
 pub mod ingress_support;
 mod payload;

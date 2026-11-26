@@ -65,7 +65,7 @@ pub use deps::{
     MAX_ACTIVE_MENTION_TTL_SECONDS, MIN_ACTIVE_MENTION_TTL_SECONDS,
     WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
 };
-pub use display_names::PushDisplayNames;
+pub use display_names::{PushDisplayNameRequest, PushDisplayNameResolver};
 pub(crate) use gate::{
     evaluate_push_gate_at_dispatch, PushEvalCaches, PushEvalDeps, PushEvalStage,
     RoomPolicyCacheEntry, T1PushDispatchOutcome,

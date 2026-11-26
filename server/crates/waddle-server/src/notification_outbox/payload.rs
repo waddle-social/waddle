@@ -1,5 +1,6 @@
 //! XEP-0357 notification payload building and the Waddle push context.
 
+use waddle_xmpp::push::envelope::NotificationClass as WireNotificationClass;
 use waddle_xmpp::push::names::PushNames;
 
 use super::{
@@ -96,6 +97,7 @@ pub fn build_xep0357_notification_payload(
     message_count: u32,
     rich: &RichSummary,
     context: &Element,
+    class: NotificationClass,
     names: Option<&PushNames>,
 ) -> Element {
     let mut notification = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
@@ -103,8 +105,7 @@ pub fn build_xep0357_notification_payload(
         .append(context.clone());
     if let Some(names) = names
         .filter(|_| {
-            rich.sender.is_some()
-                && context.attr("class") != Some(NotificationClass::Call.as_db_value())
+            rich.sender.is_some() && WireNotificationClass::from(class).allows_display_names()
         })
         .and_then(PushNames::to_element)
     {

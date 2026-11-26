@@ -4,7 +4,7 @@
 
 use minidom::Element;
 use waddle_server::notification_outbox::{
-    build_xep0357_notification_payload, RichSummary, WADDLE_PUSH_CONTEXT_NS,
+    build_xep0357_notification_payload, NotificationClass, RichSummary, WADDLE_PUSH_CONTEXT_NS,
     XEP0357_SUMMARY_FORM_TYPE,
 };
 use waddle_xmpp::push::names::{DisplayName, PushNames, NS_PUSH_NAMES};
@@ -20,7 +20,13 @@ fn xep0357_payload_uses_summary_form_and_waddle_context_only() {
         .attr(minidom::rxml::xml_ncname!("thread").to_owned(), "")
         .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
         .build();
-    let payload = build_xep0357_notification_payload(3, &RichSummary::minimal(), &context, None);
+    let payload = build_xep0357_notification_payload(
+        3,
+        &RichSummary::minimal(),
+        &context,
+        NotificationClass::DirectMessage,
+        None,
+    );
 
     assert!(payload.is("notification", waddle_xmpp::xep::xep0357::NS_PUSH));
     let summary = payload
@@ -74,7 +80,13 @@ fn xep0357_summary_form_emits_rich_fields_when_opted_in() {
         sender: Some("juliet@capulet.example/balcony".parse().expect("jid")),
         body: Some("Wherefore art thou, Romeo?".to_string()),
     };
-    let payload = build_xep0357_notification_payload(1, &rich, &context, None);
+    let payload = build_xep0357_notification_payload(
+        1,
+        &rich,
+        &context,
+        NotificationClass::DirectMessage,
+        None,
+    );
 
     let summary = payload
         .children()
@@ -117,7 +129,13 @@ fn xep0357_summary_form_strips_body_but_keeps_sender_when_hint_stripped() {
         sender: Some("juliet@capulet.example/balcony".parse().expect("jid")),
         body: None,
     };
-    let payload = build_xep0357_notification_payload(1, &rich, &context, None);
+    let payload = build_xep0357_notification_payload(
+        1,
+        &rich,
+        &context,
+        NotificationClass::DirectMessage,
+        None,
+    );
     let summary = payload
         .children()
         .find(|child| child.is("x", NS_DATA_FORMS))
@@ -147,8 +165,20 @@ fn xep0357_names_are_an_optional_sibling_and_preserve_summary_bytes() {
         sender: DisplayName::parse("Alice Liddell"),
         room: DisplayName::parse("General"),
     };
-    let legacy = build_xep0357_notification_payload(3, &rich, &context, None);
-    let named = build_xep0357_notification_payload(3, &rich, &context, Some(&names));
+    let legacy = build_xep0357_notification_payload(
+        3,
+        &rich,
+        &context,
+        NotificationClass::PersonalMention,
+        None,
+    );
+    let named = build_xep0357_notification_payload(
+        3,
+        &rich,
+        &context,
+        NotificationClass::PersonalMention,
+        Some(&names),
+    );
     assert_eq!(
         String::from(
             legacy
@@ -181,15 +211,31 @@ fn xep0357_names_are_an_optional_sibling_and_preserve_summary_bytes() {
         "General"
     );
 
-    let minimal =
-        build_xep0357_notification_payload(3, &RichSummary::minimal(), &context, Some(&names));
+    let minimal = build_xep0357_notification_payload(
+        3,
+        &RichSummary::minimal(),
+        &context,
+        NotificationClass::PersonalMention,
+        Some(&names),
+    );
     assert_eq!(minimal.children().count(), 2);
-    let empty_names =
-        build_xep0357_notification_payload(3, &rich, &context, Some(&PushNames::default()));
+    let empty_names = build_xep0357_notification_payload(
+        3,
+        &rich,
+        &context,
+        NotificationClass::PersonalMention,
+        Some(&PushNames::default()),
+    );
     assert_eq!(empty_names, legacy);
     let call_context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
         .attr(minidom::rxml::xml_ncname!("class").to_owned(), "call")
         .build();
-    let call = build_xep0357_notification_payload(3, &rich, &call_context, Some(&names));
+    let call = build_xep0357_notification_payload(
+        3,
+        &rich,
+        &call_context,
+        NotificationClass::Call,
+        Some(&names),
+    );
     assert_eq!(call.children().count(), 2);
 }

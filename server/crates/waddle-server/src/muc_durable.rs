@@ -3802,6 +3802,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_room_config_is_readable_without_the_owner_fence() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(room) = projection_test_room("published-room-config").await else {
+            return;
+        };
+        room.store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                projection_config_intent("Shared room name"),
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("commit config");
+        let reader = PostgresMucRoomStore::open(
+            room.db.clone(),
+            CancellationToken::new(),
+            SharedNodeIdentity::new(node_identity()),
+        )
+        .await
+        .expect("open another node's store");
+        assert!(reader
+            .load_published_room_config(&room.room_jid)
+            .await
+            .expect("read a preparing room")
+            .is_none());
+        room.store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Publish,
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("publish room");
+        let config = reader
+            .load_published_room_config(&room.room_jid)
+            .await
+            .expect("read without claiming the room")
+            .expect("published config");
+        assert_eq!(config.name, "Shared room name");
+        room.store
+            .commit_room_mutation(
+                &room.room_jid,
+                &room.fence,
+                RoomDurableMutation::Dormancy,
+                RoomMutationEffects::none(),
+            )
+            .await
+            .expect("retire room to dormancy");
+        let config = reader
+            .load_published_room_config(&room.room_jid)
+            .await
+            .expect("read a dormant room")
+            .expect("dormant config");
+        assert_eq!(config.name, "Shared room name");
+        assert!(reader
+            .load_published_room_config(&unique_room_jid("missing-published-config"))
+            .await
+            .expect("read missing room")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn config_coordinates_persist_and_restore_across_retirement() {
         let _guard = clustering_control_plane_table_lock().lock().await;
         let Some(room) = projection_test_room("lane-1647-config-coordinates").await else {

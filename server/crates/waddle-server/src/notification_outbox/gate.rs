@@ -1076,6 +1076,7 @@ mod tests {
             class: NotificationClass::ChannelMention,
             message_count: 1,
             context: Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build(),
+            room_archive_stanza_id: None,
             rich_summary: RichSummary::minimal(),
             approved_payload: None,
             approved_publish_options: None,
