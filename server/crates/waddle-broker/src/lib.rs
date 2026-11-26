@@ -24,6 +24,9 @@ pub use admission::replica_fence::{
     BrokerReplicaFence, FenceTicket, BROKER_FENCE_ACK_DEADLINE, BROKER_FENCE_EXPIRY_GRACE,
     BROKER_FENCE_LEASE_MARGIN, BROKER_FENCE_LEASE_TTL, BROKER_FENCE_TICK,
 };
+pub use admission::rollback::{
+    RollbackController, RollbackError, RollbackReport, RollbackScope, RollbackTarget,
+};
 pub use admission::service::{
     AdmissionBarrierHooks, AdmissionServiceError, AdmitInvocationInput, AdmittedDispatch,
     BoundDispatchContext, BrokerAdmissionService, TraceRecorder,
@@ -52,10 +55,11 @@ pub use custody::{
 };
 pub use egress::{
     is_blocked_admin_path, resolve_and_validate_addrs, validate_operation_path, BrokerEgressClient,
-    DnsResolver, EgressBindingPolicy, EgressCaps, EgressChunk, EgressError, EgressInferenceRequest,
-    EgressProfileRegistry, EgressResponse, EgressStream, EgressStreamEvent, ExpectedEgressBinding,
-    ProfileError, ProviderOperation, ProviderOperationWire, ProviderProfile, SsrfError,
-    TokioDnsResolver,
+    DataCollectionPolicy, DnsResolver, EgressBindingPolicy, EgressCaps, EgressChunk, EgressError,
+    EgressInferenceRequest, EgressProfileRegistry, EgressResponse, EgressStream, EgressStreamEvent,
+    ExpectedEgressBinding, ProfileError, ProviderOperation, ProviderOperationWire, ProviderProfile,
+    QualifiedZdrRoute, RouteKeyOrigin, RouteQualificationError, SsrfError, TokioDnsResolver,
+    ZdrRouteQuery, ZdrRouteRegistry,
 };
 pub use envelope::{
     decrypt_secret, encrypt_secret, EnvelopeCipher, EnvelopeContext, SealedEnvelope,

@@ -5,6 +5,7 @@
 pub mod invocation;
 pub mod postgres;
 pub mod replica_fence;
+pub mod rollback;
 pub mod service;
 pub mod turso;
 

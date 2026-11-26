@@ -6,6 +6,7 @@
 pub mod client;
 pub mod profile;
 pub mod ssrf;
+pub mod zdr;
 
 pub use client::{
     verify_dispatch_matches_request, BrokerEgressClient, EgressChunk, EgressError,
@@ -17,3 +18,7 @@ pub use profile::{
     EgressProfileRegistry, ProfileError, ProviderOperation, ProviderProfile,
 };
 pub use ssrf::{resolve_and_validate_addrs, DnsResolver, SsrfError, TokioDnsResolver};
+pub use zdr::{
+    DataCollectionPolicy, QualifiedZdrRoute, RouteKeyOrigin, RouteQualificationError,
+    ZdrRouteQuery, ZdrRouteRegistry,
+};
