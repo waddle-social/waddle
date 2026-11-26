@@ -3,8 +3,9 @@
 use super::{
     bail, effective_module_config_json, push_feature_namespace, remove_invalid_cached_extension,
     runtime_grants_for_module, validate_manifest_against_module, Arc, BareJid, CommandNode,
-    DenyingExtensionHostTools, Digest, ExtensionCapability, ExtensionConfig, ExtensionHostTools,
-    ExtensionManager, ExtensionManifest, ExtensionModuleConfig, HashMap, HashSet, LoadedExtension,
+    DenyingExtensionHostTools, DenyingExtensionInferenceHost, Digest, ExtensionCapability,
+    ExtensionConfig, ExtensionHostTools, ExtensionInferenceHost, ExtensionManager,
+    ExtensionManifest, ExtensionModuleConfig, HashMap, HashSet, LoadedExtension,
     OciExtensionPuller, Path, PayloadNamespace, PluginId, Result, Sha256, WasmExtensionActor,
     WasmRuntime,
 };
@@ -41,6 +42,27 @@ impl ExtensionManager {
         config: ExtensionConfig,
         host_tools: Arc<dyn ExtensionHostTools>,
     ) -> Result<Self> {
+        Self::from_config_with_hosts(
+            config,
+            host_tools,
+            Arc::new(DenyingExtensionInferenceHost),
+        )
+        .await
+    }
+
+    /// Load configured components using both host tools and an explicit
+    /// brokered [`ExtensionInferenceHost`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid configuration, artifact loading/verification
+    /// failures, Wasm initialization failures, invalid manifests/routes, or duplicate
+    /// extension identifiers.
+    pub async fn from_config_with_hosts(
+        config: ExtensionConfig,
+        host_tools: Arc<dyn ExtensionHostTools>,
+        inference_host: Arc<dyn ExtensionInferenceHost>,
+    ) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
                 actors: Vec::new(),
@@ -49,6 +71,7 @@ impl ExtensionManager {
                 launch_signing_key: None,
                 tenant_id: None,
                 resource_controller: None,
+                inference_host,
             });
         }
         config.validate().map_err(anyhow::Error::msg)?;
@@ -104,7 +127,8 @@ impl ExtensionManager {
                     );
                 }
             }
-            .with_host_tools(Arc::clone(&host_tools));
+            .with_host_tools(Arc::clone(&host_tools))
+            .with_inference_host(Arc::clone(&inference_host));
 
             let manifest = actor.manifest();
             validate_manifest_against_module(module, &manifest)?;
@@ -166,7 +190,23 @@ impl ExtensionManager {
             launch_signing_key: None,
             tenant_id: None,
             resource_controller: None,
+            inference_host,
         })
+    }
+
+    /// Install or replace the brokered [`ExtensionInferenceHost`] across all actors.
+    #[must_use]
+    pub fn with_inference_host(mut self, inference_host: Arc<dyn ExtensionInferenceHost>) -> Self {
+        self.inference_host = Arc::clone(&inference_host);
+        self.actors = self
+            .actors
+            .into_iter()
+            .map(|actor| match Arc::try_unwrap(actor) {
+                Ok(inner) => Arc::new(inner.with_inference_host(Arc::clone(&inference_host))),
+                Err(shared) => shared,
+            })
+            .collect();
+        self
     }
 
     /// Load configured components bound to a specific canonical [`waddle_broker_core::identity::TenantId`]
@@ -183,7 +223,33 @@ impl ExtensionManager {
         host_tools: Arc<dyn ExtensionHostTools>,
         resource_controller: Arc<waddle_broker_core::quotas::TenantResourceController>,
     ) -> Result<Self> {
-        let mut mgr = Self::from_config_with_host_tools(config, host_tools).await?;
+        Self::from_config_for_tenant_with_hosts(
+            tenant_id,
+            config,
+            host_tools,
+            Arc::new(DenyingExtensionInferenceHost),
+            resource_controller,
+        )
+        .await
+    }
+
+    /// Load configured components bound to a canonical [`waddle_broker_core::identity::TenantId`],
+    /// explicit host tools, brokered [`ExtensionInferenceHost`], and per-tenant
+    /// [`waddle_broker_core::quotas::TenantResourceController`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid configuration, artifact loading/verification
+    /// failures, Wasm initialization failures, invalid manifests/routes, or duplicate
+    /// extension identifiers.
+    pub async fn from_config_for_tenant_with_hosts(
+        tenant_id: waddle_broker_core::identity::TenantId,
+        config: ExtensionConfig,
+        host_tools: Arc<dyn ExtensionHostTools>,
+        inference_host: Arc<dyn ExtensionInferenceHost>,
+        resource_controller: Arc<waddle_broker_core::quotas::TenantResourceController>,
+    ) -> Result<Self> {
+        let mut mgr = Self::from_config_with_hosts(config, host_tools, inference_host).await?;
         mgr.tenant_id = Some(tenant_id.clone());
         mgr.resource_controller = Some(Arc::clone(&resource_controller));
         mgr.actors = mgr

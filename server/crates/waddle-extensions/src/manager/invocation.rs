@@ -5,10 +5,23 @@ use super::{
     ExtensionCapability, ExtensionEffect, ExtensionEvent, ExtensionManager, LaunchInvocation,
     LaunchInvocationRequest, LaunchTokenVerification, LaunchValidationRequest, PluginId,
     ProviderWebhook, EXTENSION_COMMAND_TIMEOUT, EXTENSION_PROVIDER_WEBHOOK_TIMEOUT,
+    EXTENSION_STREAMING_COMMAND_TIMEOUT,
 };
 use crate::types::ActionId;
 
 impl ExtensionManager {
+    /// Returns `true` if a command-granted extension actor declares `node`.
+    #[must_use]
+    pub fn has_command_node(&self, node: &str) -> bool {
+        let Ok(command_node) = CommandNode::try_new(node.to_string()) else {
+            return false;
+        };
+        self.actors.iter().any(|actor| {
+            actor.has_grant(ExtensionCapability::Commands)
+                && actor.manifest().declares_command(&command_node)
+        })
+    }
+
     /// Dispatch to the first command-granted plugin declaring the node and sign its
     /// effects. Unknown or invalid nodes return no effects; deadline expiry returns a
     /// host warning.
@@ -61,6 +74,66 @@ impl ExtensionManager {
                         DisplayText::try_new(format!("Extension command {command_node} timed out"))
                             .expect("timeout warning is non-empty"),
                     )],
+                };
+            }
+        }
+        Vec::new()
+    }
+
+    /// Dispatch an extension command off the 15s stanza wedge loop, racing Wasm
+    /// execution against `cancel_rx` (so dropping the `StreamingInferenceSession` or
+    /// canceling shutdown drops `Store<HostState>` and fires `InferenceStream::Drop`
+    /// synchronously) and allowing streaming commands up to
+    /// `EXTENSION_STREAMING_COMMAND_TIMEOUT`.
+    pub async fn invoke_command_decoupled(
+        &self,
+        request: CommandInvocationRequest<'_>,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Vec<ExtensionEffect> {
+        if *cancel_rx.borrow() {
+            return Vec::new();
+        }
+        let CommandInvocationRequest {
+            node,
+            waddle_id,
+            room,
+            requester,
+            session_id,
+            action,
+            fields,
+            form,
+        } = request;
+        let Ok(command_node) = CommandNode::try_new(node.to_string()) else {
+            return Vec::new();
+        };
+        let dispatch_node = command_node.clone();
+        let dispatch_waddle_id = waddle_id.clone();
+        let event = ExtensionEvent::Command(CommandInvocation {
+            waddle_id,
+            room,
+            requester,
+            command_node: dispatch_node,
+            session_id,
+            action,
+            form,
+            fields,
+        });
+        for actor in &self.actors {
+            if actor.has_grant(ExtensionCapability::Commands)
+                && actor.manifest().declares_command(&command_node)
+            {
+                let exec_fut = actor.handle_event_for_waddle(event, dispatch_waddle_id);
+                let timed = timeout(EXTENSION_STREAMING_COMMAND_TIMEOUT, exec_fut);
+                return tokio::select! {
+                    biased;
+                    _ = cancel_rx.changed() => Vec::new(),
+                    res = timed => match res {
+                        Ok(effects) => self.sign_effects(effects),
+                        Err(_) => vec![ExtensionEffect::HostWarning(
+                            DisplayText::try_new(format!("Extension command {command_node} timed out"))
+                                .expect("timeout warning is non-empty"),
+                        )],
+                    },
                 };
             }
         }

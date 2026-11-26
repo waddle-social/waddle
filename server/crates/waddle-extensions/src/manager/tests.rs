@@ -54,6 +54,7 @@ fn launch_tokens_cover_payload_fields() {
         launch_signing_key: Some(key.to_vec()),
         tenant_id: None,
         resource_controller: None,
+        inference_host: std::sync::Arc::new(crate::runtime::DenyingExtensionInferenceHost),
     };
     let plugin = PluginId::try_new("link-board").expect("plugin id");
     let action = ActionId::try_new("save-link").expect("action id");
@@ -450,6 +451,7 @@ async fn enrich_message_does_not_fallback_without_loaded_actor() {
         launch_signing_key: None,
         tenant_id: None,
         resource_controller: None,
+        inference_host: std::sync::Arc::new(crate::runtime::DenyingExtensionInferenceHost),
     };
 
     let mut msg = Message::new(None);

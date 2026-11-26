@@ -27,7 +27,7 @@ use crate::actor::WasmExtensionActor;
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::host_tools::{DenyingExtensionHostTools, ExtensionHostTools};
 use crate::oci::OciExtensionPuller;
-use crate::runtime::{LoadedExtension, WasmRuntime};
+use crate::runtime::{DenyingExtensionInferenceHost, ExtensionInferenceHost, LoadedExtension, WasmRuntime};
 use crate::types::{
     is_official_namespace, message_has_framework_envelope, CommandAction, CommandInvocation,
     CommandNode, CommandSessionId, DetectedLink, DisplayText, ExtensionCapability, ExtensionEffect,
@@ -40,6 +40,7 @@ const MAX_DETECTED_LINKS: usize = 3;
 const EXTENSION_ENRICH_TIMEOUT: Duration = Duration::from_millis(750);
 const EXTENSION_OBSERVE_TIMEOUT: Duration = Duration::from_secs(45);
 const EXTENSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
+const EXTENSION_STREAMING_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const EXTENSION_PROVIDER_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(45);
 const XEP_0359_STANZA_ID_NS: &str = "urn:xmpp:sid:0";
 
@@ -154,7 +155,6 @@ enum EffectiveModuleConfigError {
 }
 
 /// Loaded extension actors, discovery metadata, and launch-signing authority for one host.
-#[derive(Debug)]
 pub struct ExtensionManager {
     actors: Vec<Arc<WasmExtensionActor>>,
     feature_namespaces: Vec<String>,
@@ -162,6 +162,18 @@ pub struct ExtensionManager {
     launch_signing_key: Option<Vec<u8>>,
     tenant_id: Option<waddle_broker_core::identity::TenantId>,
     resource_controller: Option<Arc<waddle_broker_core::quotas::TenantResourceController>>,
+    inference_host: Arc<dyn ExtensionInferenceHost>,
+}
+
+impl std::fmt::Debug for ExtensionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionManager")
+            .field("actors", &self.actors)
+            .field("feature_namespaces", &self.feature_namespaces)
+            .field("route_descriptors", &self.route_descriptors)
+            .field("tenant_id", &self.tenant_id)
+            .finish_non_exhaustive()
+    }
 }
 
 mod construction;

@@ -13,7 +13,10 @@ use crate::host_tools::{
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::observer_test_support::ObserverTestPlugin;
-use crate::runtime::LoadedExtension;
+use crate::runtime::{
+    is_inference_plugin, DenyingExtensionInferenceHost, ExtensionInferenceHost,
+    InferenceInvocationParams, LoadedExtension,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::types::{ArtifactReference, ExtensionProfile};
 use crate::types::{
@@ -37,6 +40,7 @@ pub struct WasmExtensionActor {
     extension: Arc<LoadedExtension>,
     config: String,
     host_tools: Arc<dyn ExtensionHostTools>,
+    inference_host: Arc<dyn ExtensionInferenceHost>,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
@@ -74,6 +78,7 @@ impl WasmExtensionActor {
             extension: Arc::new(extension),
             config: config.to_string(),
             host_tools: Arc::new(DenyingExtensionHostTools),
+            inference_host: Arc::new(DenyingExtensionInferenceHost),
             grants: HashSet::new(),
             allowed_http_origins: Vec::new(),
             provider_room_grants: Vec::new(),
@@ -111,6 +116,13 @@ impl WasmExtensionActor {
     #[must_use]
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
+        self
+    }
+
+    /// Install the brokered inference host used by `waddle:extension/inference@4.0.0`.
+    #[must_use]
+    pub fn with_inference_host(mut self, inference_host: Arc<dyn ExtensionInferenceHost>) -> Self {
+        self.inference_host = inference_host;
         self
     }
 
@@ -204,6 +216,7 @@ impl WasmExtensionActor {
             kind: InvocationKind::RoomMessageObserve,
             provider_room_grants: Vec::new(),
         };
+        let inference_invocation = is_inference_plugin(&self.manifest.id);
         let result = if let Some(capability) = delivery {
             self.extension
                 .call_handle_event_typed_with_delivery_and_tracker(
@@ -213,6 +226,8 @@ impl WasmExtensionActor {
                         context,
                         capability,
                     },
+                    Arc::clone(&self.inference_host),
+                    inference_invocation,
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
@@ -225,6 +240,8 @@ impl WasmExtensionActor {
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
                     context,
+                    Arc::clone(&self.inference_host),
+                    inference_invocation,
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
@@ -335,17 +352,20 @@ impl WasmExtensionActor {
         if matches!(event, ExtensionEvent::RoomMessageObserve(_)) {
             return Vec::new();
         }
+        let inference_invocation = is_inference_plugin(&self.manifest.id);
         match self
             .extension
-            .call_handle_event_with_memory_tracker(
+            .call_handle_event_with_inference(InferenceInvocationParams {
                 event,
-                Arc::clone(&self.host_tools),
+                tools: Arc::clone(&self.host_tools),
+                inference: Arc::clone(&self.inference_host),
                 context,
-                self.config.clone(),
-                self.grants.clone(),
-                self.allowed_http_origins.clone(),
-                memory_tracker,
-            )
+                config: self.config.clone(),
+                grants: self.grants.clone(),
+                allowed_http_origins: self.allowed_http_origins.clone(),
+                tenant_memory_tracker: memory_tracker,
+                inference_invocation,
+            })
             .await
         {
             Ok(response) => response

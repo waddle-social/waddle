@@ -29,6 +29,7 @@ mod tests;
 mod ui_conversions;
 mod wit_to_domain;
 
+pub(crate) use host_state::is_inference_plugin;
 pub use host_state::{DeliveryKey, HostState, HostStateSpec};
 pub use http::HttpRuntime;
 pub use inference::{

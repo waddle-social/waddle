@@ -466,3 +466,231 @@ async fn stderr_suppression_blocks_guest_logging_and_outbound_http_for_inference
         "guest log/stderr sentinel must have 0 occurrences in host logs: {logs}"
     );
 }
+
+#[tokio::test]
+async fn wasm_guest_inference_stream_reads_first_chunk_and_verified_terminal_usage() {
+    use tokio::sync::Notify;
+    use waddle_extensions::config::RuntimeLimits;
+    use waddle_extensions::types::{
+        CommandAction, CommandInvocation, CommandNode, FullJidValue,
+    };
+    use waddle_extensions::actor::WasmExtensionActor;
+
+    struct ProgressiveInferenceHost {
+        first_chunk_seen: Arc<Notify>,
+        release_second_chunk: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ExtensionInferenceHost for ProgressiveInferenceHost {
+        async fn start_stream(
+            &self,
+            _context: &InvocationContext,
+            request: HostInferenceRequest,
+        ) -> Result<OpenedInferenceStream, HostInferenceError> {
+            assert_eq!(request.provider, "openai");
+            assert_eq!(request.model, "gpt-4o-mini");
+            let (tx, rx) = mpsc::channel(4);
+            let (cancel, _cancel_rx) = StreamCancelHandle::new();
+            let first_chunk_seen = Arc::clone(&self.first_chunk_seen);
+            let release_second = Arc::clone(&self.release_second_chunk);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamItem::Chunk(HostInferenceChunk {
+                        delta: b"hello ".to_vec(),
+                        sequence: 0,
+                        finish_reason: None,
+                    }))
+                    .await;
+                first_chunk_seen.notify_one();
+                release_second.notified().await;
+                let _ = tx
+                    .send(StreamItem::Chunk(HostInferenceChunk {
+                        delta: b"world".to_vec(),
+                        sequence: 1,
+                        finish_reason: Some("stop".to_owned()),
+                    }))
+                    .await;
+                let _ = tx
+                    .send(StreamItem::EndOfStream(VerifiedInferenceUsage {
+                        provider: "openai".to_owned(),
+                        model: "gpt-4o-mini".to_owned(),
+                        input_tokens: 12,
+                        output_tokens: 2,
+                        cost_microcents: 420,
+                    }))
+                    .await;
+            });
+            Ok(OpenedInferenceStream {
+                rx,
+                cancel,
+                max_chunk_bytes: 1024,
+            })
+        }
+    }
+
+    let runtime = WasmRuntime::try_new().expect("runtime");
+    let loaded = LoadedExtension::load(
+        &runtime,
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/inference_stream.wat"
+        )),
+    )
+    .expect("load inference_stream.wat")
+    .with_limits(RuntimeLimits::default())
+    .expect("limits");
+
+    let first_chunk_seen = Arc::new(Notify::new());
+    let release_second_chunk = Arc::new(Notify::new());
+    let host = Arc::new(ProgressiveInferenceHost {
+        first_chunk_seen: Arc::clone(&first_chunk_seen),
+        release_second_chunk: Arc::clone(&release_second_chunk),
+    });
+
+    let actor = WasmExtensionActor::initialize(loaded, "{}")
+        .await
+        .expect("init")
+        .with_grants(HashSet::from([ExtensionCapability::Commands]))
+        .with_inference_host(host);
+
+    let event = ExtensionEvent::Command(CommandInvocation {
+        waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
+        room: None,
+        requester: FullJidValue::try_new("alice@acme.example/web").expect("requester"),
+        command_node: CommandNode::try_new("urn:waddle:extension:1:ai-chatbot").expect("node"),
+        session_id: None,
+        action: Some(CommandAction::Execute),
+        form: None,
+        fields: Vec::new(),
+    });
+    let release_clone = Arc::clone(&release_second_chunk);
+    let gate_task = tokio::spawn(async move {
+        first_chunk_seen.notified().await;
+        // Brief pause verifies guest consumes chunk 0 before stream finishes.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        release_clone.notify_one();
+    });
+
+    let effects = actor
+        .handle_event_for_waddle(event, WaddleId::try_new("acme.example").expect("waddle"))
+        .await;
+    gate_task.await.expect("gate task");
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        waddle_extensions::ExtensionEffect::HostWarning(text) => {
+            assert_eq!(text.as_str(), "hello world");
+        }
+        other => panic!("expected assembled stream HostWarning effect, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn wasm_guest_inference_stream_drop_cancels_on_epoch_trap_after_first_chunk() {
+    use tokio::sync::Notify;
+    use waddle_extensions::config::RuntimeLimits;
+    use waddle_extensions::types::{
+        CommandAction, CommandInvocation, CommandNode, DataFormValue, FormFieldValue,
+        FullJidValue, UiActionId,
+    };
+    use waddle_extensions::actor::WasmExtensionActor;
+
+    struct HangingHost {
+        first_chunk_sent: Arc<Notify>,
+        cancel_rx_slot: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
+    }
+
+    #[async_trait]
+    impl ExtensionInferenceHost for HangingHost {
+        async fn start_stream(
+            &self,
+            _context: &InvocationContext,
+            _request: HostInferenceRequest,
+        ) -> Result<OpenedInferenceStream, HostInferenceError> {
+            let (tx, rx) = mpsc::channel(4);
+            let (cancel, cancel_rx) = StreamCancelHandle::new();
+            *self.cancel_rx_slot.lock().expect("lock") = Some(cancel_rx);
+            let sent = Arc::clone(&self.first_chunk_sent);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamItem::Chunk(HostInferenceChunk {
+                        delta: b"partial".to_vec(),
+                        sequence: 0,
+                        finish_reason: None,
+                    }))
+                    .await;
+                sent.notify_one();
+                std::future::pending::<()>().await;
+            });
+            Ok(OpenedInferenceStream {
+                rx,
+                cancel,
+                max_chunk_bytes: 1024,
+            })
+        }
+    }
+
+    let runtime = WasmRuntime::try_new().expect("runtime");
+    let loaded = LoadedExtension::load(
+        &runtime,
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/inference_stream.wat"
+        )),
+    )
+    .expect("load inference_stream.wat")
+    .with_limits(RuntimeLimits {
+        invocation_timeout_ms: 250,
+        http_timeout_ms: 250,
+        ..RuntimeLimits::default()
+    })
+    .expect("limits");
+
+    let first_chunk_sent = Arc::new(Notify::new());
+    let host = Arc::new(HangingHost {
+        first_chunk_sent: Arc::clone(&first_chunk_sent),
+        cancel_rx_slot: Mutex::new(None),
+    });
+
+    let actor = WasmExtensionActor::initialize(loaded, "{}")
+        .await
+        .expect("init")
+        .with_grants(HashSet::from([ExtensionCapability::Commands]))
+        .with_inference_host(Arc::clone(&host) as Arc<dyn ExtensionInferenceHost>);
+
+    let event = ExtensionEvent::Command(CommandInvocation {
+        waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
+        room: None,
+        requester: FullJidValue::try_new("alice@acme.example/web").expect("requester"),
+        command_node: CommandNode::try_new("urn:waddle:extension:1:ai-chatbot").expect("node"),
+        session_id: None,
+        action: Some(CommandAction::Execute),
+        form: None,
+        fields: vec![FormFieldValue {
+            name: UiActionId::try_new("hang").expect("field"),
+            values: vec![DataFormValue::new("1")],
+        }],
+    });
+
+    let effects = actor
+        .handle_event_for_waddle(event, WaddleId::try_new("acme.example").expect("waddle"))
+        .await;
+    // Guest spun after receiving chunk 0 until epoch/deadline trap -> fail-open warning.
+    assert!(
+        matches!(
+            effects.first(),
+            Some(waddle_extensions::ExtensionEffect::HostWarning(_))
+        ),
+        "expected deadline/epoch trap HostWarning, got {effects:?}"
+    );
+    let cancel_rx = host
+        .cancel_rx_slot
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("start_stream was called");
+    assert!(
+        *cancel_rx.borrow(),
+        "dropping Store<HostState> on epoch/deadline trap must synchronously trigger InferenceStream::Drop cancel"
+    );
+}
