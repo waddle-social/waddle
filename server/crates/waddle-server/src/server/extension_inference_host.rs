@@ -109,6 +109,99 @@ pub trait BrokerCredentialResolver: Send + Sync {
     ) -> Result<(AccountId, Uuid, SignedInferenceInvocation), HostInferenceError>;
 }
 
+/// Event emitted to a room strictly after broker admission succeeds and
+/// strictly before inference egress begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomDisclosureEvent {
+    pub tenant_id: TenantId,
+    pub room_jid: BareJid,
+    pub requester: Option<BareJid>,
+    pub plugin_id: String,
+    pub provider: String,
+    pub model: String,
+    pub attempt_id: AttemptId,
+}
+
+/// Server-owned sink for post-admission, pre-egress room disclosure of room
+/// `/ai` or interactive launch invocations.
+#[async_trait]
+pub trait RoomDisclosureEmitter: Send + Sync {
+    async fn emit_room_disclosure(
+        &self,
+        event: &RoomDisclosureEvent,
+    ) -> Result<(), HostInferenceError>;
+}
+
+/// No-op disclosure emitter used when unit tests or headless callers supply
+/// their own isolation harness.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopRoomDisclosureEmitter;
+
+#[async_trait]
+impl RoomDisclosureEmitter for NoopRoomDisclosureEmitter {
+    async fn emit_room_disclosure(
+        &self,
+        _event: &RoomDisclosureEvent,
+    ) -> Result<(), HostInferenceError> {
+        Ok(())
+    }
+}
+
+/// Production room disclosure emitter broadcasting a room system message via
+/// the XMPP interpreter pipeline after admission and before egress.
+pub struct ServerRoomDisclosureEmitter {
+    state: Arc<WebSocketState>,
+}
+
+impl ServerRoomDisclosureEmitter {
+    /// Construct a room disclosure emitter backed by `state`.
+    pub fn new(state: Arc<WebSocketState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl RoomDisclosureEmitter for ServerRoomDisclosureEmitter {
+    async fn emit_room_disclosure(
+        &self,
+        event: &RoomDisclosureEvent,
+    ) -> Result<(), HostInferenceError> {
+        let requester_label = event
+            .requester
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "a room member".to_owned());
+        let disclosure_body = format!(
+            "{requester_label} invoked /{} in this room (provider={}, model={})",
+            event.plugin_id, event.provider, event.model
+        );
+        let mut msg =
+            xmpp_parsers::message::Message::new(Some(jid::Jid::from(event.room_jid.clone())));
+        msg.from = Some(jid::Jid::from(event.room_jid.clone()));
+        msg.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        msg.bodies
+            .insert(xmpp_parsers::message::Lang(String::new()), disclosure_body);
+        let deps = crate::server::routes::websocket::interpret_loop::build_interpret_deps(
+            &self.state,
+            None,
+        );
+        if crate::server::routes::interpret::broadcast_room_system_message(
+            &deps,
+            event.room_jid.clone(),
+            Box::new(msg),
+        )
+        .await
+        .is_none()
+        {
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::TemporaryFailure,
+                "failed to broadcast room disclosure before inference egress",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for [`BrokerExtensionInferenceHost`].
 #[derive(Debug, Clone)]
 pub struct BrokerExtensionInferenceHostConfig {
@@ -131,6 +224,7 @@ pub struct BrokerExtensionInferenceHost<L> {
     peer_spiffe_id: SpiffeId,
     channel_binding: [u8; TLS_EXPORTER_CHANNEL_BINDING_LEN],
     credential_resolver: Arc<dyn BrokerCredentialResolver>,
+    disclosure_emitter: Arc<dyn RoomDisclosureEmitter>,
     default_budget: BudgetLimits,
     default_deployment: String,
     default_reserved_spend_microcents: u64,
@@ -155,10 +249,20 @@ where
             peer_spiffe_id: config.peer_spiffe_id,
             channel_binding: config.channel_binding,
             credential_resolver,
+            disclosure_emitter: Arc::new(NoopRoomDisclosureEmitter),
             default_budget: config.default_budget,
             default_deployment: config.default_deployment,
             default_reserved_spend_microcents: config.default_reserved_spend_microcents,
         }
+    }
+
+    /// Configure the post-admission, pre-egress room disclosure emitter.
+    pub fn with_disclosure_emitter(
+        mut self,
+        disclosure_emitter: Arc<dyn RoomDisclosureEmitter>,
+    ) -> Self {
+        self.disclosure_emitter = disclosure_emitter;
+        self
     }
 }
 
@@ -330,6 +434,37 @@ where
                     "broker admission denied inference invocation",
                 )
             })?;
+
+        if matches!(
+            context.kind,
+            InvocationKind::Command | InvocationKind::Launch
+        ) {
+            if let Some(room_jid) = context.source_room.clone() {
+                let disclosure = RoomDisclosureEvent {
+                    tenant_id: tenant_id.clone(),
+                    room_jid,
+                    requester: context.requester.clone(),
+                    plugin_id: context.plugin_id.as_str().to_owned(),
+                    provider: request.provider.clone(),
+                    model: request.model.clone(),
+                    attempt_id: admitted.receipt.attempt_id,
+                };
+                if let Err(err) = self
+                    .disclosure_emitter
+                    .emit_room_disclosure(&disclosure)
+                    .await
+                {
+                    let _ = self
+                        .admission
+                        .reconcile_attempt(
+                            admitted.receipt.attempt_id,
+                            AttemptOutcome::FailedBeforeSend,
+                        )
+                        .await;
+                    return Err(err);
+                }
+            }
+        }
 
         let mut body_map = Map::new();
         body_map.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -703,13 +838,32 @@ pub(crate) async fn build_startup_extension_inference_host(
         default_reserved_spend_microcents: 0,
     };
     let shutdown = websocket_state.deps.shutdown.stop_token();
+    let disclosure_emitter: Arc<dyn RoomDisclosureEmitter> = Arc::new(
+        ServerRoomDisclosureEmitter::new(Arc::clone(websocket_state)),
+    );
 
     if let Some(admission_path) = std::env::var_os("WADDLE_BROKER_ADMISSION_DB") {
         let ledger = Arc::new(TursoAdmissionLedgerStore::open(admission_path).await?);
-        build_host_with_ledger(config, ledger, egress, resolver, shutdown).await
+        build_host_with_ledger(
+            config,
+            ledger,
+            egress,
+            resolver,
+            disclosure_emitter,
+            shutdown,
+        )
+        .await
     } else {
         let ledger = Arc::new(SqliteCompatAdmissionLedgerStore::in_memory().await?);
-        build_host_with_ledger(config, ledger, egress, resolver, shutdown).await
+        build_host_with_ledger(
+            config,
+            ledger,
+            egress,
+            resolver,
+            disclosure_emitter,
+            shutdown,
+        )
+        .await
     }
 }
 
@@ -718,6 +872,7 @@ async fn build_host_with_ledger<L>(
     ledger: Arc<L>,
     egress: Arc<BrokerEgressClient>,
     resolver: Arc<dyn BrokerCredentialResolver>,
+    disclosure_emitter: Arc<dyn RoomDisclosureEmitter>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<Arc<dyn ExtensionInferenceHost>>
 where
@@ -756,9 +911,10 @@ where
         replica_fence,
         TraceRecorder::new(),
     ));
-    Ok(Arc::new(BrokerExtensionInferenceHost::new(
-        config, admission, egress, resolver,
-    )))
+    Ok(Arc::new(
+        BrokerExtensionInferenceHost::new(config, admission, egress, resolver)
+            .with_disclosure_emitter(disclosure_emitter),
+    ))
 }
 
 #[derive(Default)]

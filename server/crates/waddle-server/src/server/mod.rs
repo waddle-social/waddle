@@ -59,6 +59,7 @@ pub use extension_commands::decoupled_test_hooks::{
     build_websocket_state_for_test, run_extension_command_decoupled_for_test,
     DecoupledCommandDispatchHandle,
 };
+pub use extension_commands::validate_room_ai_output_mode;
 pub use routes::interpret::effects;
 /// Interpreter-only ingress planning seam, consumed by the authority cutover.
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};

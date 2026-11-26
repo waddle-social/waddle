@@ -169,6 +169,11 @@ pub(crate) async fn register_extension_commands(
                     let room = extension_field_value(&fields, "room")
                         .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
                         .and_then(|value| ExtensionRoomJid::try_new(value).ok());
+                    if let Err(err) =
+                        validate_room_ai_output_mode(&registered_node, room.as_ref(), &fields)
+                    {
+                        return extension_warning_result(&err);
+                    }
                     let command_session_id = ctx.command.session_id.clone();
                     let requester =
                         match waddle_extensions::FullJidValue::try_new(ctx.from.to_string()) {
@@ -274,6 +279,27 @@ pub(crate) async fn build_extension_manager(
     };
 
     Ok(Arc::new(manager))
+}
+
+/// Reject private `/ai` output mode inside MUC rooms before extension execution
+/// so room `/ai` prompts cannot generate hidden side-channel answers.
+pub fn validate_room_ai_output_mode(
+    node: &str,
+    room: Option<&ExtensionRoomJid>,
+    fields: &[waddle_extensions::FormFieldValue],
+) -> Result<(), String> {
+    if node != "urn:waddle:extension:1:ai-chatbot" || room.is_none() {
+        return Ok(());
+    }
+    if let Some(mode) = extension_field_value(fields, "output") {
+        let trimmed = mode.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("channel") {
+            return Err(
+                "private output mode is forbidden for /ai inside a room; room /ai always posts publicly to the channel".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn extension_field_value(
