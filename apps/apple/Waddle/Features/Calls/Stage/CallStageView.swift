@@ -122,7 +122,12 @@ struct CallStageView: View {
                 notices
             }
             HStack(spacing: Theme.Spacing.m) {
-                if participants == nil || !participantsCoverTiles {
+                if controls.isFloating == true {
+                    // The picture is in the floating window: a track keeps one renderer.
+                    if participants == nil || !participantsCoverTiles {
+                        CallFloatingNotice(returnsOnEscape: controls.escapeStepsDown) { perform(.togglePictureInPicture) }
+                    }
+                } else if participants == nil || !participantsCoverTiles {
                     CallTileArea(
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
                         toggleParticipants: { perform(.toggleParticipants) }

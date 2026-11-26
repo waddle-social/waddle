@@ -16,12 +16,14 @@ struct CallControlBar: View {
     private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
     private var isSelfViewHidden: Bool { controls.isSelfViewHidden }
     private var size: CallSurface.Size { controls.size }
-    private var escapeStepsDown: Bool { controls.escapeStepsDown }
     private var showsParticipants: Bool { controls.showsParticipants }
     private var isSharingScreen: Bool? { controls.devices.isSharingScreen }
     private var chatUnread: Int? { controls.chatUnread }
     private var showsChat: Bool { controls.showsChat }
     private var canReact: Bool { controls.canReact }
+    private var isFloating: Bool? { controls.isFloating }
+    /// Escape brings a floating call back before it steps the stage down (web #1034).
+    private var escapeStepsDown: Bool { controls.escapeStepsDown && controls.isFloating != true }
 
     var body: some View {
         // Widest first; the bar takes the first that fits (`CallControlBarLayout`).
@@ -109,6 +111,13 @@ struct CallControlBar: View {
                 tone: showsParticipants ? .chosen : .plain, action: { perform(.toggleParticipants) }
             )
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        }
+        if let isFloating, isInBar(.pictureInPicture, layout) {
+            CallControlButton(
+                title: isFloating ? "Return to call" : "Picture-in-Picture", symbol: isFloating ? "pip.exit" : "pip.enter",
+                tone: isFloating ? .chosen : .plain, action: { perform(.togglePictureInPicture) }
+            )
+            .accessibilityAddTraits(isFloating ? .isSelected : [])
         }
         sizeSteps
         more(layout)
@@ -213,6 +222,9 @@ struct CallControlBar: View {
             if isInMenu(.react, layout) {
                 Menu("React") { reactionChoices }
             }
+            if isInMenu(.pictureInPicture, layout) {
+                Button("Picture-in-Picture", action: { perform(.togglePictureInPicture) })
+            }
             if isInMenu(.viewChoice, layout) {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { perform(.setViewMode($0)) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
@@ -288,6 +300,8 @@ struct CallControlButton: View {
         case off
         /// A choice that is in effect: the camera off, a hand up.
         case chosen
+        /// Ends our part of the call, where there is no room for the pill that says so.
+        case end
     }
 
     let title: String
@@ -318,6 +332,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.fg
         case .off: Theme.Colors.dangerText
         case .chosen: Theme.Colors.actionText
+        case .end: Theme.Colors.dangerFg
         }
     }
 
@@ -326,6 +341,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.surface2
         case .off: Theme.Colors.danger.opacity(0.18)
         case .chosen: Theme.Colors.actionSubtle
+        case .end: Theme.Colors.danger
         }
     }
 }

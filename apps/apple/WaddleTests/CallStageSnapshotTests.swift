@@ -39,7 +39,8 @@ final class CallStageSnapshotTests: XCTestCase {
     private static func stageControls(
         status: CallSessionStatus, presentation: CallStagePresentation,
         participants: [CallParticipantRow]? = nil, isMicrophoneOn: Bool = true, isCameraOn: Bool = false,
-        isHandRaised: Bool? = false, size: CallSurface.Size = .split, isSharingScreen: Bool? = nil
+        isHandRaised: Bool? = false, size: CallSurface.Size = .split, isSharingScreen: Bool? = nil,
+        isFloating: Bool? = nil
     ) -> CallControls {
         CallControls(
             devices: .init(
@@ -47,20 +48,21 @@ final class CallStageSnapshotTests: XCTestCase {
                 hasMedia: status.hasMedia, isSharingScreen: isSharingScreen
             ),
             isHandRaised: isHandRaised, viewMode: presentation.viewMode, isSelfViewHidden: presentation.isSelfViewHidden,
-            size: size, showsParticipants: participants != nil, canReact: status.hasMedia
+            size: size, showsParticipants: participants != nil, canReact: status.hasMedia, isFloating: isFloating
         )
     }
 
     private func assertStage(
         title: String = "#design", subtitle: String = "2 others in call", status: CallSessionStatus = .connected,
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
-        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, issues: [CallMediaIssue] = [],
+        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, isFloating: Bool? = nil,
+        issues: [CallMediaIssue] = [],
         checkingIssues: Set<CallMediaIssue.Kind> = [], isChromeHidden: Bool = false,
         stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
         let controls = Self.stageControls(
             status: status, presentation: presentation, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
-            isHandRaised: isHandRaised, size: stageSize
+            isHandRaised: isHandRaised, size: stageSize, isFloating: isFloating
         )
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
@@ -183,6 +185,14 @@ final class CallStageSnapshotTests: XCTestCase {
     }
 
     /// Someone shares their screen: it takes the large tile, in gallery view too.
+    /// The picture is in its floating window: the stage says where the call went.
+    func testRoomWhileTheCallFloats() {
+        assertStage(
+            title: "#design", subtitle: "3 others in call", status: .connected,
+            tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken], isFloating: true
+        )
+    }
+
     func testRoomWithASharedScreen() {
         let screen = CallStageTile(
             identity: Self.linus.identity, source: .screen, label: "linus's screen", hasVideo: true,
@@ -380,7 +390,7 @@ final class CallStageSnapshotTests: XCTestCase {
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, hasMedia: Bool = true, isHandRaised: Bool? = nil,
         viewMode: CallStagePresentation.ViewMode = .gallery, size: CallSurface.Size = .split,
         isSharingScreen: Bool? = nil, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false,
-        testName: String = #function, line: UInt = #line
+        isFloating: Bool? = nil, testName: String = #function, line: UInt = #line
     ) {
         let controls = CallControls(
             devices: .init(
@@ -388,7 +398,7 @@ final class CallStageSnapshotTests: XCTestCase {
                 hasMedia: hasMedia, isSharingScreen: isSharingScreen
             ),
             isHandRaised: isHandRaised, viewMode: viewMode, size: size,
-            chatUnread: chatUnread, showsChat: showsChat, canReact: canReact
+            chatUnread: chatUnread, showsChat: showsChat, canReact: canReact, isFloating: isFloating
         )
         assertHuddleSnapshot(
             precision: 0.97,
@@ -400,6 +410,11 @@ final class CallStageSnapshotTests: XCTestCase {
             testName: testName,
             line: line
         )
+    }
+
+    /// Someone has a picture: the call can float.
+    func testControlBarWithPictureInPicture() {
+        assertBar(isHandRaised: false, size: .split, isFloating: false)
     }
 
     /// A room's call with messages in its chat that nobody here has looked at.
