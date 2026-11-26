@@ -12,7 +12,7 @@ import Testing
         port.heldCallVerbs = ["retract"]
 
         var completions = 0
-        #expect(coordinator.beginCallTermination { completions += 1 })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { completions += 1 })
         await eventually { port.callSends.last == .retract(callPeer.bare, sid) }
         #expect(port.disconnectCount == 0)
         port.releaseCallSends()
@@ -59,7 +59,7 @@ import Testing
         #expect(await calls.startCall(to: callPeer.bare, media: callAudio))
 
         var completed = false
-        #expect(coordinator.beginCallTermination { completed = true })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { completed = true })
         // Install the winner without yielding so the quit task sees the new slot.
         let replacement = CallEvent(from: callPeer, sid: "replacement", kind: .propose(callAudio))
         try #require(calls.installIncoming(replacement, media: callAudio, expected: calls.state, accepting: true, epoch: calls.generation))
@@ -77,7 +77,7 @@ import Testing
         port.heldCallVerbs = ["retract"]
 
         var completions = 0
-        #expect(coordinator.beginCallTermination { completions += 1 })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { completions += 1 })
         await eventually { port.callSends.last == .retract(callPeer.bare, sid) }
         port.emit(.disconnected)
         await eventually { coordinator.connection == .offline(retryAt: nil) }
@@ -101,7 +101,7 @@ import Testing
         port.completedCallSends = []
 
         var sendsAtCompletion: [CallSend]?
-        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
         #expect(calls.state == .idle)
@@ -121,7 +121,7 @@ import Testing
         port.completedCallSends = []
 
         var sendsAtCompletion: [CallSend]?
-        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
         #expect(calls.state == .idle)
@@ -133,7 +133,7 @@ import Testing
     @Test func quittingWithoutACallDoesNotWait() async {
         let (coordinator, port) = await connectedSession()
 
-        #expect(!coordinator.beginCallTermination { Issue.record("No hang-up was started") })
+        #expect(!coordinator.beginCallTermination(timeout: .seconds(30)) { Issue.record("No hang-up was started") })
         #expect(coordinator.calls.state == .idle)
         #expect(port.disconnectCount == 0)
         #expect(port.callSends.isEmpty)
@@ -145,7 +145,7 @@ import Testing
         calls.handle(.init(from: callPeer, sid: "c1", kind: .propose(callAudio)))
         await eventually { port.completedCallSends.count == 1 }
 
-        #expect(!coordinator.beginCallTermination { Issue.record("The call was never answered here") })
+        #expect(!coordinator.beginCallTermination(timeout: .seconds(30)) { Issue.record("The call was never answered here") })
         #expect(calls.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
         #expect(port.disconnectCount == 0)
         #expect(port.callSends == [.ringing(callPeer, "c1")])
@@ -158,7 +158,7 @@ import Testing
         let sid = try #require(coordinator.calls.state.sid)
 
         var sendsAtCompletion: [CallSend]?
-        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
         #expect(coordinator.calls.state == .idle)
@@ -173,7 +173,7 @@ import Testing
         #expect(await calls.acceptIncoming())
 
         var sendsAtCompletion: [CallSend]?
-        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
         #expect(calls.state == .idle)
@@ -187,7 +187,7 @@ import Testing
         let sid = try #require(calls.state.sid)
 
         var completed = false
-        #expect(coordinator.beginCallTermination { completed = true })
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { completed = true })
         calls.clear()
         calls.handle(.init(from: callPeer, sid: "c2", kind: .propose(callAudio)))
         await eventually { completed && port.completedCallSends.count >= 2 }
