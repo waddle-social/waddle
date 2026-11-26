@@ -15,9 +15,9 @@ struct PeerBlockSection: View {
         let covering = session.blockedEntry(covering: peer)
         let isBlocked = covering != nil
         // Blocked with their whole server: that entry is not this person's to lift from here.
-        let own = covering.flatMap { $0.jid.bare == peer ? $0 : nil }
+        let isTheirOwnEntry = covering?.jid.bare == peer
         Section {
-            if let covering, own == nil {
+            if let covering, !isTheirOwnEntry {
                 Text(BlockText.coveredNote(covering))
                     .huddleText(Theme.Typography.body)
                     .foregroundStyle(Theme.Colors.fgMuted)
@@ -40,7 +40,7 @@ struct PeerBlockSection: View {
         } footer: {
             if didFail {
                 FormSectionFooter(BlockText.failed)
-            } else if own != nil {
+            } else if isTheirOwnEntry {
                 FormSectionFooter(BlockText.blockedNote)
             }
         }

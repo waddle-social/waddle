@@ -43,19 +43,19 @@ struct BlockedPeopleSection: View {
             }
             // A list that could not be read does not follow changes made elsewhere, whatever it already holds.
             if load == .failed, isOnline {
-                FormActionButton(title: "Try again", symbol: "arrow.clockwise") {
+                FormActionButton(title: BlockText.tryAgain, symbol: "arrow.clockwise") {
                     Task { await session.reloadBlockList() }
                 }
             }
         } header: {
-            FormSectionHeader("Blocked people")
+            FormSectionHeader(BlockText.listTitle)
         } footer: {
             if failed != nil {
                 FormSectionFooter(BlockText.failed)
             } else if load == .failed, isOnline {
                 FormSectionFooter(BlockText.couldNotLoad)
             } else {
-                FormSectionFooter("Block someone from their details in a direct message.")
+                FormSectionFooter(BlockText.howToBlock)
             }
         }
     }
@@ -102,7 +102,8 @@ private struct BlockedEntryRow: View {
                 }
             }
             Spacer(minLength: Theme.Spacing.s)
-            Button("Unblock", action: unblock)
+            Button(BlockText.unblock, action: unblock)
+                .buttonStyle(.huddle(.secondary, size: .small))
                 .disabled(isWorking)
                 .accessibilityLabel(Text(entry.unblockLabel))
         }

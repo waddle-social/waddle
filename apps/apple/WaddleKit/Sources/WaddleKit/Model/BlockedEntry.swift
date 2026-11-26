@@ -17,8 +17,9 @@ public struct BlockedEntry: Hashable, Identifiable, Sendable {
         if jid.bare.localpart == nil {
             title = jid.resource == nil ? "Everyone at \(jid.bare.domain)" : address
             detail = nil
-        } else if let resource = jid.resource {
-            title = "\(name(jid.bare) ?? jid.bare.description) on \(resource)"
+        } else if jid.resource != nil {
+            // Not the device's own label: that is the protocol's word for it, and often a random string.
+            title = "One of \(name(jid.bare) ?? jid.bare.description)'s devices"
             detail = address
         } else if let name = name(jid.bare), name != address {
             title = name
@@ -42,7 +43,8 @@ public enum BlockText {
     public static let confirmMessage =
         "They can't message or call you directly, and you can't message them, until you unblock them. You still see each other in rooms you share."
 
-    public static let blockedNote = "You blocked this person. They can't message or call you directly."
+    public static let blockedNote =
+        "You blocked this person. They can't message or call you directly, and you can't message them."
 
     /// The person is blocked with their whole server, which another client did: not this person's to undo here.
     public static func coveredNote(_ entry: BlockedEntry) -> String {
@@ -50,6 +52,14 @@ public enum BlockText {
     }
 
     public static let offline = "The list loads when you're back online."
+
+    public static let listTitle = "Blocked people"
+
+    public static let howToBlock = "Block someone from their profile."
+
+    public static let tryAgain = "Try again"
+
+    public static let unblock = "Unblock"
 
     public static let failed = "That didn't go through. Check your connection and try again."
 

@@ -270,6 +270,7 @@
 		579D464CCC7A1601D2217FA7 /* FFIInbound+Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A5A81C6475212B6231EEFDC /* FFIInbound+Call.swift */; };
 		57A94E749CE8123A86147D25 /* CallStageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA86BA5170F32EC30A1D804C /* CallStageModel.swift */; };
 		580F0184B9067734F9D35B81 /* CallShortcutKeysTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E59EE209E5B4695E1D06D233 /* CallShortcutKeysTests.swift */; };
+		582DC75FF295240FCCDF97F8 /* FakePort+Blocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */; };
 		590D6C5A30F8F49BE0909A6D /* GroupCallRosterStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD28165C27A0CBAD701FE41A /* GroupCallRosterStrip.swift */; };
 		590DFEA0175D868801952DB2 /* ExtensionCommandFormSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF3C366FF15AFD0089E2F96 /* ExtensionCommandFormSheet.swift */; };
 		5A9417962C9520831DABE795 /* StoryViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD8B49EFB0EDEA4C7F1DE6F /* StoryViewer.swift */; };
@@ -582,6 +583,7 @@
 		B5386E5160F1572EEF86C911 /* PushControlsSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98ED22994875718F88ABC97A /* PushControlsSnapshotTests.swift */; };
 		B5750785D1B02D35D2BAC85B /* EventDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */; };
 		B5E01FEDC9B9B8A708B104C0 /* EventEditorParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FD3364EDD46C6BC806C8958 /* EventEditorParts.swift */; };
+		B5EC668F289847698EE1931C /* FakePort+Blocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */; };
 		B5F6928CE905C8F82637003C /* QuickSwitcherResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0EC3BBBD56E38C392A73A0 /* QuickSwitcherResults.swift */; };
 		B6D6E074559E4E2AA65FFD19 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C0B6BD5F8A7D842A008370 /* RootView.swift */; };
 		B6FA7A0D0880626FB61A1770 /* PinnedMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 463B2FA03157B7332CE180CB /* PinnedMessagesView.swift */; };
@@ -862,6 +864,7 @@
 		11105E8B11D4C7F2CB3ED289 /* CommunitySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommunitySnapshotTests.swift; sourceTree = "<group>"; };
 		116C44D1284E56359FA8FCC3 /* CallShortcutKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallShortcutKeys.swift; sourceTree = "<group>"; };
 		11B35AA012A5570BDC2F1FD5 /* CallTonePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallTonePlayer.swift; sourceTree = "<group>"; };
+		11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Blocking.swift"; sourceTree = "<group>"; };
 		11E556D95DAF8FB92C14A348 /* Motion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Motion.swift; sourceTree = "<group>"; };
 		12445F68EB008CA7EF03F862 /* ComposerNotice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerNotice.swift; sourceTree = "<group>"; };
 		14FB0444FBD894A06DDA6874 /* ChannelNavigationRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelNavigationRow.swift; sourceTree = "<group>"; };
@@ -1671,6 +1674,7 @@
 			children = (
 				E81704B7DBD86ABF17B4778B /* FakePort.swift */,
 				7AFA47F094F3F774AED436DC /* FakePort+Admin.swift */,
+				11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */,
 				DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */,
 				29ABBFC816B163EFFA2FD289 /* FakePort+Community.swift */,
 				EA01E0DDEBD8CF352E5ABC19 /* FakePort+Events.swift */,
@@ -2787,6 +2791,7 @@
 				32C7E1A23AAC797A745AC8BE /* EventsSnapshotTests.swift in Sources */,
 				74D75833CCADC0E2FFCAC2FD /* FakeCallMedia.swift in Sources */,
 				25BBAEF11F2B5A9B9ED470CE /* FakePort+Admin.swift in Sources */,
+				582DC75FF295240FCCDF97F8 /* FakePort+Blocking.swift in Sources */,
 				4E4CCC511B25572B50FB71D3 /* FakePort+Calls.swift in Sources */,
 				82968DF90B9F4B7AE653EA23 /* FakePort+Community.swift in Sources */,
 				7724D0E8A3AF5ECDFEE4EFCA /* FakePort+Events.swift in Sources */,
@@ -3190,6 +3195,7 @@
 				BC6823CB7EAA5A4A38272C3E /* EventsSnapshotTests.swift in Sources */,
 				3F96F723D2D4BC0D72DC1CB3 /* FakeCallMedia.swift in Sources */,
 				87126EB9C8D4584A6698A0CB /* FakePort+Admin.swift in Sources */,
+				B5EC668F289847698EE1931C /* FakePort+Blocking.swift in Sources */,
 				3EB84E23C0D3EBEB0C46C583 /* FakePort+Calls.swift in Sources */,
 				868F786CD6B1635455E1AB83 /* FakePort+Community.swift in Sources */,
 				D5DE548074D61CD789FF3FF8 /* FakePort+Events.swift in Sources */,

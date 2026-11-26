@@ -32,9 +32,11 @@ extension SessionCoordinator {
 
     /// The block list as the app shows it, in the list's order.
     public var blockedEntries: [BlockedEntry] {
-        blockList.blockedJIDs.map { jid in
-            BlockedEntry(jid) { directory.title(for: .direct($0)) }
-        }
+        blockList.blockedJIDs.map(entry)
+    }
+
+    private func entry(_ jid: JID) -> BlockedEntry {
+        BlockedEntry(jid) { directory.title(for: .direct($0)) }
     }
 
     /// Asks for the list again, as after a load that failed.
@@ -53,14 +55,12 @@ extension SessionCoordinator {
         blockList.apply(.blocked([jid]))
     }
 
-    /// Removes the exact entry from the account's block list.
     /// What blocks `person`, as the app says it; nil when nothing does.
     public func blockedEntry(covering person: BareJID) -> BlockedEntry? {
-        blockList.entry(covering: person).map { jid in
-            BlockedEntry(jid) { directory.title(for: .direct($0)) }
-        }
+        blockList.entry(covering: person).map(entry)
     }
 
+    /// Removes the exact entry from the account's block list.
     public func unblock(_ jid: JID) async throws {
         let epoch = connectionEpoch
         try await port.unblock([jid])

@@ -162,6 +162,9 @@ struct PeerProfileSheet: View {
                 if let details {
                     PeerDetailsSection(details: details)
                 }
+                if let peer = messageablePeer {
+                    PeerBlockSection(peer: peer, name: profile.name)
+                }
             }
             .huddleForm()
             .peerDetails(of: profile.jid, session: session, into: $details)

@@ -29,7 +29,7 @@ struct BlockedEntryTests {
     @Test func aServerAndADeviceSayWhatTheyCover() {
         #expect(BlockedEntry(jid("spam.example"), name: names).title == "Everyone at spam.example")
         let device = BlockedEntry(jid("bob@waddle.test/phone"), name: names)
-        #expect(device.title == "Bob on phone")
+        #expect(device.title == "One of Bob's devices")
         #expect(device.detail == "bob@waddle.test/phone")
         #expect(BlockedEntry(jid("spam.example/bot"), name: names).title == "spam.example/bot")
     }
