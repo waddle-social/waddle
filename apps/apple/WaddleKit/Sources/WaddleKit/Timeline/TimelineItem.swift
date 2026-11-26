@@ -219,7 +219,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// Every id a pin of this message may be named by. In 1:1 the server
     /// names it by `@id`; for a message that has none it falls back to an
     /// archive id and then to the origin-id.
-    public var pinnedIDs: [String] {
+    public var pinAliases: [String] {
         if conversation.isRoom { return roomStanzaID.map { [$0] } ?? [] }
         return [identity.messageID, identity.originID].compactMap(\.self) + identity.stanzaIDs.map(\.id)
     }

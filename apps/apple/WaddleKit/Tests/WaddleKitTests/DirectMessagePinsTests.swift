@@ -111,6 +111,14 @@ struct DirectMessagePinsTests {
         #expect(coordinator.pins.pins(in: bob).first?.preview.text == "lunch at noon")
     }
 
+    @Test func anOldPinIsUnpinnedFromTheListWithoutItsMessageLoaded() async {
+        let (coordinator, port) = online()
+        coordinator.route(pinEvent(.pinned, target: "older", by: bobBare, to: meBare))
+        let pin = coordinator.pins.pins(in: bob)[0]
+        #expect(await coordinator.unpin(pin, in: bobConversation))
+        #expect(port.pinWrites == [FakePort.PinWrite(pinned: false, targetID: "older", conversation: bobConversation)])
+    }
+
     @Test func aRoomsPinNoticeInItsHistoryStaysARow() {
         let (coordinator, _) = online()
         var notice = roomMessage("bob pinned a message", from: "general", stanzaID: "n1")

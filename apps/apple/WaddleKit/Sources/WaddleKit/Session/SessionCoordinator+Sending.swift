@@ -436,15 +436,6 @@ extension SessionCoordinator {
         return selfOccupant(in: conversation.jid)?.canModerate == true
     }
 
-    public func setPinned(_ pinned: Bool, _ item: TimelineItem) async -> Bool {
-        guard let target = item.pinTargetID else { return false }
-        return await port.setPinned(pinned, targetID: target, in: item.conversation)
-    }
-
-    public func isPinned(_ item: TimelineItem) -> Bool {
-        item.pinnedIDs.contains { pins.isPinned($0, in: item.conversation.jid) }
-    }
-
     // MARK: - Typing (XEP-0085)
 
     /// Call on every composer edit. Sends `composing` once, then `paused`

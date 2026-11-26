@@ -201,12 +201,6 @@ extension SessionCoordinator {
             }
         }
     }
-
-    func refreshPins(in room: BareJID) async {
-        let version = pins.versionBeforeFetch(room)
-        guard let entries = try? await port.fetchPins(in: room) else { return }
-        pins.seed(entries, in: room, fetchedAt: version)
-    }
 }
 
 /// Names one screen showing a conversation, so that closing one of two

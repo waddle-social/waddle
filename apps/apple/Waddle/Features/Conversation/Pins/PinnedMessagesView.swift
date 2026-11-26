@@ -37,7 +37,7 @@ struct PinnedMessagesView: View {
                 Button {
                     open(pin)
                 } label: {
-                    PinnedMessageRow(pin: pin, room: conversation.jid)
+                    PinnedMessageRow(pin: pin, room: conversation.jid, author: author(of: pin))
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
@@ -50,14 +50,22 @@ struct PinnedMessagesView: View {
 
     @ViewBuilder
     private func unpinButton(for pin: PinEntry) -> some View {
-        let timeline = session.timelines.timeline(for: conversation)
-        if let item = timeline.item(withID: pin.targetStanzaID) {
+        // By the pin's own id: the message may be far back and not loaded.
+        if session.pinAccess(in: conversation) == .allowed {
             Button(role: .destructive) {
-                Task { _ = await session.setPinned(false, item) }
+                Task { _ = await session.unpin(pin, in: conversation) }
             } label: {
                 Label("Unpin", systemImage: "pin.slash")
             }
         }
+    }
+
+    /// A room's occupant by their nick; in a conversation of two, the person by the name the app has for them.
+    private func author(of pin: PinEntry) -> String {
+        if let nick = pin.preview.authorNick, !nick.isEmpty { return nick }
+        guard let jid = pin.preview.author else { return "Unknown" }
+        if !conversation.isRoom { return session.directory.title(for: .direct(jid.bare)) }
+        return jid.resource ?? jid.bare.localpart ?? jid.bare.domain
     }
 
     private func open(_ pin: PinEntry) {
@@ -70,6 +78,7 @@ struct PinnedMessagesView: View {
 private struct PinnedMessageRow: View {
     let pin: PinEntry
     let room: BareJID
+    let author: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -92,12 +101,6 @@ private struct PinnedMessageRow: View {
         .padding(.vertical, Theme.Spacing.xs)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-    }
-
-    private var author: String {
-        if let nick = pin.preview.authorNick, !nick.isEmpty { return nick }
-        if let jid = pin.preview.author { return jid.resource ?? jid.bare.localpart ?? jid.bare.domain }
-        return "Unknown"
     }
 
     /// XEP-0392: the author's bare JID unless it is only the room
