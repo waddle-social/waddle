@@ -10,6 +10,7 @@ pub(crate) mod extension_bot_rooms;
 mod extension_commands;
 pub mod extension_host_adapter;
 mod extension_host_tools;
+pub mod extension_inference_host;
 mod fixed_account;
 mod health;
 pub(crate) mod host_grant_revocation;
@@ -54,9 +55,15 @@ pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
 pub(crate) mod routes;
 
+pub use extension_commands::decoupled_test_hooks::{
+    build_websocket_state_for_test, run_extension_command_decoupled_for_test,
+    DecoupledCommandDispatchHandle,
+};
+pub use extension_commands::validate_room_ai_output_mode;
 pub use routes::interpret::effects;
 /// Interpreter-only ingress planning seam, consumed by the authority cutover.
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
+pub use routes::websocket::{spawn_decoupled_streaming_inference, StreamingInferenceSession};
 pub mod xmpp_state;
 
 pub use config::{MamOwnerClaimHandoff, ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};

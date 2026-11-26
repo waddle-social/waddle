@@ -8,10 +8,11 @@ use super::waddle::extension::types as wit_types;
 use crate::host_tools::{HostToolError, HostToolErrorCode};
 use crate::types::DisplayText;
 
+/// Host HTTP client and concurrency semaphore shared across extension instances.
 #[derive(Debug, Clone)]
-pub(super) struct HttpRuntime {
-    pub client: reqwest::Client,
-    pub permits: std::sync::Arc<tokio::sync::Semaphore>,
+pub struct HttpRuntime {
+    pub(super) client: reqwest::Client,
+    pub(super) permits: std::sync::Arc<tokio::sync::Semaphore>,
 }
 impl HttpRuntime {
     /// Initialize the host HTTP client with the extension network policy.

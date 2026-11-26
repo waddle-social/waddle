@@ -24,7 +24,7 @@ interface SendOrchestrationDeps {
  * markers, composing notifications, search, paging, and extension actions.
  */
 export function useSendOrchestration(deps: SendOrchestrationDeps) {
-  const { ui, xmppClient, waddles, messaging, dmMessaging, isActiveDirectDmSurface, activeTarget, activeDmPeer } = deps;
+  const { ui, xmppClient, messaging, dmMessaging, isActiveDirectDmSurface, activeTarget, activeDmPeer } = deps;
 
   async function sendActiveMessage(
     body?: string,
@@ -41,17 +41,6 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
       return;
     }
     await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle, linkPreview);
-  }
-
-  async function sendPublicChannelMessage(body: string) {
-    if (activeTarget.value !== messaging || ui.sidebarMode.value !== "channels" || !xmppClient.value || !waddles.activeChannelId.value) {
-      throw new Error("Public AI prompts require an active channel.");
-    }
-    ui.clearActionError();
-    await messaging.sendMessage(body);
-    if (ui.actionError.value) {
-      throw new Error(ui.actionError.value);
-    }
   }
 
   async function sendThreadMessage(
@@ -169,7 +158,6 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
 
   return {
     sendActiveMessage,
-    sendPublicChannelMessage,
     sendThreadMessage,
     sendCallChatMessage,
     sendGif,

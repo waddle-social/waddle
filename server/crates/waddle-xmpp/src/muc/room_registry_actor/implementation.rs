@@ -395,6 +395,7 @@ pub struct RoomRegistryActor {
     /// Terminal shutdown has begun. Once set inside the actor mailbox, no
     /// later demand or orphan-reaper message may acquire fresh room authority.
     pub(in crate::muc::room_registry_actor) terminal_claim_acquisition_disabled: bool,
+    pub(in crate::muc::room_registry_actor) tenant_id: waddle_broker_core::identity::TenantId,
     pub(in crate::muc::room_registry_actor) muc_domain: String,
     /// Per-deployment XEP-0421 occupant-id HMAC key. Forwarded to every
     /// `RoomActor` at spawn so all rooms in this deployment share the
@@ -663,8 +664,26 @@ impl RoomRegistryActor {
         }
     }
 
-    /// Create a new registry for the given MUC service domain.
+    /// Create a new registry for the given MUC service domain, deriving a
+    /// canonical default [`waddle_broker_core::identity::TenantId`] from `muc_domain`.
     pub fn new(muc_domain: String, occupant_id_secret: OccupantIdSecret) -> Self {
+        let lower = muc_domain.to_ascii_lowercase();
+        let candidate = lower.strip_prefix("muc.").unwrap_or(&lower);
+        let tenant_id = waddle_broker_core::identity::TenantId::parse(candidate)
+            .or_else(|_| waddle_broker_core::identity::TenantId::parse(&lower))
+            .unwrap_or_else(|_| {
+                waddle_broker_core::identity::TenantId::parse("localhost")
+                    .expect("static fallback tenant id")
+            });
+        Self::for_tenant(tenant_id, muc_domain, occupant_id_secret)
+    }
+
+    /// Create a new registry explicitly scoped to `tenant_id`.
+    pub fn for_tenant(
+        tenant_id: waddle_broker_core::identity::TenantId,
+        muc_domain: String,
+        occupant_id_secret: OccupantIdSecret,
+    ) -> Self {
         info!(domain = %muc_domain, "Creating RoomRegistryActor");
         Self {
             rooms: HashMap::new(),
@@ -687,6 +706,7 @@ impl RoomRegistryActor {
             pending_retry_timer_generation: 0,
             scheduled_pending_retry_generation: None,
             terminal_claim_acquisition_disabled: false,
+            tenant_id,
             muc_domain,
             occupant_id_secret,
             server_hats: Default::default(),
@@ -697,6 +717,11 @@ impl RoomRegistryActor {
             durable_store: None,
             rollout_backoff: None,
         }
+    }
+
+    /// Canonical tenant bound to this room registry actor.
+    pub fn tenant_id(&self) -> &waddle_broker_core::identity::TenantId {
+        &self.tenant_id
     }
 
     pub(in crate::muc::room_registry_actor) fn has_pending_release_capacity(

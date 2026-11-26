@@ -21,6 +21,36 @@ use std::collections::BTreeMap;
 const MAX_CANDIDATE_POLICY_ATTEMPTS: i64 = 48;
 
 impl NotificationOutboxStore {
+    /// Placement-fenced drain: verifies the tenant's suspend-aware `BootInstant`
+    /// [`waddle_tenancy::quiesce::LocalLeaseGuard`] before reading or dispatching
+    /// push candidates so a suspended or deposed cell never sends APNs/FCM/WebPush.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn drain_pending_candidates_into_outbox_fenced(
+        &self,
+        push_store: &dyn PushSubscriptionStore,
+        blocking_storage: &dyn BlockingStorage,
+        settings_projection: &NotificationSettingsProjectionStore,
+        deps: NotificationDrainDeps<'_>,
+        first_party_service_jid: &BareJid,
+        batch: DrainBatch,
+        local_guard: Option<&waddle_tenancy::quiesce::LocalLeaseGuard>,
+    ) -> Result<usize, NotificationOutboxError> {
+        if let Some(guard) = local_guard {
+            if !guard.is_valid() {
+                return Ok(0);
+            }
+        }
+        self.drain_pending_candidates_into_outbox(
+            push_store,
+            blocking_storage,
+            settings_projection,
+            deps,
+            first_party_service_jid,
+            batch,
+        )
+        .await
+    }
+
     pub async fn drain_pending_candidates_into_outbox(
         &self,
         push_store: &dyn PushSubscriptionStore,

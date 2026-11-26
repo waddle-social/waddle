@@ -52,6 +52,9 @@ fn launch_tokens_cover_payload_fields() {
         feature_namespaces: Vec::new(),
         route_descriptors: Vec::new(),
         launch_signing_key: Some(key.to_vec()),
+        tenant_id: None,
+        resource_controller: None,
+        inference_host: std::sync::Arc::new(crate::runtime::DenyingExtensionInferenceHost),
     };
     let plugin = PluginId::try_new("link-board").expect("plugin id");
     let action = ActionId::try_new("save-link").expect("action id");
@@ -446,6 +449,9 @@ async fn enrich_message_does_not_fallback_without_loaded_actor() {
         feature_namespaces: vec!["urn:example:extension:1".to_string()],
         route_descriptors: Vec::new(),
         launch_signing_key: None,
+        tenant_id: None,
+        resource_controller: None,
+        inference_host: std::sync::Arc::new(crate::runtime::DenyingExtensionInferenceHost),
     };
 
     let mut msg = Message::new(None);
@@ -454,8 +460,64 @@ async fn enrich_message_does_not_fallback_without_loaded_actor() {
         "https://github.com/waddle-social/waddle".to_string(),
     );
 
-    assert_eq!(manager.enrich_message(&mut msg).await, 0);
+    assert_eq!(
+        manager
+            .enrich_message_for_waddle(&mut msg, WaddleId::try_new("test-waddle").expect("waddle"))
+            .await,
+        0
+    );
     assert!(msg.payloads.is_empty());
+}
+
+#[tokio::test]
+async fn pre_instantiation_wasm_quota_rejects_before_store_creation() {
+    let runtime = crate::runtime::WasmRuntime::try_new().expect("runtime");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/message_hook.wat");
+    let loaded = crate::runtime::LoadedExtension::load(&runtime, &path).expect("fixture");
+
+    let tenant = waddle_broker_core::identity::TenantId::parse("quota.example").expect("valid");
+    let quotas = waddle_broker_core::quotas::TenantResourceQuotas {
+        max_wasm_instances: 1,
+        ..waddle_broker_core::quotas::TenantResourceQuotas::default()
+    };
+    let controller = std::sync::Arc::new(
+        waddle_broker_core::quotas::TenantResourceController::new(quotas).expect("valid quotas"),
+    );
+
+    let actor = crate::actor::WasmExtensionActor::initialize(loaded, "1")
+        .await
+        .expect("init")
+        .with_tenant_id(tenant.clone())
+        .with_resource_controller(std::sync::Arc::clone(&controller));
+
+    // Saturate the tenant's single Wasm instance permit before invoking the actor.
+    let _held = controller
+        .try_acquire_wasm_invocation(&tenant, 0)
+        .expect("first permit");
+
+    let event = crate::types::ExtensionEvent::MessageHook(crate::types::MessageHook {
+        context: crate::types::MessageContext {
+            waddle_id: WaddleId::try_new("quota.example").expect("waddle"),
+            stanza_id: None,
+            room: None,
+            sender: Some(
+                crate::types::FullJidValue::try_new("alice@quota.example/res").expect("jid"),
+            ),
+            thread_id: None,
+            reply_to: None,
+        },
+        body: DisplayText::try_new("hello").expect("body"),
+        links: Vec::new(),
+    });
+    let effects = actor
+        .handle_event_for_waddle(event, WaddleId::try_new("quota.example").expect("waddle"))
+        .await;
+    assert_eq!(effects.len(), 1);
+    assert!(
+        matches!(&effects[0], ExtensionEffect::HostWarning(msg) if msg.as_str().contains("resource limit exceeded")),
+        "expected pre-instantiation resource limit HostWarning, got: {effects:?}"
+    );
 }
 
 struct TestArtifacts {

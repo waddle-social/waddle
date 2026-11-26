@@ -102,11 +102,22 @@ pub struct ConnectionRegistry {
     /// Where stanzas for full JIDs no connection here can hold are offered,
     /// once the deployment routes to other servers.
     foreign: OnceLock<Arc<dyn ForeignDelivery>>,
+    /// Canonical tenant bound to this connection registry when tenant-scoped.
+    tenant_id: Option<waddle_broker_core::identity::TenantId>,
 }
 
 impl ConnectionRegistry {
     /// Create a new connection registry.
     pub fn new() -> Self {
+        Self::new_inner(None)
+    }
+
+    /// Create a new connection registry explicitly scoped to `tenant_id`.
+    pub fn for_tenant(tenant_id: waddle_broker_core::identity::TenantId) -> Self {
+        Self::new_inner(Some(tenant_id))
+    }
+
+    fn new_inner(tenant_id: Option<waddle_broker_core::identity::TenantId>) -> Self {
         info!("Creating connection registry");
         Self {
             bind_slots: Arc::new(DashMap::new()),
@@ -118,7 +129,13 @@ impl ConnectionRegistry {
             started_at: Instant::now(),
             sm_stream_owners: Arc::new(DashMap::new()),
             foreign: OnceLock::new(),
+            tenant_id,
         }
+    }
+
+    /// Canonical tenant bound to this connection registry, if configured.
+    pub fn tenant_id(&self) -> Option<&waddle_broker_core::identity::TenantId> {
+        self.tenant_id.as_ref()
     }
 
     /// Offer stanzas for full JIDs that hold no connection here to

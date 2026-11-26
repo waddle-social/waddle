@@ -124,7 +124,7 @@ impl ObservationWork {
     }
 }
 
-pub(crate) struct CapturedRoomSource<'a> {
+pub struct CapturedRoomSource<'a> {
     pub key: MessageKey,
     pub room: &'a jid::BareJid,
     pub message: &'a xmpp_parsers::message::Message,
@@ -154,7 +154,7 @@ impl RoomObservationRepository {
         sources::sync_configured(tx, configured, now_ms).await
     }
 
-    pub(crate) async fn capture(
+    pub async fn capture(
         tx: &mut super::IngressUowTransaction<'_>,
         source: CapturedRoomSource<'_>,
     ) -> Result<(), ObservationError> {

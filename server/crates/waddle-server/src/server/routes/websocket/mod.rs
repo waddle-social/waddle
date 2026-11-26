@@ -63,7 +63,9 @@ mod cleanup;
 mod connection;
 mod drain_append;
 mod frame;
-mod frame_backstop;
+pub(crate) use frame::handle_xmpp_frame_with_admission;
+pub(crate) mod frame_backstop;
+pub use frame_backstop::{spawn_decoupled_streaming_inference, StreamingInferenceSession};
 pub(crate) mod interpret_loop;
 pub(crate) mod link_preview_refs;
 pub(crate) mod link_preview_telemetry;
@@ -156,13 +158,13 @@ pub(crate) use local_departures::{
 };
 #[cfg(feature = "clustering")]
 pub(crate) use state::MembershipGenerationFilter;
-pub(crate) use state::ResolvedPrincipal;
 pub use state::{
     default_link_preview_resolve_permits, ActiveCallThread, DmCallThreadKey, DmPairKey, DmPinStore,
     PendingDmCallOffer, ProtocolServices, RemoteMucMemberships, ResolverAffiliationSyncSchedule,
     ResolverAffiliationSyncScheduler, ResolverAffiliationSyncWork, WebSocketDeps, WebSocketState,
     XmppServiceDomains,
 };
+pub(crate) use state::{ResolvedPrincipal, WsConnState};
 
 pub(crate) use cleanup::{
     drain_destroy_completions, get_or_create_room_actor, get_room_actor, get_room_actor_result,

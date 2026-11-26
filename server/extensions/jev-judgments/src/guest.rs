@@ -1,7 +1,13 @@
+#[cfg(not(test))]
+use crate::bindings::waddle::extension::inference;
 use crate::bindings::waddle::extension::{runtime, types};
 use crate::bindings::{self, exports};
 use crate::config::JevConfig;
-use crate::decisions::{self, Failure};
+#[cfg(not(test))]
+use crate::config::MAX_RESPONSE_BYTES;
+#[cfg(not(test))]
+use crate::decisions;
+use crate::decisions::Failure;
 
 struct JevJudgments;
 bindings::export!(JevJudgments with_types_in bindings);
@@ -29,7 +35,6 @@ impl exports::waddle::extension::lifecycle::Guest for JevJudgments {
             capabilities: vec![
                 types::ExtensionCapability::MessageObserve,
                 types::ExtensionCapability::RoomResultPublish,
-                types::ExtensionCapability::OutboundHttpRequest,
             ],
             commands: vec![],
             routes: vec![],
@@ -57,48 +62,88 @@ impl exports::waddle::extension::framework::Guest for JevJudgments {
                 "Jev configuration is invalid",
             )
         })?;
-        // This is the same operator-approved provider request as the former
-        // core worker. The host enforces the configured HTTPS origin, four
-        // second timeout, single request, and 64 KiB response limit.
-        let response = runtime::http_request(&types::OutgoingHttpRequest {
-            method: types::HttpMethod::Post,
-            url: types::Url {
-                value: config.endpoint.to_string(),
-            },
-            headers: vec![
-                types::HttpHeader {
-                    name: "authorization".to_string(),
-                    value: format!("Bearer {}", config.api_key.as_str()),
-                },
-                types::HttpHeader {
-                    name: "content-type".to_string(),
-                    value: "application/json".to_string(),
-                },
-            ],
-            body: Some(decisions::request_body(
-                &config.model,
-                &observation.body.value,
-            )),
-        })
-        .map_err(|_| provider_error(Failure::Transport))?;
-        let batch = decisions::parse_http_response(response.status, &response.body, &config.model)
-            .map_err(provider_error)?;
-        let usage = types::InvocationUsage {
-            provider: types::ProviderId {
-                value: "openrouter".to_string(),
-            },
-            model: types::ModelId {
-                value: batch.model_version.clone(),
-            },
-            cost_micro_usd: batch.cost_micro_usd().map_err(provider_error)?,
-        };
-        Ok(types::ExtensionResponse {
-            effects: vec![types::ExtensionEffect::PublishRoomResult(
-                crate::payload::safety_scores(&batch),
-            )],
-            usage: Some(usage),
-        })
+        invoke_brokered_decisions(&config, &observation.body.value)
     }
+}
+
+#[cfg(not(test))]
+fn invoke_brokered_decisions(
+    config: &JevConfig,
+    body: &str,
+) -> Result<types::ExtensionResponse, types::ExtensionError> {
+    let stream = inference::start_stream(&inference::InferenceRequest {
+        credential: inference::CredentialRef::Tenant(config.credential_name.clone()),
+        provider: types::ProviderId {
+            value: config.provider.clone(),
+        },
+        deployment: config.deployment.clone(),
+        model: types::ModelId {
+            value: config.model.clone(),
+        },
+        messages: vec![inference::InferenceMessage {
+            role: "user".to_string(),
+            content: decisions::request_body(&config.model, body),
+        }],
+        max_output_tokens: None,
+    })
+    .map_err(|err| map_inference_error(&err))?;
+
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream
+        .next_chunk()
+        .map_err(|err| map_inference_error(&err))?
+    {
+        if buffer.len().saturating_add(chunk.delta.len()) > MAX_RESPONSE_BYTES {
+            return Err(provider_error(Failure::ResponseTooLarge));
+        }
+        buffer.extend_from_slice(&chunk.delta);
+    }
+    let verified = stream.terminal_usage();
+    let payload_text = String::from_utf8(buffer).map_err(|_| {
+        provider_error(Failure::InvalidResponse(
+            decisions::InvalidResponse::DocumentShape,
+        ))
+    })?;
+    let batch = decisions::parse_http_response(200, &payload_text, &config.model)
+        .map_err(provider_error)?;
+    let usage = verified.map(|v| types::InvocationUsage {
+        provider: v.provider,
+        model: v.model,
+        cost_micro_usd: v.cost_microcents,
+    });
+    Ok(types::ExtensionResponse {
+        effects: vec![types::ExtensionEffect::PublishRoomResult(
+            crate::payload::safety_scores(&batch),
+        )],
+        usage,
+    })
+}
+
+#[cfg(not(test))]
+fn map_inference_error(err: &inference::InferenceError) -> types::ExtensionError {
+    let code = match err.code {
+        inference::InferenceErrorCode::Denied | inference::InferenceErrorCode::Canceled => {
+            types::ExtensionErrorCode::Denied
+        }
+        inference::InferenceErrorCode::InvalidRequest => types::ExtensionErrorCode::InvalidRequest,
+        inference::InferenceErrorCode::RateLimited
+        | inference::InferenceErrorCode::TemporaryFailure
+        | inference::InferenceErrorCode::ChunkLimitExceeded => {
+            types::ExtensionErrorCode::TemporaryFailure
+        }
+    };
+    error(
+        code,
+        &format!("Jev brokered inference failed: {:?}", err.code),
+    )
+}
+
+#[cfg(test)]
+fn invoke_brokered_decisions(
+    _config: &JevConfig,
+    _body: &str,
+) -> Result<types::ExtensionResponse, types::ExtensionError> {
+    Err(provider_error(Failure::Transport))
 }
 
 fn display(value: &str) -> types::DisplayText {

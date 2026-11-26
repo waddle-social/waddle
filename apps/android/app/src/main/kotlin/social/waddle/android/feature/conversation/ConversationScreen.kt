@@ -353,7 +353,7 @@ private fun ConversationScaffold(
                     inMuc = viewModel.isGroupchat,
                     onSlashArmed = { slashCommandHost?.controller?.ensureDiscovered() },
                     slashDispatch = slashCommandHost?.let { host ->
-                        slashDispatchOf(host) { body -> viewModel.send(body) }
+                        slashDispatchOf(host)
                     },
                     placeholder = composerPlaceholderOf(kind),
                     onImage = viewModel::sendAttachment,
@@ -378,7 +378,6 @@ private fun ConversationScaffold(
         SlashCommandSurfaces(
             host = slashCommandHost,
             snackbarHostState = snackbarHostState,
-            sendPublicMessage = { body -> viewModel.send(body) },
         )
     }
 

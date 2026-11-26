@@ -15,6 +15,7 @@ pub mod lineage;
 pub mod local_space_subscriptions;
 mod migrations;
 pub mod physical_attestation;
+pub mod placement_fence;
 mod pool;
 pub(crate) mod private_xml;
 pub(crate) mod read_only_timeout;
@@ -24,6 +25,8 @@ pub(crate) mod runtime_store_acl;
 pub mod s2s_accounts;
 pub mod s2s_spaces;
 mod schema;
+pub mod tenant_registry;
+pub mod turso_tenant_store;
 mod value;
 
 use sqlx::postgres::PgPool;

@@ -61,6 +61,31 @@ fn decode_work(
     })
 }
 
+/// Placement-fenced room-observation claim: enforces local `BootInstant` lease
+/// validity and transactional `tenant_placement_leases` (`FOR SHARE` on Postgres)
+/// whenever a `TenantQueryScope` / `LocalLeaseGuard` is supplied.
+#[allow(dead_code)]
+pub(crate) async fn claim_fenced(
+    tx: &mut IngressUowTransaction<'_>,
+    subscription: &RoomObservationSubscription,
+    now_ms: i64,
+    scope: Option<&waddle_broker_core::store::TenantQueryScope>,
+    local_guard: Option<&waddle_tenancy::quiesce::LocalLeaseGuard>,
+) -> Result<Option<ObservationWork>, ObservationError> {
+    if let Some(guard) = local_guard {
+        if !guard.is_valid() {
+            return Ok(None);
+        }
+    }
+    if crate::db::placement_fence::check_optional_placement_fence(tx.transaction_mut(), scope)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+    claim(tx, subscription, now_ms).await
+}
+
 pub(super) async fn claim(
     tx: &mut IngressUowTransaction<'_>,
     subscription: &RoomObservationSubscription,
@@ -144,28 +169,18 @@ pub(super) async fn claim(
             terminal_receipt(tx, subscription, message_key, "source_changed", now_ms).await?;
             continue;
         }
-        let uncertain = status == "started" || category.as_deref() == Some("unknown_after_send");
-        if !uncertain
-            && u32::try_from(attempt)
-                .ok()
-                .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
+        if status == "started" || category.as_deref() == Some(QUARANTINE_CATEGORY) {
+            quarantine_unknown_after_send(tx, subscription, &id, &message_key, now_ms).await?;
+            continue;
+        }
+        if u32::try_from(attempt)
+            .ok()
+            .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
         {
             tx.transaction_mut().execute(
                 "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE id = ? AND status IN ('pending', 'leased', 'started')",
                 crate::db_params![now_ms, &id],
             ).await?;
-            let mut rows = tx
-                .transaction_mut()
-                .query(
-                    "SELECT message_key FROM extension_room_observation_work WHERE id = ?",
-                    crate::db_params![&id],
-                )
-                .await?;
-            let message_key: String = rows
-                .next()
-                .await?
-                .ok_or(ObservationError::Database)?
-                .get(0)?;
             let message_key = MessageKey::from_storage(
                 Uuid::parse_str(&message_key).map_err(|_| ObservationError::Codec)?,
             );
@@ -174,7 +189,7 @@ pub(super) async fn claim(
         }
         let lease = Uuid::now_v7();
         let changed = tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, terminal_category = CASE WHEN status = 'started' THEN 'unknown_after_send' ELSE terminal_category END, attempt = CASE WHEN attempt < 4294967295 THEN attempt + 1 ELSE attempt END WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?))",
+            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, attempt = CASE WHEN attempt < 4294967295 THEN attempt + 1 ELSE attempt END WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status = 'leased' AND lease_until_ms <= ?))",
             crate::db_params![lease.to_string(), now_ms.saturating_add(LEASE_MS), owner.node_id.clone(), owner.node_epoch.clone(), &id, now_ms, now_ms],
         ).await?;
         if changed == 1 {
@@ -187,6 +202,27 @@ pub(super) async fn claim(
         }
     }
     Ok(None)
+}
+
+const QUARANTINE_CATEGORY: &str = "unknown_after_send";
+
+async fn quarantine_unknown_after_send(
+    tx: &mut IngressUowTransaction<'_>,
+    subscription: &RoomObservationSubscription,
+    work_id: &str,
+    message_key_str: &str,
+    now_ms: i64,
+) -> Result<(), ObservationError> {
+    tx.transaction_mut()
+        .execute(
+            "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE id = ? AND status IN ('pending', 'leased', 'started')",
+            crate::db_params![QUARANTINE_CATEGORY, now_ms, work_id],
+        )
+        .await?;
+    let message_key = MessageKey::from_storage(
+        Uuid::parse_str(message_key_str).map_err(|_| ObservationError::Codec)?,
+    );
+    terminal_receipt(tx, subscription, message_key, QUARANTINE_CATEGORY, now_ms).await
 }
 
 fn failure_category(failure: ObservationFailure) -> &'static str {
@@ -309,7 +345,7 @@ async fn current_work(
         source_json,
         attempt,
         generation,
-        uncertain: category.as_deref() == Some("unknown_after_send"),
+        quarantined: category.as_deref() == Some(QUARANTINE_CATEGORY),
     }))
 }
 
@@ -318,7 +354,7 @@ struct CurrentWork {
     source_json: String,
     attempt: i64,
     generation: i64,
-    uncertain: bool,
+    quarantined: bool,
 }
 
 /// Retain node authority through commit, matching the UOW's other fenced
@@ -393,7 +429,7 @@ pub(super) async fn finish(
         source_json,
         attempt,
         generation,
-        uncertain,
+        quarantined,
     }) = current_work(tx, work, "started", Some(now_ms)).await?
     else {
         return Ok(false);
@@ -439,21 +475,13 @@ pub(super) async fn finish(
                     .transpose()?,
             )
         }
-        // A later known failure/skip describes only this invocation. It does
-        // not resolve output that may have been lost from an earlier start.
+        // Any row already marked quarantined settles immediately without re-dispatch.
         RoomObservationOutcome::NotInvoked
         | RoomObservationOutcome::PermanentFailure(_)
         | RoomObservationOutcome::NotApplicable(_)
-            if uncertain =>
+            if quarantined =>
         {
-            (
-                "pending",
-                "unknown_after_send",
-                now_ms.saturating_add(retry_delay_ms(
-                    u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
-                )),
-                None,
-            )
+            ("terminal", QUARANTINE_CATEGORY, now_ms, None)
         }
         RoomObservationOutcome::NotInvoked
             if u32::try_from(attempt)
@@ -470,10 +498,11 @@ pub(super) async fn finish(
             )
         }
         RoomObservationOutcome::NotInvoked => ("terminal", "retry_exhausted", now_ms, None),
-        // An error after runtime entry is not evidence that the callback had
-        // no effects. Retain its token until lease expiry; recovery then uses
-        // a new token, accepting a possible repeated guest effect.
-        RoomObservationOutcome::UnresolvedFailure(_) => return Ok(false),
+        // An error after runtime entry leaves provider/guest side effects unknown.
+        // Quarantine immediately as terminal `unknown_after_send` and never re-dispatch.
+        RoomObservationOutcome::UnresolvedFailure(_) => {
+            ("terminal", QUARANTINE_CATEGORY, now_ms, None)
+        }
         RoomObservationOutcome::PermanentFailure(failure) => {
             ("terminal", failure_category(*failure), now_ms, None)
         }

@@ -31,6 +31,8 @@ pub enum ExtensionEffect {
     CommandForm(DataForm),
     /// Surface a nonblank diagnostic without stopping the surrounding message flow.
     HostWarning(DisplayText),
+    /// Host-only fail-closed denial surfaced when an inference or policy-gated invocation fails.
+    HostDenial(DisplayText),
     /// Produce no host operation.
     Noop,
 }
@@ -99,7 +101,7 @@ impl ExtensionEffect {
                 manifest.declares_capability(ExtensionCapability::Commands)
                     && grants.contains(&ExtensionCapability::Commands)
             }
-            Self::HostWarning(_) => true,
+            Self::HostWarning(_) | Self::HostDenial(_) => true,
             Self::Noop => true,
         }
     }

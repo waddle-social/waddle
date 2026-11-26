@@ -45,7 +45,7 @@ async fn blocked_direction(
 /// XEP-0191 §3.3: the error answering a request to an address on the
 /// sender's own blocking list, from that address; the request is not
 /// routed.
-pub(super) fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &Jid) -> Vec<String> {
+pub(crate) fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &Jid) -> Vec<String> {
     // RFC 6120 §8.2.3 prohibits answering result/error IQs with another IQ.
     let payload = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
@@ -63,7 +63,10 @@ pub(super) fn outgoing_block_frames(iq: &Iq, sender: &FullJid, target: &Jid) -> 
         from: Some(target.clone()),
         to: Some(Jid::from(sender.clone())),
         id: iq.id().into(),
-        payload: Some(payload.clone()),
+        payload:
+            waddle_xmpp::protocol::handlers::credential_sanitize::sanitize_iq_error_echo_payload(
+                payload,
+            ),
         error,
     })))]
 }

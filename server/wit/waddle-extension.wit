@@ -1,4 +1,4 @@
-package waddle:extension@3.0.0;
+package waddle:extension@4.0.0;
 
 interface types {
     record detected-link {
@@ -852,12 +852,74 @@ interface runtime {
     current-timestamp: func() -> string;
 }
 
+/// Typed, host-brokered streaming inference interface (`waddle:extension@4.0.0`).
+/// Guests reference credentials solely by `credential-ref` (`tenant` or `invoking-user`),
+/// never receiving raw API keys, bearer headers, or reusable credential IDs.
+interface inference {
+    use types.{model-id, provider-id};
+
+    variant credential-ref {
+        tenant(string),
+        invoking-user(string),
+    }
+
+    record inference-message {
+        role: string,
+        content: string,
+    }
+
+    record inference-request {
+        credential: credential-ref,
+        provider: provider-id,
+        deployment: string,
+        model: model-id,
+        messages: list<inference-message>,
+        max-output-tokens: option<u32>,
+    }
+
+    record inference-chunk {
+        delta: list<u8>,
+        sequence: u64,
+        finish-reason: option<string>,
+    }
+
+    record verified-usage {
+        provider: provider-id,
+        model: model-id,
+        input-tokens: u64,
+        output-tokens: u64,
+        cost-microcents: u64,
+    }
+
+    enum inference-error-code {
+        denied,
+        invalid-request,
+        canceled,
+        rate-limited,
+        temporary-failure,
+        chunk-limit-exceeded,
+    }
+
+    record inference-error {
+        code: inference-error-code,
+        message: string,
+    }
+
+    resource inference-stream {
+        next-chunk: func() -> result<option<inference-chunk>, inference-error>;
+        terminal-usage: func() -> option<verified-usage>;
+    }
+
+    start-stream: func(request: inference-request) -> result<inference-stream, inference-error>;
+}
+
 world waddle-extension {
     import wasi:logging/logging@0.1.0-draft;
     import wasi:clocks/monotonic-clock@0.2.0;
     import wasi:random/random@0.2.0;
     import delivery;
     import host-tools;
+    import inference;
     import runtime;
 
     export lifecycle;

@@ -7,6 +7,7 @@ use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
 
 fn context(source_room: Option<jid::BareJid>) -> host::InvocationContext {
     host::InvocationContext {
+        tenant_id: None,
         waddle_id: WaddleId::try_new("native-requester").expect("waddle"),
         plugin_id: direct_ingress::plugin(),
         requester: Some("romeo@example.com".parse().expect("requester")),

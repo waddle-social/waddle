@@ -1,0 +1,3 @@
+# Exact-count allowlist for legacy single-tenant sites in `check-tenant-isolation.py`.
+# Format: <server-relative-path> <rule-kind> <exact-count>
+# Removing a legacy site requires removing or decrementing its entry here.

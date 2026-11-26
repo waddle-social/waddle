@@ -76,7 +76,7 @@ pub(crate) fn command_response_with_config(
         )
     })?;
     let response_target = command_response_target(&command)?;
-    let context = ExecutionContext::command(command.requester, prompt, response_target);
+    let context = ExecutionContext::command(prompt, response_target);
     execute_for_context_with_config(context, executor, config).map(Some)
 }
 
@@ -104,19 +104,19 @@ fn prompt_command_form() -> types::DataForm {
                 label: Some(display("Output")),
                 required: true,
                 values: vec![types::DataFormValue {
-                    value: "private".to_string(),
+                    value: "channel".to_string(),
                 }],
                 options: vec![
-                    types::FormFieldOption {
-                        label: Some(display("Private")),
-                        value: types::DataFormValue {
-                            value: "private".to_string(),
-                        },
-                    },
                     types::FormFieldOption {
                         label: Some(display("Post to channel")),
                         value: types::DataFormValue {
                             value: "channel".to_string(),
+                        },
+                    },
+                    types::FormFieldOption {
+                        label: Some(display("Private (non-room only)")),
+                        value: types::DataFormValue {
+                            value: "private".to_string(),
                         },
                     },
                 ],
@@ -151,15 +151,28 @@ fn command_prompt(command: &types::CommandInvocation) -> Option<CleanPrompt> {
 fn command_response_target(
     command: &types::CommandInvocation,
 ) -> Result<Option<ResponseTarget>, types::ExtensionError> {
+    let default_output = if command.room.is_some() {
+        "channel"
+    } else {
+        "private"
+    };
     let output = command
         .fields
         .iter()
         .find(|field| field.name.value == "output")
         .and_then(|field| field.values.first())
         .map(|value| value.value.as_str())
-        .unwrap_or("private");
+        .unwrap_or(default_output);
     match output {
-        "private" => Ok(None),
+        "private" => {
+            if command.room.is_some() {
+                return Err(extension_error(
+                    types::ExtensionErrorCode::Denied,
+                    "private output mode is not permitted for room /ai invocations",
+                ));
+            }
+            Ok(None)
+        }
         "channel" => {
             let Some(room) = command.room.clone() else {
                 return Err(extension_error(

@@ -1,15 +1,24 @@
 use crate::bindings::waddle::extension::types;
-use crate::constants::{DEFAULT_CONTEXT_LIMIT, MAX_CONTEXT_LIMIT};
+use crate::constants::{
+    DEFAULT_CONTEXT_LIMIT, DEFAULT_DEPLOYMENT, DEFAULT_PROVIDER, MAX_CONTEXT_LIMIT,
+};
 
 pub(crate) trait ProviderExecutor {
     fn execute(&self, request: ProviderRequest) -> Result<ProviderAnswer, ProviderExecutionError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CredentialPreference {
+    InvokingUser,
+    Tenant(NonEmptyString),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderConfig {
-    pub(crate) endpoint: NonEmptyString,
+    pub(crate) provider: NonEmptyString,
+    pub(crate) deployment: NonEmptyString,
     pub(crate) model: NonEmptyString,
-    pub(crate) api_key: NonEmptyString,
+    pub(crate) credential: CredentialPreference,
     pub(crate) system_prompt: Option<NonEmptyString>,
     pub(crate) context_limit: u32,
 }
@@ -21,12 +30,23 @@ impl ProviderConfig {
         }
         let document = serde_json::from_str::<serde_json::Value>(input)
             .map_err(|_| ProviderConfigError::InvalidJson)?;
-        let endpoint = json_config_string(&document, "endpoint")
-            .ok_or(ProviderConfigError::MissingEndpoint)?;
+        if document.get("api_key").is_some() || document.get("endpoint").is_some() {
+            return Err(ProviderConfigError::LegacyPlaintextConfigForbidden);
+        }
+        let provider = json_config_string(&document, "provider")
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
+        let deployment = json_config_string(&document, "deployment")
+            .unwrap_or_else(|| DEFAULT_DEPLOYMENT.to_string());
         let model =
             json_config_string(&document, "model").ok_or(ProviderConfigError::MissingModel)?;
-        let api_key =
-            json_config_string(&document, "api_key").ok_or(ProviderConfigError::MissingApiKey)?;
+        let credential = match json_config_string(&document, "credential_name") {
+            Some(name) => {
+                let name =
+                    NonEmptyString::try_new(name).ok_or(ProviderConfigError::InvalidCredential)?;
+                CredentialPreference::Tenant(name)
+            }
+            None => CredentialPreference::InvokingUser,
+        };
         let context_limit = json_config_string(&document, "context_limit")
             .map(|value| {
                 value
@@ -37,10 +57,12 @@ impl ProviderConfig {
             .unwrap_or(DEFAULT_CONTEXT_LIMIT)
             .min(MAX_CONTEXT_LIMIT);
         Ok(Self {
-            endpoint: NonEmptyString::try_new(endpoint)
-                .ok_or(ProviderConfigError::MissingEndpoint)?,
+            provider: NonEmptyString::try_new(provider)
+                .ok_or(ProviderConfigError::MissingProvider)?,
+            deployment: NonEmptyString::try_new(deployment)
+                .ok_or(ProviderConfigError::MissingDeployment)?,
             model: NonEmptyString::try_new(model).ok_or(ProviderConfigError::MissingModel)?,
-            api_key: NonEmptyString::try_new(api_key).ok_or(ProviderConfigError::MissingApiKey)?,
+            credential,
             system_prompt: json_config_string(&document, "system_prompt")
                 .and_then(NonEmptyString::try_new),
             context_limit,
@@ -61,20 +83,26 @@ fn json_config_string(document: &serde_json::Value, key: &str) -> Option<String>
 pub(crate) enum ProviderConfigError {
     Missing,
     InvalidJson,
-    MissingEndpoint,
+    LegacyPlaintextConfigForbidden,
+    MissingProvider,
+    MissingDeployment,
     MissingModel,
-    MissingApiKey,
+    InvalidCredential,
     InvalidContextLimit,
 }
 
 impl std::fmt::Display for ProviderConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Missing => f.write_str("expected JSON config with endpoint, model, and api_key"),
+            Self::Missing => f.write_str("expected JSON config with broker provider and model"),
             Self::InvalidJson => f.write_str("provider config must be a JSON object"),
-            Self::MissingEndpoint => f.write_str("missing endpoint"),
+            Self::LegacyPlaintextConfigForbidden => {
+                f.write_str("legacy plaintext api_key/endpoint configuration is forbidden")
+            }
+            Self::MissingProvider => f.write_str("missing provider"),
+            Self::MissingDeployment => f.write_str("missing deployment"),
             Self::MissingModel => f.write_str("missing model"),
-            Self::MissingApiKey => f.write_str("missing api_key"),
+            Self::InvalidCredential => f.write_str("credential_name must be non-empty"),
             Self::InvalidContextLimit => f.write_str("context_limit must be an unsigned integer"),
         }
     }
@@ -82,14 +110,14 @@ impl std::fmt::Display for ProviderConfigError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderRequest {
-    pub(crate) endpoint: NonEmptyString,
+    pub(crate) provider: NonEmptyString,
+    pub(crate) deployment: NonEmptyString,
     pub(crate) model: NonEmptyString,
-    pub(crate) api_key: NonEmptyString,
+    pub(crate) credential: CredentialPreference,
     pub(crate) context_limit: u32,
     pub(crate) messages: Vec<ProviderMessage>,
     pub(crate) tools: Vec<HostToolRequest>,
     pub(crate) tool_target: Option<ResponseTarget>,
-    pub(crate) requester: Option<types::BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,8 +150,6 @@ pub(crate) struct HostToolRequest {
 pub(crate) enum HostTool {
     QueryMam,
     Members,
-    Presence,
-    Roster,
     Channels,
     Spaces,
 }
@@ -133,8 +159,6 @@ impl HostTool {
         match name {
             "query_mam" => Some(Self::QueryMam),
             "list_room_members" => Some(Self::Members),
-            "get_presence" => Some(Self::Presence),
-            "get_roster" => Some(Self::Roster),
             "list_channels" => Some(Self::Channels),
             "list_spaces" => Some(Self::Spaces),
             _ => None,
@@ -144,19 +168,13 @@ impl HostTool {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionContext {
-    pub(crate) requester: Option<types::BareJid>,
     pub(crate) prompt: CleanPrompt,
     pub(crate) response_target: Option<ResponseTarget>,
 }
 
 impl ExecutionContext {
-    pub(crate) fn command(
-        requester: types::FullJid,
-        prompt: CleanPrompt,
-        response_target: Option<ResponseTarget>,
-    ) -> Self {
+    pub(crate) fn command(prompt: CleanPrompt, response_target: Option<ResponseTarget>) -> Self {
         Self {
-            requester: bare_jid_from_full(&requester.value),
             prompt,
             response_target,
         }
@@ -178,8 +196,12 @@ pub(crate) struct ProviderAnswer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProviderExecutionError {
-    Http(String),
-    HttpStatus { status: u16, body: String },
+    Denied(String),
+    #[cfg(not(test))]
+    Canceled,
+    #[cfg(not(test))]
+    RateLimited,
+    BrokerFailure(String),
     InvalidResponse(String),
 }
 
@@ -204,13 +226,4 @@ impl NonEmptyString {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-fn bare_jid_from_full(value: &str) -> Option<types::BareJid> {
-    let bare = value
-        .split_once('/')
-        .map_or(value, |(bare, _resource)| bare);
-    NonEmptyString::try_new(bare).map(|value| types::BareJid {
-        value: value.as_str().to_string(),
-    })
 }

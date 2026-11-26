@@ -28,12 +28,14 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+waddle-broker-core = { path = "../waddle-broker-core" }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 xmpp-parsers = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
 dhat = "0.3"
 memory-stats = "1"
 

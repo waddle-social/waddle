@@ -43,6 +43,7 @@ libp2p = { version = "0.57.1", default-features = false, features = [
 # XMPP Server
 waddle-xmpp = { path = "../waddle-xmpp" }
 waddle-xmpp-core = { path = "../waddle-xmpp-core" }
+waddle-broker = { path = "../waddle-broker" }
 waddle-sfu = { path = "../waddle-sfu" }
 waddle-extensions = { path = "../waddle-extensions" }
 
@@ -129,6 +130,8 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
+waddle-broker-core = { path = "../waddle-broker-core" }
+waddle-tenancy = { path = "../waddle-tenancy" }
 
 # Utilities
 uuid = { workspace = true }
