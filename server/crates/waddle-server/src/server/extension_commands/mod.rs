@@ -1,5 +1,7 @@
 use crate::config::ServerConfig;
 use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::extension_inference_host::DeferredExtensionInferenceHost;
+pub(crate) mod decoupled_test_hooks;
 mod forms;
 pub(crate) mod pubsub;
 pub(crate) mod startup;
@@ -11,8 +13,9 @@ use forms::{
 use pubsub::{extension_command_result, ExtensionPubSubContext};
 use std::sync::Arc;
 use waddle_extensions::{
-    host_tools as ext_host, ExtensionConfig, ExtensionManager, FullJidValue, LaunchContext,
-    LaunchId, RoomJid as ExtensionRoomJid, StanzaId, WaddleId, INVOKE_COMMAND_NODE,
+    host_tools as ext_host, runtime as ext_runtime, ExtensionConfig, ExtensionManager,
+    FullJidValue, LaunchContext, LaunchId, RoomJid as ExtensionRoomJid, StanzaId, WaddleId,
+    INVOKE_COMMAND_NODE,
 };
 use waddle_xmpp::pubsub::PubSubStorage;
 
@@ -166,31 +169,40 @@ pub(crate) async fn register_extension_commands(
                     let room = extension_field_value(&fields, "room")
                         .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
                         .and_then(|value| ExtensionRoomJid::try_new(value).ok());
+                    if let Err(err) =
+                        validate_room_ai_output_mode(&registered_node, room.as_ref(), &fields)
+                    {
+                        return extension_warning_result(&err);
+                    }
                     let command_session_id = ctx.command.session_id.clone();
+                    let requester =
+                        match waddle_extensions::FullJidValue::try_new(ctx.from.to_string()) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return waddle_xmpp::commands::CommandResult::Completed {
+                                    session_id: None,
+                                    form: None,
+                                    notes: vec![waddle_xmpp::commands::Note::error(format!(
+                                        "Invalid requester JID: {error}"
+                                    ))],
+                                };
+                            }
+                        };
+                    let request = waddle_extensions::manager::CommandInvocationRequest {
+                        node: &registered_node,
+                        waddle_id,
+                        room,
+                        requester,
+                        session_id: extension_session_id(command_session_id.clone()),
+                        action: ctx.command.action.map(extension_command_action),
+                        fields,
+                        form: submitted_form.and_then(extension_data_form),
+                    };
+                    let cancel_rx = ctx
+                        .cancel_rx
+                        .unwrap_or_else(|| tokio::sync::watch::channel(false).1);
                     let effects = manager
-                        .invoke_command(waddle_extensions::manager::CommandInvocationRequest {
-                            node: &registered_node,
-                            waddle_id,
-                            room,
-                            requester: match waddle_extensions::FullJidValue::try_new(
-                                ctx.from.to_string(),
-                            ) {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    return waddle_xmpp::commands::CommandResult::Completed {
-                                        session_id: None,
-                                        form: None,
-                                        notes: vec![waddle_xmpp::commands::Note::error(format!(
-                                            "Invalid requester JID: {error}"
-                                        ))],
-                                    };
-                                }
-                            },
-                            session_id: extension_session_id(command_session_id.clone()),
-                            action: ctx.command.action.map(extension_command_action),
-                            fields,
-                            form: submitted_form.and_then(extension_data_form),
-                        })
+                        .invoke_command_decoupled_with_chunks(request, cancel_rx, ctx.chunk_tx)
                         .await;
                     extension_command_result(
                         effects,
@@ -213,12 +225,30 @@ pub(crate) async fn register_extension_commands(
 
 pub(crate) async fn build_extension_manager(
     server_config: &ServerConfig,
-    _xmpp_domain: &str,
+    xmpp_domain: &str,
     deferred_extension_host_tools: Arc<DeferredExtensionHostTools>,
+    deferred_extension_inference_host: Arc<DeferredExtensionInferenceHost>,
 ) -> anyhow::Result<Arc<ExtensionManager>> {
-    let manager = match ExtensionManager::from_config_with_host_tools(
+    let tenant_id = waddle_broker_core::identity::TenantId::parse(xmpp_domain)
+        .or_else(|_| {
+            waddle_broker_core::identity::TenantId::parse(&xmpp_domain.to_ascii_lowercase())
+        })
+        .map_err(|e| {
+            anyhow::anyhow!("invalid canonical tenant_id from xmpp_domain {xmpp_domain:?}: {e}")
+        })?;
+    let resource_controller = Arc::new(
+        waddle_broker_core::quotas::TenantResourceController::new(
+            waddle_broker_core::quotas::TenantResourceQuotas::default(),
+        )
+        .map_err(|e| anyhow::anyhow!("invalid default tenant quotas: {e}"))?,
+    );
+    let manager = match ExtensionManager::from_config_for_tenant_with_hosts(
+        tenant_id.clone(),
         server_config.extensions.clone(),
         Arc::clone(&deferred_extension_host_tools) as Arc<dyn ext_host::ExtensionHostTools>,
+        Arc::clone(&deferred_extension_inference_host)
+            as Arc<dyn ext_runtime::ExtensionInferenceHost>,
+        Arc::clone(&resource_controller),
     )
     .await
     {
@@ -230,13 +260,17 @@ pub(crate) async fn build_extension_manager(
                 ));
             }
             tracing::warn!(error = %error, "Failed to initialize disabled extension manager; continuing without extensions");
-            ExtensionManager::from_config_with_host_tools(
+            ExtensionManager::from_config_for_tenant_with_hosts(
+                tenant_id,
                 ExtensionConfig {
                     enabled: false,
                     cache_dir: String::new(),
                     modules: Vec::new(),
                 },
                 Arc::clone(&deferred_extension_host_tools) as Arc<dyn ext_host::ExtensionHostTools>,
+                Arc::clone(&deferred_extension_inference_host)
+                    as Arc<dyn ext_runtime::ExtensionInferenceHost>,
+                resource_controller,
             )
             .await
             .map(|mgr| mgr.with_launch_signing_key(server_config.session_key.as_bytes()))
@@ -245,6 +279,27 @@ pub(crate) async fn build_extension_manager(
     };
 
     Ok(Arc::new(manager))
+}
+
+/// Reject private `/ai` output mode inside MUC rooms before extension execution
+/// so room `/ai` prompts cannot generate hidden side-channel answers.
+pub fn validate_room_ai_output_mode(
+    node: &str,
+    room: Option<&ExtensionRoomJid>,
+    fields: &[waddle_extensions::FormFieldValue],
+) -> Result<(), String> {
+    if node != "urn:waddle:extension:1:ai-chatbot" || room.is_none() {
+        return Ok(());
+    }
+    if let Some(mode) = extension_field_value(fields, "output") {
+        let trimmed = mode.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("channel") {
+            return Err(
+                "private output mode is forbidden for /ai inside a room; room /ai always posts publicly to the channel".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn extension_field_value(

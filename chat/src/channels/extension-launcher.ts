@@ -23,7 +23,6 @@ export function useExtensionLauncher(input: {
   xmppClient: ReadonlyRef<BrowserXmppClient | null | undefined>;
   roomJid: ReadonlyRef<string | null | undefined>;
   invokeExtensionAction: ReadonlyRef<((action: ExtensionAnnotationAction) => Promise<ExtensionCommandResult>) | undefined>;
-  sendPublicChannelMessage?: ReadonlyRef<((body: string) => Promise<void>) | undefined>;
   focusPalette: () => void;
   focusComposerExtensions: () => void;
 }) {
@@ -221,7 +220,7 @@ export function useExtensionLauncher(input: {
   async function submitForm(
     command: DiscoveredExtensionCommand,
     action: ExtensionCommandAction = "complete",
-    options: { skipPublicPrompt?: boolean; roomJid?: string; generation?: number } = {},
+    options: { roomJid?: string; generation?: number } = {},
   ): Promise<boolean> {
     const client = input.xmppClient.value;
     if (!client) return false;
@@ -251,10 +250,6 @@ export function useExtensionLauncher(input: {
     }
     commandStates.value = { ...commandStates.value, [key]: { state: "loading" } };
     try {
-      if (!options.skipPublicPrompt) {
-        if (!isCurrentCommandContext(context)) return false;
-        await sendPublicPromptIfRequested(command, form.fields, action, context.roomJid);
-      }
       if (!isCurrentCommandContext(context)) return false;
       const result = await client.submitExtensionCommandForm(command, form.sessionId, form.fields, action, context.roomJid);
       if (!isCurrentCommandContext(context)) return false;
@@ -356,25 +351,6 @@ export function useExtensionLauncher(input: {
       void nextTick(input.focusPalette);
       return false;
     }
-  }
-
-  async function sendPublicPromptIfRequested(
-    command: DiscoveredExtensionCommand,
-    fields: ExtensionCommandFormField[],
-    action: ExtensionCommandAction,
-    roomJid?: string,
-  ) {
-    if (command.node !== AI_CHATBOT_COMMAND_NODE) return;
-    if (action === "cancel" || action === "prev") return;
-    if (formFieldValue(fields, "output") !== "channel") return;
-    if (!roomJid) return;
-    const prompt = formFieldValue(fields, "prompt")?.trim();
-    if (!prompt) return;
-    const sendPublicChannelMessage = input.sendPublicChannelMessage?.value;
-    if (!sendPublicChannelMessage) {
-      throw new Error("Cannot post the AI prompt to this channel.");
-    }
-    await sendPublicChannelMessage(prompt);
   }
 
   function forceChannelOutputForSlashAi(command: DiscoveredExtensionCommand, roomJid?: string) {

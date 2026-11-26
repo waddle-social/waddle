@@ -366,10 +366,10 @@ pub struct ObservedWorld {
     pub deleting: bool,
     /// Result of pure spec validation.
     pub spec_validation: SpecValidationState,
-    /// Observed PostgreSQL health.
-    pub postgres: DependencyHealth,
-    /// Observed SpiceDB health.
-    pub spicedb: DependencyHealth,
+    /// Observed storage backend health (`Turso` or `Postgres`).
+    pub storage: DependencyHealth,
+    /// Observed authorization backend health (`OpenFga` or `SpiceDb`).
+    pub authz: DependencyHealth,
     /// Observed secret metadata (no raw secret values).
     pub secrets: SecretsObservation,
     /// Observed workload state.
@@ -393,9 +393,9 @@ impl ObservedWorld {
         None
     }
 
-    /// Returns `true` when external Postgres and SpiceDB dependencies are both healthy.
+    /// Returns `true` when storage and authorization dependencies are both healthy.
     #[must_use]
     pub const fn deps_ready(&self) -> bool {
-        self.postgres.is_ready() && self.spicedb.is_ready()
+        self.storage.is_ready() && self.authz.is_ready()
     }
 }

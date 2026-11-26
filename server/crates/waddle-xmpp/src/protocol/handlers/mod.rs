@@ -30,6 +30,7 @@ pub mod call_lifecycle;
 pub mod canonicalize;
 pub mod carbons;
 pub mod carbons_message;
+pub mod credential_sanitize;
 pub mod direct_marker;
 pub mod enrichment_dispatch;
 pub mod errors;

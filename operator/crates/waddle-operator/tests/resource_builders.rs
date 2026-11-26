@@ -4,14 +4,18 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::ByteString;
 use serde_json::json;
-use waddle_operator::bindings::{PostgresBinding, ResolvedRuntimeBindings, SpiceDbBinding};
+use waddle_operator::bindings::{
+    AuthzBinding, OpenFgaBinding, PostgresBinding, ResolvedRuntimeBindings, SpiceDbBinding,
+    StorageBinding,
+};
 use waddle_operator::external_crds::DiscoveredEsoVersion;
 use waddle_operator::resources::{
     build_config_map, build_deployment, build_headless_service, build_http_service,
     build_managed_external_secret, build_network_policy, build_pdb, build_pvc, build_s2s_service,
-    build_service_account, build_yolo_secret, compute_workload_hash, config_map_digest,
-    fill_missing_yolo_keys, managed_external_secret_drifted, ANNOTATION_SPEC_HASH,
-    KEY_DEPLOYMENT_UUID, KEY_OCCUPANT_ID_SECRET, KEY_SESSION_KEY,
+    build_service_account, build_tenants_config_map, build_yolo_secret, compute_workload_hash,
+    config_map_digest, fill_missing_yolo_keys, managed_external_secret_drifted,
+    ANNOTATION_SPEC_HASH, KEY_DEPLOYMENT_UUID, KEY_OCCUPANT_ID_SECRET, KEY_SESSION_KEY,
+    TENANTS_MOUNT_PATH,
 };
 use waddle_operator::yolo::{
     generate_base64_secret_48, generate_ed25519_seed_base64, validate_keypair_pool, RedactedSecret,
@@ -34,34 +38,40 @@ fn sample_eso_clustered_server() -> WaddleServer {
                 "publicWebsocketUrl": "wss://waddle.example/xmpp-websocket",
                 "tlsSecretName": "waddle-xmpp-tls"
             },
-            "postgres": {
-                "mode": "CloudNativePg",
-                "cnpg": { "clusterName": "waddle-pg" },
-                "restrictedRuntime": {
-                    "enabled": true,
-                    "releaseGitSha": "0123456789abcdef0123456789abcdef01234567",
-                    "schema": "waddle",
-                    "databaseHost": "waddle-pg-rw",
-                    "databasePort": 5432,
-                    "databaseName": "waddle",
-                    "caSecretName": "waddle-pg-ca",
-                    "caSecretKey": "ca.crt",
-                    "runtimeCredentialSecret": "waddle-pg-runtime-creds",
-                    "runtimeCredentialKey": "password",
-                    "handoffConfigMapName": "waddle-pg-handoff",
-                    "roles": {
-                        "migratorLogin": "waddle_migrator",
-                        "schemaOwner": "waddle_owner",
-                        "runtimeLogin": "waddle_runtime",
-                        "attestorInstallerLogin": "waddle_attestor_installer",
-                        "attestorDefinerRole": "waddle_attestor_definer",
-                        "attestorSchema": "waddle_attestor"
+            "storage": {
+                "backend": "Postgres",
+                "postgres": {
+                    "mode": "CloudNativePg",
+                    "cnpg": { "clusterName": "waddle-pg" },
+                    "restrictedRuntime": {
+                        "enabled": true,
+                        "releaseGitSha": "0123456789abcdef0123456789abcdef01234567",
+                        "schema": "waddle",
+                        "databaseHost": "waddle-pg-rw",
+                        "databasePort": 5432,
+                        "databaseName": "waddle",
+                        "caSecretName": "waddle-pg-ca",
+                        "caSecretKey": "ca.crt",
+                        "runtimeCredentialSecret": "waddle-pg-runtime-creds",
+                        "runtimeCredentialKey": "password",
+                        "handoffConfigMapName": "waddle-pg-handoff",
+                        "roles": {
+                            "migratorLogin": "waddle_migrator",
+                            "schemaOwner": "waddle_owner",
+                            "runtimeLogin": "waddle_runtime",
+                            "attestorInstallerLogin": "waddle_attestor_installer",
+                            "attestorDefinerRole": "waddle_attestor_definer",
+                            "attestorSchema": "waddle_attestor"
+                        }
                     }
                 }
             },
-            "spicedb": {
-                "mode": "SpiceDbOperator",
-                "operator": { "clusterName": "spicedb" }
+            "authz": {
+                "backend": "SpiceDb",
+                "spicedb": {
+                    "mode": "SpiceDbOperator",
+                    "operator": { "clusterName": "spicedb" }
+                }
             },
             "secrets": {
                 "mode": "ExternalSecrets",
@@ -119,19 +129,22 @@ fn deployment_and_companion_manifests_match_waddle_server_contracts() {
     let validated = validate_spec(&ws.spec).expect("spec must validate");
     let rr = ws
         .spec
+        .storage
         .postgres
-        .restricted_runtime
-        .clone()
+        .as_ref()
+        .and_then(|pg| pg.restricted_runtime.clone())
         .expect("restricted runtime present");
 
     let bindings = ResolvedRuntimeBindings {
-        postgres: PostgresBinding::RestrictedRuntime { spec: Box::new(rr) },
-        spicedb: SpiceDbBinding {
+        storage: StorageBinding::Postgres(PostgresBinding::RestrictedRuntime {
+            spec: Box::new(rr),
+        }),
+        authz: AuthzBinding::SpiceDb(SpiceDbBinding {
             endpoint: "http://spicedb:50051".to_owned(),
             insecure: true,
             preshared_key_secret_name: "waddle-prod-runtime-secrets".to_owned(),
             preshared_key_secret_key: "WADDLE_SPICEDB_PRESHARED_KEY".to_owned(),
-        },
+        }),
         runtime_secret_name: "waddle-prod-runtime-secrets".to_owned(),
         extra_secret_refs: vec!["waddle-extra-env".to_owned()],
         clustering_keypool_secret_name: Some("waddle-keypool".to_owned()),
@@ -395,13 +408,19 @@ fn managed_external_secret_and_yolo_secret_preserve_keys_and_redact() {
         "spec": {
             "baseUrl": "https://quick.local",
             "xmpp": { "domain": "quick.local" },
-            "postgres": {
-                "mode": "CloudNativePg",
-                "cnpg": { "clusterName": "pg" }
+            "storage": {
+                "backend": "Postgres",
+                "postgres": {
+                    "mode": "CloudNativePg",
+                    "cnpg": { "clusterName": "pg" }
+                }
             },
-            "spicedb": {
-                "mode": "SpiceDbOperator",
-                "operator": { "clusterName": "spicedb" }
+            "authz": {
+                "backend": "SpiceDb",
+                "spicedb": {
+                    "mode": "SpiceDbOperator",
+                    "operator": { "clusterName": "spicedb" }
+                }
             },
             "secrets": { "mode": "Yolo" }
         }
@@ -442,5 +461,260 @@ fn managed_external_secret_and_yolo_secret_preserve_keys_and_redact() {
         validate_keypair_pool(&format!("{},{}", k1.expose_secret(), k2.expose_secret()), 2)
             .expect("2 valid seeds"),
         2
+    );
+}
+
+#[test]
+fn turso_openfga_broker_extensions_builder_emits_exact_server_contract() {
+    let ws: WaddleServer = serde_json::from_value(json!({
+        "apiVersion": "waddle.social/v1alpha1",
+        "kind": "WaddleServer",
+        "metadata": {
+            "name": "waddle",
+            "namespace": "waddle-next",
+            "uid": "33333333-4444-4555-8666-777777777777"
+        },
+        "spec": {
+            "replicas": 1,
+            "updateStrategy": "Recreate",
+            "baseUrl": "https://next.apps.waddle.chat",
+            "xmpp": {
+                "domain": "waddle.social",
+                "publicWebsocketUrl": "wss://next.apps.waddle.chat/xmpp-websocket"
+            },
+            "storage": {
+                "backend": "Turso",
+                "turso": {
+                    "dataDir": "/var/lib/waddle/tenants",
+                    "reservedFds": 256,
+                    "rlimitNofile": 65536
+                }
+            },
+            "authz": {
+                "backend": "OpenFga",
+                "openfga": {
+                    "serviceName": "openfga",
+                    "port": 8080,
+                    "scheme": "http",
+                    "authSecretRef": {
+                        "name": "openfga-auth",
+                        "key": "preshared-key"
+                    },
+                    "consistency": "higher_consistency"
+                }
+            },
+            "broker": {
+                "enabled": true,
+                "dataDir": "/var/lib/waddle/broker",
+                "kms": {
+                    "provider": "Scaleway",
+                    "scaleway": {
+                        "baseUrl": "https://api.scaleway.com",
+                        "region": "fr-par",
+                        "projectId": "proj-1234",
+                        "authSecretRef": {
+                            "name": "scaleway-kms-secret",
+                            "key": "auth-token"
+                        },
+                        "rootKeyId": "key-5678"
+                    }
+                },
+                "cellSpiffeId": "spiffe://waddle.social/cell/waddle-next"
+            },
+            "extensions": {
+                "enabled": true,
+                "pluginsDir": "/var/lib/waddle/plugins"
+            },
+            "secrets": {
+                "mode": "ExternalSecrets",
+                "externalSecrets": {
+                    "externalSecretName": "waddle-runtime-secrets"
+                }
+            },
+            "persistence": {
+                "enabled": true,
+                "storageClassName": "openebs-mayastor",
+                "accessModes": ["ReadWriteOnce"],
+                "size": "20Gi"
+            }
+        }
+    }))
+    .expect("valid Turso+OpenFGA+Broker spec");
+
+    let validated = validate_spec(&ws.spec).expect("Turso+OpenFGA+Broker spec validates");
+    let bindings = ResolvedRuntimeBindings {
+        storage: StorageBinding::Turso {
+            data_dir: "/var/lib/waddle/tenants".to_owned(),
+            reserved_fds: 256,
+            rlimit_nofile: Some(65536),
+        },
+        authz: AuthzBinding::OpenFga(OpenFgaBinding {
+            endpoint: "http://openfga:8080".to_owned(),
+            consistency: "higher_consistency".to_owned(),
+            auth_secret_ref: Some(("openfga-auth".to_owned(), "preshared-key".to_owned())),
+        }),
+        runtime_secret_name: "waddle-runtime-secrets".to_owned(),
+        extra_secret_refs: Vec::new(),
+        clustering_keypool_secret_name: None,
+        deployment_uuid: None,
+        lineage_action: None,
+        secrets_checksum: Some(
+            ContentDigest::try_new(&"d".repeat(64)).expect("64 hex chars valid"),
+        ),
+        session_key_fingerprint: None,
+        occupant_id_fingerprint: None,
+        eso_api_version: Some(DiscoveredEsoVersion::V1),
+    };
+
+    let cm = build_config_map(&ws, &bindings).expect("configmap");
+    let data = cm.data.as_ref().expect("cm data");
+    assert_eq!(
+        data.get("WADDLE_DB_DRIVER").map(String::as_str),
+        Some("turso")
+    );
+    assert_eq!(
+        data.get("WADDLE_TURSO_DATA_DIR").map(String::as_str),
+        Some("/var/lib/waddle/tenants")
+    );
+    assert_eq!(
+        data.get("WADDLE_DATABASE_URL").map(String::as_str),
+        Some("sqlite:///var/lib/waddle/tenants/control.db?mode=rwc")
+    );
+    assert_eq!(
+        data.get("WADDLE_TURSO_RESERVED_FDS").map(String::as_str),
+        Some("256")
+    );
+    assert_eq!(
+        data.get("WADDLE_TURSO_RLIMIT_NOFILE").map(String::as_str),
+        Some("65536")
+    );
+    assert_eq!(
+        data.get("WADDLE_AUTHZ_BACKEND").map(String::as_str),
+        Some("openfga")
+    );
+    assert_eq!(
+        data.get("WADDLE_OPENFGA_ENDPOINT").map(String::as_str),
+        Some("http://openfga:8080")
+    );
+    assert_eq!(
+        data.get("WADDLE_OPENFGA_CONSISTENCY").map(String::as_str),
+        Some("higher_consistency")
+    );
+    assert_eq!(
+        data.get("WADDLE_BROKER_ENABLED").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        data.get("WADDLE_BROKER_DATA_DIR").map(String::as_str),
+        Some("/var/lib/waddle/broker")
+    );
+    assert_eq!(
+        data.get("WADDLE_BROKER_ADMISSION_DB").map(String::as_str),
+        Some("/var/lib/waddle/broker/admission.db")
+    );
+    assert_eq!(
+        data.get("WADDLE_BROKER_KMS_PROVIDER").map(String::as_str),
+        Some("scaleway")
+    );
+    assert_eq!(
+        data.get("WADDLE_SCW_KMS_BASE_URL").map(String::as_str),
+        Some("https://api.scaleway.com")
+    );
+    assert_eq!(
+        data.get("WADDLE_SCW_KMS_REGION").map(String::as_str),
+        Some("fr-par")
+    );
+    assert_eq!(
+        data.get("WADDLE_SCW_KMS_PROJECT_ID").map(String::as_str),
+        Some("proj-1234")
+    );
+    assert_eq!(
+        data.get("WADDLE_SCW_KMS_ROOT_KEY_ID").map(String::as_str),
+        Some("key-5678")
+    );
+    assert_eq!(
+        data.get("WADDLE_CELL_SPIFFE_ID").map(String::as_str),
+        Some("spiffe://waddle.social/cell/waddle-next")
+    );
+    assert_eq!(
+        data.get("WADDLE_EXTENSIONS_ENABLED").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        data.get("WADDLE_EXTENSIONS_PLUGINS_DIR")
+            .map(String::as_str),
+        Some("/var/lib/waddle/plugins")
+    );
+    assert_eq!(
+        data.get("WADDLE_DEFAULT_TENANT_ID").map(String::as_str),
+        Some("waddle.social")
+    );
+    assert_eq!(
+        data.get("WADDLE_TENANTS_DIR").map(String::as_str),
+        Some(TENANTS_MOUNT_PATH)
+    );
+    assert!(
+        !data.contains_key("WADDLE_SPICEDB_ENDPOINT"),
+        "OpenFGA mode must not emit SpiceDB endpoint"
+    );
+
+    let tenants_cm = build_tenants_config_map(&ws).expect("tenants cm");
+    assert_eq!(tenants_cm.metadata.name.as_deref(), Some("waddle-tenants"));
+
+    let digest = config_map_digest(&cm).expect("digest");
+    let dep = build_deployment(&ws, &validated, &bindings, &digest).expect("deployment");
+    let pod_spec = dep.spec.expect("dep spec").template.spec.expect("pod spec");
+    let container = &pod_spec.containers[0];
+    let env_map: BTreeMap<&str, &k8s_openapi::api::core::v1::EnvVar> = container
+        .env
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|ev| (ev.name.as_str(), ev))
+        .collect();
+
+    assert!(
+        !env_map.contains_key("WADDLE_DATABASE_URL"),
+        "Turso mode emits WADDLE_DATABASE_URL via ConfigMap, not Deployment env"
+    );
+    assert!(
+        !env_map.contains_key("WADDLE_SPICEDB_PRESHARED_KEY"),
+        "OpenFGA mode must not emit WADDLE_SPICEDB_PRESHARED_KEY"
+    );
+    assert_eq!(
+        env_map["WADDLE_OPENFGA_API_TOKEN"]
+            .value_from
+            .as_ref()
+            .and_then(|vf| vf.secret_key_ref.as_ref())
+            .map(|s| (s.name.as_str(), s.key.as_str())),
+        Some(("openfga-auth", "preshared-key"))
+    );
+    assert_eq!(
+        env_map["WADDLE_SCW_KMS_AUTH_TOKEN"]
+            .value_from
+            .as_ref()
+            .and_then(|vf| vf.secret_key_ref.as_ref())
+            .map(|s| (s.name.as_str(), s.key.as_str())),
+        Some(("scaleway-kms-secret", "auth-token"))
+    );
+
+    let tenants_mount = container
+        .volume_mounts
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|m| m.mount_path == TENANTS_MOUNT_PATH)
+        .expect("/etc/waddle/tenants mount present");
+    assert_eq!(tenants_mount.read_only, Some(true));
+    let tenants_vol = pod_spec
+        .volumes
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|v| v.name == tenants_mount.name)
+        .expect("tenants volume present");
+    assert_eq!(
+        tenants_vol.config_map.as_ref().map(|cm| cm.name.as_str()),
+        Some("waddle-tenants")
     );
 }

@@ -14,7 +14,7 @@ use thiserror::Error;
 use waddle_xmpp::ingress::ProtocolEpoch;
 
 use super::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
-use super::{MigrationRunner, BASELINE_VERSION};
+use super::{MigrationRunner, INITIAL_SCHEMA_VERSION};
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, LINEAGE_ADVISORY_LOCK_KEY};
 use crate::db::physical_attestation::{quote_identifier, PgRoleName};
@@ -83,7 +83,12 @@ pub(crate) async fn verify_room_observation_migration_v1023_in_transaction(
 
     let ledger = format!("{}._migrations", quote_identifier(schema));
     MigrationRunner::single()
-        .verify_applied_through_in_transaction(tx, DatabaseDriver::Postgres, &ledger, 1023)
+        .verify_applied_through_in_transaction(
+            tx,
+            DatabaseDriver::Postgres,
+            &ledger,
+            INITIAL_SCHEMA_VERSION,
+        )
         .await
 }
 
@@ -350,7 +355,7 @@ async fn run_on_fresh_session(
     let mut rows = tx
         .query(
             &format!("SELECT count(*) FROM {quoted}._migrations WHERE version = ?"),
-            crate::db_params![BASELINE_VERSION],
+            crate::db_params![INITIAL_SCHEMA_VERSION],
         )
         .await?;
     let row = rows
@@ -542,7 +547,7 @@ async fn check_protected_role_privileges(
                 tx,
                 DatabaseDriver::Postgres,
                 &format!("{quoted}._migrations"),
-                1009,
+                INITIAL_SCHEMA_VERSION,
             )
             .await?;
         epoch_acl::verify_v1009_epoch_owner_stage(tx, config, schema, &quoted).await?;

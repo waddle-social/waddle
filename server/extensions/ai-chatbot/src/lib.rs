@@ -107,8 +107,8 @@ fn provider_config() -> Result<RuntimeProviderConfig, types::ExtensionError> {
 pub(crate) use command::{command_response_with_config, take_sent_room_messages};
 #[cfg(test)]
 pub(crate) use constants::{
-    BASELINE_SYSTEM_PROMPT, COMMAND_NODE, MAX_CONTEXT_BYTES, MAX_CONTEXT_LINE_BYTES,
-    MAX_PROVIDER_TOOL_CALLS_PER_ROUND, OPENROUTER_REFERER, OPENROUTER_TITLE,
+    BASELINE_SYSTEM_PROMPT, COMMAND_NODE, DEFAULT_DEPLOYMENT, DEFAULT_PROVIDER, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND,
 };
 #[cfg(test)]
 pub(crate) use error::extension_error;
@@ -116,16 +116,16 @@ pub(crate) use error::extension_error;
 pub(crate) use manifest::manifest;
 #[cfg(test)]
 pub(crate) use model::{
-    CleanPrompt, ExecutionContext, HostTool, NonEmptyString, ProviderAnswer, ProviderConfig,
-    ProviderExecutionError, ProviderExecutor, ProviderRequest, ProviderRole, ResponseTarget,
+    CleanPrompt, CredentialPreference, ExecutionContext, HostTool, NonEmptyString, ProviderAnswer,
+    ProviderConfig, ProviderConfigError, ProviderExecutionError, ProviderExecutor, ProviderRequest,
+    ResponseTarget,
 };
 #[cfg(test)]
 pub(crate) use prompt::clean_prompt;
 #[cfg(test)]
 pub(crate) use provider::{
     assemble_provider_request, execute_provider_request_with_runtime, parse_provider_answer,
-    provider_execution_error, provider_request_headers, provider_request_json,
-    provider_request_json_from_parts,
+    provider_execution_error, provider_tools_json,
 };
 #[cfg(test)]
 pub(crate) use tools::{format_archived_messages, provider_tool_mam_query, select_host_tools};

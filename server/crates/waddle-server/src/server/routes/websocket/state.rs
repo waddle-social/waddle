@@ -1563,6 +1563,10 @@ pub struct WebSocketDeps {
     /// graceful shutdown so in-flight deliveries can finish updating the
     /// ledger before runtime teardown.
     pub provider_dispatch_tasks: ProviderDispatchTracker,
+    /// Tracker for decoupled streaming inference tasks spawned from XEP-0050
+    /// extension commands, drained under `WADDLE_DRAIN_TIMEOUT_SECS` on
+    /// graceful shutdown after cancellation is signaled.
+    pub inference_stream_tasks: tokio_util::task::TaskTracker,
     /// RFC 7395 §3.8 keepalive knobs (issue #1090), parsed and
     /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
@@ -1856,7 +1860,7 @@ pub(super) fn authenticated_client_room_origin(
     })
 }
 
-pub(super) struct WsConnState {
+pub(crate) struct WsConnState {
     pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
     /// Physical transport identity, retained across bind/resume attempts on
     /// this WebSocket and kept separate from ingress and durable SM generations.
@@ -1874,7 +1878,7 @@ pub(super) struct WsConnState {
     pub(super) account_binding: Option<super::account_binding::AccountBindingLink>,
     #[cfg(test)]
     pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,
-    pub(super) phase: ConnectionPhase,
+    pub(crate) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
     /// restart, independently from lifecycle revocation.
@@ -1888,7 +1892,7 @@ pub(super) struct WsConnState {
     pub(super) stream_open_wire_state: StreamOpenWireState,
     /// The authenticated backend Session for this connection, if any.
     /// Populated on SASL success and used for SM resume/detach.
-    pub(super) authenticated_session: Option<Session>,
+    pub(crate) authenticated_session: Option<Session>,
     pub(super) occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     /// XEP-0198 state for this WebSocket. Counts stanzas in both directions
     /// once enabled and holds the unacked queue used for resumption.
@@ -1940,7 +1944,7 @@ pub(super) struct WsConnState {
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
-    pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
+    pub(crate) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
     /// Same-queue endpoint recovered from an empty, sealed binding after a
     /// published resume attempt failed. Registration consumes this only when
@@ -2045,6 +2049,11 @@ pub(super) struct WsConnState {
     /// replacement in [`Self::ensure_state_machine`] re-seeds the
     /// policy with the same configuration the pre-bind machine used.
     pub(super) keepalive_config: waddle_xmpp::protocol::KeepaliveConfig,
+    /// Active decoupled streaming inference sessions launched from XEP-0050
+    /// extension commands on this WebSocket connection. Dropping `WsConnState`
+    /// on disconnect synchronously drops each [`StreamingInferenceSession`],
+    /// firing `cancel_sync()` -> `InferenceStream::Drop` -> upstream egress cancel.
+    pub(crate) active_inference_sessions: Vec<super::frame_backstop::StreamingInferenceSession>,
 }
 
 impl WsConnState {
@@ -2060,7 +2069,7 @@ impl WsConnState {
         Self::new_for_connection_ref(waddle_xmpp::ownership::ConnectionRef::fresh(node_lease))
     }
 
-    pub(super) fn new_for_connection_ref(
+    pub(crate) fn new_for_connection_ref(
         connection_ref: waddle_xmpp::ownership::ConnectionRef,
     ) -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
@@ -2128,6 +2137,7 @@ impl WsConnState {
             send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
+            active_inference_sessions: Vec::new(),
         }
     }
 

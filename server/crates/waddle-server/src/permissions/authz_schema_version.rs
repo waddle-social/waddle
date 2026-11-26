@@ -107,8 +107,11 @@ pub const AUTHZ_SCHEMA_MARKER_ID: &str = "installed";
 /// Version 1 is the first versioned schema; it adds outcast precedence to
 /// every channel permission. Version 2 adds the `waddle_grant_projection`
 /// definition, which holds the host-grant projection markers and changes no
-/// permission. Stores without a marker are unversioned and are upgraded.
-pub const AUTHZ_SCHEMA_VERSION: u32 = 2;
+/// permission. Version 3 adds the broker-owned inference definitions
+/// (`extension`, `tenant_credential`, `user_credential`, `installed_extension`,
+/// and `room_inference_policy`). Stores without a marker are unversioned and
+/// are upgraded.
+pub const AUTHZ_SCHEMA_VERSION: u32 = 3;
 
 /// Prefix of the marker relation; the version follows in decimal, without
 /// leading zeros. SpiceDB relation names need at least three characters, so

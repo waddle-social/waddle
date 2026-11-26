@@ -218,10 +218,38 @@ pub async fn start_with_config_and_owner_outbox(
     crate::auth::retirement::verify_ledger_readable(db_pool.global()).await?;
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
-    let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
-        PermissionActor::new_for_tests(Arc::clone(&global_db))
-    } else {
-        PermissionActor::from_server_config(&server_config).await?
+    let tenant_manifests = match server_config.tenancy.tenants_dir.as_deref() {
+        Some(dir) => super::tenancy_bootstrap::load_tenant_manifests(dir).await?,
+        None => Vec::new(),
+    };
+    let extra_openfga_stores =
+        super::tenancy_bootstrap::extract_openfga_store_refs(&tenant_manifests)?;
+    let default_tenant = server_config
+        .tenancy
+        .resolved_default_tenant_id(&xmpp_config.domain)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let (permission_actor_impl, broker_permission_backend) =
+        if server_config.resolved_authz_backend().is_none() && fixed_test_account_enabled() {
+            (PermissionActor::new_for_tests(Arc::clone(&global_db)), None)
+        } else {
+            PermissionActor::from_server_config_with_broker_backend(
+                &server_config,
+                &xmpp_config.domain,
+                &extra_openfga_stores,
+            )
+            .await?
+        };
+    let tenant_registry = match server_config.turso.as_ref() {
+        Some(turso_cfg) => Some(
+            super::tenancy_bootstrap::bootstrap_turso_tenant_registry(
+                turso_cfg,
+                &default_tenant,
+                &tenant_manifests,
+                broker_permission_backend.clone(),
+            )
+            .await?,
+        ),
+        None => None,
     };
     // PostgreSQL holds the canonical grants of enrolled host-grant scopes.
     // Legacy tuple writes to their objects are refused from that store, so
@@ -456,6 +484,8 @@ pub async fn start_with_config_and_owner_outbox(
         clustering_enabled: server_config.clustering.enabled,
     });
     state.host_grants = host_grants;
+    state.broker_permission_backend = broker_permission_backend;
+    state.tenant_registry = tenant_registry;
     // Host-grant decisions about remote principals read the snapshot this
     // replica runs; while S2S is off they admit no remote domain.
     state.s2s_federation = s2s_config

@@ -1,13 +1,12 @@
 use super::{
     assemble_provider_request, clean_prompt, command_response_with_config,
     execute_provider_request_with_runtime, extension_error, format_archived_messages, manifest,
-    parse_provider_answer, provider_execution_error, provider_request_headers,
-    provider_request_json, provider_request_json_from_parts, provider_tool_mam_query,
-    select_host_tools, take_sent_room_messages, types, CleanPrompt, ExecutionContext, HostTool,
-    NonEmptyString, ProviderAnswer, ProviderConfig, ProviderExecutionError, ProviderExecutor,
-    ProviderRequest, ProviderRole, ResponseTarget, BASELINE_SYSTEM_PROMPT, COMMAND_NODE,
-    MAX_CONTEXT_BYTES, MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND,
-    OPENROUTER_REFERER, OPENROUTER_TITLE,
+    parse_provider_answer, provider_execution_error, provider_tool_mam_query, provider_tools_json,
+    select_host_tools, take_sent_room_messages, types, CleanPrompt, CredentialPreference,
+    ExecutionContext, HostTool, NonEmptyString, ProviderAnswer, ProviderConfig,
+    ProviderConfigError, ProviderExecutionError, ProviderExecutor, ProviderRequest, ResponseTarget,
+    BASELINE_SYSTEM_PROMPT, COMMAND_NODE, DEFAULT_DEPLOYMENT, DEFAULT_PROVIDER, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_LINE_BYTES, MAX_PROVIDER_TOOL_CALLS_PER_ROUND,
 };
 
 struct FakeExecutor {
@@ -39,7 +38,7 @@ fn clean_prompt_strips_ai_command_and_mentions_case_insensitively() {
 }
 
 #[test]
-fn manifest_registers_slash_ai_as_extension_command() {
+fn manifest_registers_slash_ai_as_extension_command_without_raw_http_or_privacy_leaks() {
     let manifest = manifest();
     assert_eq!(manifest.commands.len(), 1);
     assert_eq!(manifest.commands[0].node.value, COMMAND_NODE);
@@ -54,53 +53,60 @@ fn manifest_registers_slash_ai_as_extension_command() {
             types::ExtensionCapability::MessageEnrich,
             types::ExtensionCapability::HostMamRead,
             types::ExtensionCapability::HostMembersRead,
-            types::ExtensionCapability::HostPresenceRead,
-            types::ExtensionCapability::HostRosterRead,
             types::ExtensionCapability::HostChannelsRead,
             types::ExtensionCapability::HostSpacesRead,
             types::ExtensionCapability::HostMessageSend,
-            types::ExtensionCapability::OutboundHttpRequest,
             types::ExtensionCapability::Commands,
         ]
     );
 }
 
 #[test]
-fn parses_provider_configuration_contract() {
+fn parses_brokered_provider_configuration_and_rejects_legacy_plaintext() {
     let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value","system_prompt":"Use XMPP context.","context_limit":8}"#,
+        r#"{"provider":"openrouter","deployment":"default","model":"waddle-test","system_prompt":"Use XMPP context.","context_limit":8}"#,
     )
     .expect("provider config");
-    assert_eq!(
-        config.endpoint.as_str(),
-        "https://api.example.test/v1/chat/completions"
-    );
+    assert_eq!(config.provider.as_str(), DEFAULT_PROVIDER);
+    assert_eq!(config.deployment.as_str(), DEFAULT_DEPLOYMENT);
     assert_eq!(config.model.as_str(), "waddle-test");
-    assert_eq!(config.api_key.as_str(), "secret-value");
+    assert_eq!(config.credential, CredentialPreference::InvokingUser);
     assert_eq!(config.system_prompt.unwrap().as_str(), "Use XMPP context.");
     assert_eq!(config.context_limit, 8);
+
+    let tenant_config =
+        ProviderConfig::parse(r#"{"model":"waddle-test","credential_name":"tenant-openrouter"}"#)
+            .expect("tenant credential config");
+    assert_eq!(
+        tenant_config.credential,
+        CredentialPreference::Tenant(
+            NonEmptyString::try_new("tenant-openrouter").expect("credential name")
+        )
+    );
+
+    assert_eq!(
+        ProviderConfig::parse(r#"{"model":"waddle-test","api_key":"secret-value"}"#),
+        Err(ProviderConfigError::LegacyPlaintextConfigForbidden)
+    );
+    assert_eq!(
+        ProviderConfig::parse(
+            r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test"}"#
+        ),
+        Err(ProviderConfigError::LegacyPlaintextConfigForbidden)
+    );
 }
 
 #[test]
-fn selects_tools_for_context_assembly() {
-    let context = execution_context("summarize this channel and roster for the space");
+fn selects_only_room_scoped_and_discovery_tools() {
+    let context = execution_context("summarize this channel for the space");
     let tools = select_host_tools(&context, 5);
     let kinds: Vec<_> = tools.iter().map(|request| request.tool).collect();
     assert_eq!(kinds, vec![HostTool::QueryMam, HostTool::Members]);
 
-    let command_context = command_execution_context("summarize my roster for this space");
+    let command_context = command_execution_context("list spaces");
     let tools = select_host_tools(&command_context, 5);
     let kinds: Vec<_> = tools.iter().map(|request| request.tool).collect();
-    assert_eq!(
-        kinds,
-        vec![
-            HostTool::QueryMam,
-            HostTool::Channels,
-            HostTool::Spaces,
-            HostTool::Presence,
-            HostTool::Roster,
-        ]
-    );
+    assert_eq!(kinds, vec![HostTool::Channels, HostTool::Spaces]);
 
     let no_context_tools = select_host_tools(&context, 0);
     assert!(!no_context_tools
@@ -109,38 +115,15 @@ fn selects_tools_for_context_assembly() {
 }
 
 #[test]
-fn requester_private_tool_selection_stays_command_scoped() {
-    let room_context = execution_context("who is online in this room?");
-    assert!(!select_host_tools(&room_context, 5)
-        .iter()
-        .any(|request| request.tool == HostTool::Presence));
-
-    let requester_context = command_execution_context("what is my status?");
-    assert!(select_host_tools(&requester_context, 5)
-        .iter()
-        .any(|request| request.tool == HostTool::Presence));
-
-    let room_roster_context = execution_context("show my roster");
-    assert!(!select_host_tools(&room_roster_context, 5)
-        .iter()
-        .any(|request| request.tool == HostTool::Roster));
-}
-
-#[test]
-fn assembles_provider_request_with_prompt_and_tool_schemas_without_initial_context_injection() {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value","system_prompt":"Be concise."}"#,
-    )
-    .expect("provider config");
+fn assembles_brokered_provider_request_and_room_only_mam_schema() {
+    let config = ProviderConfig::parse(r#"{"model":"waddle-test","system_prompt":"Be concise."}"#)
+        .expect("provider config");
     let context = execution_context("summarize this thread");
     let tools = select_host_tools(&context, config.context_limit);
     let request = assemble_provider_request(&config, &context, tools);
-    assert_eq!(
-        request.endpoint.as_str(),
-        "https://api.example.test/v1/chat/completions"
-    );
+    assert_eq!(request.provider.as_str(), "openrouter");
+    assert_eq!(request.deployment.as_str(), "default");
     assert_eq!(request.model.as_str(), "waddle-test");
-    assert_eq!(request.api_key.as_str(), "secret-value");
     assert_eq!(request.messages.len(), 3);
     assert_eq!(request.messages[0].content.as_str(), BASELINE_SYSTEM_PROMPT);
     assert_eq!(request.messages[1].content.as_str(), "Be concise.");
@@ -148,144 +131,75 @@ fn assembles_provider_request_with_prompt_and_tool_schemas_without_initial_conte
         request.messages[2].content.as_str(),
         "summarize this thread"
     );
-    assert_eq!(request.messages[2].role, ProviderRole::User);
     assert!(request.messages.iter().all(|message| {
         !message
             .content
             .as_str()
             .contains("Untrusted Waddle context")
-            && !message
-                .content
-                .as_str()
-                .contains("room members: alice, bob")
-            && !message.content.as_str().contains("waddle context sources")
             && !message.content.as_str().contains("waddle context:")
     }));
-    assert!(request
-        .tools
-        .iter()
-        .any(|tool| tool.tool == HostTool::QueryMam));
+
+    let tool_schemas = provider_tools_json(&request.tools);
+    let mam_schema = serde_json::to_string(&tool_schemas).expect("tool json");
+    assert!(mam_schema.contains("\"query_mam\""));
+    assert!(!mam_schema.contains("\"conversation\""));
+    assert!(!mam_schema.contains("presence"));
+    assert!(!mam_schema.contains("roster"));
 }
 
 #[test]
-fn serializes_openai_compatible_provider_request() {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value","system_prompt":"Be concise."}"#,
-    )
-    .expect("provider config");
-    let context = execution_context("summarize this thread");
-    let tools = select_host_tools(&context, config.context_limit);
-    let request = assemble_provider_request(&config, &context, tools);
-    let body = provider_request_json(&request);
-    assert!(body.contains("\"model\":\"waddle-test\""));
-    assert!(body.contains("\"role\":\"system\""));
-    assert!(body.contains("\"role\":\"user\""));
-    assert!(body.contains("summarize this thread"));
-    assert!(body.contains("\"tools\""));
-    assert!(body.contains("\"tool_choice\":\"auto\""));
-    assert!(body.contains("\"name\":\"query_mam\""));
-    assert!(body.contains("\"max_results\""));
-    assert!(!body.contains("Untrusted Waddle context"));
-    assert!(!body.contains("waddle context sources"));
-}
-
-#[test]
-fn provider_tool_choice_is_auto_for_initial_and_followup_requests() {
-    let messages = vec![serde_json::json!({
-        "role": "user",
-        "content": "summarize"
-    })];
-    let tools = vec![serde_json::json!({
-        "type": "function",
-        "function": {
-            "name": "query_mam",
-            "parameters": {
-                "type": "object"
-            }
-        }
-    })];
-
-    let initial = provider_request_json_from_parts("waddle-test", &messages, &tools, true);
-    let followup = provider_request_json_from_parts("waddle-test", &messages, &tools, false);
-
-    assert!(initial.contains("\"tool_choice\":\"auto\""));
-    assert!(followup.contains("\"tool_choice\":\"auto\""));
-}
-
-#[test]
-fn provider_loop_allows_initial_answer_without_forced_tool_call() {
+fn provider_loop_handles_streamed_text_and_tool_calls() {
     let request = provider_request_for_loop_test();
-    let mut bodies = Vec::new();
-    let mut responses =
-        vec![r#"{"choices":[{"message":{"content":"summary without tool"}}]}"#.to_string()]
-            .into_iter();
-
+    let mut rounds = 0usize;
     let answer = execute_provider_request_with_runtime(
         &request,
-        |body| {
-            bodies.push(body);
-            Ok(types::HttpResponse {
-                status: 200,
-                body: responses.next().expect("provider response"),
-            })
+        |_messages| {
+            rounds += 1;
+            Ok("streamed assistant summary".to_string())
         },
-        |tool_call, request| {
-            panic!("unexpected tool call {tool_call:?} for request {request:?}");
+        |tool_call, req| {
+            panic!("unexpected tool call {tool_call:?} for {req:?}");
         },
     )
     .expect("provider answer");
-
-    assert_eq!(answer.text.as_str(), "summary without tool");
-    let first: serde_json::Value = serde_json::from_str(&bodies[0]).expect("first body");
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(first["tool_choice"], "auto");
-    assert!(first["tools"]
-        .as_array()
-        .is_some_and(|tools| !tools.is_empty()));
+    assert_eq!(rounds, 1);
+    assert_eq!(answer.text.as_str(), "streamed assistant summary");
 }
 
 #[test]
-fn provider_loop_rejects_tools_not_advertised_for_context() {
+fn provider_loop_rejects_unavailable_tools() {
     let request = provider_request_for_loop_test();
-    assert!(!request
-        .tools
-        .iter()
-        .any(|request| request.tool == HostTool::Roster));
-    let mut bodies = Vec::new();
     let mut responses = vec![
-        r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"get_roster","arguments":"{}"}}]}}]}"#
+        r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"list_spaces","arguments":"{}"}}]}}]}"#
             .to_string(),
-        r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
+        "done".to_string(),
     ]
     .into_iter();
+    let mut seen_tool_error = false;
 
     let answer = execute_provider_request_with_runtime(
         &request,
-        |body| {
-            bodies.push(body);
-            Ok(types::HttpResponse {
-                status: 200,
-                body: responses.next().expect("provider response"),
-            })
+        |messages| {
+            if messages
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("was not available"))
+            {
+                seen_tool_error = true;
+            }
+            Ok(responses.next().expect("provider response"))
         },
-        |tool_call, request| {
-            panic!("unavailable tool executed: {tool_call:?} for request {request:?}");
+        |tool_call, req| {
+            panic!("unavailable tool executed: {tool_call:?} for request {req:?}");
         },
     )
     .expect("provider answer");
 
     assert_eq!(answer.text.as_str(), "done");
-    let second: serde_json::Value = serde_json::from_str(&bodies[1]).expect("second body");
-    assert!(second["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| message["role"] == "tool"
-            && message["content"] == "Error: tool get_roster was not available for this request"));
+    assert!(seen_tool_error);
 }
 
 #[test]
-fn provider_loop_caps_tool_calls_per_round() {
+fn provider_loop_caps_tool_calls_per_round_and_aggregate_bytes() {
     let request = provider_request_for_loop_test();
     let tool_calls = (0..(MAX_PROVIDER_TOOL_CALLS_PER_ROUND + 2))
         .map(|index| {
@@ -299,7 +213,6 @@ fn provider_loop_caps_tool_calls_per_round() {
             })
         })
         .collect::<Vec<_>>();
-    let mut bodies = Vec::new();
     let mut responses = vec![
         serde_json::json!({
             "choices": [{
@@ -311,109 +224,43 @@ fn provider_loop_caps_tool_calls_per_round() {
             }]
         })
         .to_string(),
-        r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
-    ]
-    .into_iter();
-    let mut executed_tool_calls = 0usize;
-
-    let answer = execute_provider_request_with_runtime(
-        &request,
-        |body| {
-            bodies.push(body);
-            Ok(types::HttpResponse {
-                status: 200,
-                body: responses.next().expect("provider response"),
-            })
-        },
-        |_tool_call, _target| {
-            executed_tool_calls += 1;
-            Ok("tool context".to_string())
-        },
-    )
-    .expect("provider answer");
-
-    assert_eq!(answer.text.as_str(), "done");
-    assert_eq!(executed_tool_calls, MAX_PROVIDER_TOOL_CALLS_PER_ROUND);
-    let second: serde_json::Value = serde_json::from_str(&bodies[1]).expect("second body");
-    let tool_messages = second["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "tool")
-        .collect::<Vec<_>>();
-    assert_eq!(tool_messages.len(), MAX_PROVIDER_TOOL_CALLS_PER_ROUND + 2);
-    assert!(tool_messages
-        .iter()
-        .any(|message| message["content"] == "Error: provider tool-call limit exceeded"));
-}
-
-#[test]
-fn provider_loop_caps_aggregate_tool_result_bytes() {
-    let request = provider_request_for_loop_test();
-    let tool_calls = (0..3)
-        .map(|index| {
-            serde_json::json!({
-                "id": format!("call-{index}"),
-                "type": "function",
-                "function": {
-                    "name": "query_mam",
-                    "arguments": "{}"
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut bodies = Vec::new();
-    let mut responses = vec![
-        serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": tool_calls
-                }
-            }]
-        })
-        .to_string(),
-        r#"{"choices":[{"message":{"content":"done"}}]}"#.to_string(),
+        "done".to_string(),
     ]
     .into_iter();
     let large_tool_result = "a".repeat(MAX_CONTEXT_BYTES / 2 + 64);
+    let mut executed = 0usize;
+    let mut tool_outputs = Vec::new();
 
     execute_provider_request_with_runtime(
         &request,
-        |body| {
-            bodies.push(body);
-            Ok(types::HttpResponse {
-                status: 200,
-                body: responses.next().expect("provider response"),
-            })
+        |messages| {
+            tool_outputs = messages
+                .iter()
+                .filter(|m| m.role == "tool")
+                .map(|m| m.content.clone())
+                .collect();
+            Ok(responses.next().expect("provider response"))
         },
-        |_tool_call, _target| Ok(large_tool_result.clone()),
+        |_tool_call, _req| {
+            executed += 1;
+            Ok(large_tool_result.clone())
+        },
     )
     .expect("provider answer");
 
-    let second: serde_json::Value = serde_json::from_str(&bodies[1]).expect("second body");
-    let tool_contents = second["messages"]
-        .as_array()
-        .unwrap()
+    assert_eq!(executed, MAX_PROVIDER_TOOL_CALLS_PER_ROUND);
+    assert_eq!(tool_outputs.len(), MAX_PROVIDER_TOOL_CALLS_PER_ROUND + 2);
+    assert!(tool_outputs
         .iter()
-        .filter(|message| message["role"] == "tool")
-        .map(|message| message["content"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(tool_contents.len(), 3);
-    assert!(tool_contents[1].ends_with("[truncated]"));
-    assert_eq!(
-        tool_contents[2],
-        "Error: provider tool-result budget exceeded"
-    );
+        .any(|out| out.contains("budget exceeded")));
+    assert!(tool_outputs
+        .iter()
+        .any(|out| out.contains("limit exceeded")));
 }
 
 #[test]
 fn slash_ai_search_stays_provider_prompt_with_message_search_tool() {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value"}"#,
-    )
-    .expect("provider config");
+    let config = ProviderConfig::parse(r#"{"model":"waddle-test"}"#).expect("provider config");
     let context = execution_context(&clean_prompt("/ai search release notes"));
     let tools = select_host_tools(&context, config.context_limit);
     let request = assemble_provider_request(&config, &context, tools);
@@ -429,7 +276,7 @@ fn slash_ai_search_stays_provider_prompt_with_message_search_tool() {
 }
 
 #[test]
-fn provider_message_tools_build_xep_mam_queries() {
+fn provider_message_tools_enforce_source_room_and_reject_conversation() {
     let mut target = execution_context("find the deploy note")
         .response_target
         .expect("room target");
@@ -439,15 +286,14 @@ fn provider_message_tools_build_xep_mam_queries() {
     });
 
     let request = ProviderRequest {
-        endpoint: NonEmptyString::try_new("https://api.example.test/v1/chat/completions")
-            .expect("endpoint"),
+        provider: NonEmptyString::try_new("openrouter").expect("provider"),
+        deployment: NonEmptyString::try_new("default").expect("deployment"),
         model: NonEmptyString::try_new("waddle-test").expect("model"),
-        api_key: NonEmptyString::try_new("secret").expect("api key"),
+        credential: CredentialPreference::InvokingUser,
         context_limit: 7,
         messages: vec![],
         tools: vec![],
         tool_target: Some(target.clone()),
-        requester: None,
     };
     let search = provider_tool_mam_query(
         &request,
@@ -461,11 +307,6 @@ fn provider_message_tools_build_xep_mam_queries() {
     assert_eq!(search.text.unwrap().value, "deploy note");
     assert_eq!(search.thread_id.unwrap().value, "thread-root");
     assert_eq!(search.max_results, 7);
-
-    let recent = provider_tool_mam_query(&request, &serde_json::json!({})).expect("recent query");
-    assert!(recent.text.is_none());
-    assert_eq!(recent.thread_id.unwrap().value, "thread-root");
-    assert_eq!(recent.max_results, 7);
 
     let cross_room = provider_tool_mam_query(
         &request,
@@ -486,14 +327,18 @@ fn provider_message_tools_build_xep_mam_queries() {
     );
     assert_eq!(
         dm.expect_err("room hook cannot query DM"),
-        "query_mam room invocations cannot target a direct conversation"
+        "query_mam does not permit direct conversation archive queries"
     );
 
-    let mut disabled_request = request.clone();
+    let mut roomless = request.clone();
+    roomless.tool_target = None;
+    assert!(provider_tool_mam_query(&roomless, &serde_json::json!({})).is_err());
+
+    let mut disabled_request = request;
     disabled_request.context_limit = 0;
-    let disabled = provider_tool_mam_query(&disabled_request, &serde_json::json!({}));
     assert_eq!(
-        disabled.expect_err("context disabled"),
+        provider_tool_mam_query(&disabled_request, &serde_json::json!({}))
+            .expect_err("context disabled"),
         "query_mam is disabled by context_limit"
     );
 }
@@ -553,37 +398,6 @@ fn focused_thread_tool_results_include_root_stanza() {
 }
 
 #[test]
-fn adds_openrouter_headers_for_openrouter_endpoint() {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://openrouter.ai/api/v1/chat/completions","model":"openrouter/auto","api_key":"secret-value"}"#,
-    )
-    .expect("provider config");
-    let request = assemble_provider_request(&config, &execution_context("answer"), vec![]);
-    let headers = provider_request_headers(&request);
-    assert!(headers
-        .iter()
-        .any(|header| header.name == "authorization" && header.value == "Bearer secret-value"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name == "accept" && header.value == "application/json"));
-    assert!(headers
-        .iter()
-        .any(|header| header.name == "http-referer" && header.value == OPENROUTER_REFERER));
-    assert!(headers
-        .iter()
-        .any(|header| header.name == "x-openrouter-title" && header.value == OPENROUTER_TITLE));
-}
-
-#[test]
-fn provider_config_trims_secret_file_newline() {
-    let config = ProviderConfig::parse(
-        "{\"endpoint\":\"https://openrouter.ai/api/v1/chat/completions\",\"model\":\"openrouter/auto\",\"api_key\":\"secret-value\\n\"}",
-    )
-    .expect("provider config");
-    assert_eq!(config.api_key.as_str(), "secret-value");
-}
-
-#[test]
 fn parses_openai_compatible_provider_answer() {
     let answer =
         parse_provider_answer(r#"{"choices":[{"message":{"content":"extension-owned answer"}}]}"#)
@@ -592,14 +406,16 @@ fn parses_openai_compatible_provider_answer() {
 }
 
 #[test]
-fn maps_provider_http_status_to_temporary_failure() {
-    let error = provider_execution_error(ProviderExecutionError::HttpStatus {
-        status: 429,
-        body: r#"{"error":{"message":"rate limited"}}"#.to_string(),
-    });
-    assert_eq!(error.code, types::ExtensionErrorCode::TemporaryFailure);
-    assert!(error.message.value.contains("HTTP 429"));
-    assert!(error.message.value.contains("rate limited"));
+fn maps_provider_denial_and_failure_without_echoing_raw_bodies() {
+    let denied =
+        provider_execution_error(ProviderExecutionError::Denied("policy denied".to_string()));
+    assert_eq!(denied.code, types::ExtensionErrorCode::Denied);
+
+    let failure = provider_execution_error(ProviderExecutionError::BrokerFailure(
+        "brokered inference temporarily unavailable".to_string(),
+    ));
+    assert_eq!(failure.code, types::ExtensionErrorCode::TemporaryFailure);
+    assert!(!failure.message.value.contains("Bearer"));
 }
 
 #[test]
@@ -611,7 +427,7 @@ fn command_missing_provider_config_returns_clear_error_not_room_reply() {
         &executor,
         Err(extension_error(
             types::ExtensionErrorCode::InvalidRequest,
-            "ai-chatbot provider configuration is invalid: expected JSON config with endpoint, model, and api_key",
+            "ai-chatbot provider configuration is invalid: expected JSON config",
         )),
     )
     .expect_err("missing provider config fails command");
@@ -620,30 +436,7 @@ fn command_missing_provider_config_returns_clear_error_not_room_reply() {
 }
 
 #[test]
-fn command_uses_prompt_field_and_reports_provider_transport_errors() {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value"}"#,
-    )
-    .map_err(|error| {
-        extension_error(
-            types::ExtensionErrorCode::InvalidRequest,
-            &format!("config error: {error}"),
-        )
-    });
-    let command = command_invocation("summarize");
-    let executor = FakeExecutor {
-        answer: Err(ProviderExecutionError::Http(
-            "provider transport failed".to_string(),
-        )),
-    };
-    let error = command_response_with_config(command, &executor, config)
-        .expect_err("provider transport error fails command");
-    assert_eq!(error.code, types::ExtensionErrorCode::TemporaryFailure);
-    assert!(error.message.value.contains("provider transport failed"));
-}
-
-#[test]
-fn command_initial_execute_returns_prompt_form() {
+fn command_initial_execute_returns_prompt_form_defaulting_to_channel() {
     let mut command = command_invocation("summarize");
     command.fields.clear();
     let executor = success_executor("answer");
@@ -656,23 +449,28 @@ fn command_initial_execute_returns_prompt_form() {
     assert_eq!(form.form_type, types::DataFormType::Form);
     assert_eq!(form.fields[0].name.value, "prompt");
     assert!(form.fields[0].required);
+    assert_eq!(form.fields[1].name.value, "output");
+    assert_eq!(form.fields[1].values[0].value, "channel");
 }
 
 #[test]
-fn command_success_returns_visible_result_enrichment() {
-    let command = command_invocation("summarize");
-    let executor = success_executor("answer");
-    let effect = command_response_with_config(command, &executor, test_config())
-        .expect("command succeeds")
-        .expect("visible command result");
-    let types::ExtensionEffect::EnrichMessage(envelope) = effect else {
-        panic!("expected command result enrichment");
-    };
-    let block = &envelope.enrichments[0].ui[0].blocks[0];
-    let types::UiBlock::Text(text) = block else {
-        panic!("expected text block");
-    };
-    assert_eq!(text.text.value, "answer");
+fn command_rejects_private_output_mode_inside_room() {
+    let mut command = command_invocation("summarize release blockers");
+    command.room = Some(types::RoomJid {
+        value: "chat@muc.example.com".to_string(),
+    });
+    command.fields.push(types::FormFieldValue {
+        name: types::UiActionId {
+            value: "output".to_string(),
+        },
+        values: vec![types::DataFormValue {
+            value: "private".to_string(),
+        }],
+    });
+    let executor = success_executor("unused");
+    let error = command_response_with_config(command, &executor, test_config())
+        .expect_err("private output mode inside room must be denied");
+    assert_eq!(error.code, types::ExtensionErrorCode::Denied);
 }
 
 #[test]
@@ -707,10 +505,6 @@ fn channel_public_command_posts_answer_to_active_room() {
     let sent = take_sent_room_messages();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body.value, "there are no blockers");
-    assert!(sent.iter().all(|request| matches!(
-        &request.target,
-        types::MessageTarget::Muc(room) if room.value == "chat@muc.example.com"
-    )));
 }
 
 #[test]
@@ -745,10 +539,7 @@ fn success_executor(answer: &str) -> FakeExecutor {
 }
 
 fn test_config() -> Result<ProviderConfig, types::ExtensionError> {
-    ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value"}"#,
-    )
-    .map_err(|error| {
+    ProviderConfig::parse(r#"{"model":"waddle-test"}"#).map_err(|error| {
         extension_error(
             types::ExtensionErrorCode::InvalidRequest,
             &format!("config error: {error}"),
@@ -757,10 +548,7 @@ fn test_config() -> Result<ProviderConfig, types::ExtensionError> {
 }
 
 fn provider_request_for_loop_test() -> ProviderRequest {
-    let config = ProviderConfig::parse(
-        r#"{"endpoint":"https://api.example.test/v1/chat/completions","model":"waddle-test","api_key":"secret-value"}"#,
-    )
-    .expect("provider config");
+    let config = ProviderConfig::parse(r#"{"model":"waddle-test"}"#).expect("provider config");
     let context = execution_context("summarize this thread");
     let tools = select_host_tools(&context, config.context_limit);
     assemble_provider_request(&config, &context, tools)
@@ -802,9 +590,6 @@ fn archived_message(
 
 fn execution_context(prompt: &str) -> ExecutionContext {
     ExecutionContext {
-        requester: Some(types::BareJid {
-            value: "alice@example.com".to_string(),
-        }),
         prompt: CleanPrompt::try_new(prompt.to_string()).expect("prompt"),
         response_target: Some(ResponseTarget {
             room: types::RoomJid {
@@ -819,9 +604,6 @@ fn execution_context(prompt: &str) -> ExecutionContext {
 
 fn command_execution_context(prompt: &str) -> ExecutionContext {
     ExecutionContext {
-        requester: Some(types::BareJid {
-            value: "alice@example.com".to_string(),
-        }),
         prompt: CleanPrompt::try_new(prompt.to_string()).expect("prompt"),
         response_target: None,
     }

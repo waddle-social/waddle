@@ -5,7 +5,7 @@ use kube::{CustomResource, KubeSchema};
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
-use crate::dependencies::{PostgresDependencySpec, SpiceDbDependencySpec};
+use crate::dependencies::{AuthzSpec, BrokerSpec, ExtensionsSpec, StorageSpec};
 use crate::secrets::{SecretProviderMode, SecretsSpec};
 use crate::server_config::{
     ClusteringSpec, DeploymentIdentitySpec, ImageSpec, IngressSpec, NetworkPolicySpec,
@@ -43,10 +43,10 @@ use crate::server_config::{
     printcolumn = r#"{"name":"Secrets","type":"string","description":"Configured secret provisioning mode","jsonPath":".status.secretsMode"}"#
 )]
 #[kube(
-    printcolumn = r#"{"name":"Postgres","type":"string","description":"Observed Postgres dependency readiness","jsonPath":".status.dependencies.postgres.phase"}"#
+    printcolumn = r#"{"name":"Storage","type":"string","description":"Observed storage dependency readiness","jsonPath":".status.dependencies.storage.phase"}"#
 )]
 #[kube(
-    printcolumn = r#"{"name":"SpiceDB","type":"string","description":"Observed SpiceDB dependency readiness","jsonPath":".status.dependencies.spicedb.phase"}"#
+    printcolumn = r#"{"name":"Authz","type":"string","description":"Observed authorization dependency readiness","jsonPath":".status.dependencies.authz.phase"}"#
 )]
 #[kube(printcolumn(
     name = "Age",
@@ -61,7 +61,8 @@ use crate::server_config::{
     validation = "self.secrets.mode != 'Yolo' || ((!has(self.replicas) || self.replicas <= 1) && !self.clustering.enabled)",
     validation = "!self.clustering.enabled || has(self.s3) || self.persistence.accessModes.exists(m, m == 'ReadWriteMany')",
     validation = "!self.clustering.enabled || (has(self.deployment) && has(self.deployment.uuid) && size(self.deployment.uuid) > 0)",
-    validation = "!(self.updateStrategy == 'RollingUpdate' && self.persistence.enabled && self.persistence.accessModes.exists(m, m == 'ReadWriteOnce') && !self.persistence.allowUnsafeRwoScale)"
+    validation = "!(self.updateStrategy == 'RollingUpdate' && self.persistence.enabled && self.persistence.accessModes.exists(m, m == 'ReadWriteOnce') && !self.persistence.allowUnsafeRwoScale)",
+    validation = "self.storage.backend != 'Turso' || ((!has(self.replicas) || self.replicas <= 1) && !self.clustering.enabled && self.updateStrategy == 'Recreate')"
 )]
 pub struct WaddleServerSpec {
     /// Desired replica count. Omit to allow an external HPA to manage replicas.
@@ -83,11 +84,19 @@ pub struct WaddleServerSpec {
     /// XMPP endpoint and domain settings.
     pub xmpp: XmppSpec,
 
-    /// External PostgreSQL dependency (observed, never created by this operator).
-    pub postgres: PostgresDependencySpec,
+    /// Pluggable storage backend (`Turso` local per-tenant DBs or external `Postgres`).
+    pub storage: StorageSpec,
 
-    /// External SpiceDB dependency (observed, never created by this operator).
-    pub spicedb: SpiceDbDependencySpec,
+    /// Pluggable authorization backend (`OpenFga` or `SpiceDb`).
+    pub authz: AuthzSpec,
+
+    /// Optional credential custody and inference egress broker configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker: Option<BrokerSpec>,
+
+    /// Optional server extensions runtime configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<ExtensionsSpec>,
 
     /// Runtime secret provisioning configuration (ESO or YOLO mode).
     pub secrets: SecretsSpec,
@@ -199,7 +208,7 @@ pub enum WaddleServerPhase {
     /// Initial admission before first dependency evaluation.
     #[default]
     Initializing,
-    /// Waiting for external Postgres and/or SpiceDB dependencies (or CRDs) before deployment.
+    /// Waiting for storage and/or authorization dependencies (or CRDs) before deployment.
     Pending,
     /// Creating YOLO secret or operator-managed `ExternalSecret` and waiting for sync.
     Provisioning,
@@ -229,7 +238,7 @@ pub enum DependencyHealthPhase {
     Ready,
 }
 
-/// Observed state of a single external dependency or secret source.
+/// Observed state of a single dependency or secret source.
 #[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyStatusSummary {
@@ -246,10 +255,10 @@ pub struct DependencyStatusSummary {
 #[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DependenciesStatus {
-    /// Observed PostgreSQL cluster / secret state.
-    pub postgres: DependencyStatusSummary,
-    /// Observed SpiceDB cluster / endpoint state.
-    pub spicedb: DependencyStatusSummary,
+    /// Observed storage backend readiness (`Turso` local storage or external `Postgres`).
+    pub storage: DependencyStatusSummary,
+    /// Observed authorization backend readiness (`OpenFga` or `SpiceDb`).
+    pub authz: DependencyStatusSummary,
     /// Observed runtime secrets readiness.
     pub secrets: DependencyStatusSummary,
 }
@@ -277,7 +286,7 @@ pub struct WaddleServerStatus {
     /// Resolved non-secret `WADDLE_DEPLOYMENT_UUID` bound to this deployment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_uuid: Option<String>,
-    /// Summary of external dependency and secret health.
+    /// Summary of dependency and secret health.
     #[serde(default)]
     pub dependencies: DependenciesStatus,
     /// Standard Kubernetes status conditions keyed by `type`.
@@ -290,7 +299,7 @@ fn default_rust_log() -> String {
     "info".to_owned()
 }
 
-fn conditions_schema(_: &mut SchemaGenerator) -> Schema {
+pub(crate) fn conditions_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "array",
         "x-kubernetes-list-type": "map",

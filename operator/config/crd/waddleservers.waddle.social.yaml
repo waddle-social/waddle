@@ -26,13 +26,13 @@ spec:
       jsonPath: .status.secretsMode
       name: Secrets
       type: string
-    - description: Observed Postgres dependency readiness
-      jsonPath: .status.dependencies.postgres.phase
-      name: Postgres
+    - description: Observed storage dependency readiness
+      jsonPath: .status.dependencies.storage.phase
+      name: Storage
       type: string
-    - description: Observed SpiceDB dependency readiness
-      jsonPath: .status.dependencies.spicedb.phase
-      name: SpiceDB
+    - description: Observed authorization dependency readiness
+      jsonPath: .status.dependencies.authz.phase
+      name: Authz
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -45,11 +45,305 @@ spec:
           spec:
             description: Declarative specification for a `WaddleServer` deployment.
             properties:
+              authz:
+                description: Pluggable authorization backend (`OpenFga` or `SpiceDb`).
+                properties:
+                  backend:
+                    default: OpenFga
+                    description: Authorization backend driver (`OpenFga` or `SpiceDb`).
+                    enum:
+                    - OpenFga
+                    - SpiceDb
+                    type: string
+                  openfga:
+                    description: OpenFGA dependency when `backend` is `OpenFga`.
+                    nullable: true
+                    properties:
+                      authSecretRef:
+                        description: Optional same-namespace Secret key holding `WADDLE_OPENFGA_API_TOKEN`.
+                        nullable: true
+                        properties:
+                          key:
+                            description: Key inside the `Secret` data map.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          name:
+                            description: Name of the Kubernetes `Secret` in the same namespace.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                        required:
+                        - key
+                        - name
+                        type: object
+                      consistency:
+                        description: OpenFGA read consistency (`higher_consistency` default or `minimize_latency`).
+                        nullable: true
+                        type: string
+                      port:
+                        default: 8080
+                        description: HTTP port exposed by the OpenFGA Service (default `8080`).
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      scheme:
+                        default: http
+                        description: URI scheme (`http` or `https`, default `http`).
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: self == 'http' || self == 'https'
+                      serviceName:
+                        description: Name of the same-namespace Kubernetes `Service` exposing OpenFGA.
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                    required:
+                    - serviceName
+                    type: object
+                    x-kubernetes-validations:
+                    - rule: '!has(self.consistency) || self.consistency == ''higher_consistency'' || self.consistency == ''minimize_latency'''
+                  spicedb:
+                    description: SpiceDB dependency when `backend` is `SpiceDb`.
+                    nullable: true
+                    properties:
+                      external:
+                        description: Explicit endpoint configuration when `mode` is `External`.
+                        nullable: true
+                        properties:
+                          endpoint:
+                            description: Full gRPC URI for SpiceDB (e.g. `http://spicedb:50051` or `https://spicedb.internal:50051`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          insecure:
+                            default: false
+                            description: Controls `WADDLE_SPICEDB_INSECURE`.
+                            type: boolean
+                          presharedKeySecretRef:
+                            description: Optional explicit Secret key reference for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                            nullable: true
+                            properties:
+                              key:
+                                description: Key inside the `Secret` data map.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                              name:
+                                description: Name of the Kubernetes `Secret` in the same namespace.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                            required:
+                            - key
+                            - name
+                            type: object
+                          serviceName:
+                            description: Optional same-namespace Kubernetes `Service` whose ready endpoints are verified.
+                            nullable: true
+                            type: string
+                        required:
+                        - endpoint
+                        type: object
+                      mode:
+                        default: SpiceDbOperator
+                        description: Selects how the SpiceDB endpoint and readiness are discovered.
+                        enum:
+                        - SpiceDbOperator
+                        - External
+                        type: string
+                      operator:
+                        description: '`SpiceDBCluster` reference when `mode` is `SpiceDbOperator`.'
+                        nullable: true
+                        properties:
+                          clusterName:
+                            description: Name of the `authzed.com/v1alpha1` `SpiceDBCluster` resource in this namespace.
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          insecure:
+                            description: |-
+                              Override `WADDLE_SPICEDB_INSECURE`. When unset, derived automatically from
+                              `SpiceDBCluster.spec.config.tlsSecretName` (`true` when absent, `false` when set).
+                            nullable: true
+                            type: boolean
+                          port:
+                            default: 50051
+                            description: gRPC port exposed by the SpiceDB Service (default `50051`).
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                          presharedKeySecretRef:
+                            description: |-
+                              Optional explicit Secret key override for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                              In ESO mode, defaults to the ESO target secret (`WADDLE_SPICEDB_PRESHARED_KEY`).
+                              In YOLO mode, defaults to `SpiceDBCluster.spec.secretName` (`preshared_key`).
+                            nullable: true
+                            properties:
+                              key:
+                                description: Key inside the `Secret` data map.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                              name:
+                                description: Name of the Kubernetes `Secret` in the same namespace.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                            required:
+                            - key
+                            - name
+                            type: object
+                          requireReady:
+                            default: true
+                            description: Require `SpiceDBCluster` healthy status and >= 1 ready endpoint before leaving `Pending`.
+                            type: boolean
+                          serviceName:
+                            description: Optional Service name override (defaults to `clusterName`).
+                            nullable: true
+                            type: string
+                        required:
+                        - clusterName
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - rule: (self.mode == 'SpiceDbOperator' && has(self.operator) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.operator))
+                type: object
+                x-kubernetes-validations:
+                - rule: (self.backend == 'OpenFga' && has(self.openfga) && !has(self.spicedb)) || (self.backend == 'SpiceDb' && has(self.spicedb) && !has(self.openfga))
               baseUrl:
                 description: Public base HTTP URL (`WADDLE_BASE_URL`).
                 type: string
                 x-kubernetes-validations:
                 - rule: size(self) > 0
+              broker:
+                description: Optional credential custody and inference egress broker configuration.
+                nullable: true
+                properties:
+                  admissionDb:
+                    description: Optional explicit admission database path (`WADDLE_BROKER_ADMISSION_DB`).
+                    nullable: true
+                    type: string
+                  cellSpiffeId:
+                    description: Optional SPIFFE ID identifying this cell (`WADDLE_CELL_SPIFFE_ID`).
+                    nullable: true
+                    type: string
+                  dataDir:
+                    default: /var/lib/waddle/broker
+                    description: Directory storing broker SQLite/Turso databases (`WADDLE_BROKER_DATA_DIR`).
+                    type: string
+                    x-kubernetes-validations:
+                    - rule: size(self) > 0
+                  enabled:
+                    default: true
+                    description: Enable the credential custody and inference egress broker (`WADDLE_BROKER_ENABLED`).
+                    type: boolean
+                  kms:
+                    description: KMS backend configuration (required when `enabled` is `true`).
+                    nullable: true
+                    properties:
+                      provider:
+                        default: Scaleway
+                        description: KMS provider (`Scaleway`, `Vault`, or `Local`).
+                        enum:
+                        - Scaleway
+                        - Vault
+                        - Local
+                        type: string
+                      scaleway:
+                        description: Scaleway Key Manager settings when `provider` is `Scaleway`.
+                        nullable: true
+                        properties:
+                          authSecretRef:
+                            description: Same-namespace Secret key containing the Scaleway secret key (`WADDLE_SCW_KMS_AUTH_TOKEN`).
+                            properties:
+                              key:
+                                description: Key inside the `Secret` data map.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                              name:
+                                description: Name of the Kubernetes `Secret` in the same namespace.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                            required:
+                            - key
+                            - name
+                            type: object
+                          baseUrl:
+                            default: https://api.scaleway.com
+                            description: Scaleway API base URL (`WADDLE_SCW_KMS_BASE_URL`, default `https://api.scaleway.com`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          projectId:
+                            description: Scaleway Project ID (`WADDLE_SCW_KMS_PROJECT_ID`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          region:
+                            default: fr-par
+                            description: Scaleway Key Manager region (`WADDLE_SCW_KMS_REGION`, default `fr-par`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          rootKeyId:
+                            description: Optional pre-provisioned Scaleway root key UUID (`WADDLE_SCW_KMS_ROOT_KEY_ID`).
+                            nullable: true
+                            type: string
+                        required:
+                        - authSecretRef
+                        - projectId
+                        type: object
+                      vault:
+                        description: HashiCorp Vault Transit settings when `provider` is `Vault`.
+                        nullable: true
+                        properties:
+                          authSecretRef:
+                            description: Same-namespace Secret key containing the Vault token (`WADDLE_VAULT_TOKEN`).
+                            properties:
+                              key:
+                                description: Key inside the `Secret` data map.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                              name:
+                                description: Name of the Kubernetes `Secret` in the same namespace.
+                                type: string
+                                x-kubernetes-validations:
+                                - rule: size(self) > 0
+                            required:
+                            - key
+                            - name
+                            type: object
+                          baseUrl:
+                            description: Vault API base URL (`WADDLE_VAULT_ADDR`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          mount:
+                            default: transit
+                            description: Vault transit mount path (`WADDLE_VAULT_TRANSIT_MOUNT`, default `transit`).
+                            type: string
+                            x-kubernetes-validations:
+                            - rule: size(self) > 0
+                          namespace:
+                            description: Optional Vault namespace (`WADDLE_VAULT_NAMESPACE`).
+                            nullable: true
+                            type: string
+                        required:
+                        - authSecretRef
+                        - baseUrl
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - rule: (self.provider == 'Scaleway' && has(self.scaleway) && !has(self.vault)) || (self.provider == 'Vault' && has(self.vault) && !has(self.scaleway)) || (self.provider == 'Local' && !has(self.scaleway) && !has(self.vault))
+                type: object
+                x-kubernetes-validations:
+                - rule: '!self.enabled || has(self.kms)'
               clustering:
                 default:
                   claimReleaseBudgetSeconds: 5
@@ -114,6 +408,19 @@ spec:
                     type: string
                   uuid:
                     description: Stable lower-case RFC-4122 UUID bound into `_lineage`. Required in ESO mode.
+                    nullable: true
+                    type: string
+                type: object
+              extensions:
+                description: Optional server extensions runtime configuration.
+                nullable: true
+                properties:
+                  enabled:
+                    default: true
+                    description: Enable server extensions (`WADDLE_EXTENSIONS_ENABLED`).
+                    type: boolean
+                  pluginsDir:
+                    description: Optional path to extension plugin modules (`WADDLE_EXTENSIONS_PLUGINS_DIR`).
                     nullable: true
                     type: string
                 type: object
@@ -295,177 +602,6 @@ spec:
                   type: string
                 description: Optional extra labels applied to server pods.
                 type: object
-              postgres:
-                description: External PostgreSQL dependency (observed, never created by this operator).
-                properties:
-                  acquireTimeoutSecs:
-                    description: Optional SQLx pool connection acquire timeout in seconds (`1..=300`).
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
-                  cnpg:
-                    description: CloudNativePG cluster source when `mode` is `CloudNativePg`.
-                    nullable: true
-                    properties:
-                      clusterName:
-                        description: Name of the `postgresql.cnpg.io/v1` `Cluster` resource in this namespace.
-                        type: string
-                        x-kubernetes-validations:
-                        - rule: size(self) > 0
-                      passwordKey:
-                        default: password
-                        description: Key holding the password when the secret uses `kubernetes.io/basic-auth` format.
-                        type: string
-                      requireHealthy:
-                        default: true
-                        description: |-
-                          Require CNPG `Ready=True`, `readyInstances >= 1`, and a non-empty `currentPrimary`
-                          before moving out of `Pending`.
-                        type: boolean
-                      secretName:
-                        description: |-
-                          Optional override for the application credential `Secret`. When omitted,
-                          the operator reads `Cluster.spec.bootstrap.initdb.secret.name` or defaults
-                          to `<clusterName>-app`.
-                        nullable: true
-                        type: string
-                      uriKey:
-                        default: uri
-                        description: Key in the CNPG application secret holding the connection URI (`uri` by default).
-                        type: string
-                      usernameKey:
-                        default: username
-                        description: Key holding the username when the secret uses `kubernetes.io/basic-auth` format.
-                        type: string
-                    required:
-                    - clusterName
-                    type: object
-                  controlPlanePoolSize:
-                    default: 4
-                    description: Dedicated control-plane pool size (`WADDLE_DB_CONTROL_PLANE_POOL_SIZE`).
-                    format: uint32
-                    minimum: 0.0
-                    type: integer
-                  external:
-                    description: External PostgreSQL secret source when `mode` is `External`.
-                    nullable: true
-                    properties:
-                      secretName:
-                        description: Name of the same-namespace `Secret` containing the Postgres DSN.
-                        type: string
-                        x-kubernetes-validations:
-                        - rule: size(self) > 0
-                      serviceName:
-                        description: Optional same-namespace Kubernetes `Service` whose ready endpoints are checked.
-                        nullable: true
-                        type: string
-                      uriKey:
-                        default: uri
-                        description: Key inside `secretName` holding the connection URI.
-                        type: string
-                    required:
-                    - secretName
-                    type: object
-                  mode:
-                    default: CloudNativePg
-                    description: Selects how the PostgreSQL endpoint and credentials are discovered.
-                    enum:
-                    - CloudNativePg
-                    - External
-                    type: string
-                  poolSize:
-                    default: 10
-                    description: Main/shared SQLx connection pool size (`WADDLE_DB_POOL_SIZE`).
-                    format: uint32
-                    minimum: 0.0
-                    type: integer
-                  restrictedRuntime:
-                    description: Restricted PostgreSQL runtime configuration matching `waddle-server` helm chart.
-                    nullable: true
-                    properties:
-                      caSecretKey:
-                        default: ca.crt
-                        description: Key inside `caSecretName` containing the PEM CA certificate.
-                        type: string
-                      caSecretName:
-                        default: ''
-                        description: Same-namespace Secret containing the PostgreSQL server CA certificate.
-                        type: string
-                      databaseHost:
-                        default: ''
-                        description: PostgreSQL primary read-write service host.
-                        type: string
-                      databaseName:
-                        default: ''
-                        description: PostgreSQL database name.
-                        type: string
-                      databasePort:
-                        default: 5432
-                        description: PostgreSQL port.
-                        format: uint16
-                        maximum: 65535.0
-                        minimum: 0.0
-                        type: integer
-                      enabled:
-                        default: false
-                        description: Enables restricted runtime wiring (`WADDLE_DB_RUNTIME_ATTESTATION`, CA mount, role env).
-                        type: boolean
-                      handoffConfigMapName:
-                        default: ''
-                        description: Same-namespace ConfigMap holding the `handoff.json` attestation document.
-                        type: string
-                      releaseGitSha:
-                        default: ''
-                        description: 40-character lower-case Git SHA matching the server release image (`WADDLE_GIT_SHA`).
-                        type: string
-                      roles:
-                        description: Role names shared with the server binary.
-                        properties:
-                          attestorDefinerRole:
-                            description: Attestor definer role.
-                            type: string
-                          attestorInstallerLogin:
-                            description: Attestor installer login.
-                            type: string
-                          attestorSchema:
-                            description: Attestor schema name.
-                            type: string
-                          migratorLogin:
-                            description: Login that ran the owner phase (`WADDLE_DB_MIGRATOR_LOGIN`).
-                            type: string
-                          runtimeLogin:
-                            description: Least-privilege runtime serving login.
-                            type: string
-                          schemaOwner:
-                            description: Schema owner role (`WADDLE_XMPP_MAM_SCHEMA_OWNER`).
-                            type: string
-                        required:
-                        - attestorDefinerRole
-                        - attestorInstallerLogin
-                        - attestorSchema
-                        - migratorLogin
-                        - runtimeLogin
-                        - schemaOwner
-                        type: object
-                      runtimeCredentialKey:
-                        default: password
-                        description: Key inside `runtimeCredentialSecret` holding the URL-safe password.
-                        type: string
-                      runtimeCredentialSecret:
-                        default: ''
-                        description: Same-namespace Secret containing the restricted runtime login password.
-                        type: string
-                      schema:
-                        default: public
-                        description: PostgreSQL application schema name (`WADDLE_XMPP_MAM_CLAIM_SCHEMA`).
-                        type: string
-                    required:
-                    - roles
-                    type: object
-                type: object
-                x-kubernetes-validations:
-                - rule: (self.mode == 'CloudNativePg' && has(self.cnpg) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.cnpg))
               probes:
                 default:
                   liveness:
@@ -1022,111 +1158,214 @@ spec:
                     nullable: true
                     type: integer
                 type: object
-              spicedb:
-                description: External SpiceDB dependency (observed, never created by this operator).
+              storage:
+                description: Pluggable storage backend (`Turso` local per-tenant DBs or external `Postgres`).
                 properties:
-                  external:
-                    description: Explicit endpoint configuration when `mode` is `External`.
+                  backend:
+                    default: Turso
+                    description: Storage backend driver (`Turso` or `Postgres`).
+                    enum:
+                    - Turso
+                    - Postgres
+                    type: string
+                  postgres:
+                    description: External PostgreSQL dependency when `backend` is `Postgres`.
                     nullable: true
                     properties:
-                      endpoint:
-                        description: Full gRPC URI for SpiceDB (e.g. `http://spicedb:50051` or `https://spicedb.internal:50051`).
-                        type: string
-                        x-kubernetes-validations:
-                        - rule: size(self) > 0
-                      insecure:
-                        default: false
-                        description: Controls `WADDLE_SPICEDB_INSECURE`.
-                        type: boolean
-                      presharedKeySecretRef:
-                        description: Optional explicit Secret key reference for `WADDLE_SPICEDB_PRESHARED_KEY`.
+                      acquireTimeoutSecs:
+                        description: Optional SQLx pool connection acquire timeout in seconds (`1..=300`).
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      cnpg:
+                        description: CloudNativePG cluster source when `mode` is `CloudNativePg`.
                         nullable: true
                         properties:
-                          key:
-                            description: Key inside the `Secret` data map.
+                          clusterName:
+                            description: Name of the `postgresql.cnpg.io/v1` `Cluster` resource in this namespace.
                             type: string
                             x-kubernetes-validations:
                             - rule: size(self) > 0
-                          name:
-                            description: Name of the Kubernetes `Secret` in the same namespace.
+                          passwordKey:
+                            default: password
+                            description: Key holding the password when the secret uses `kubernetes.io/basic-auth` format.
                             type: string
-                            x-kubernetes-validations:
-                            - rule: size(self) > 0
+                          requireHealthy:
+                            default: true
+                            description: |-
+                              Require CNPG `Ready=True`, `readyInstances >= 1`, and a non-empty `currentPrimary`
+                              before moving out of `Pending`.
+                            type: boolean
+                          secretName:
+                            description: |-
+                              Optional override for the application credential `Secret`. When omitted,
+                              the operator reads `Cluster.spec.bootstrap.initdb.secret.name` or defaults
+                              to `<clusterName>-app`.
+                            nullable: true
+                            type: string
+                          uriKey:
+                            default: uri
+                            description: Key in the CNPG application secret holding the connection URI (`uri` by default).
+                            type: string
+                          usernameKey:
+                            default: username
+                            description: Key holding the username when the secret uses `kubernetes.io/basic-auth` format.
+                            type: string
                         required:
-                        - key
-                        - name
+                        - clusterName
                         type: object
-                      serviceName:
-                        description: Optional same-namespace Kubernetes `Service` whose ready endpoints are verified.
-                        nullable: true
-                        type: string
-                    required:
-                    - endpoint
-                    type: object
-                  mode:
-                    default: SpiceDbOperator
-                    description: Selects how the SpiceDB endpoint and readiness are discovered.
-                    enum:
-                    - SpiceDbOperator
-                    - External
-                    type: string
-                  operator:
-                    description: '`SpiceDBCluster` reference when `mode` is `SpiceDbOperator`.'
-                    nullable: true
-                    properties:
-                      clusterName:
-                        description: Name of the `authzed.com/v1alpha1` `SpiceDBCluster` resource in this namespace.
-                        type: string
-                        x-kubernetes-validations:
-                        - rule: size(self) > 0
-                      insecure:
-                        description: |-
-                          Override `WADDLE_SPICEDB_INSECURE`. When unset, derived automatically from
-                          `SpiceDBCluster.spec.config.tlsSecretName` (`true` when absent, `false` when set).
-                        nullable: true
-                        type: boolean
-                      port:
-                        default: 50051
-                        description: gRPC port exposed by the SpiceDB Service (default `50051`).
-                        format: uint16
-                        maximum: 65535.0
+                      controlPlanePoolSize:
+                        default: 4
+                        description: Dedicated control-plane pool size (`WADDLE_DB_CONTROL_PLANE_POOL_SIZE`).
+                        format: uint32
                         minimum: 0.0
                         type: integer
-                      presharedKeySecretRef:
-                        description: |-
-                          Optional explicit Secret key override for `WADDLE_SPICEDB_PRESHARED_KEY`.
-                          In ESO mode, defaults to the ESO target secret (`WADDLE_SPICEDB_PRESHARED_KEY`).
-                          In YOLO mode, defaults to `SpiceDBCluster.spec.secretName` (`preshared_key`).
+                      external:
+                        description: External PostgreSQL secret source when `mode` is `External`.
                         nullable: true
                         properties:
-                          key:
-                            description: Key inside the `Secret` data map.
+                          secretName:
+                            description: Name of the same-namespace `Secret` containing the Postgres DSN.
                             type: string
                             x-kubernetes-validations:
                             - rule: size(self) > 0
-                          name:
-                            description: Name of the Kubernetes `Secret` in the same namespace.
+                          serviceName:
+                            description: Optional same-namespace Kubernetes `Service` whose ready endpoints are checked.
+                            nullable: true
                             type: string
-                            x-kubernetes-validations:
-                            - rule: size(self) > 0
+                          uriKey:
+                            default: uri
+                            description: Key inside `secretName` holding the connection URI.
+                            type: string
                         required:
-                        - key
-                        - name
+                        - secretName
                         type: object
-                      requireReady:
-                        default: true
-                        description: Require `SpiceDBCluster` healthy status and >= 1 ready endpoint before leaving `Pending`.
-                        type: boolean
-                      serviceName:
-                        description: Optional Service name override (defaults to `clusterName`).
-                        nullable: true
+                      mode:
+                        default: CloudNativePg
+                        description: Selects how the PostgreSQL endpoint and credentials are discovered.
+                        enum:
+                        - CloudNativePg
+                        - External
                         type: string
-                    required:
-                    - clusterName
+                      poolSize:
+                        default: 10
+                        description: Main/shared SQLx connection pool size (`WADDLE_DB_POOL_SIZE`).
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      restrictedRuntime:
+                        description: Restricted PostgreSQL runtime configuration matching `waddle-server` helm chart.
+                        nullable: true
+                        properties:
+                          caSecretKey:
+                            default: ca.crt
+                            description: Key inside `caSecretName` containing the PEM CA certificate.
+                            type: string
+                          caSecretName:
+                            default: ''
+                            description: Same-namespace Secret containing the PostgreSQL server CA certificate.
+                            type: string
+                          databaseHost:
+                            default: ''
+                            description: PostgreSQL primary read-write service host.
+                            type: string
+                          databaseName:
+                            default: ''
+                            description: PostgreSQL database name.
+                            type: string
+                          databasePort:
+                            default: 5432
+                            description: PostgreSQL port.
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                          enabled:
+                            default: false
+                            description: Enables restricted runtime wiring (`WADDLE_DB_RUNTIME_ATTESTATION`, CA mount, role env).
+                            type: boolean
+                          handoffConfigMapName:
+                            default: ''
+                            description: Same-namespace ConfigMap holding the `handoff.json` attestation document.
+                            type: string
+                          releaseGitSha:
+                            default: ''
+                            description: 40-character lower-case Git SHA matching the server release image (`WADDLE_GIT_SHA`).
+                            type: string
+                          roles:
+                            description: Role names shared with the server binary.
+                            properties:
+                              attestorDefinerRole:
+                                description: Attestor definer role.
+                                type: string
+                              attestorInstallerLogin:
+                                description: Attestor installer login.
+                                type: string
+                              attestorSchema:
+                                description: Attestor schema name.
+                                type: string
+                              migratorLogin:
+                                description: Login that ran the owner phase (`WADDLE_DB_MIGRATOR_LOGIN`).
+                                type: string
+                              runtimeLogin:
+                                description: Least-privilege runtime serving login.
+                                type: string
+                              schemaOwner:
+                                description: Schema owner role (`WADDLE_XMPP_MAM_SCHEMA_OWNER`).
+                                type: string
+                            required:
+                            - attestorDefinerRole
+                            - attestorInstallerLogin
+                            - attestorSchema
+                            - migratorLogin
+                            - runtimeLogin
+                            - schemaOwner
+                            type: object
+                          runtimeCredentialKey:
+                            default: password
+                            description: Key inside `runtimeCredentialSecret` holding the URL-safe password.
+                            type: string
+                          runtimeCredentialSecret:
+                            default: ''
+                            description: Same-namespace Secret containing the restricted runtime login password.
+                            type: string
+                          schema:
+                            default: public
+                            description: PostgreSQL application schema name (`WADDLE_XMPP_MAM_CLAIM_SCHEMA`).
+                            type: string
+                        required:
+                        - roles
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - rule: (self.mode == 'CloudNativePg' && has(self.cnpg) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.cnpg))
+                  turso:
+                    description: Turso storage settings when `backend` is `Turso`.
+                    nullable: true
+                    properties:
+                      dataDir:
+                        default: /var/lib/waddle/tenants
+                        description: Directory storing per-tenant Turso databases (`WADDLE_TURSO_DATA_DIR`).
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      reservedFds:
+                        description: File descriptors reserved for non-tenant I/O (`WADDLE_TURSO_RESERVED_FDS`, default `256`).
+                        format: uint32
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      rlimitNofile:
+                        description: Optional `RLIMIT_NOFILE` hint (`WADDLE_TURSO_RLIMIT_NOFILE`).
+                        format: uint32
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - rule: (self.mode == 'SpiceDbOperator' && has(self.operator) && !has(self.external)) || (self.mode == 'External' && has(self.external) && !has(self.operator))
+                - rule: (self.backend == 'Turso' && !has(self.postgres)) || (self.backend == 'Postgres' && has(self.postgres) && !has(self.turso))
               telemetry:
                 default: {}
                 description: OpenTelemetry tracing and metrics configuration.
@@ -1218,10 +1457,10 @@ spec:
                 - domain
                 type: object
             required:
+            - authz
             - baseUrl
-            - postgres
             - secrets
-            - spicedb
+            - storage
             - xmpp
             type: object
             x-kubernetes-validations:
@@ -1231,6 +1470,7 @@ spec:
             - rule: '!self.clustering.enabled || has(self.s3) || self.persistence.accessModes.exists(m, m == ''ReadWriteMany'')'
             - rule: '!self.clustering.enabled || (has(self.deployment) && has(self.deployment.uuid) && size(self.deployment.uuid) > 0)'
             - rule: '!(self.updateStrategy == ''RollingUpdate'' && self.persistence.enabled && self.persistence.accessModes.exists(m, m == ''ReadWriteOnce'') && !self.persistence.allowUnsafeRwoScale)'
+            - rule: self.storage.backend != 'Turso' || ((!has(self.replicas) || self.replicas <= 1) && !self.clustering.enabled && self.updateStrategy == 'Recreate')
           status:
             description: Observed status subresource for `WaddleServer`.
             nullable: true
@@ -1266,19 +1506,19 @@ spec:
                 x-kubernetes-list-type: map
               dependencies:
                 default:
-                  postgres:
+                  authz:
                     phase: Missing
                     reason: ''
                   secrets:
                     phase: Missing
                     reason: ''
-                  spicedb:
+                  storage:
                     phase: Missing
                     reason: ''
-                description: Summary of external dependency and secret health.
+                description: Summary of dependency and secret health.
                 properties:
-                  postgres:
-                    description: Observed PostgreSQL cluster / secret state.
+                  authz:
+                    description: Observed authorization backend readiness (`OpenFga` or `SpiceDb`).
                     properties:
                       message:
                         description: Optional human-readable diagnostic message (never contains secret values).
@@ -1321,8 +1561,8 @@ spec:
                     - phase
                     - reason
                     type: object
-                  spicedb:
-                    description: Observed SpiceDB cluster / endpoint state.
+                  storage:
+                    description: Observed storage backend readiness (`Turso` local storage or external `Postgres`).
                     properties:
                       message:
                         description: Optional human-readable diagnostic message (never contains secret values).
@@ -1344,9 +1584,9 @@ spec:
                     - reason
                     type: object
                 required:
-                - postgres
+                - authz
                 - secrets
-                - spicedb
+                - storage
                 type: object
               deploymentUuid:
                 description: Resolved non-secret `WADDLE_DEPLOYMENT_UUID` bound to this deployment.

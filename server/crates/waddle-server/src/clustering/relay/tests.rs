@@ -300,6 +300,7 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
     let message = RelayExtensionRoomSend {
         context: InvocationContext {
+            tenant_id: None,
             waddle_id: waddle_extensions::WaddleId::try_new("space").expect("waddle"),
             plugin_id: waddle_extensions::PluginId::try_new("stargate").expect("plugin"),
             requester: Some("romeo@example.test".parse().expect("requester")),

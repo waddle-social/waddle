@@ -1,0 +1,34 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-waddle-next
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infra-waddle-operator
+    - name: infra-external-secrets
+    - name: infra-onepassword-connect
+    - name: infra-cilium-gateway
+    - name: openebs-postinstall
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./waddle-next
+  prune: true
+  wait: true
+  sourceRef:
+    kind: OCIRepository
+    name: bootstrap
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: openfga
+      namespace: waddle-next
+    - apiVersion: waddle.social/v1alpha1
+      kind: WaddleServer
+      name: waddle
+      namespace: waddle-next
+    - apiVersion: waddle.social/v1alpha1
+      kind: WaddleTenant
+      name: waddle-social
+      namespace: waddle-next

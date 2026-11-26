@@ -9,7 +9,8 @@ use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
-use axum::Router;
+use axum::routing::get;
+use axum::{Json, Router};
 use base64::Engine;
 use http::Request;
 use kube::runtime::events::{Recorder, Reporter};
@@ -22,8 +23,11 @@ use waddle_operator::health::{probe_router, HealthState};
 use waddle_operator::leader_election::{LeaderConfig, LeaderGuard, LeadershipFence};
 use waddle_operator::metrics::OperatorMetrics;
 use waddle_operator::resources::ANNOTATION_SESSION_KEY_FINGERPRINT;
-use waddle_operator::{reconcile_single, ControllerContext, OperatorError, OperatorPolicy};
-use waddle_operator_crd::{WaddleServer, WaddleServerPhase};
+use waddle_operator::{
+    reconcile_single, reconcile_tenant, ControllerContext, OperatorError, OperatorPolicy,
+    TenantControllerContext, TENANT_FINALIZER,
+};
+use waddle_operator_crd::{WaddleServer, WaddleServerPhase, WaddleTenant, WaddleTenantPhase};
 
 #[derive(Default)]
 struct MockClusterInner {
@@ -137,6 +141,12 @@ impl MockCluster {
         let path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{name}");
         let val = self.get(&path).expect("WaddleServer must exist");
         serde_json::from_value(val).expect("valid WaddleServer JSON")
+    }
+
+    fn get_tenant(&self, ns: &str, name: &str) -> WaddleTenant {
+        let path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddletenants/{name}");
+        let val = self.get(&path).expect("WaddleTenant must exist");
+        serde_json::from_value(val).expect("valid WaddleTenant JSON")
     }
 }
 
@@ -367,6 +377,27 @@ fn handle_resource_patch(g: &mut MockClusterInner, path: String, payload: Value)
     }
 
     let existing = g.resources.get(&path).cloned();
+    // Handle JSON merge patch updating only metadata.finalizers (used by WaddleTenant finalizer lifecycle).
+    if payload.get("spec").is_none()
+        && payload
+            .get("metadata")
+            .and_then(|m| m.get("finalizers"))
+            .is_some()
+    {
+        if let Some(mut prev) = existing {
+            if let Some(meta) = prev.get_mut("metadata").and_then(Value::as_object_mut) {
+                meta.insert(
+                    "finalizers".to_owned(),
+                    payload["metadata"]["finalizers"].clone(),
+                );
+                let rv = next_rv(g);
+                meta.insert("resourceVersion".to_owned(), Value::String(rv));
+            }
+            g.resources.insert(path, prev.clone());
+            return json_response(StatusCode::OK, prev);
+        }
+    }
+
     let mut stored = payload;
     if path.contains("/configmaps/") {
         if let Some(prev) = &existing {
@@ -555,8 +586,14 @@ fn yolo_waddle_json(ns: &str, name: &str) -> Value {
         "spec": {
             "baseUrl": "https://waddle.local",
             "xmpp": { "domain": "waddle.local" },
-            "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } },
-            "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } },
+            "storage": {
+                "backend": "Postgres",
+                "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } }
+            },
+            "authz": {
+                "backend": "SpiceDb",
+                "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } }
+            },
             "secrets": { "mode": "Yolo" }
         }
     })
@@ -671,8 +708,8 @@ async fn pending_when_crds_missing_and_full_yolo_lifecycle_to_ready_with_idempot
     let ws1 = cluster.get_waddle(ns, name);
     let st1 = ws1.status.as_ref().expect("status set");
     assert_eq!(st1.phase, WaddleServerPhase::Pending);
-    assert_eq!(st1.dependencies.postgres.reason, "CrdNotInstalled");
-    assert_eq!(st1.dependencies.spicedb.reason, "CrdNotInstalled");
+    assert_eq!(st1.dependencies.storage.reason, "CrdNotInstalled");
+    assert_eq!(st1.dependencies.authz.reason, "CrdNotInstalled");
     assert!(
         cluster
             .get(&format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}"))
@@ -820,8 +857,14 @@ async fn degraded_never_regresses_on_spicedb_outage_or_invalid_edit_and_eso_rota
             "spec": {
                 "baseUrl": "https://chat.waddle.social",
                 "xmpp": { "domain": "chat.waddle.social" },
-                "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } },
-                "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } },
+                "storage": {
+                    "backend": "Postgres",
+                    "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } }
+                },
+                "authz": {
+                    "backend": "SpiceDb",
+                    "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } }
+                },
                 "deployment": { "uuid": "cccccccc-dddd-4eee-8fff-333333333333" },
                 "secrets": {
                     "mode": "ExternalSecrets",
@@ -1073,8 +1116,14 @@ async fn clustered_s2s_eso_lineage_and_defaults_tolerant_reconciliation() {
                 "replicas": 2,
                 "baseUrl": "https://chat.example.com",
                 "xmpp": { "domain": "chat.example.com" },
-                "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } },
-                "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } },
+                "storage": {
+                    "backend": "Postgres",
+                    "postgres": { "mode": "CloudNativePg", "cnpg": { "clusterName": "pg" } }
+                },
+                "authz": {
+                    "backend": "SpiceDb",
+                    "spicedb": { "mode": "SpiceDbOperator", "operator": { "clusterName": "spicedb" } }
+                },
                 "deployment": {
                     "uuid": "dddddddd-1111-4222-8333-444444444444",
                     "lineageAction": "enroll"
@@ -1254,13 +1303,19 @@ async fn invalid_spec_skips_dependency_gets_and_stale_deadline_stays_reconciling
             "spec": {
                 "baseUrl": "https://sec.local",
                 "xmpp": { "domain": "sec.local" },
-                "postgres": {
-                    "mode": "External",
-                    "external": { "secretName": "../../other-ns/secrets/stolen" }
+                "storage": {
+                    "backend": "Postgres",
+                    "postgres": {
+                        "mode": "External",
+                        "external": { "secretName": "../../other-ns/secrets/stolen" }
+                    }
                 },
-                "spicedb": {
-                    "mode": "External",
-                    "external": { "endpoint": "http://spicedb:50051", "insecure": true }
+                "authz": {
+                    "backend": "SpiceDb",
+                    "spicedb": {
+                        "mode": "External",
+                        "external": { "endpoint": "http://spicedb:50051", "insecure": true }
+                    }
                 },
                 "secrets": { "mode": "Yolo" }
             }
@@ -1300,8 +1355,8 @@ async fn invalid_spec_skips_dependency_gets_and_stale_deadline_stays_reconciling
         "updatedReplicas": 0,
         "readySummary": "0/1",
         "dependencies": {
-            "postgres": { "phase": "Ready", "reason": "Ready" },
-            "spicedb": { "phase": "Ready", "reason": "Ready" },
+            "storage": { "phase": "Ready", "reason": "Ready" },
+            "authz": { "phase": "Ready", "reason": "Ready" },
             "secrets": { "phase": "Ready", "reason": "Ready" }
         }
     });
@@ -1383,7 +1438,7 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         .expect("reconcile with stale SpiceDBCluster generation");
     let st_stale = cluster.get_waddle(ns, name).status.expect("st");
     assert_eq!(st_stale.phase, WaddleServerPhase::Pending);
-    assert_eq!(st_stale.dependencies.spicedb.reason, "GenerationPending");
+    assert_eq!(st_stale.dependencies.authz.reason, "GenerationPending");
 
     // Advance SpiceDBCluster observedGeneration to 2 -> reach Ready.
     let mut sp2 = cluster.get(&sp_path).expect("spicedb exists");
@@ -1607,5 +1662,446 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
         cluster.mutations().is_empty(),
         "revoked leader fence must perform zero Kubernetes writes, got: {:?}",
         cluster.mutations()
+    );
+}
+
+#[derive(Default)]
+struct MockOpenFgaServerState {
+    stores: Vec<(String, String)>,
+    store_creates: usize,
+    model_writes: usize,
+    last_bearer: Option<String>,
+}
+
+async fn start_mock_openfga_server() -> (String, Arc<Mutex<MockOpenFgaServerState>>) {
+    let state = Arc::new(Mutex::new(MockOpenFgaServerState::default()));
+    let app = Router::new()
+        .route(
+            "/stores",
+            get({
+                let st = Arc::clone(&state);
+                move |headers: axum::http::HeaderMap| {
+                    let st = Arc::clone(&st);
+                    async move {
+                        let mut g = st.lock().expect("lock");
+                        g.last_bearer = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned);
+                        let stores: Vec<Value> = g
+                            .stores
+                            .iter()
+                            .map(|(id, name)| json!({ "id": id, "name": name }))
+                            .collect();
+                        (
+                            StatusCode::OK,
+                            Json(json!({ "stores": stores, "continuation_token": "" })),
+                        )
+                    }
+                }
+            })
+            .post({
+                let st = Arc::clone(&state);
+                move |Json(body): Json<Value>| {
+                    let st = Arc::clone(&st);
+                    async move {
+                        let mut g = st.lock().expect("lock");
+                        g.store_creates += 1;
+                        let id = format!("01FGASTORE{:03}", g.store_creates);
+                        let name = body["name"].as_str().unwrap_or("").to_owned();
+                        g.stores.push((id.clone(), name.clone()));
+                        (StatusCode::CREATED, Json(json!({ "id": id, "name": name })))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/stores/{store_id}/authorization-models",
+            get({
+                let st = Arc::clone(&state);
+                move || {
+                    let st = Arc::clone(&st);
+                    async move {
+                        let g = st.lock().expect("lock");
+                        let models: Vec<Value> = (1..=g.model_writes)
+                            .rev()
+                            .map(|idx| json!({ "id": format!("01FGAMODEL{idx:03}") }))
+                            .collect();
+                        (
+                            StatusCode::OK,
+                            Json(json!({ "authorization_models": models })),
+                        )
+                    }
+                }
+            })
+            .post({
+                let st = Arc::clone(&state);
+                move |Json(_body): Json<Value>| {
+                    let st = Arc::clone(&st);
+                    async move {
+                        let mut g = st.lock().expect("lock");
+                        g.model_writes += 1;
+                        let model_id = format!("01FGAMODEL{:03}", g.model_writes);
+                        (
+                            StatusCode::CREATED,
+                            Json(json!({ "authorization_model_id": model_id })),
+                        )
+                    }
+                }
+            }),
+        );
+
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind mock openfga");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), state)
+}
+
+#[tokio::test]
+async fn turso_openfga_broker_server_and_waddle_tenant_full_lifecycle() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cluster = MockCluster::start().await;
+    // Neither CNPG nor SpiceDB CRDs are installed — Turso + OpenFGA must work cleanly!
+    cluster.set_crds_installed(false, false, true);
+
+    let ns = "waddle-next";
+    let server_name = "waddle";
+    let tenant_cr_name = "waddle-social";
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let ws_path =
+        format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{server_name}");
+    cluster.put(
+        &ws_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleServer",
+            "metadata": {
+                "name": server_name,
+                "namespace": ns,
+                "uid": "11111111-aaaa-4bbb-8ccc-000000000001",
+                "generation": 1
+            },
+            "spec": {
+                "replicas": 1,
+                "updateStrategy": "Recreate",
+                "baseUrl": "https://next.apps.waddle.chat",
+                "xmpp": { "domain": "waddle.social" },
+                "storage": {
+                    "backend": "Turso",
+                    "turso": { "dataDir": "/var/lib/waddle/tenants", "reservedFds": 256 }
+                },
+                "authz": {
+                    "backend": "OpenFga",
+                    "openfga": {
+                        "serviceName": "openfga",
+                        "port": 8080,
+                        "scheme": "http",
+                        "authSecretRef": { "name": "openfga-auth", "key": "preshared-key" },
+                        "consistency": "higher_consistency"
+                    }
+                },
+                "broker": {
+                    "enabled": true,
+                    "dataDir": "/var/lib/waddle/broker",
+                    "kms": {
+                        "provider": "Scaleway",
+                        "scaleway": {
+                            "baseUrl": "https://api.scaleway.com",
+                            "region": "fr-par",
+                            "projectId": "proj-waddle",
+                            "authSecretRef": { "name": "scaleway-kms-secret", "key": "auth-token" }
+                        }
+                    }
+                },
+                "extensions": { "enabled": true },
+                "secrets": {
+                    "mode": "ExternalSecrets",
+                    "externalSecrets": {
+                        "externalSecretName": "waddle-runtime-secrets",
+                        "apiVersion": "V1"
+                    }
+                }
+            }
+        }),
+    );
+
+    let wt_path =
+        format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddletenants/{tenant_cr_name}");
+    cluster.put(
+        &wt_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleTenant",
+            "metadata": {
+                "name": tenant_cr_name,
+                "namespace": ns,
+                "uid": "22222222-aaaa-4bbb-8ccc-000000000002",
+                "generation": 1
+            },
+            "spec": {
+                "serverRef": { "name": server_name },
+                "tenantId": "waddle.social",
+                "placementMode": "SharedPool",
+                "owners": ["rawkode", "icepuma", "randax"],
+                "quotas": { "maxConcurrentConnections": 1000, "maxRooms": 200 },
+                "extensions": {
+                    "enabledPlugins": ["ai"],
+                    "approvedProviders": ["openrouter"],
+                    "zdrRequired": true
+                }
+            }
+        }),
+    );
+
+    let caps = discover_capabilities(&cluster.client()).await;
+    assert!(!caps.has_cnpg);
+    assert!(!caps.has_spicedb);
+    let server_ctx = make_ctx(&cluster, false, caps);
+
+    // 1. OpenFGA Service missing -> WaddleServer stays Pending.
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, server_name)),
+        Arc::clone(&server_ctx),
+    )
+    .await
+    .expect("reconcile pending openfga");
+    let st_pending = cluster.get_waddle(ns, server_name).status.expect("st");
+    assert_eq!(st_pending.phase, WaddleServerPhase::Pending);
+    assert_eq!(st_pending.dependencies.storage.reason, "Ready");
+    assert_eq!(
+        st_pending.dependencies.authz.reason,
+        "OpenFGAServiceMissing"
+    );
+
+    // Seed OpenFGA Service, ready EndpointSlice, auth Secret, ESO ExternalSecret + Secret, and Scaleway KMS Secret.
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/services/openfga"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": { "name": "openfga", "namespace": ns }
+        }),
+    );
+    set_spicedb_endpoints(&cluster, ns, "openfga", true);
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/openfga-auth"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "openfga-auth", "namespace": ns },
+            "data": { "preshared-key": b64.encode("openfga-secret-token") }
+        }),
+    );
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/scaleway-kms-secret"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "scaleway-kms-secret", "namespace": ns },
+            "data": { "auth-token": b64.encode("scw-kms-secret-token") }
+        }),
+    );
+    cluster.put(
+        &format!("/apis/external-secrets.io/v1/namespaces/{ns}/externalsecrets/waddle-runtime-secrets"),
+        json!({
+            "apiVersion": "external-secrets.io/v1",
+            "kind": "ExternalSecret",
+            "metadata": { "name": "waddle-runtime-secrets", "namespace": ns },
+            "spec": { "target": { "name": "waddle-runtime-secrets" } },
+            "status": { "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced" }] }
+        }),
+    );
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/waddle-runtime-secrets"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "waddle-runtime-secrets", "namespace": ns },
+            "data": {
+                "WADDLE_SESSION_KEY": b64.encode("session-secret-key-at-least-32-bytes-long"),
+                "WADDLE_OCCUPANT_ID_SECRET": b64.encode("occupant-secret-key-at-least-32-bytes-long")
+            }
+        }),
+    );
+
+    // 2. WaddleServer advances to Reconciling and creates ConfigMap + <name>-tenants + Deployment.
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, server_name)),
+        Arc::clone(&server_ctx),
+    )
+    .await
+    .expect("reconcile turso+openfga workload");
+    assert_eq!(
+        cluster
+            .get_waddle(ns, server_name)
+            .status
+            .expect("st")
+            .phase,
+        WaddleServerPhase::Reconciling
+    );
+    assert!(cluster
+        .get(&format!(
+            "/api/v1/namespaces/{ns}/configmaps/{server_name}-tenants"
+        ))
+        .is_some());
+
+    // 3. WaddleTenant reconciles while server is still Reconciling -> stays Pending.
+    let (mock_openfga_url, fga_state) = start_mock_openfga_server().await;
+    let tenant_ctx = Arc::new(TenantControllerContext {
+        client: cluster.client(),
+        metrics: Arc::new(OperatorMetrics::new()),
+        recorder: None,
+        leadership: LeadershipFence::always_active(),
+        openfga_endpoint_override: Some(mock_openfga_url),
+    });
+
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, tenant_cr_name)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("tenant pending while server reconciling");
+    let wt_pending = cluster.get_tenant(ns, tenant_cr_name);
+    assert_eq!(
+        wt_pending.status.as_ref().expect("wt status").phase,
+        WaddleTenantPhase::Pending
+    );
+    assert!(
+        wt_pending
+            .metadata
+            .finalizers
+            .as_deref()
+            .unwrap_or(&[])
+            .contains(&TENANT_FINALIZER.to_owned()),
+        "tenant cleanup finalizer must be attached"
+    );
+
+    // 4. Mark WaddleServer Ready -> WaddleTenant provisions OpenFGA store/model + ConfigMaps + Ready.
+    mark_deployment_available(&cluster, ns, server_name);
+    reconcile_single(
+        Arc::new(cluster.get_waddle(ns, server_name)),
+        Arc::clone(&server_ctx),
+    )
+    .await
+    .expect("server ready");
+    assert_eq!(
+        cluster
+            .get_waddle(ns, server_name)
+            .status
+            .expect("st")
+            .phase,
+        WaddleServerPhase::Ready
+    );
+
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, tenant_cr_name)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("tenant ready");
+    let wt_ready = cluster.get_tenant(ns, tenant_cr_name);
+    let wt_status = wt_ready.status.as_ref().expect("wt status");
+    assert_eq!(wt_status.phase, WaddleTenantPhase::Ready);
+    assert_eq!(wt_status.openfga_store_id.as_deref(), Some("01FGASTORE001"));
+    assert_eq!(wt_status.openfga_model_id.as_deref(), Some("01FGAMODEL001"));
+    assert_eq!(wt_status.lease_epoch, Some(1));
+
+    {
+        let fg = fga_state.lock().expect("lock");
+        assert_eq!(fg.store_creates, 1);
+        assert_eq!(fg.model_writes, 1);
+        assert_eq!(
+            fg.last_bearer.as_deref(),
+            Some("Bearer openfga-secret-token")
+        );
+    }
+
+    // Verify per-tenant projection ConfigMap + server aggregated tenants ConfigMap.
+    let proj_cm_path = format!("/api/v1/namespaces/{ns}/configmaps/waddle-tenant-{tenant_cr_name}");
+    let proj_cm = cluster.get(&proj_cm_path).expect("projection ConfigMap");
+    assert_eq!(
+        proj_cm["metadata"]["labels"]["waddle.social/server"].as_str(),
+        Some(server_name)
+    );
+    assert_eq!(
+        proj_cm["metadata"]["labels"]["waddle.social/tenant"].as_str(),
+        Some("waddle.social")
+    );
+    let proj_json: Value = serde_json::from_str(
+        proj_cm["data"]["waddle.social.json"]
+            .as_str()
+            .expect("tenant json key"),
+    )
+    .expect("valid tenant projection json");
+    assert_eq!(proj_json["tenantId"].as_str(), Some("waddle.social"));
+    assert_eq!(proj_json["openfgaStoreId"].as_str(), Some("01FGASTORE001"));
+    assert_eq!(proj_json["openfgaModelId"].as_str(), Some("01FGAMODEL001"));
+    assert_eq!(proj_json["owners"], json!(["rawkode", "icepuma", "randax"]));
+
+    let agg_cm = cluster
+        .get(&format!(
+            "/api/v1/namespaces/{ns}/configmaps/{server_name}-tenants"
+        ))
+        .expect("server tenants ConfigMap");
+    assert!(
+        agg_cm["data"]["waddle.social.json"].as_str().is_some(),
+        "server aggregated tenants ConfigMap must contain waddle.social.json"
+    );
+
+    // 5. Re-reconcile is idempotent (no duplicate OpenFGA calls, no status churn).
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, tenant_cr_name)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("idempotent tenant reconcile");
+    {
+        let fg = fga_state.lock().expect("lock");
+        assert_eq!(fg.store_creates, 1);
+        assert_eq!(fg.model_writes, 1);
+    }
+
+    // 6. Deletion cleans up projection ConfigMap, removes entry from <server>-tenants, and removes finalizer.
+    let mut deleting_wt = cluster.get(&wt_path).expect("wt exists");
+    deleting_wt["metadata"]["deletionTimestamp"] = json!("2026-11-26T21:00:00Z");
+    cluster.put(&wt_path, deleting_wt);
+
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, tenant_cr_name)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("tenant deletion cleanup");
+    let wt_term = cluster.get_tenant(ns, tenant_cr_name);
+    assert_eq!(
+        wt_term.status.as_ref().expect("term status").phase,
+        WaddleTenantPhase::Terminating
+    );
+    assert!(
+        wt_term
+            .metadata
+            .finalizers
+            .as_deref()
+            .unwrap_or(&[])
+            .is_empty(),
+        "cleanup finalizer must be removed after deletion"
+    );
+    assert!(
+        cluster.get(&proj_cm_path).is_none(),
+        "projection ConfigMap must be deleted on tenant removal"
+    );
+    let agg_after = cluster
+        .get(&format!(
+            "/api/v1/namespaces/{ns}/configmaps/{server_name}-tenants"
+        ))
+        .expect("server tenants ConfigMap remains");
+    assert!(
+        agg_after["data"].get("waddle.social.json").is_none(),
+        "deleted tenant entry must be removed from server aggregated tenants ConfigMap"
     );
 }

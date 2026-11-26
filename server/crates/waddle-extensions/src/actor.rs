@@ -13,13 +13,18 @@ use crate::host_tools::{
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::observer_test_support::ObserverTestPlugin;
-use crate::runtime::LoadedExtension;
+use crate::runtime::{
+    is_inference_plugin, DenyingExtensionInferenceHost, ExtensionInferenceHost,
+    InferenceInvocationParams, LoadedExtension,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::types::{ArtifactReference, ExtensionProfile};
 use crate::types::{
     ConfiguredRoomObserver, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent,
     ExtensionManifest, ExtensionResponse, ObservationFailure, RoomMessageObserve, WaddleId,
 };
+use waddle_broker_core::identity::TenantId;
+use waddle_broker_core::quotas::TenantResourceController;
 
 /// Host admission is distinct from any error after entering the runtime.
 pub(crate) enum ObservationInvocationError {
@@ -35,11 +40,14 @@ pub struct WasmExtensionActor {
     extension: Arc<LoadedExtension>,
     config: String,
     host_tools: Arc<dyn ExtensionHostTools>,
+    inference_host: Arc<dyn ExtensionInferenceHost>,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
     room_observer: Option<ConfiguredRoomObserver>,
     observation_permits: Arc<tokio::sync::Semaphore>,
+    tenant_id: Option<TenantId>,
+    resource_controller: Option<Arc<TenantResourceController>>,
 }
 
 impl std::fmt::Debug for WasmExtensionActor {
@@ -70,11 +78,14 @@ impl WasmExtensionActor {
             extension: Arc::new(extension),
             config: config.to_string(),
             host_tools: Arc::new(DenyingExtensionHostTools),
+            inference_host: Arc::new(DenyingExtensionInferenceHost),
             grants: HashSet::new(),
             allowed_http_origins: Vec::new(),
             provider_room_grants: Vec::new(),
             room_observer: None,
             observation_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+            tenant_id: None,
+            resource_controller: None,
         })
     }
 
@@ -105,6 +116,13 @@ impl WasmExtensionActor {
     #[must_use]
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
+        self
+    }
+
+    /// Install the brokered inference host used by `waddle:extension/inference@4.0.0`.
+    #[must_use]
+    pub fn with_inference_host(mut self, inference_host: Arc<dyn ExtensionInferenceHost>) -> Self {
+        self.inference_host = inference_host;
         self
     }
 
@@ -148,8 +166,30 @@ impl WasmExtensionActor {
         self.room_observer.as_ref()
     }
 
+    /// Bind this extension actor to a canonical [`TenantId`].
+    #[must_use]
+    pub fn with_tenant_id(mut self, tenant_id: TenantId) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Return the canonical [`TenantId`] bound to this actor, if configured.
+    #[must_use]
+    pub fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
+    }
+
+    /// Attach a per-tenant [`TenantResourceController`] enforced before Wasm
+    /// store creation and instantiation.
+    #[must_use]
+    pub fn with_resource_controller(mut self, controller: Arc<TenantResourceController>) -> Self {
+        self.resource_controller = Some(controller);
+        self
+    }
+
     pub(crate) async fn observe_room_message(
         &self,
+        waddle_id: WaddleId,
         event: RoomMessageObserve,
         delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
     ) -> Result<ExtensionResponse, ObservationInvocationError> {
@@ -158,38 +198,54 @@ impl WasmExtensionActor {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ObservationInvocationError::NotInvoked)?;
+        let wasm_permit = match (&self.resource_controller, &self.tenant_id) {
+            (Some(controller), Some(tenant_id)) => Some(
+                controller
+                    .try_acquire_wasm_invocation(tenant_id, 0)
+                    .map_err(|_| ObservationInvocationError::NotInvoked)?,
+            ),
+            _ => None,
+        };
+        let memory_tracker = wasm_permit.as_ref().map(|p| p.memory_tracker());
         let context = InvocationContext {
-            // This is a display/runtime context only, never tenant authority.
-            waddle_id: WaddleId::try_new("room-observation").expect("static context"),
+            tenant_id: self.tenant_id.clone(),
+            waddle_id,
             plugin_id: self.manifest.id.clone(),
             requester: None,
             source_room: Some(event.source.room.clone()),
             kind: InvocationKind::RoomMessageObserve,
             provider_room_grants: Vec::new(),
         };
+        let inference_invocation = is_inference_plugin(&self.manifest.id);
         let result = if let Some(capability) = delivery {
             self.extension
-                .call_handle_event_typed_with_delivery(
+                .call_handle_event_typed_with_delivery_and_tracker(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
                     DeliveryInvocation {
                         context,
                         capability,
                     },
+                    Arc::clone(&self.inference_host),
+                    inference_invocation,
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
+                    memory_tracker,
                 )
                 .await
         } else {
             self.extension
-                .call_handle_event_typed(
+                .call_handle_event_typed_with_tracker(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
                     context,
+                    Arc::clone(&self.inference_host),
+                    inference_invocation,
                     self.config.clone(),
                     self.grants.clone(),
                     self.allowed_http_origins.clone(),
+                    memory_tracker,
                 )
                 .await
         };
@@ -225,18 +281,6 @@ impl WasmExtensionActor {
         effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
     }
 
-    /// Run an event in the default `local` community and return only permitted effects;
-    /// guest failures become host warnings.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the fixed nonblank `local` community identifier violates the
-    /// identifier constructor invariant.
-    pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
-        self.handle_event_for_waddle(event, WaddleId::try_new("local").expect("static waddle id"))
-            .await
-    }
-
     /// Run an event in the specified community, deriving requester authority from the event.
     pub async fn handle_event_for_waddle(
         &self,
@@ -262,13 +306,61 @@ impl WasmExtensionActor {
         waddle_id: WaddleId,
         requester: Option<xmpp_parsers::jid::BareJid>,
     ) -> Vec<ExtensionEffect> {
+        self.handle_event_for_waddle_with_chunks(event, waddle_id, requester, None)
+            .await
+    }
+
+    /// Run an event using explicit requester authority and an optional progressive
+    /// stream chunk channel. Inference failures and `Denied` errors fail closed as
+    /// [`ExtensionEffect::HostDenial`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if construction of the nonempty diagnostic violates the display-text
+    /// invariant. Test-support fixtures can also panic if their recorded-invocation
+    /// mutex was poisoned.
+    pub async fn handle_event_for_waddle_with_chunks(
+        &self,
+        event: ExtensionEvent,
+        waddle_id: WaddleId,
+        requester: Option<xmpp_parsers::jid::BareJid>,
+        chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    ) -> Vec<ExtensionEffect> {
         #[cfg(any(test, feature = "test-support"))]
         if let (Some(plugin), ExtensionEvent::MessageHook(hook)) = (&self.observer_test, &event) {
             if let Some(effects) = plugin.invoke(hook.clone()).await {
                 return effects;
             }
         }
+        let inference_invocation = is_inference_plugin(&self.manifest.id);
+        let wasm_permit = match (&self.resource_controller, &self.tenant_id) {
+            (Some(controller), Some(tenant_id)) => {
+                match controller.try_acquire_wasm_invocation(tenant_id, 0) {
+                    Ok(permit) => Some(permit),
+                    Err(err) => {
+                        warn!(
+                            plugin = %self.manifest.id,
+                            error = %err,
+                            "extension invocation rejected before instantiation by tenant quota"
+                        );
+                        let text = DisplayText::try_new(format!(
+                            "Extension {} resource limit exceeded",
+                            self.manifest.id
+                        ))
+                        .expect("quota warning is non-empty");
+                        return if inference_invocation {
+                            vec![ExtensionEffect::HostDenial(text)]
+                        } else {
+                            vec![ExtensionEffect::HostWarning(text)]
+                        };
+                    }
+                }
+            }
+            _ => None,
+        };
+        let memory_tracker = wasm_permit.as_ref().map(|p| p.memory_tracker());
         let context = InvocationContext {
+            tenant_id: self.tenant_id.clone(),
             waddle_id,
             plugin_id: self.manifest.id.clone(),
             requester: requester.or_else(|| requester_for_event(&event)),
@@ -286,14 +378,18 @@ impl WasmExtensionActor {
         }
         match self
             .extension
-            .call_handle_event(
+            .call_handle_event_with_inference_classified(InferenceInvocationParams {
                 event,
-                Arc::clone(&self.host_tools),
+                tools: Arc::clone(&self.host_tools),
+                inference: Arc::clone(&self.inference_host),
+                chunk_tx,
                 context,
-                self.config.clone(),
-                self.grants.clone(),
-                self.allowed_http_origins.clone(),
-            )
+                config: self.config.clone(),
+                grants: self.grants.clone(),
+                allowed_http_origins: self.allowed_http_origins.clone(),
+                tenant_memory_tracker: memory_tracker,
+                inference_invocation,
+            })
             .await
         {
             Ok(response) => response
@@ -304,16 +400,35 @@ impl WasmExtensionActor {
                         && effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
                 })
                 .collect(),
-            Err(error) => {
-                let message = format!("Extension {} failed: {error}", self.manifest.id);
-                warn!(
-                    extension = %self.manifest.id,
-                    %error,
-                    "extension handle-event failed; continuing fail-open"
-                );
-                vec![ExtensionEffect::HostWarning(
-                    DisplayText::try_new(message).expect("host warning is non-empty"),
-                )]
+            Err((failure, detail)) => {
+                let message = match detail {
+                    Some(detail) => {
+                        format!(
+                            "Extension {} failed ({failure:?}): {detail}",
+                            self.manifest.id
+                        )
+                    }
+                    None => format!("Extension {} failed: {failure:?}", self.manifest.id),
+                };
+                if inference_invocation || matches!(failure, ObservationFailure::Denied) {
+                    warn!(
+                        extension = %self.manifest.id,
+                        ?failure,
+                        "inference extension handle-event failed; failing closed"
+                    );
+                    vec![ExtensionEffect::HostDenial(
+                        DisplayText::try_new(message).expect("host denial is non-empty"),
+                    )]
+                } else {
+                    warn!(
+                        extension = %self.manifest.id,
+                        ?failure,
+                        "extension handle-event failed; continuing fail-open"
+                    );
+                    vec![ExtensionEffect::HostWarning(
+                        DisplayText::try_new(message).expect("host warning is non-empty"),
+                    )]
+                }
             }
         }
     }

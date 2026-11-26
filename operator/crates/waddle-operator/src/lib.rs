@@ -1,4 +1,4 @@
-//! Kubernetes controller, observers, and workload builders for `WaddleServer`.
+//! Kubernetes controller, observers, and workload builders for `WaddleServer` and `WaddleTenant`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -23,14 +23,19 @@ pub mod leader_election;
 pub mod metrics;
 /// Cluster state observer converting API objects into a pure `ObservedWorld`.
 pub mod observer;
+/// OpenFGA HTTP provisioning client for tenant stores and authorization models.
+pub mod openfga_client;
 /// Kubernetes workload manifest builders (Deployment, ConfigMap, Services, PDB, NetworkPolicy, Secrets).
 pub mod resources;
+/// `WaddleTenant` reconciliation controller and projection ConfigMap manager.
+pub mod tenant_controller;
 /// Cryptographic generators, redacted secret wrappers, and keypool validators.
 pub mod yolo;
 
-pub use cli::{Cli, Command, LogFormat, RunArgs};
+pub use cli::{Cli, Command, CrdArgs, CrdKind, LogFormat, RunArgs};
 pub use controller::{reconcile_single, run_controller, ControllerContext};
 pub use error::OperatorError;
 pub use health::HealthState;
 pub use metrics::OperatorMetrics;
 pub use observer::OperatorPolicy;
+pub use tenant_controller::{reconcile_tenant, TenantControllerContext, TENANT_FINALIZER};

@@ -12,9 +12,10 @@ use kube::{Client, CustomResourceExt};
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 use waddle_operator::{
-    health, run_controller, Cli, Command, HealthState, LogFormat, OperatorError, OperatorMetrics,
+    health, run_controller, Cli, Command, CrdKind, HealthState, LogFormat, OperatorError,
+    OperatorMetrics,
 };
-use waddle_operator_crd::WaddleServer;
+use waddle_operator_crd::{WaddleServer, WaddleTenant};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -27,13 +28,10 @@ async fn main() -> ExitCode {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Crd => match render_crd_yaml() {
+        Command::Crd(args) => match render_crd_yaml(args.kind) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "failed to render WaddleServer CRD: {err}"
-                );
+                let _ = writeln!(std::io::stderr(), "failed to render CRD: {err}");
                 ExitCode::FAILURE
             }
         },
@@ -50,8 +48,11 @@ async fn main() -> ExitCode {
     }
 }
 
-fn render_crd_yaml() -> Result<(), OperatorError> {
-    let crd = WaddleServer::crd();
+fn render_crd_yaml(kind: CrdKind) -> Result<(), OperatorError> {
+    let crd = match kind {
+        CrdKind::Server => WaddleServer::crd(),
+        CrdKind::Tenant => WaddleTenant::crd(),
+    };
     let yaml = serde_yaml_ng::to_string(&crd)
         .map_err(|err| OperatorError::Serialization(err.to_string()))?;
     let mut stdout = std::io::stdout().lock();

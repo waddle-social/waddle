@@ -154,6 +154,17 @@ pub struct AppState {
     /// as the session's own request would. While unbound such a write
     /// notifies nobody.
     notifications: OnceLock<std::sync::Weak<crate::server::routes::websocket::WebSocketState>>,
+    /// Shared broker-role [`waddle_broker_core::permission::PermissionBackend`]
+    /// (e.g. OpenFGA) backing both `BrokerAdmissionService` and
+    /// `ServerTenantRegistry` when configured.
+    pub broker_permission_backend:
+        Option<Arc<dyn waddle_broker_core::permission::PermissionBackend>>,
+    /// Multi-tenant Turso [`crate::db::tenant_registry::ServerTenantRegistry`]
+    /// initialized when `WADDLE_DB_DRIVER=turso` or `WADDLE_TURSO_DATA_DIR` is set.
+    pub tenant_registry: Option<Arc<crate::db::tenant_registry::ServerTenantRegistry>>,
+    /// Startup broker credential custody service, published once the
+    /// extension inference host is wired.
+    broker_custody: OnceLock<Arc<waddle_broker::custody::BrokerCustodyService>>,
 }
 
 impl AppState {
@@ -302,7 +313,25 @@ impl AppState {
             runtime_progress: Arc::new(RuntimeProgress::new()),
             durable_sm: OnceLock::new(),
             account_authority: OnceLock::new(),
+            broker_permission_backend: None,
+            tenant_registry: None,
+            broker_custody: OnceLock::new(),
         }
+    }
+
+    /// Returns the startup [`waddle_broker::custody::BrokerCustodyService`] if
+    /// the broker inference host has been armed.
+    pub fn broker_custody(&self) -> Option<&Arc<waddle_broker::custody::BrokerCustodyService>> {
+        self.broker_custody.get()
+    }
+
+    /// Publishes the startup [`waddle_broker::custody::BrokerCustodyService`]
+    /// once the broker runtime has been constructed.
+    pub(crate) fn set_broker_custody(
+        &self,
+        custody: Arc<waddle_broker::custody::BrokerCustodyService>,
+    ) {
+        let _ = self.broker_custody.set(custody);
     }
 }
 

@@ -4,8 +4,9 @@ use std::fmt;
 use url::Url;
 
 use crate::dependencies::{
+    AuthzBackendKind, AuthzSpec, BrokerKmsProviderKind, BrokerSpec, OpenFgaDependencySpec,
     PostgresDependencySpec, PostgresSourceMode, RestrictedRuntimeSpec, SpiceDbDependencySpec,
-    SpiceDbSourceMode,
+    SpiceDbSourceMode, StorageBackendKind, StorageSpec,
 };
 use crate::identifiers::{
     DeploymentUuid, GitSha, ImageDigest, PgIdentifier, ResourceName, XmppDomain,
@@ -27,6 +28,9 @@ const RESERVED_OPERATOR_ENV_KEYS: &[&str] = &[
     "WADDLE_OCCUPANT_ID_SECRET",
     "WADDLE_DATABASE_URL",
     "WADDLE_SPICEDB_PRESHARED_KEY",
+    "WADDLE_OPENFGA_API_TOKEN",
+    "WADDLE_SCW_KMS_AUTH_TOKEN",
+    "WADDLE_VAULT_TOKEN",
     "WADDLE_CLUSTERING_KEYPAIR_POOL",
     "WADDLE_DB_RUNTIME_ATTESTATION",
     "WADDLE_RUNTIME_DB_PASSWORD",
@@ -49,6 +53,8 @@ pub enum ValidationViolation {
         /// Supplied replica count.
         replicas: i32,
     },
+    /// Turso single-writer storage requires `replicas <= 1`, `clustering.enabled=false`, and `Recreate`.
+    TursoSingleWriterViolation,
     /// YOLO secret generation is restricted to single-replica non-clustered deployments.
     YoloForbidsClusteringOrMultiReplica,
     /// `terminationGracePeriodSeconds` is below the required ordered-shutdown floor.
@@ -80,7 +86,7 @@ pub enum ValidationViolation {
         /// Minimum required key count.
         required: i32,
     },
-    /// Non-YOLO deployments require `deployment.uuid` for DB lineage attestation.
+    /// Non-YOLO Postgres deployments require `deployment.uuid` for DB lineage attestation.
     DeploymentUuidRequiredInEsoMode,
     /// Invalid `deployment.uuid` format.
     InvalidDeploymentUuid,
@@ -108,7 +114,7 @@ pub enum ValidationViolation {
         /// Field path.
         field: &'static str,
     },
-    /// Discriminated dependency or secrets struct is inconsistent with its `mode`.
+    /// Discriminated dependency, broker, or secrets struct is inconsistent with its mode/backend.
     InconsistentDiscriminatedSpec {
         /// Section name.
         section: &'static str,
@@ -147,6 +153,10 @@ impl fmt::Display for ValidationViolation {
                 f,
                 "spec.replicas ({replicas}) > 1 requires spec.clustering.enabled=true"
             ),
+            Self::TursoSingleWriterViolation => write!(
+                f,
+                "spec.storage.backend=Turso enforces single-writer safety (replicas <= 1, clustering.enabled=false, updateStrategy=Recreate)"
+            ),
             Self::YoloForbidsClusteringOrMultiReplica => write!(
                 f,
                 "Yolo secret mode only supports single-replica non-clustered deployments (replicas <= 1 and clustering.enabled=false)"
@@ -184,7 +194,7 @@ impl fmt::Display for ValidationViolation {
                 "spec.clustering.enrolledKeyCount ({enrolled}) must be >= {required} (replicas + maxSurge + keypairHeadroom)"
             ),
             Self::DeploymentUuidRequiredInEsoMode => {
-                write!(f, "spec.deployment.uuid is required in ExternalSecrets mode")
+                write!(f, "spec.deployment.uuid is required in ExternalSecrets Postgres mode")
             }
             Self::InvalidDeploymentUuid => {
                 write!(f, "spec.deployment.uuid must be a lower-case RFC-4122 UUID")
@@ -202,7 +212,7 @@ impl fmt::Display for ValidationViolation {
                 "spec.deployment.lineageAction cannot be set when restrictedRuntime.enabled=true"
             ),
             Self::InvalidRestrictedRuntime { detail } => {
-                write!(f, "spec.postgres.restrictedRuntime invalid: {detail}")
+                write!(f, "spec.storage.postgres.restrictedRuntime invalid: {detail}")
             }
             Self::InvalidImageDigest => {
                 write!(f, "spec.image.digest must match sha256:<64 lower-case hex> and not be zero")
@@ -296,8 +306,11 @@ pub fn validate_spec(spec: &WaddleServerSpec) -> Result<ValidatedSpec, Validatio
     let deployment_uuid = validate_deployment_identity(spec, &mut violations);
     validate_image_and_urls(spec, &mut violations);
     let xmpp_domain = validate_xmpp(spec, &mut violations);
-    validate_postgres(&spec.postgres, &mut violations);
-    validate_spicedb(&spec.spicedb, &mut violations);
+    validate_storage(&spec.storage, &mut violations);
+    validate_authz(&spec.authz, &mut violations);
+    if let Some(broker) = &spec.broker {
+        validate_broker(broker, &mut violations);
+    }
     validate_secrets(&spec.secrets, &mut violations);
     validate_numeric_knobs(spec, &mut violations);
     validate_s3_and_s2s_and_env(spec, &mut violations);
@@ -326,6 +339,14 @@ fn validate_replicas_and_clustering(
         if replicas < 0 {
             violations.push(ValidationViolation::NegativeReplicas { replicas });
         }
+    }
+
+    if spec.storage.backend == StorageBackendKind::Turso
+        && (effective_replicas > 1
+            || spec.clustering.enabled
+            || spec.update_strategy != UpdateStrategyKind::Recreate)
+    {
+        violations.push(ValidationViolation::TursoSingleWriterViolation);
     }
 
     if effective_replicas > 1 && !spec.clustering.enabled {
@@ -464,7 +485,9 @@ fn validate_deployment_identity(
             }
         },
         _ => {
-            if spec.secrets.mode == SecretProviderMode::ExternalSecrets {
+            if spec.secrets.mode == SecretProviderMode::ExternalSecrets
+                && spec.storage.backend == StorageBackendKind::Postgres
+            {
                 violations.push(ValidationViolation::DeploymentUuidRequiredInEsoMode);
             }
             None
@@ -480,9 +503,10 @@ fn validate_deployment_identity(
                 violations.push(ValidationViolation::LineageActionRequiresDeploymentUuid);
             }
             let restricted = spec
+                .storage
                 .postgres
-                .restricted_runtime
                 .as_ref()
+                .and_then(|pg| pg.restricted_runtime.as_ref())
                 .is_some_and(|r| r.enabled);
             if restricted {
                 violations.push(ValidationViolation::LineageActionForbiddenInRestrictedRuntime);
@@ -550,30 +574,56 @@ fn validate_xmpp(
     domain
 }
 
+fn validate_storage(storage: &StorageSpec, violations: &mut Vec<ValidationViolation>) {
+    match (storage.backend, &storage.turso, &storage.postgres) {
+        (StorageBackendKind::Turso, maybe_turso, None) => {
+            if let Some(turso) = maybe_turso {
+                if turso.data_dir.trim().is_empty() {
+                    violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                        section: "spec.storage.turso.dataDir",
+                        detail: "dataDir must not be empty",
+                    });
+                }
+            }
+        }
+        (StorageBackendKind::Postgres, None, Some(pg)) => {
+            validate_postgres(pg, violations);
+        }
+        _ => violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.storage",
+            detail: "backend must match the populated turso or postgres block exclusively",
+        }),
+    }
+}
+
 fn validate_postgres(postgres: &PostgresDependencySpec, violations: &mut Vec<ValidationViolation>) {
     match (postgres.mode, &postgres.cnpg, &postgres.external) {
         (PostgresSourceMode::CloudNativePg, Some(cnpg), None) => {
             validate_resource_name(
                 &cnpg.cluster_name,
-                "spec.postgres.cnpg.clusterName",
+                "spec.storage.postgres.cnpg.clusterName",
                 violations,
             );
             if let Some(secret) = cnpg.secret_name.as_deref() {
-                validate_resource_name(secret, "spec.postgres.cnpg.secretName", violations);
+                validate_resource_name(secret, "spec.storage.postgres.cnpg.secretName", violations);
             }
         }
         (PostgresSourceMode::External, None, Some(ext)) => {
             validate_resource_name(
                 &ext.secret_name,
-                "spec.postgres.external.secretName",
+                "spec.storage.postgres.external.secretName",
                 violations,
             );
             if let Some(svc) = ext.service_name.as_deref() {
-                validate_resource_name(svc, "spec.postgres.external.serviceName", violations);
+                validate_resource_name(
+                    svc,
+                    "spec.storage.postgres.external.serviceName",
+                    violations,
+                );
             }
         }
         _ => violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
-            section: "spec.postgres",
+            section: "spec.storage.postgres",
             detail: "mode must match the populated cnpg or external block exclusively",
         }),
     }
@@ -581,7 +631,7 @@ fn validate_postgres(postgres: &PostgresDependencySpec, violations: &mut Vec<Val
     if let Some(timeout) = postgres.acquire_timeout_secs {
         if !(1..=MAX_WAIT_SECS).contains(&timeout) {
             violations.push(ValidationViolation::OutOfRange {
-                field: "spec.postgres.acquireTimeoutSecs",
+                field: "spec.storage.postgres.acquireTimeoutSecs",
                 min: 1,
                 max: MAX_WAIT_SECS,
                 actual: timeout,
@@ -635,19 +685,77 @@ fn validate_restricted_runtime(
     }
     validate_resource_name(
         &restricted.ca_secret_name,
-        "spec.postgres.restrictedRuntime.caSecretName",
+        "spec.storage.postgres.restrictedRuntime.caSecretName",
         violations,
     );
     validate_resource_name(
         &restricted.runtime_credential_secret,
-        "spec.postgres.restrictedRuntime.runtimeCredentialSecret",
+        "spec.storage.postgres.restrictedRuntime.runtimeCredentialSecret",
         violations,
     );
     validate_resource_name(
         &restricted.handoff_config_map_name,
-        "spec.postgres.restrictedRuntime.handoffConfigMapName",
+        "spec.storage.postgres.restrictedRuntime.handoffConfigMapName",
         violations,
     );
+}
+
+fn validate_authz(authz: &AuthzSpec, violations: &mut Vec<ValidationViolation>) {
+    match (authz.backend, &authz.openfga, &authz.spicedb) {
+        (AuthzBackendKind::OpenFga, Some(openfga), None) => {
+            validate_openfga(openfga, violations);
+        }
+        (AuthzBackendKind::SpiceDb, None, Some(spicedb)) => {
+            validate_spicedb(spicedb, violations);
+        }
+        _ => violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.authz",
+            detail: "backend must match the populated openfga or spicedb block exclusively",
+        }),
+    }
+}
+
+fn validate_openfga(openfga: &OpenFgaDependencySpec, violations: &mut Vec<ValidationViolation>) {
+    validate_resource_name(
+        &openfga.service_name,
+        "spec.authz.openfga.serviceName",
+        violations,
+    );
+    if !matches!(openfga.scheme.as_str(), "http" | "https") {
+        violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.authz.openfga.scheme",
+            detail: "scheme must be 'http' or 'https'",
+        });
+    }
+    if openfga.port == 0 {
+        violations.push(ValidationViolation::OutOfRange {
+            field: "spec.authz.openfga.port",
+            min: 1,
+            max: u64::from(u16::MAX),
+            actual: 0,
+        });
+    }
+    if let Some(secret_ref) = &openfga.auth_secret_ref {
+        validate_resource_name(
+            &secret_ref.name,
+            "spec.authz.openfga.authSecretRef.name",
+            violations,
+        );
+        if secret_ref.key.trim().is_empty() {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.authz.openfga.authSecretRef.key",
+                detail: "key must not be empty",
+            });
+        }
+    }
+    if let Some(consistency) = openfga.consistency.as_deref() {
+        if !matches!(consistency, "higher_consistency" | "minimize_latency") {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.authz.openfga.consistency",
+                detail: "consistency must be 'higher_consistency' or 'minimize_latency'",
+            });
+        }
+    }
 }
 
 fn validate_spicedb(spicedb: &SpiceDbDependencySpec, violations: &mut Vec<ValidationViolation>) {
@@ -655,16 +763,16 @@ fn validate_spicedb(spicedb: &SpiceDbDependencySpec, violations: &mut Vec<Valida
         (SpiceDbSourceMode::SpiceDbOperator, Some(op), None) => {
             validate_resource_name(
                 &op.cluster_name,
-                "spec.spicedb.operator.clusterName",
+                "spec.authz.spicedb.operator.clusterName",
                 violations,
             );
             if let Some(svc) = op.service_name.as_deref() {
-                validate_resource_name(svc, "spec.spicedb.operator.serviceName", violations);
+                validate_resource_name(svc, "spec.authz.spicedb.operator.serviceName", violations);
             }
             if let Some(secret_ref) = &op.preshared_key_secret_ref {
                 validate_resource_name(
                     &secret_ref.name,
-                    "spec.spicedb.operator.presharedKeySecretRef.name",
+                    "spec.authz.spicedb.operator.presharedKeySecretRef.name",
                     violations,
                 );
             }
@@ -672,24 +780,106 @@ fn validate_spicedb(spicedb: &SpiceDbDependencySpec, violations: &mut Vec<Valida
         (SpiceDbSourceMode::External, None, Some(ext)) => {
             if Url::parse(ext.endpoint.trim()).is_err() {
                 violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
-                    section: "spec.spicedb.external.endpoint",
+                    section: "spec.authz.spicedb.external.endpoint",
                     detail: "endpoint must be a valid URL",
                 });
             }
             if let Some(svc) = ext.service_name.as_deref() {
-                validate_resource_name(svc, "spec.spicedb.external.serviceName", violations);
+                validate_resource_name(svc, "spec.authz.spicedb.external.serviceName", violations);
             }
             if let Some(secret_ref) = &ext.preshared_key_secret_ref {
                 validate_resource_name(
                     &secret_ref.name,
-                    "spec.spicedb.external.presharedKeySecretRef.name",
+                    "spec.authz.spicedb.external.presharedKeySecretRef.name",
                     violations,
                 );
             }
         }
         _ => violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
-            section: "spec.spicedb",
+            section: "spec.authz.spicedb",
             detail: "mode must match the populated operator or external block exclusively",
+        }),
+    }
+}
+
+fn validate_broker(broker: &BrokerSpec, violations: &mut Vec<ValidationViolation>) {
+    if !broker.enabled {
+        return;
+    }
+    if broker.data_dir.trim().is_empty() {
+        violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.broker.dataDir",
+            detail: "dataDir must not be empty when broker is enabled",
+        });
+    }
+    let Some(kms) = &broker.kms else {
+        violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.broker.kms",
+            detail: "kms configuration is required when broker.enabled=true",
+        });
+        return;
+    };
+    match (kms.provider, &kms.scaleway, &kms.vault) {
+        (BrokerKmsProviderKind::Scaleway, Some(scw), None) => {
+            if Url::parse(scw.base_url.trim()).is_err() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.scaleway.baseUrl",
+                    detail: "baseUrl must be a valid URL",
+                });
+            }
+            if scw.region.trim().is_empty() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.scaleway.region",
+                    detail: "region must not be empty",
+                });
+            }
+            if scw.project_id.trim().is_empty() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.scaleway.projectId",
+                    detail: "projectId must not be empty",
+                });
+            }
+            validate_resource_name(
+                &scw.auth_secret_ref.name,
+                "spec.broker.kms.scaleway.authSecretRef.name",
+                violations,
+            );
+            if scw.auth_secret_ref.key.trim().is_empty() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.scaleway.authSecretRef.key",
+                    detail: "key must not be empty",
+                });
+            }
+        }
+        (BrokerKmsProviderKind::Vault, None, Some(vault)) => {
+            if Url::parse(vault.base_url.trim()).is_err() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.vault.baseUrl",
+                    detail: "baseUrl must be a valid URL",
+                });
+            }
+            if vault.mount.trim().is_empty() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.vault.mount",
+                    detail: "mount must not be empty",
+                });
+            }
+            validate_resource_name(
+                &vault.auth_secret_ref.name,
+                "spec.broker.kms.vault.authSecretRef.name",
+                violations,
+            );
+            if vault.auth_secret_ref.key.trim().is_empty() {
+                violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                    section: "spec.broker.kms.vault.authSecretRef.key",
+                    detail: "key must not be empty",
+                });
+            }
+        }
+        (BrokerKmsProviderKind::Local, None, None) => {}
+        _ => violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+            section: "spec.broker.kms",
+            detail: "provider must match the populated scaleway/vault block exclusively",
         }),
     }
 }
@@ -836,9 +1026,12 @@ mod tests {
     use serde_json::Value;
 
     use crate::dependencies::{
-        CloudNativePgSource, ExternalPostgresSource, ExternalSpiceDbSource, PostgresDependencySpec,
-        PostgresSourceMode, RestrictedRuntimeRolesSpec, RestrictedRuntimeSpec,
-        SpiceDbDependencySpec, SpiceDbOperatorSource, SpiceDbSourceMode,
+        AuthzBackendKind, AuthzSpec, BrokerKmsProviderKind, BrokerKmsSpec, BrokerSpec,
+        CloudNativePgSource, ExtensionsSpec, ExternalPostgresSource, ExternalSpiceDbSource,
+        OpenFgaDependencySpec, PostgresDependencySpec, PostgresSourceMode,
+        RestrictedRuntimeRolesSpec, RestrictedRuntimeSpec, ScalewayKmsSpec, SecretKeyRef,
+        SpiceDbDependencySpec, SpiceDbOperatorSource, SpiceDbSourceMode, StorageBackendKind,
+        StorageSpec, TursoStorageSpec,
     };
     use crate::secrets::{
         EsoApiVersion, ExternalSecretsSpec, SecretProviderMode, SecretsSpec, YoloSecretsSpec,
@@ -853,7 +1046,7 @@ mod tests {
 
     const SAMPLE_UUID: &str = "b90424f8-22ca-40bb-a24e-551d171c7b84";
 
-    fn valid_eso_spec() -> WaddleServerSpec {
+    fn valid_postgres_eso_spec() -> WaddleServerSpec {
         WaddleServerSpec {
             replicas: Some(1),
             mode: crate::server_config::ServerMode::HomeServer,
@@ -867,34 +1060,44 @@ mod tests {
                 native_auth_enabled: true,
                 registration_enabled: false,
             },
-            postgres: PostgresDependencySpec {
-                mode: PostgresSourceMode::CloudNativePg,
-                cnpg: Some(CloudNativePgSource {
-                    cluster_name: "postgresql".to_owned(),
-                    secret_name: None,
-                    uri_key: "uri".to_owned(),
-                    username_key: "username".to_owned(),
-                    password_key: "password".to_owned(),
-                    require_healthy: true,
+            storage: StorageSpec {
+                backend: StorageBackendKind::Postgres,
+                turso: None,
+                postgres: Some(PostgresDependencySpec {
+                    mode: PostgresSourceMode::CloudNativePg,
+                    cnpg: Some(CloudNativePgSource {
+                        cluster_name: "postgresql".to_owned(),
+                        secret_name: None,
+                        uri_key: "uri".to_owned(),
+                        username_key: "username".to_owned(),
+                        password_key: "password".to_owned(),
+                        require_healthy: true,
+                    }),
+                    external: None,
+                    pool_size: 10,
+                    control_plane_pool_size: 4,
+                    acquire_timeout_secs: None,
+                    restricted_runtime: None,
                 }),
-                external: None,
-                pool_size: 10,
-                control_plane_pool_size: 4,
-                acquire_timeout_secs: None,
-                restricted_runtime: None,
             },
-            spicedb: SpiceDbDependencySpec {
-                mode: SpiceDbSourceMode::SpiceDbOperator,
-                operator: Some(SpiceDbOperatorSource {
-                    cluster_name: "spicedb".to_owned(),
-                    service_name: None,
-                    port: 50051,
-                    insecure: None,
-                    preshared_key_secret_ref: None,
-                    require_ready: true,
+            authz: AuthzSpec {
+                backend: AuthzBackendKind::SpiceDb,
+                openfga: None,
+                spicedb: Some(SpiceDbDependencySpec {
+                    mode: SpiceDbSourceMode::SpiceDbOperator,
+                    operator: Some(SpiceDbOperatorSource {
+                        cluster_name: "spicedb".to_owned(),
+                        service_name: None,
+                        port: 50051,
+                        insecure: None,
+                        preshared_key_secret_ref: None,
+                        require_ready: true,
+                    }),
+                    external: None,
                 }),
-                external: None,
             },
+            broker: None,
+            extensions: None,
             secrets: SecretsSpec {
                 mode: SecretProviderMode::ExternalSecrets,
                 external_secrets: Some(ExternalSecretsSpec {
@@ -934,6 +1137,59 @@ mod tests {
             pod_annotations: std::collections::BTreeMap::new(),
             pod_labels: std::collections::BTreeMap::new(),
         }
+    }
+
+    fn valid_turso_openfga_broker_spec() -> WaddleServerSpec {
+        let mut spec = valid_postgres_eso_spec();
+        spec.deployment.uuid = None;
+        spec.storage = StorageSpec {
+            backend: StorageBackendKind::Turso,
+            turso: Some(TursoStorageSpec {
+                data_dir: "/var/lib/waddle/tenants".to_owned(),
+                reserved_fds: Some(256),
+                rlimit_nofile: Some(65536),
+            }),
+            postgres: None,
+        };
+        spec.authz = AuthzSpec {
+            backend: AuthzBackendKind::OpenFga,
+            openfga: Some(OpenFgaDependencySpec {
+                service_name: "openfga".to_owned(),
+                port: 8080,
+                scheme: "http".to_owned(),
+                auth_secret_ref: Some(SecretKeyRef {
+                    name: "openfga-auth".to_owned(),
+                    key: "token".to_owned(),
+                }),
+                consistency: Some("higher_consistency".to_owned()),
+            }),
+            spicedb: None,
+        };
+        spec.broker = Some(BrokerSpec {
+            enabled: true,
+            data_dir: "/var/lib/waddle/broker".to_owned(),
+            admission_db: None,
+            kms: Some(BrokerKmsSpec {
+                provider: BrokerKmsProviderKind::Scaleway,
+                scaleway: Some(ScalewayKmsSpec {
+                    base_url: "https://api.scaleway.com".to_owned(),
+                    region: "fr-par".to_owned(),
+                    project_id: "11111111-2222-3333-4444-555555555555".to_owned(),
+                    auth_secret_ref: SecretKeyRef {
+                        name: "scaleway-kms-secret".to_owned(),
+                        key: "auth-token".to_owned(),
+                    },
+                    root_key_id: None,
+                }),
+                vault: None,
+            }),
+            cell_spiffe_id: Some("spiffe://waddle.social/cell/waddle-next".to_owned()),
+        });
+        spec.extensions = Some(ExtensionsSpec {
+            enabled: true,
+            plugins_dir: None,
+        });
+        spec
     }
 
     fn walk_schema_rejecting_non_structural(node: &Value, path: &str) {
@@ -976,8 +1232,63 @@ mod tests {
     }
 
     #[test]
+    fn cel_accepts_turso_openfga_broker_and_enforces_single_writer_and_discriminators() {
+        let valid_turso = WaddleServer::new("waddle-next", valid_turso_openfga_broker_spec());
+        assert!(
+            valid_turso.validate_cel().is_ok(),
+            "valid Turso+OpenFGA+Broker spec must pass CEL: {:?}",
+            valid_turso.validate_cel()
+        );
+        assert!(
+            validate_spec(&valid_turso.spec).is_ok(),
+            "valid Turso+OpenFGA+Broker spec must pass pure validation"
+        );
+
+        let mut bad_replicas = valid_turso_openfga_broker_spec();
+        bad_replicas.replicas = Some(2);
+        assert!(
+            WaddleServer::new("bad-turso-replicas", bad_replicas.clone())
+                .validate_cel()
+                .is_err(),
+            "Turso with replicas=2 must be rejected by CEL"
+        );
+        assert!(validate_spec(&bad_replicas)
+            .expect_err("Turso replicas=2 must fail")
+            .violations()
+            .contains(&ValidationViolation::TursoSingleWriterViolation));
+
+        let mut bad_strategy = valid_turso_openfga_broker_spec();
+        bad_strategy.update_strategy = UpdateStrategyKind::RollingUpdate;
+        bad_strategy.persistence.allow_unsafe_rwo_scale = true;
+        assert!(
+            WaddleServer::new("bad-turso-rolling", bad_strategy)
+                .validate_cel()
+                .is_err(),
+            "Turso with RollingUpdate must be rejected by CEL"
+        );
+
+        let mut mismatched_storage = valid_turso_openfga_broker_spec();
+        mismatched_storage.storage.backend = StorageBackendKind::Postgres;
+        assert!(
+            WaddleServer::new("bad-storage", mismatched_storage)
+                .validate_cel()
+                .is_err(),
+            "Postgres backend without postgres block must be rejected by CEL"
+        );
+
+        let mut mismatched_authz = valid_turso_openfga_broker_spec();
+        mismatched_authz.authz.backend = AuthzBackendKind::SpiceDb;
+        assert!(
+            WaddleServer::new("bad-authz", mismatched_authz)
+                .validate_cel()
+                .is_err(),
+            "SpiceDb backend with openfga block must be rejected by CEL"
+        );
+    }
+
+    #[test]
     fn cel_accepts_valid_spec_and_enforces_immutable_secret_mode() {
-        let valid = WaddleServer::new("prod", valid_eso_spec());
+        let valid = WaddleServer::new("prod", valid_postgres_eso_spec());
         assert!(
             valid.validate_cel().is_ok(),
             "valid ESO spec should pass CEL: {:?}",
@@ -998,7 +1309,7 @@ mod tests {
 
     #[test]
     fn cel_rejects_yolo_with_clustering_and_rolling_update_with_rwo() {
-        let mut yolo_cluster = valid_eso_spec();
+        let mut yolo_cluster = valid_postgres_eso_spec();
         yolo_cluster.secrets = SecretsSpec {
             mode: SecretProviderMode::Yolo,
             external_secrets: None,
@@ -1016,7 +1327,7 @@ mod tests {
             "YOLO + clustering must be rejected by CEL"
         );
 
-        let mut rwo_rolling = valid_eso_spec();
+        let mut rwo_rolling = valid_postgres_eso_spec();
         rwo_rolling.update_strategy = UpdateStrategyKind::RollingUpdate;
         assert!(
             WaddleServer::new("bad-rwo", rwo_rolling)
@@ -1028,7 +1339,8 @@ mod tests {
 
     #[test]
     fn validates_default_eso_spec_and_computes_shutdown_floor() {
-        let validated = validate_spec(&valid_eso_spec()).expect("default ESO spec is valid");
+        let validated =
+            validate_spec(&valid_postgres_eso_spec()).expect("default ESO spec is valid");
         assert_eq!(validated.effective_replicas, 1);
         assert_eq!(
             validated.termination_grace_period_seconds, 52,
@@ -1038,7 +1350,7 @@ mod tests {
 
     #[test]
     fn rejects_shutdown_grace_below_floor() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.shutdown.termination_grace_period_seconds = Some(51);
         let err = validate_spec(&spec).expect_err("grace below 52s must fail");
         assert!(
@@ -1054,7 +1366,7 @@ mod tests {
 
     #[test]
     fn rejects_yolo_clustering_and_multi_replica() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.secrets = SecretsSpec {
             mode: SecretProviderMode::Yolo,
             external_secrets: None,
@@ -1069,7 +1381,7 @@ mod tests {
 
     #[test]
     fn validates_clustering_keypool_headroom_and_shared_storage() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.replicas = Some(2);
         spec.clustering.enabled = true;
         spec.clustering.enrolled_key_count = 3; // needs 2 + 1 (RollingUpdate) + 1 = 4
@@ -1096,29 +1408,31 @@ mod tests {
 
     #[test]
     fn validates_restricted_runtime_and_forbids_lineage_action() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.deployment.lineage_action = Some("enroll".to_owned());
-        spec.postgres.restricted_runtime = Some(RestrictedRuntimeSpec {
-            enabled: true,
-            release_git_sha: "badsha".to_owned(),
-            schema: "public".to_owned(),
-            database_host: "postgresql-rw".to_owned(),
-            database_port: 5432,
-            database_name: "waddle".to_owned(),
-            ca_secret_name: "postgresql-ca".to_owned(),
-            ca_secret_key: "ca.crt".to_owned(),
-            runtime_credential_secret: "waddle-runtime-db".to_owned(),
-            runtime_credential_key: "password".to_owned(),
-            handoff_config_map_name: "waddle-server-runtime-handoff".to_owned(),
-            roles: RestrictedRuntimeRolesSpec {
-                migrator_login: "waddle_migrator".to_owned(),
-                schema_owner: "waddle_owner".to_owned(),
-                runtime_login: "waddle_runtime".to_owned(),
-                attestor_installer_login: "waddle_attestor_installer".to_owned(),
-                attestor_definer_role: "waddle_attestor_definer".to_owned(),
-                attestor_schema: "waddle_attestor".to_owned(),
-            },
-        });
+        if let Some(pg) = spec.storage.postgres.as_mut() {
+            pg.restricted_runtime = Some(RestrictedRuntimeSpec {
+                enabled: true,
+                release_git_sha: "badsha".to_owned(),
+                schema: "public".to_owned(),
+                database_host: "postgresql-rw".to_owned(),
+                database_port: 5432,
+                database_name: "waddle".to_owned(),
+                ca_secret_name: "postgresql-ca".to_owned(),
+                ca_secret_key: "ca.crt".to_owned(),
+                runtime_credential_secret: "waddle-runtime-db".to_owned(),
+                runtime_credential_key: "password".to_owned(),
+                handoff_config_map_name: "waddle-server-runtime-handoff".to_owned(),
+                roles: RestrictedRuntimeRolesSpec {
+                    migrator_login: "waddle_migrator".to_owned(),
+                    schema_owner: "waddle_owner".to_owned(),
+                    runtime_login: "waddle_runtime".to_owned(),
+                    attestor_installer_login: "waddle_attestor_installer".to_owned(),
+                    attestor_definer_role: "waddle_attestor_definer".to_owned(),
+                    attestor_schema: "waddle_attestor".to_owned(),
+                },
+            });
+        }
         let err = validate_spec(&spec).expect_err("bad sha + lineage action must fail");
         assert!(err
             .violations()
@@ -1131,9 +1445,11 @@ mod tests {
 
     #[test]
     fn rejects_reserved_extra_env_and_bad_keepalive_and_zero_digest() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.extra_env
             .insert("WADDLE_SESSION_KEY".to_owned(), "oops".to_owned());
+        spec.extra_env
+            .insert("WADDLE_SCW_KMS_AUTH_TOKEN".to_owned(), "oops".to_owned());
         spec.ws_keepalive.interval_secs = 121;
         spec.image.digest = Some(
             "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
@@ -1146,6 +1462,11 @@ mod tests {
             .violations()
             .contains(&ValidationViolation::ReservedExtraEnvKey {
                 key: "WADDLE_SESSION_KEY".to_owned()
+            }));
+        assert!(err
+            .violations()
+            .contains(&ValidationViolation::ReservedExtraEnvKey {
+                key: "WADDLE_SCW_KMS_AUTH_TOKEN".to_owned()
             }));
         assert!(err.violations().contains(&ValidationViolation::OutOfRange {
             field: "spec.wsKeepalive.intervalSecs",
@@ -1160,34 +1481,42 @@ mod tests {
 
     #[test]
     fn allows_yolo_single_node_without_deployment_uuid_in_spec() {
-        let mut spec = valid_eso_spec();
+        let mut spec = valid_postgres_eso_spec();
         spec.deployment.uuid = None;
         spec.secrets = SecretsSpec {
             mode: SecretProviderMode::Yolo,
             external_secrets: None,
             yolo: Some(YoloSecretsSpec::default()),
         };
-        spec.postgres = PostgresDependencySpec {
-            mode: PostgresSourceMode::External,
-            cnpg: None,
-            external: Some(ExternalPostgresSource {
-                secret_name: "pg-secret".to_owned(),
-                uri_key: "uri".to_owned(),
-                service_name: Some("pg-rw".to_owned()),
+        spec.storage = StorageSpec {
+            backend: StorageBackendKind::Postgres,
+            turso: None,
+            postgres: Some(PostgresDependencySpec {
+                mode: PostgresSourceMode::External,
+                cnpg: None,
+                external: Some(ExternalPostgresSource {
+                    secret_name: "pg-secret".to_owned(),
+                    uri_key: "uri".to_owned(),
+                    service_name: Some("pg-rw".to_owned()),
+                }),
+                pool_size: 10,
+                control_plane_pool_size: 4,
+                acquire_timeout_secs: Some(30),
+                restricted_runtime: None,
             }),
-            pool_size: 10,
-            control_plane_pool_size: 4,
-            acquire_timeout_secs: Some(30),
-            restricted_runtime: None,
         };
-        spec.spicedb = SpiceDbDependencySpec {
-            mode: SpiceDbSourceMode::External,
-            operator: None,
-            external: Some(ExternalSpiceDbSource {
-                endpoint: "http://spicedb:50051".to_owned(),
-                insecure: true,
-                service_name: Some("spicedb".to_owned()),
-                preshared_key_secret_ref: None,
+        spec.authz = AuthzSpec {
+            backend: AuthzBackendKind::SpiceDb,
+            openfga: None,
+            spicedb: Some(SpiceDbDependencySpec {
+                mode: SpiceDbSourceMode::External,
+                operator: None,
+                external: Some(ExternalSpiceDbSource {
+                    endpoint: "http://spicedb:50051".to_owned(),
+                    insecure: true,
+                    service_name: Some("spicedb".to_owned()),
+                    preshared_key_secret_ref: None,
+                }),
             }),
         };
         assert!(

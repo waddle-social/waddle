@@ -132,8 +132,6 @@ class ExtensionCommandControllerTest {
             inlineField = inlineField,
             composerExecute = composerExecute,
         )
-
-        val noSend: suspend (String) -> Unit = { }
     }
 
     @Test
@@ -147,7 +145,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.InlineSubmit(command = ai, fieldName = "prompt", value = "hello"),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         assertTrue(handled)
@@ -181,7 +178,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.InlineSubmit(command = ai, fieldName = "prompt", value = "hello"),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         assertTrue(handled)
@@ -219,7 +215,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.OpenPalette(command = poll, prefillFirstRequired = "Lunch?"),
             roomJid = "general@muc.waddle.test",
-            sendPublicMessage = noSend,
         )
 
         assertTrue(handled)
@@ -243,7 +238,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.DirectExecute(command = stargate),
             roomJid = "general@muc.waddle.test",
-            sendPublicMessage = noSend,
         )
 
         assertTrue(handled)
@@ -282,22 +276,16 @@ class ExtensionCommandControllerTest {
                 ),
             )
             val controller = wire.controller()
-            val sent = mutableListOf<String>()
 
             val handled = controller.dispatch(
                 SlashInvocation.InlineSubmit(command = ai, fieldName = "prompt", value = "hi ai"),
                 roomJid = "general@muc.waddle.test",
-                sendPublicMessage = { body ->
-                    sent += body
-                    wire.log += "public:$body"
-                },
             )
 
             assertTrue(handled)
-            assertEquals(listOf("hi ai"), sent)
-            // The public prompt precedes the submit on the wire.
+            // Room disclosure is server-owned post-admission; client submits directly.
             assertEquals(
-                listOf("invoke:${ai.node}", "public:hi ai", "submit:${ai.node}"),
+                listOf("invoke:${ai.node}", "submit:${ai.node}"),
                 wire.log,
             )
             val submitted = wire.submitCalls.single()
@@ -328,15 +316,12 @@ class ExtensionCommandControllerTest {
                 ),
             )
             val controller = wire.controller()
-            val sent = mutableListOf<String>()
 
             controller.dispatch(
                 SlashInvocation.InlineSubmit(command = ai, fieldName = "prompt", value = "hi"),
                 roomJid = null,
-                sendPublicMessage = { sent += it },
             )
 
-            assertTrue(sent.isEmpty())
             assertEquals(
                 listOf("private"),
                 wire.submitCalls.single().fields.single { it.name == "output" }.values,
@@ -353,7 +338,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.OpenPalette(command = poll),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         assertFalse(handled)
@@ -385,7 +369,6 @@ class ExtensionCommandControllerTest {
         controller.dispatch(
             SlashInvocation.DirectExecute(command = stargate),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         assertEquals(
@@ -403,7 +386,6 @@ class ExtensionCommandControllerTest {
         controller.dispatch(
             SlashInvocation.OpenPalette(command = poll),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
         wire.submitAnswer = ExtensionCommandCall.Ok(
             ExtensionCommandResult(
@@ -415,7 +397,7 @@ class ExtensionCommandControllerTest {
             ),
         )
 
-        val handled = controller.submitForm(ExtensionCommandAction.CANCEL, noSend)
+        val handled = controller.submitForm(ExtensionCommandAction.CANCEL)
 
         assertTrue(handled)
         assertNull(controller.formSession.value)
@@ -451,7 +433,6 @@ class ExtensionCommandControllerTest {
             val handled = controller.dispatch(
                 SlashInvocation.InlineSubmit(command = hostile, fieldName = "prompt", value = "hello"),
                 roomJid = null,
-                sendPublicMessage = noSend,
             )
 
             assertTrue(handled)
@@ -479,10 +460,9 @@ class ExtensionCommandControllerTest {
         controller.dispatch(
             SlashInvocation.OpenPalette(command = hostile),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
-        val handled = controller.submitForm(ExtensionCommandAction.COMPLETE, noSend)
+        val handled = controller.submitForm(ExtensionCommandAction.COMPLETE)
 
         assertFalse(handled)
         assertTrue(wire.submitCalls.isEmpty())
@@ -507,7 +487,6 @@ class ExtensionCommandControllerTest {
         val handled = controller.dispatch(
             SlashInvocation.InlineSubmit(command = poll, fieldName = "question", value = "Lunch?"),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         assertTrue(handled)
@@ -528,10 +507,9 @@ class ExtensionCommandControllerTest {
             controller.dispatch(
                 SlashInvocation.OpenPalette(command = poll),
                 roomJid = null,
-                sendPublicMessage = noSend,
             )
 
-            val handled = controller.submitForm(ExtensionCommandAction.COMPLETE, noSend)
+            val handled = controller.submitForm(ExtensionCommandAction.COMPLETE)
 
             assertFalse(handled)
             assertTrue(wire.submitCalls.isEmpty())
@@ -553,7 +531,6 @@ class ExtensionCommandControllerTest {
         controller.dispatch(
             SlashInvocation.OpenPalette(command = poll),
             roomJid = null,
-            sendPublicMessage = noSend,
         )
 
         controller.updateField("question", listOf("Dinner?"))

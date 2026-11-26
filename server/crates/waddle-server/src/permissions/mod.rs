@@ -9,6 +9,7 @@ mod check;
 pub mod host_grant;
 mod schema;
 mod spicedb;
+pub mod spicedb_tenant;
 mod tuple;
 
 pub use actor::{
@@ -20,8 +21,9 @@ pub use actor::{
     WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
-    decode_object, decode_subject, AuthzIdError, AuthzOpaqueId, AuthzUserJid, EncodedObjectId,
-    EncodedSubjectId, AUTHZ_ID_WIRE_PREFIX, MAX_AUTHZ_ID_BYTES, MAX_AUTHZ_WIRE_BYTES,
+    decode_object, decode_subject, decode_tenant_scoped_id, encode_tenant_scoped_id, AuthzIdError,
+    AuthzOpaqueId, AuthzUserJid, EncodedObjectId, EncodedSubjectId, AUTHZ_ID_WIRE_PREFIX,
+    MAX_AUTHZ_ID_BYTES, MAX_AUTHZ_WIRE_BYTES,
 };
 pub use authz_incarnation::{
     classify_codec_markers, guarded_resource_definitions, AuthzIncarnationError, CodecMarkerRow,
@@ -36,8 +38,20 @@ pub use authz_schema_version::{
     AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
-pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
+pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema, SPICEDB_SCHEMA};
+pub use spicedb_tenant::TenantSpiceDbPermissionBackend;
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
+pub use waddle_broker::authz::local::LocalPermissionBackend;
+pub use waddle_broker::authz::openfga::{
+    parse_openfga_consistency, InProcessOpenFgaServer, OpenFgaCheckWireRequest, OpenFgaConfig,
+    OpenFgaConsistency, OpenFgaPermissionBackend, OpenFgaTupleKey, RecordedOpenFgaRequest,
+};
+pub use waddle_broker::authz::openfga_model::{
+    openfga_authorization_model_json, openfga_module_grant_object, openfga_store_grant_object,
+    OPENFGA_CHAT_MODULE_DSL, OPENFGA_INFERENCE_MODULE_DSL, OPENFGA_SCHEMA_VERSION,
+};
+pub use waddle_broker::authz::AuthzCallerRole;
+pub use waddle_broker_core::permission::PermissionBackend;
 
 /// The SpiceDB backend's own identifier conversions, exposed to
 /// `test_support` so integration tests observe the exact wire values.
@@ -99,6 +113,9 @@ pub enum PermissionError {
         "SpiceDB configuration is required; set WADDLE_SPICEDB_ENDPOINT and WADDLE_SPICEDB_PRESHARED_KEY"
     )]
     SpiceDbConfigMissing,
+
+    #[error("OpenFGA configuration is required; set WADDLE_OPENFGA_ENDPOINT")]
+    OpenFgaConfigMissing,
 
     #[error("Unsupported operation for '{0}' permission backend")]
     UnsupportedOperation(&'static str),

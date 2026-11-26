@@ -1,40 +1,12 @@
-//! Baseline-only notification rows used by migration and restricted-runtime witnesses.
+//! Initial v1 notification rows used by migration and restricted-runtime witnesses.
 
-use sha2::{Digest, Sha256};
-use waddle_server::db::{Database, DatabaseDriver};
+use waddle_server::db::{Database, MigrationRunner};
 
-const SQLITE_BASELINE: &str = include_str!("../../sql/baseline/sqlite.sql");
-const POSTGRES_BASELINE: &str = include_str!("../../sql/baseline/postgres.sql");
-
-pub async fn install_baseline_only(db: &Database, schema: &str) {
-    let template = match db.driver() {
-        DatabaseDriver::Sqlite => SQLITE_BASELINE,
-        DatabaseDriver::Postgres => POSTGRES_BASELINE,
-    };
-    let bootstrap = match db.driver() {
-        DatabaseDriver::Sqlite => include_str!("../../sql/baseline/sqlite.bootstrap.sql"),
-        DatabaseDriver::Postgres => include_str!("../../sql/baseline/postgres.bootstrap.sql"),
-    };
-    let sql = template
-        .replace("__SCHEMA_QUOTED__", &format!("\"{schema}\""))
-        .replace("__SCHEMA_LITERAL__", &format!("'{schema}'"))
-        .replace("__SCHEMA__", schema);
-    let mut tx = db.begin_immediate().await.expect("baseline transaction");
-    tx.execute_batch(bootstrap)
+pub async fn install_baseline_only(db: &Database, _schema: &str) {
+    MigrationRunner::single()
+        .run(db)
         .await
-        .expect("baseline bootstrap");
-    tx.execute_batch(&sql).await.expect("baseline schema");
-    tx.execute(
-        "INSERT INTO _migrations (version, description, checksum) VALUES (?, ?, ?)",
-        waddle_server::db_params![
-            2000_i64,
-            "schema baseline",
-            hex::encode(Sha256::digest(template.as_bytes()))
-        ],
-    )
-    .await
-    .expect("baseline ledger row");
-    tx.commit().await.expect("commit baseline");
+        .expect("apply v1 schema");
 }
 
 pub async fn seed_notification_rows(db: &Database) {
@@ -82,11 +54,11 @@ async fn insert_call_rows(db: &Database) {
         (),
     )
     .await
-    .expect("call candidate accepted after migration");
+    .expect("call candidate accepted");
     conn.execute(
         "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, status, created_at_ms, updated_at_ms) VALUES ('call-job', 'bob@example.com', 'push.example.com', 'node', 'alice@example.com', 'alice@example.com/phone', '[\"alice@example.com/phone\"]', 'call', 1, 'call-context', 'queued', 6000, 6000)",
         (),
     )
     .await
-    .expect("call job accepted after migration");
+    .expect("call job accepted");
 }

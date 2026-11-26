@@ -1,11 +1,11 @@
-//! Migration 2001 preserves queued notifications and admits offline call candidates.
+//! Schema v1 preserves queued notifications and admits offline call candidates.
 
 #[path = "restricted_runtime_support/notification_migration.rs"]
 mod support;
 
 use sqlx::PgPool;
 use waddle_server::db::{
-    Database, DatabaseConfig, DatabaseDriver, MigrationRunner, BASELINE_VERSION,
+    Database, DatabaseConfig, DatabaseDriver, MigrationRunner, INITIAL_SCHEMA_VERSION,
 };
 
 use support::{
@@ -13,39 +13,22 @@ use support::{
 };
 
 #[tokio::test]
-async fn sqlite_baseline_notification_rows_survive_call_migration() {
+async fn sqlite_v1_notification_schema_admits_offline_calls() {
     let db = Database::in_memory("call-migration").await.expect("sqlite");
     install_baseline_only(&db, "main").await;
+    assert_eq!(
+        MigrationRunner::single().latest_version(),
+        Some(INITIAL_SCHEMA_VERSION)
+    );
     seed_notification_rows(&db).await;
     let indexes = sqlite_indexes(&db).await;
-    assert_eq!(indexes.len(), 8);
-    assert_eq!(
-        MigrationRunner::single().run(&db).await.expect("upgrade"),
-        versions_after_baseline()
-    );
+    assert_eq!(indexes.len(), 9);
     assert_rows_preserved_and_insert_call(&db).await;
-    let upgraded_indexes = sqlite_indexes(&db).await;
-    assert_eq!(upgraded_indexes.len(), indexes.len() + 1);
-    for index in indexes {
-        assert!(
-            upgraded_indexes.contains(&index),
-            "existing index survives: {index:?}"
-        );
-    }
     assert!(MigrationRunner::single()
         .run(&db)
         .await
         .expect("rerun")
         .is_empty());
-}
-
-/// Every version after the baseline, from 2001 on: what an upgrade of a
-/// baseline-only database applies. The catalog numbers them without a gap.
-fn versions_after_baseline() -> Vec<i64> {
-    let latest = MigrationRunner::single()
-        .latest_version()
-        .expect("a catalog");
-    (BASELINE_VERSION + 1..=latest).collect()
 }
 
 async fn sqlite_indexes(db: &Database) -> Vec<(String, String)> {
@@ -62,7 +45,7 @@ async fn sqlite_indexes(db: &Database) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn postgres_baseline_notification_rows_survive_call_migration() {
+async fn postgres_v1_notification_schema_admits_offline_calls() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
@@ -80,12 +63,11 @@ async fn postgres_baseline_notification_rows_survive_call_migration() {
     let db = Database::from_config("call-migration", &config)
         .await
         .expect("postgres database");
-    install_baseline_only(&db, &schema).await;
-    seed_notification_rows(&db).await;
     assert_eq!(
-        MigrationRunner::single().run(&db).await.expect("upgrade"),
-        versions_after_baseline()
+        MigrationRunner::single().run(&db).await.expect("migrate"),
+        vec![INITIAL_SCHEMA_VERSION]
     );
+    seed_notification_rows(&db).await;
     assert_rows_preserved_and_insert_call(&db).await;
     assert!(MigrationRunner::single()
         .run(&db)

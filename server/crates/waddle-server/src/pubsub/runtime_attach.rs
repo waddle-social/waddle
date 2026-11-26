@@ -171,10 +171,6 @@ const NODE_COLUMNS: &[Column] = &[
     text("roster_groups_allowed", false),
     bigint("item_expire", false),
 ];
-/// The version 8 columns of `pubsub_nodes`, which the PostgreSQL baseline
-/// creates: every current column except the trailing `roster_groups_allowed`
-/// (migration 2027, version 9) and `item_expire` (migration 2028, version 10).
-const NODE_COLUMNS_V8: &[Column] = NODE_COLUMNS.split_at(NODE_COLUMNS.len() - 2).0;
 const ITEM_COLUMNS: &[Column] = &[
     Column {
         name: "seq",
@@ -757,45 +753,6 @@ pub(super) async fn verify_marker_shape_and_data_tx(
 ) -> Result<bool, PubSubRuntimeAttachError> {
     verify_marker_shape_tx(tx, &identity.schema.name.0).await?;
     verify_marker_data(tx, identity).await
-}
-
-/// Verify the baseline PubSub layout before Space bindings retain its nodes.
-pub(crate) async fn verify_space_binding_baseline(
-    tx: &mut Transaction<'_>,
-) -> Result<(), DatabaseError> {
-    let schema = {
-        let mut rows = tx.query("SELECT current_schema()::text", ()).await?;
-        let row = rows.next().await?.ok_or_else(|| {
-            DatabaseError::QueryFailed("no schema for the Space bindings migration".to_owned())
-        })?;
-        row.get::<String>(0)?
-    };
-    for current in TABLES
-        .iter()
-        .filter(|table| table.name != PUBSUB_SCHEMA_MARKER_TABLE)
-    {
-        // The baseline is version 8, before `roster_groups_allowed` and `item_expire`.
-        let baseline = Table {
-            columns: if current.name == "pubsub_nodes" {
-                NODE_COLUMNS_V8
-            } else {
-                current.columns
-            },
-            ..*current
-        };
-        let table = &baseline;
-        async {
-            verify_table(tx, &schema, table).await?;
-            verify_columns(tx, &schema, table).await?;
-            verify_constraints(tx, &schema, table).await?;
-            verify_indexes(tx, &schema, table).await
-        }
-        .await
-        .map_err(|error| {
-            DatabaseError::QueryFailed(format!("Space bindings require PubSub v8: {error}"))
-        })?;
-    }
-    Ok(())
 }
 
 pub(super) async fn verify_owner_schema_shape_tx(
@@ -1544,26 +1501,13 @@ async fn verify_space_write_guard(
     schema: &str,
     table: &'static str,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    let (migration, name, events) = if table == "pubsub_items" {
-        (
-            include_str!(
-                "../../sql/migrations/2018_host_grant_space_bookmark_versions.postgres.sql"
-            ),
-            "guard_bound_space_item_write",
-            31_i32,
-        )
+    let (name, events) = if table == "pubsub_items" {
+        ("guard_bound_space_item_write", 31_i32)
     } else {
-        (
-            include_str!("../../sql/migrations/2021_host_grant_space_configuration.postgres.sql"),
-            "guard_bound_space_configuration_write",
-            19_i32,
-        )
+        ("guard_bound_space_configuration_write", 19_i32)
     };
     let invalid = || PubSubRuntimeAttachError::InvalidTable { table };
-    let source = migration
-        .split_once("AS $$")
-        .and_then(|(_, body)| body.split_once("$$").map(|(source, _)| source))
-        .ok_or_else(invalid)?;
+    let source = crate::db::postgres_function_body(name).ok_or_else(invalid)?;
     // Standalone PubSub bootstrap has no host-grant tables. A migrated
     // schema requires the installed invoker trigger and its exact body.
     let valid = query_boolean(
@@ -2013,15 +1957,15 @@ async fn verify_counter(
 
 #[cfg(test)]
 mod baseline_shape_tests {
-    use super::{NODE_COLUMNS, NODE_COLUMNS_V8};
+    use super::NODE_COLUMNS;
 
-    /// Column names of `pubsub_nodes` in the PostgreSQL baseline, in order.
-    fn baseline_node_columns() -> Vec<String> {
-        let baseline = include_str!("../../sql/baseline/postgres.sql");
-        let start = baseline
+    /// Column names of `pubsub_nodes` in the PostgreSQL v1 schema, in order.
+    fn v1_node_columns() -> Vec<String> {
+        let v1 = include_str!("../../sql/v1/postgres.sql");
+        let start = v1
             .find("CREATE TABLE pubsub_nodes (")
-            .expect("baseline creates pubsub_nodes");
-        let body = &baseline[start..];
+            .expect("v1 creates pubsub_nodes");
+        let body = &v1[start..];
         let end = body.find("\n);").expect("table definition ends");
         body["CREATE TABLE pubsub_nodes (".len()..end]
             .lines()
@@ -2032,40 +1976,17 @@ mod baseline_shape_tests {
             .collect()
     }
 
-    /// The Space bindings migration verifies the baseline against
-    /// `NODE_COLUMNS_V8`; the version 9 column is added by migration 2027.
     #[test]
-    fn the_version_8_node_columns_are_the_baseline_columns() {
-        let v8: Vec<&str> = NODE_COLUMNS_V8.iter().map(|column| column.name).collect();
-        assert_eq!(v8, baseline_node_columns());
-    }
-
-    #[test]
-    fn migration_2027_adds_exactly_the_remaining_node_column() {
-        let added: Vec<&str> = NODE_COLUMNS
-            .iter()
-            .skip(NODE_COLUMNS_V8.len())
-            .map(|column| column.name)
-            .collect();
-        assert_eq!(added, ["roster_groups_allowed", "item_expire"]);
-        let migration = include_str!("../../sql/migrations/2027_pubsub_roster_groups.postgres.sql");
-        assert!(migration.contains("ADD COLUMN IF NOT EXISTS roster_groups_allowed text"));
-        assert!(migration.contains("SET version = 9"));
-    }
-
-    #[test]
-    fn migration_2028_adds_item_expire_and_moves_the_version_to_10() {
-        let migration = include_str!("../../sql/migrations/2028_pubsub_item_expire.postgres.sql");
-        assert!(migration.contains("ADD COLUMN IF NOT EXISTS item_expire bigint"));
-        assert!(migration.contains("version NOT IN (9, 10)"));
-        assert!(migration.contains("SET version = 10 WHERE version = 9"));
+    fn v1_pubsub_nodes_columns_match_expected_shape() {
+        let expected: Vec<&str> = NODE_COLUMNS.iter().map(|column| column.name).collect();
+        assert_eq!(expected, v1_node_columns());
         assert_eq!(
             NODE_COLUMNS
                 .last()
                 .map(|column| (column.name, column.kind, column.not_null)),
             Some(("item_expire", "bigint", false))
         );
-        let sqlite = include_str!("../../sql/migrations/2028_pubsub_item_expire.sqlite.sql");
-        assert!(sqlite.trim_end().ends_with("SELECT 1;"));
+        let v1 = include_str!("../../sql/v1/postgres.sql");
+        assert!(v1.contains("INSERT INTO pubsub_schema_version (version)\nVALUES (10);"));
     }
 }

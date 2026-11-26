@@ -1,0 +1,3040 @@
+-- Initial schema v1 (version 1) for PostgreSQL.
+--
+-- Structure and static rows of the application schema, representing the
+-- complete schema rebased from baseline 2000 + migrations 2001..2026.
+-- Rendered as a template: __SCHEMA__, __SCHEMA_QUOTED__ and __SCHEMA_LITERAL__
+-- stand for the schema's name. Run it rendered, with that schema first on the
+-- search path, as the role that is to own the objects.
+
+CREATE SEQUENCE blocking_list_id_seq AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE SEQUENCE clustering_claim_epoch_seq AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 0 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE SEQUENCE local_space_notification_order AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE SEQUENCE native_users_id_seq AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE SEQUENCE reactions_id_seq AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE SEQUENCE roster_items_id_seq AS bigint START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1;
+
+CREATE FUNCTION pending_notification_recovery_ordinal_immutable()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$ BEGIN IF NEW.notification_recovery_ordinal IS DISTINCT FROM OLD.notification_recovery_ordinal THEN RAISE EXCEPTION 'pending recovery ordinal is immutable'; END IF; RETURN NEW; END $function$;
+
+CREATE FUNCTION waddle_ingress_epoch_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+DECLARE
+    live_epoch BIGINT;
+    tx_epoch TEXT;
+    tx_xid TEXT;
+BEGIN
+    EXECUTE pg_catalog.format(
+        'SELECT epoch FROM %I.ingress_protocol_epoch WHERE id = 1 FOR SHARE',
+        TG_TABLE_SCHEMA
+    ) INTO live_epoch;
+    IF live_epoch IS NULL THEN
+        RAISE EXCEPTION 'waddle: ingress_protocol_epoch row missing; refusing % on %.%',
+            TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
+    IF live_epoch = 0 THEN
+        RETURN NULL;
+    END IF;
+    tx_epoch := current_setting('waddle.protocol_epoch', true);
+    tx_xid := current_setting('waddle.protocol_epoch_xid', true);
+    IF tx_epoch IS NULL OR tx_epoch <> live_epoch::text
+       OR tx_xid IS NULL OR tx_xid <> pg_current_xact_id()::text THEN
+        RAISE EXCEPTION 'waddle: % on %.% requires a transaction-local epoch proof (SET LOCAL waddle.protocol_epoch = %; SELECT set_config(''waddle.protocol_epoch_xid'', pg_current_xact_id()::text, true))',
+            TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME, live_epoch;
+    END IF;
+    RETURN NULL;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_epoch_guard_manifest_append_only()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'waddle: ingress epoch guard manifest is append-only';
+END $function$;
+
+CREATE FUNCTION waddle_ingress_owner_rejection_delete_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+DECLARE
+    child_exists BOOLEAN;
+BEGIN
+    EXECUTE format(
+        'SELECT EXISTS (SELECT 1 FROM %I.ingress_messages WHERE message_key = $1)',
+        TG_TABLE_SCHEMA
+    ) INTO child_exists USING OLD.child_message_key;
+    IF child_exists THEN
+        RAISE EXCEPTION 'waddle: owner rejection survives until child retention';
+    END IF;
+    RETURN OLD;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_owner_rejection_immutable()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+BEGIN
+    RAISE EXCEPTION 'waddle: owner rejection binding is immutable';
+END $function$;
+
+CREATE FUNCTION waddle_ingress_owner_rejection_insert_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+DECLARE
+    source_decision SMALLINT;
+    source_binding_version SMALLINT;
+BEGIN
+    EXECUTE format(
+        'SELECT owner_decision, source_binding_version FROM %I.ingress_messages WHERE message_key = $1 FOR UPDATE',
+        TG_TABLE_SCHEMA
+    ) INTO source_decision, source_binding_version USING NEW.source_message_key;
+    IF source_decision IS DISTINCT FROM 0 OR source_binding_version IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'waddle: owner rejection requires an undecided bound source';
+    END IF;
+    RETURN NEW;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_protocol_epoch_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.epoch <> 0 AND (NEW.activated_at IS NULL OR NEW.lineage_uuid IS NULL) THEN
+            RAISE EXCEPTION 'waddle: nonzero ingress protocol epochs require activation metadata';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        -- One advance per transaction: each row version validates +1
+        -- independently, so without this transaction-local sentinel a
+        -- duplicated activation statement would commit a two-epoch jump
+        -- that no deployment ever observed.
+        IF current_setting('waddle.protocol_epoch_advance_xid', true)
+               = pg_current_xact_id()::text THEN
+            RAISE EXCEPTION 'waddle: only one ingress protocol epoch advance per transaction';
+        END IF;
+        IF NEW.epoch <> OLD.epoch + 1 THEN
+            RAISE EXCEPTION 'waddle: ingress protocol epoch must advance exactly one step';
+        END IF;
+        IF NEW.activated_at IS NULL OR NEW.lineage_uuid IS NULL THEN
+            RAISE EXCEPTION 'waddle: nonzero ingress protocol epochs require activation metadata';
+        END IF;
+        PERFORM set_config('waddle.protocol_epoch_advance_xid', pg_current_xact_id()::text, true);
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'waddle: refusing % on ingress_protocol_epoch', TG_OP;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_source_binding_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+DECLARE
+    has_rejection BOOLEAN;
+BEGIN
+    IF NEW.source_binding_version IS DISTINCT FROM OLD.source_binding_version
+      OR NEW.source_bare_jid IS DISTINCT FROM OLD.source_bare_jid
+      OR NEW.source_auth_context_id IS DISTINCT FROM OLD.source_auth_context_id
+      OR NEW.source_auth_context_version IS DISTINCT FROM OLD.source_auth_context_version
+      OR NEW.source_auth_epoch IS DISTINCT FROM OLD.source_auth_epoch
+      OR NEW.source_sm_ingress_id IS DISTINCT FROM OLD.source_sm_ingress_id
+      OR NEW.source_ingress_ordinal IS DISTINCT FROM OLD.source_ingress_ordinal THEN
+        RAISE EXCEPTION 'waddle: ingress source binding is immutable';
+    END IF;
+    IF NEW.owner_decision IS DISTINCT FROM OLD.owner_decision THEN
+        EXECUTE format(
+            'SELECT EXISTS (SELECT 1 FROM %I.ingress_owner_rejections WHERE source_message_key = $1)',
+            TG_TABLE_SCHEMA
+        ) INTO has_rejection USING NEW.message_key;
+        IF OLD.owner_decision IS NULL AND NEW.owner_decision = 0
+          AND NEW.source_binding_version = 1 AND NEW.source_bare_jid IS NOT NULL THEN
+            RETURN NEW;
+        ELSIF OLD.owner_decision = 0 AND NEW.owner_decision = 1
+          AND NOT has_rejection THEN
+            RETURN NEW;
+        ELSIF OLD.owner_decision = 0 AND NEW.owner_decision = 2
+          AND has_rejection THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'waddle: invalid ingress owner decision transition';
+    END IF;
+    RETURN NEW;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_source_insert_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+BEGIN
+    IF NEW.owner_decision IS NOT NULL THEN
+        RAISE EXCEPTION 'waddle: owner decision starts undecided only after source intent commit';
+    END IF;
+    RETURN NEW;
+END $function$;
+
+CREATE FUNCTION waddle_ingress_truncate_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+BEGIN
+    RAISE EXCEPTION 'waddle: TRUNCATE is not permitted on %.%',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME;
+END $function$;
+
+CREATE FUNCTION waddle_p21_record_effect_receipt(p_operation_id uuid, p_message_key uuid, p_receipt_kind integer, p_semantic_identity_hash bytea)
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog', 'pg_temp'
+AS $function$
+DECLARE
+    prior_message UUID;
+    prior_kind INTEGER;
+    prior_hash BYTEA;
+    prior_inserted BOOLEAN;
+    receipt_inserted BOOLEAN;
+BEGIN
+    IF p_operation_id IS NULL OR p_message_key IS NULL OR p_receipt_kind IS NULL
+       OR p_semantic_identity_hash IS NULL
+       OR pg_catalog.octet_length(p_semantic_identity_hash) <> 32 THEN
+        RAISE EXCEPTION 'waddle: malformed receipt operation' USING ERRCODE = '22023';
+    END IF;
+    PERFORM __SCHEMA__.waddle_ingress_definer_prepare();
+    SELECT message_key, receipt_kind, semantic_identity_hash, inserted
+      INTO prior_message, prior_kind, prior_hash, prior_inserted
+      FROM __SCHEMA__.p21_receipt_operation_results
+     WHERE operation_id = p_operation_id;
+    IF NOT FOUND THEN
+        receipt_inserted := __SCHEMA__.waddle_ingress_record_effect_receipt(
+            p_message_key, p_receipt_kind, p_semantic_identity_hash
+        );
+        INSERT INTO __SCHEMA__.p21_receipt_operation_results
+            (operation_id, message_key, receipt_kind, semantic_identity_hash, inserted)
+        VALUES
+            (p_operation_id, p_message_key, p_receipt_kind, p_semantic_identity_hash, receipt_inserted)
+        ON CONFLICT (operation_id) DO NOTHING;
+        SELECT message_key, receipt_kind, semantic_identity_hash, inserted
+          INTO STRICT prior_message, prior_kind, prior_hash, prior_inserted
+          FROM __SCHEMA__.p21_receipt_operation_results
+         WHERE operation_id = p_operation_id;
+    END IF;
+    IF prior_message IS DISTINCT FROM p_message_key
+       OR prior_kind IS DISTINCT FROM p_receipt_kind
+       OR prior_hash IS DISTINCT FROM p_semantic_identity_hash THEN
+        RAISE EXCEPTION 'waddle: receipt operation identity conflict' USING ERRCODE = '23505';
+    END IF;
+    RETURN prior_inserted;
+END
+$function$;
+
+CREATE FUNCTION guard_bound_space_configuration_write()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'pg_catalog'
+AS $function$
+DECLARE
+    bound_lifecycle TEXT;
+BEGIN
+    IF OLD IS NOT DISTINCT FROM NEW THEN
+        RETURN NEW;
+    END IF;
+    -- Binding takes a conflicting lock on this same node before inserting
+    -- the binding. A legacy configuration write must check after taking it.
+    EXECUTE format(
+        'SELECT lifecycle_id FROM %I.host_grant_space_bindings WHERE service_jid = $1 AND space_node = $2',
+        TG_TABLE_SCHEMA
+    ) INTO bound_lifecycle USING OLD.owner_jid, OLD.node_name;
+    IF bound_lifecycle IS NOT NULL AND
+        bound_lifecycle IS DISTINCT FROM current_setting('waddle.space_configuration_lifecycle', true)
+    THEN
+        RAISE EXCEPTION 'bound Space configuration requires the canonical writer'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+CREATE FUNCTION guard_bound_space_item_write()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    target_owner TEXT;
+    target_node TEXT;
+    bound_lifecycle TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        target_owner := OLD.owner_jid;
+        target_node := OLD.node_name;
+    ELSE
+        target_owner := NEW.owner_jid;
+        target_node := NEW.node_name;
+    END IF;
+    IF TG_OP = 'UPDATE' AND
+       (OLD.owner_jid, OLD.node_name) IS DISTINCT FROM (NEW.owner_jid, NEW.node_name)
+    THEN
+        RAISE EXCEPTION 'PubSub item node identity is immutable' USING ERRCODE = 'check_violation';
+    END IF;
+    EXECUTE format('SELECT 1 FROM %I.pubsub_nodes WHERE owner_jid = $1 AND node_name = $2 FOR KEY SHARE',
+                   TG_TABLE_SCHEMA) USING target_owner, target_node;
+    EXECUTE format('SELECT lifecycle_id FROM %I.host_grant_space_bindings WHERE service_jid = $1 AND space_node = $2',
+                   TG_TABLE_SCHEMA) INTO bound_lifecycle USING target_owner, target_node;
+    IF bound_lifecycle IS NOT NULL AND
+       bound_lifecycle IS DISTINCT FROM current_setting('waddle.space_bookmark_lifecycle', true)
+    THEN
+        RAISE EXCEPTION 'bound Space items require the canonical writer' USING ERRCODE = 'check_violation';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+CREATE FUNCTION reject_immutable_account_id_change()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    IF OLD.account_id IS NOT NULL AND NEW.account_id IS DISTINCT FROM OLD.account_id THEN
+        RAISE EXCEPTION 'account_id is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+CREATE TABLE _waddle_space_store_owner (
+    marker_id bigint NOT NULL,
+    marker_version bigint NOT NULL,
+    spaces_contract_version bigint NOT NULL,
+    channel_links_contract_version bigint NOT NULL,
+    system_identifier text NOT NULL,
+    database_oid bigint NOT NULL,
+    database_name text NOT NULL,
+    schema_oid bigint NOT NULL,
+    schema_name text NOT NULL,
+    CONSTRAINT _waddle_space_store_owner_pkey PRIMARY KEY (marker_id)
+);
+
+CREATE TABLE account_resource_bindings (
+    full_jid text NOT NULL,
+    bare_jid text NOT NULL,
+    claim_identity text NOT NULL,
+    revision bigint NOT NULL,
+    install_generation bigint NOT NULL,
+    operation_seq bigint NOT NULL,
+    state integer NOT NULL,
+    binding_ref text,
+    binding_claim_identity text,
+    logical_generation text,
+    occupancy_generation text,
+    endpoint_published integer NOT NULL,
+    actor_registered integer NOT NULL,
+    presence_available integer NOT NULL,
+    presence_show integer,
+    presence_status text,
+    presence_priority integer NOT NULL,
+    presence_payloads text,
+    carbons_enabled integer NOT NULL,
+    roster_interested integer NOT NULL,
+    blocklist_interested integer NOT NULL,
+    sm_session_id text,
+    sm_generation bigint,
+    snapshot_revision bigint NOT NULL,
+    detach_custody integer,
+    retiring_from integer,
+    retirement_source_revision bigint,
+    retirement_custody integer,
+    offline_flushed integer NOT NULL,
+    subscriptions_flushed integer NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT account_resource_bindings_pkey PRIMARY KEY (full_jid),
+    CONSTRAINT account_resource_bindings_state_check CHECK ((state = ANY (ARRAY[0, 1, 2, 3, 4, 5])))
+);
+
+CREATE TABLE account_resource_operations (
+    operation_id text NOT NULL,
+    full_jid text NOT NULL,
+    kind integer NOT NULL,
+    binding_ref text NOT NULL,
+    expected_revision bigint NOT NULL,
+    committed_revision bigint NOT NULL,
+    operation_seq bigint NOT NULL,
+    recorded_at_ms bigint NOT NULL,
+    CONSTRAINT account_resource_operations_pkey PRIMARY KEY (operation_id)
+);
+
+CREATE TABLE attachments (
+    id text NOT NULL,
+    message_id text NOT NULL,
+    filename text NOT NULL,
+    content_type text NOT NULL,
+    size_bytes bigint NOT NULL,
+    storage_key text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT attachments_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE auth_identities (
+    id text NOT NULL,
+    user_jid text NOT NULL,
+    provider_id text NOT NULL,
+    issuer text NOT NULL,
+    subject text NOT NULL,
+    email text,
+    email_verified integer,
+    raw_claims_json text NOT NULL,
+    created_at text NOT NULL,
+    last_login_at text NOT NULL,
+    tenant_id text DEFAULT 'default'::text NOT NULL,
+    CONSTRAINT auth_identities_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE blocking_list (
+    id bigint DEFAULT nextval('blocking_list_id_seq'::regclass) NOT NULL,
+    user_jid text NOT NULL,
+    blocked_jid text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT blocking_list_pkey PRIMARY KEY (id),
+    CONSTRAINT blocking_list_user_jid_blocked_jid_key UNIQUE (user_jid, blocked_jid)
+);
+
+CREATE TABLE call_teardown_outbox (
+    intent_id text NOT NULL,
+    call_id text NOT NULL,
+    identity text,
+    room_jid text,
+    action text NOT NULL,
+    generation integer,
+    occupant text,
+    unbound_occupant text,
+    room_sid text,
+    participant_sid text,
+    session_binding text,
+    thread_id text,
+    anchor_origin_id text,
+    thread_started_at_ms bigint,
+    thread_ended_at_ms bigint,
+    producing_node text,
+    status text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    next_attempt_at_ms bigint,
+    claimed_at_ms bigint,
+    claim_token text,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT call_teardown_outbox_pkey PRIMARY KEY (intent_id),
+    CONSTRAINT call_teardown_outbox_action_check CHECK ((action = ANY (ARRAY['remove_participant'::text, 'retire_displaced_participant'::text, 'delete_room'::text, 'muji_presence_clear'::text, 'muji_presence_clear_only'::text, 'muji_room_sweep'::text, 'call_thread_end_retry'::text]))),
+    CONSTRAINT call_teardown_outbox_anchor_origin_id_check CHECK (((anchor_origin_id IS NULL) OR (anchor_origin_id <> ''::text))),
+    CONSTRAINT call_teardown_outbox_check CHECK ((((action = 'remove_participant'::text) AND (identity IS NOT NULL) AND (room_jid IS NULL)) OR ((action = 'retire_displaced_participant'::text) AND (identity IS NOT NULL) AND (room_jid IS NULL) AND ((participant_sid IS NULL) OR (participant_sid <> ''::text)) AND ((participant_sid IS NOT NULL) OR (occupant IS NOT NULL))) OR ((action = 'delete_room'::text) AND (identity IS NULL) AND (room_jid IS NULL) AND (participant_sid IS NULL)) OR ((action = 'muji_presence_clear'::text) AND (identity IS NOT NULL) AND (room_jid IS NOT NULL)) OR ((action = 'muji_presence_clear_only'::text) AND (identity IS NOT NULL) AND (room_jid IS NOT NULL) AND (participant_sid IS NULL)) OR ((action = 'muji_room_sweep'::text) AND (identity IS NULL) AND (room_jid IS NOT NULL) AND (room_sid IS NOT NULL) AND (participant_sid IS NULL)) OR ((action = 'call_thread_end_retry'::text) AND (identity IS NULL) AND (room_jid IS NOT NULL) AND (participant_sid IS NULL) AND (thread_id IS NOT NULL) AND (anchor_origin_id IS NOT NULL) AND (thread_started_at_ms IS NOT NULL) AND (thread_ended_at_ms IS NOT NULL)))),
+    CONSTRAINT call_teardown_outbox_check1 CHECK ((((thread_id IS NULL) AND (anchor_origin_id IS NULL) AND (thread_started_at_ms IS NULL) AND (thread_ended_at_ms IS NULL)) OR (action = 'call_thread_end_retry'::text))),
+    CONSTRAINT call_teardown_outbox_generation_check CHECK (((generation IS NULL) OR (generation > 0))),
+    CONSTRAINT call_teardown_outbox_identity_check CHECK (((identity IS NULL) OR (identity <> ''::text))),
+    CONSTRAINT call_teardown_outbox_occupant_check CHECK (((occupant IS NULL) OR (occupant <> ''::text))),
+    CONSTRAINT call_teardown_outbox_producing_node_check CHECK (((producing_node IS NULL) OR (producing_node <> ''::text))),
+    CONSTRAINT call_teardown_outbox_room_jid_check CHECK (((room_jid IS NULL) OR (room_jid <> ''::text))),
+    CONSTRAINT call_teardown_outbox_session_binding_check CHECK (((session_binding IS NULL) OR (session_binding <> ''::text))),
+    CONSTRAINT call_teardown_outbox_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in-progress'::text, 'done'::text, 'failed'::text]))),
+    CONSTRAINT call_teardown_outbox_thread_id_check CHECK (((thread_id IS NULL) OR (thread_id <> ''::text))),
+    CONSTRAINT call_teardown_outbox_unbound_occupant_check CHECK (((unbound_occupant IS NULL) OR (unbound_occupant <> ''::text)))
+);
+
+CREATE TABLE channel_space_links (
+    channel_jid text NOT NULL,
+    space_jid text NOT NULL,
+    space_node text NOT NULL,
+    created_at bigint NOT NULL,
+    CONSTRAINT channel_space_links_pkey PRIMARY KEY (channel_jid)
+);
+
+CREATE TABLE channels (
+    id text NOT NULL,
+    name text NOT NULL,
+    description text,
+    channel_type text DEFAULT 'text'::text NOT NULL,
+    "position" integer DEFAULT 0 NOT NULL,
+    is_default integer DEFAULT 0 NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    pin_permission text DEFAULT 'admins-only'::text NOT NULL,
+    members_only integer DEFAULT 1 NOT NULL,
+    public_room integer DEFAULT 1 NOT NULL,
+    federated integer DEFAULT 0 NOT NULL,
+    CONSTRAINT channels_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE clustering_claims (
+    entity text NOT NULL,
+    entity_type text NOT NULL,
+    node_id text NOT NULL,
+    node_epoch text NOT NULL,
+    claim_epoch bigint DEFAULT nextval('clustering_claim_epoch_seq'::regclass) NOT NULL,
+    CONSTRAINT clustering_claims_pkey PRIMARY KEY (entity)
+);
+
+CREATE TABLE clustering_muc_admin_receipts (
+    attempt_id text NOT NULL,
+    room_jid text NOT NULL,
+    lifecycle_id text NOT NULL,
+    revision bigint NOT NULL,
+    created_at_ms bigint NOT NULL,
+    removed_sessions_json text NOT NULL,
+    CONSTRAINT clustering_muc_admin_receipts_pkey PRIMARY KEY (attempt_id),
+    CONSTRAINT clustering_muc_admin_receipts_revision_check CHECK ((revision >= 1))
+);
+
+CREATE TABLE clustering_muc_destroy_outbox (
+    attempt_id text NOT NULL,
+    payload_json text NOT NULL,
+    lifecycle_id text,
+    origin_instance_id text,
+    available_at_ms bigint NOT NULL,
+    lease_token text,
+    leased_at_ms bigint,
+    CONSTRAINT clustering_muc_destroy_outbox_pkey PRIMARY KEY (attempt_id)
+);
+
+CREATE TABLE clustering_muc_room_affiliations (
+    room_jid text NOT NULL,
+    member_jid text NOT NULL,
+    affiliation text NOT NULL,
+    reason text,
+    granted_at timestamp with time zone,
+    CONSTRAINT clustering_muc_room_affiliations_pkey PRIMARY KEY (room_jid, member_jid)
+);
+
+CREATE TABLE clustering_muc_room_effects (
+    lifecycle_id text NOT NULL,
+    revision bigint NOT NULL,
+    ordinal bigint NOT NULL,
+    room_jid text NOT NULL,
+    kind text NOT NULL,
+    terminal boolean NOT NULL,
+    payload_json text NOT NULL,
+    available_at_ms bigint NOT NULL,
+    superseded boolean DEFAULT false NOT NULL,
+    origin_instance_id text NOT NULL,
+    producing_node text NOT NULL,
+    lease_token text,
+    leased_at_ms bigint,
+    attempt_count bigint DEFAULT 0 NOT NULL,
+    last_error text,
+    created_at_ms bigint NOT NULL,
+    unowned_since_ms bigint,
+    CONSTRAINT clustering_muc_room_effects_pkey PRIMARY KEY (lifecycle_id, revision, ordinal),
+    CONSTRAINT clustering_muc_room_effects_kind_check CHECK ((kind <> ''::text)),
+    CONSTRAINT clustering_muc_room_effects_ordinal_check CHECK ((ordinal >= 0)),
+    CONSTRAINT clustering_muc_room_effects_revision_check CHECK ((revision >= 1)),
+    CONSTRAINT clustering_muc_room_effects_room_jid_check CHECK ((room_jid <> ''::text))
+);
+
+CREATE TABLE clustering_muc_room_lifecycles (
+    lifecycle_id text NOT NULL,
+    room_jid text NOT NULL,
+    revision bigint NOT NULL,
+    state text NOT NULL,
+    mutation_fingerprint text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT clustering_muc_room_lifecycles_pkey PRIMARY KEY (lifecycle_id),
+    CONSTRAINT clustering_muc_room_lifecycles_revision_min CHECK ((revision >= 1)),
+    CONSTRAINT clustering_muc_room_lifecycles_state_closed CHECK ((state = ANY (ARRAY['preparing'::text, 'active'::text, 'dormant'::text, 'tombstoned'::text])))
+);
+
+CREATE TABLE clustering_muc_rooms (
+    room_jid text NOT NULL,
+    waddle_id text NOT NULL,
+    channel_id text NOT NULL,
+    config_json text NOT NULL,
+    subject_json text,
+    config_lifecycle_id text,
+    config_revision bigint,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    lifecycle_id text,
+    revision bigint,
+    CONSTRAINT clustering_muc_rooms_pkey PRIMARY KEY (room_jid),
+    CONSTRAINT clustering_muc_rooms_config_lifecycle_pairing CHECK (((config_lifecycle_id IS NULL) = (config_revision IS NULL))),
+    CONSTRAINT clustering_muc_rooms_config_revision_min CHECK (((config_revision IS NULL) OR (config_revision >= 1))),
+    CONSTRAINT clustering_muc_rooms_lifecycle_pairing CHECK (((lifecycle_id IS NULL) = (revision IS NULL))),
+    CONSTRAINT clustering_muc_rooms_revision_min CHECK (((revision IS NULL) OR (revision >= 1)))
+);
+
+CREATE TABLE clustering_nodes (
+    node_id text NOT NULL,
+    node_epoch text NOT NULL,
+    heartbeat timestamp with time zone DEFAULT now() NOT NULL,
+    expired boolean DEFAULT false NOT NULL,
+    pod_template_hash text,
+    draining boolean DEFAULT false NOT NULL,
+    peer_id text,
+    first_seen timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT clustering_nodes_pkey PRIMARY KEY (node_id)
+);
+
+CREATE TABLE clustering_orphan_reaper_cursors (
+    lane text NOT NULL,
+    cursor_entity text,
+    CONSTRAINT clustering_orphan_reaper_cursors_pkey PRIMARY KEY (lane)
+);
+
+CREATE TABLE clustering_peer_allowlist (
+    peer_id text NOT NULL,
+    enrolled_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT clustering_peer_allowlist_pkey PRIMARY KEY (peer_id)
+);
+
+CREATE TABLE clustering_steal_intents (
+    entity text NOT NULL,
+    reporter_node text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT clustering_steal_intents_entity_reporter_node_key UNIQUE (entity, reporter_node)
+);
+
+CREATE TABLE device_auth (
+    device_code text NOT NULL,
+    user_code text NOT NULL,
+    status text NOT NULL,
+    payload text NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    CONSTRAINT device_auth_pkey PRIMARY KEY (device_code)
+);
+
+CREATE TABLE dnd_projection (
+    owner_bare_jid text NOT NULL,
+    payload_xml text NOT NULL,
+    source_version bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT dnd_projection_pkey PRIMARY KEY (owner_bare_jid)
+);
+
+CREATE TABLE dnd_projection_source_version (
+    id bigint NOT NULL,
+    current_version bigint NOT NULL,
+    CONSTRAINT dnd_projection_source_version_pkey PRIMARY KEY (id),
+    CONSTRAINT dnd_projection_source_version_id_check CHECK ((id = 1))
+);
+
+CREATE TABLE entity_caps (
+    hash text NOT NULL,
+    ver text NOT NULL,
+    info text NOT NULL,
+    verified_at_ms bigint NOT NULL,
+    CONSTRAINT entity_caps_pkey PRIMARY KEY (hash, ver),
+    CONSTRAINT entity_caps_hash CHECK ((octet_length(hash) BETWEEN 1 AND 32)),
+    CONSTRAINT entity_caps_info CHECK ((octet_length(info) BETWEEN 1 AND 65536)),
+    CONSTRAINT entity_caps_ver CHECK ((octet_length(ver) BETWEEN 1 AND 256))
+);
+
+CREATE TABLE extension_bot_rooms (
+    room_jid text NOT NULL,
+    plugin_id text NOT NULL,
+    CONSTRAINT extension_bot_rooms_pkey PRIMARY KEY (room_jid, plugin_id)
+);
+
+CREATE TABLE extension_grants (
+    grant_id text NOT NULL,
+    plugin_id text NOT NULL,
+    scope smallint NOT NULL,
+    room_jid text,
+    granted_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    CONSTRAINT extension_grants_pkey PRIMARY KEY (grant_id),
+    CONSTRAINT extension_grants_check CHECK ((((scope = 0) AND (room_jid IS NULL)) OR ((scope = 1) AND (room_jid IS NOT NULL))))
+);
+
+CREATE TABLE extension_room_observation_receipts (
+    plugin_id text NOT NULL,
+    generation bigint NOT NULL,
+    room_jid text NOT NULL,
+    message_key text NOT NULL,
+    category text NOT NULL,
+    recorded_at_ms bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT extension_room_observation_receipts_pkey PRIMARY KEY (plugin_id, generation, room_jid, message_key)
+);
+
+CREATE TABLE extension_room_observation_work (
+    id text NOT NULL,
+    source_key text NOT NULL,
+    message_key text NOT NULL,
+    plugin_id text NOT NULL,
+    generation bigint NOT NULL,
+    identity text NOT NULL,
+    room_jid text NOT NULL,
+    revision bigint NOT NULL,
+    source_json text NOT NULL,
+    body text NOT NULL,
+    status text NOT NULL,
+    attempt bigint DEFAULT 0 NOT NULL,
+    due_at_ms bigint NOT NULL,
+    lease_id text,
+    lease_until_ms bigint,
+    terminal_category text,
+    usage_json text,
+    lease_node_id text,
+    lease_node_incarnation text,
+    settled_at_ms bigint,
+    CONSTRAINT extension_room_observation_work_pkey PRIMARY KEY (id),
+    CONSTRAINT extension_room_observation_wo_plugin_id_generation_room_jid_key UNIQUE (plugin_id, generation, room_jid, source_key, revision)
+);
+
+CREATE TABLE extension_room_observers (
+    plugin_id text NOT NULL,
+    generation bigint NOT NULL,
+    identity text NOT NULL,
+    scope_json text NOT NULL,
+    max_concurrent bigint NOT NULL,
+    tenant_id text DEFAULT 'default'::text NOT NULL,
+    CONSTRAINT extension_room_observers_pkey PRIMARY KEY (tenant_id, plugin_id)
+);
+
+CREATE TABLE extension_room_publications (
+    id text NOT NULL,
+    work_id text NOT NULL,
+    output_index bigint NOT NULL,
+    source_key text NOT NULL,
+    plugin_id text NOT NULL,
+    generation bigint NOT NULL,
+    identity text NOT NULL,
+    room_jid text NOT NULL,
+    revision bigint NOT NULL,
+    source_json text NOT NULL,
+    payload_json text NOT NULL,
+    status text NOT NULL,
+    settled_at_ms bigint,
+    CONSTRAINT extension_room_publications_pkey PRIMARY KEY (id),
+    CONSTRAINT extension_room_publications_work_id_output_index_key UNIQUE (work_id, output_index)
+);
+
+CREATE TABLE extension_room_source_revisions (
+    room_jid text NOT NULL,
+    room_stanza_id text NOT NULL,
+    source_key text NOT NULL,
+    CONSTRAINT extension_room_source_revisions_pkey PRIMARY KEY (room_jid, room_stanza_id)
+);
+
+CREATE TABLE extension_room_sources (
+    source_key text NOT NULL,
+    room_jid text NOT NULL,
+    sender_jid text NOT NULL,
+    root_stanza_id text NOT NULL,
+    revision_stanza_id text NOT NULL,
+    root_origin_id text,
+    revision bigint NOT NULL,
+    source_json text NOT NULL,
+    retracted bigint DEFAULT 0 NOT NULL,
+    captured_at_ms bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT extension_room_sources_pkey PRIMARY KEY (source_key),
+    CONSTRAINT extension_room_sources_room_jid_root_stanza_id_key UNIQUE (room_jid, root_stanza_id)
+);
+
+CREATE TABLE group_dm_archive_boundaries (
+    room_jid text NOT NULL,
+    member_jid text NOT NULL,
+    visible_after text,
+    updated_at text NOT NULL,
+    CONSTRAINT group_dm_archive_boundaries_pkey PRIMARY KEY (room_jid, member_jid)
+);
+
+CREATE TABLE groupchat_notification_recovery (
+    message_key text NOT NULL,
+    recipient_bare_jid text NOT NULL,
+    room_jid text NOT NULL,
+    thread_id text DEFAULT ''::text NOT NULL,
+    stanza_id_by text NOT NULL,
+    stanza_id text NOT NULL,
+    sender_jid text NOT NULL,
+    is_live_occupant integer NOT NULL,
+    room_members_only integer NOT NULL,
+    sender_can_broadcast_channel_mention integer NOT NULL,
+    created_at_ms bigint NOT NULL,
+    completed_at_ms bigint,
+    CONSTRAINT groupchat_notification_recovery_pkey PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id)
+);
+
+CREATE TABLE inbox_entries (
+    user_jid text NOT NULL,
+    partner_jid text NOT NULL,
+    thread_id text DEFAULT ''::text NOT NULL,
+    kind text NOT NULL,
+    last_stanza_id text NOT NULL,
+    last_updated bigint NOT NULL,
+    unread integer DEFAULT 0 NOT NULL,
+    preview text,
+    thread_title text,
+    reply_count integer DEFAULT 0 NOT NULL,
+    author text,
+    call_thread_kind text,
+    call_thread_media text,
+    call_ended_at bigint,
+    call_duration text,
+    read_ordinal bigint,
+    CONSTRAINT inbox_entries_pkey PRIMARY KEY (user_jid, partner_jid, thread_id)
+);
+
+CREATE TABLE ingress_archive_dispatch (
+    archive_jid text NOT NULL,
+    archive_seq bigint NOT NULL,
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    resource text NOT NULL,
+    pending_row_id text DEFAULT ''::text NOT NULL,
+    CONSTRAINT ingress_archive_dispatch_pkey PRIMARY KEY (archive_jid, message_key, kind, semantic_identity_hash, resource, pending_row_id),
+    CONSTRAINT ingress_archive_dispatch_archive_seq_check CHECK ((archive_seq > 0)),
+    CONSTRAINT ingress_archive_dispatch_check CHECK (((pending_row_id = ''::text) OR (resource = ''::text)))
+);
+
+CREATE TABLE ingress_carbon_receipts (
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    recipient text NOT NULL,
+    CONSTRAINT ingress_carbon_receipts_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient)
+);
+
+CREATE TABLE ingress_deliveries (
+    delivery_key uuid NOT NULL,
+    message_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    row_revision numeric(20,0) DEFAULT 0 NOT NULL,
+    CONSTRAINT ingress_deliveries_pkey PRIMARY KEY (delivery_key),
+    CONSTRAINT ingress_deliveries_row_revision_check CHECK ((row_revision BETWEEN (0)::numeric AND '18446744073709551615'::numeric))
+);
+
+CREATE TABLE ingress_delivery_receipts (
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    resource text NOT NULL,
+    policy_discard_reason text,
+    CONSTRAINT ingress_delivery_receipts_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash, resource),
+    CONSTRAINT ingress_delivery_receipts_policy_discard_reason_check CHECK ((policy_discard_reason = ANY (ARRAY['occupancy_departed'::text, 'occupancy_superseded'::text, 'occupancy_incarnation_lost'::text, 'room_retired'::text])))
+);
+
+CREATE TABLE ingress_direct_requests (
+    request_key uuid NOT NULL,
+    recipient_jid text NOT NULL,
+    sender_entity text NOT NULL,
+    payload bytea NOT NULL,
+    message_key uuid,
+    owner_decision smallint DEFAULT 0 NOT NULL,
+    refusal smallint,
+    settled_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    target_node_id text,
+    target_node_epoch text,
+    target_binding text,
+    CONSTRAINT ingress_direct_requests_pkey PRIMARY KEY (request_key),
+    CONSTRAINT ingress_direct_requests_decision_check CHECK ((owner_decision = ANY (ARRAY[0, 1, 2]))),
+    CONSTRAINT ingress_direct_requests_jid_check CHECK (((recipient_jid <> ''::text) AND (octet_length(recipient_jid) <= 3071) AND (sender_entity <> ''::text) AND (octet_length(sender_entity) <= 3200))),
+    CONSTRAINT ingress_direct_requests_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1114112))),
+    CONSTRAINT ingress_direct_requests_refusal_check CHECK ((((owner_decision = 2) AND (refusal = ANY (ARRAY[1, 2]))) OR ((owner_decision <> 2) AND (refusal IS NULL)))),
+    CONSTRAINT ingress_direct_requests_settled_check CHECK (((settled_at IS NULL) OR (owner_decision <> 0))),
+    CONSTRAINT ingress_direct_requests_target_check CHECK ((((target_node_id IS NULL) AND (target_node_epoch IS NULL) AND (target_binding IS NULL)) OR ((target_node_id IS NOT NULL) AND (target_node_epoch IS NOT NULL) AND (target_binding IS NOT NULL) AND (target_node_id <> ''::text) AND (octet_length(target_node_id) <= 255) AND (target_node_epoch <> ''::text) AND (octet_length(target_node_epoch) <= 255) AND ((octet_length(target_binding) >= 2) AND (octet_length(target_binding) <= 2048)))))
+);
+
+CREATE TABLE ingress_effect_descendants (
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    descendant_key text NOT NULL,
+    settled_at timestamp with time zone,
+    CONSTRAINT ingress_effect_descendants_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash, descendant_key),
+    CONSTRAINT ingress_effect_descendants_semantic_identity_hash_check CHECK ((octet_length(semantic_identity_hash) = 32))
+);
+
+CREATE TABLE ingress_effect_intents (
+    message_key uuid NOT NULL,
+    effect_ordinal numeric(20,0) NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    payload_version integer NOT NULL,
+    payload bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ingress_effect_intents_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash),
+    CONSTRAINT ingress_effect_intents_effect_ordinal_check CHECK ((effect_ordinal BETWEEN (0)::numeric AND '18446744073709551615'::numeric)),
+    CONSTRAINT ingress_effect_intents_kind_check CHECK ((kind >= 0)),
+    CONSTRAINT ingress_effect_intents_payload_check CHECK ((octet_length(payload) <= 65536)),
+    CONSTRAINT ingress_effect_intents_payload_version_check CHECK ((payload_version = 1)),
+    CONSTRAINT ingress_effect_intents_semantic_identity_hash_check CHECK ((octet_length(semantic_identity_hash) = 32))
+);
+
+CREATE TABLE ingress_effect_receipts (
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL,
+    policy_discard_reason text,
+    CONSTRAINT ingress_effect_receipts_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash),
+    CONSTRAINT ingress_effect_receipts_policy_discard_reason_check CHECK ((policy_discard_reason = ANY (ARRAY['recipient_blocked'::text, 'storage_hint_forbids_handoff'::text]))),
+    CONSTRAINT ingress_effect_receipts_semantic_identity_hash_check CHECK ((octet_length(semantic_identity_hash) = 32))
+);
+
+CREATE TABLE ingress_epoch_guard_manifest (
+    table_name text NOT NULL,
+    CONSTRAINT ingress_epoch_guard_manifest_pkey PRIMARY KEY (table_name)
+);
+
+CREATE TABLE ingress_mailbox_entries (
+    lane_id uuid NOT NULL,
+    sequence numeric(20,0) NOT NULL,
+    operation_kind smallint NOT NULL,
+    message_key uuid,
+    disposition smallint DEFAULT 0 NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    next_attempt_at timestamp with time zone,
+    dead_lettered_at timestamp with time zone,
+    dead_letter_reason smallint,
+    request_language text,
+    appended_at timestamp with time zone DEFAULT now() NOT NULL,
+    request_key uuid,
+    direct_key uuid,
+    CONSTRAINT ingress_mailbox_entries_pkey PRIMARY KEY (lane_id, sequence),
+    CONSTRAINT ingress_mailbox_entries_attempt_check CHECK ((attempt_count >= 0)),
+    CONSTRAINT ingress_mailbox_entries_dead_letter_check CHECK ((((dead_lettered_at IS NULL) AND (dead_letter_reason IS NULL)) OR ((dead_lettered_at IS NOT NULL) AND (dead_letter_reason IS NOT NULL) AND (dead_letter_reason BETWEEN 1 AND 3) AND (disposition = 0)))),
+    CONSTRAINT ingress_mailbox_entries_disposition_check CHECK ((disposition BETWEEN 0 AND 4)),
+    CONSTRAINT ingress_mailbox_entries_language_check CHECK (((request_language IS NULL) OR ((request_language <> ''::text) AND (octet_length(request_language) <= 64)))),
+    CONSTRAINT ingress_mailbox_entries_operation_check CHECK ((operation_kind BETWEEN 1 AND 6)),
+    CONSTRAINT ingress_mailbox_entries_parent_check CHECK ((((operation_kind = 1) AND (message_key IS NOT NULL) AND (request_key IS NULL) AND (direct_key IS NULL)) OR ((operation_kind BETWEEN 2 AND 5) AND (message_key IS NULL) AND (request_key IS NOT NULL) AND (direct_key IS NULL)) OR ((operation_kind = 6) AND (message_key IS NULL) AND (request_key IS NULL) AND (direct_key IS NOT NULL)))),
+    CONSTRAINT ingress_mailbox_entries_sequence_check CHECK ((sequence BETWEEN (1)::numeric AND '18446744073709551615'::numeric))
+);
+
+CREATE TABLE ingress_mailbox_lanes (
+    lane_id uuid NOT NULL,
+    digest_version smallint NOT NULL,
+    digest bytea NOT NULL,
+    encoding_version smallint NOT NULL,
+    encoding bytea NOT NULL,
+    last_sequence numeric(20,0) DEFAULT 0 NOT NULL,
+    last_dispositioned numeric(20,0) DEFAULT 0 NOT NULL,
+    origin_epoch bigint NOT NULL,
+    target_epoch bigint NOT NULL,
+    target_node_id text NOT NULL,
+    target_node_epoch text NOT NULL,
+    CONSTRAINT ingress_mailbox_lanes_pkey PRIMARY KEY (lane_id),
+    CONSTRAINT ingress_mailbox_lanes_digest_key UNIQUE (digest_version, digest),
+    CONSTRAINT ingress_mailbox_lanes_digest_check CHECK (((digest_version = 1) AND (octet_length(digest) = 32))),
+    CONSTRAINT ingress_mailbox_lanes_encoding_check CHECK (((encoding_version = 1) AND ((octet_length(encoding) >= 3) AND (octet_length(encoding) <= 8192)) AND (get_byte(encoding, 0) = 1))),
+    CONSTRAINT ingress_mailbox_lanes_fence_check CHECK (((origin_epoch >= 0) AND (target_epoch >= 0) AND (target_node_id <> ''::text) AND (octet_length(target_node_id) <= 1024) AND (target_node_epoch <> ''::text) AND (octet_length(target_node_epoch) <= 1024))),
+    CONSTRAINT ingress_mailbox_lanes_sequence_check CHECK (((last_sequence BETWEEN (0)::numeric AND '18446744073709551615'::numeric) AND (last_dispositioned BETWEEN (0)::numeric AND last_sequence)))
+);
+
+CREATE TABLE ingress_messages (
+    message_key uuid NOT NULL,
+    digest_version integer NOT NULL,
+    digest bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    terminal_at timestamp with time zone,
+    row_revision numeric(20,0) DEFAULT 0 NOT NULL,
+    envelope_version smallint,
+    envelope bytea,
+    retention_eligible_at timestamp with time zone,
+    source_binding_version smallint,
+    source_bare_jid text,
+    source_auth_context_id uuid,
+    source_auth_context_version numeric(20,0),
+    source_auth_epoch numeric(20,0),
+    source_sm_ingress_id uuid,
+    source_ingress_ordinal numeric(20,0),
+    owner_decision smallint,
+    CONSTRAINT ingress_messages_pkey PRIMARY KEY (message_key),
+    CONSTRAINT ingress_messages_check CHECK (((envelope IS NULL) = (envelope_version IS NULL))),
+    CONSTRAINT ingress_messages_digest_check CHECK ((octet_length(digest) = 32)),
+    CONSTRAINT ingress_messages_digest_version_check CHECK ((digest_version = 1)),
+    CONSTRAINT ingress_messages_envelope_version_check CHECK (((envelope_version IS NULL) OR (envelope_version = ANY (ARRAY[1, 2])))),
+    CONSTRAINT ingress_messages_owner_decision_check CHECK (((owner_decision IS NULL) OR ((owner_decision = ANY (ARRAY[0, 1, 2])) AND (source_binding_version IS NOT NULL) AND (source_binding_version = 1)))),
+    CONSTRAINT ingress_messages_row_revision_check CHECK ((row_revision BETWEEN (0)::numeric AND '18446744073709551615'::numeric)),
+    CONSTRAINT ingress_messages_source_binding_check CHECK ((((source_binding_version IS NULL) AND (source_bare_jid IS NULL) AND (source_auth_context_id IS NULL) AND (source_auth_context_version IS NULL) AND (source_auth_epoch IS NULL) AND (source_sm_ingress_id IS NULL) AND (source_ingress_ordinal IS NULL)) OR ((source_binding_version IS NOT NULL) AND (source_binding_version = 1) AND (source_bare_jid IS NOT NULL) AND (source_bare_jid <> ''::text) AND (octet_length(source_bare_jid) <= 3071) AND (source_auth_context_id IS NOT NULL) AND (source_auth_context_version IS NOT NULL) AND (source_auth_context_version BETWEEN (1)::numeric AND '18446744073709551615'::numeric) AND (source_auth_epoch IS NOT NULL) AND (source_auth_epoch BETWEEN (1)::numeric AND '18446744073709551615'::numeric) AND (((source_sm_ingress_id IS NULL) AND (source_ingress_ordinal IS NULL)) OR ((source_sm_ingress_id IS NOT NULL) AND (source_ingress_ordinal IS NOT NULL) AND (source_ingress_ordinal BETWEEN (1)::numeric AND '18446744073709551615'::numeric))))))
+);
+
+CREATE TABLE ingress_origin_aliases (
+    alias_key_hash bytea NOT NULL,
+    sender_bare_jid text NOT NULL,
+    target_kind integer NOT NULL,
+    target_jid text DEFAULT ''::text NOT NULL,
+    origin_id text NOT NULL,
+    message_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ingress_origin_aliases_pkey PRIMARY KEY (alias_key_hash),
+    CONSTRAINT ingress_origin_aliases_alias_key_hash_check CHECK ((octet_length(alias_key_hash) = 32)),
+    CONSTRAINT ingress_origin_aliases_check CHECK (((target_kind = 0) = (target_jid = ''::text))),
+    CONSTRAINT ingress_origin_aliases_origin_id_check CHECK (((origin_id <> ''::text) AND (octet_length(origin_id) <= 1024))),
+    CONSTRAINT ingress_origin_aliases_sender_bare_jid_check CHECK (((sender_bare_jid <> ''::text) AND (octet_length(sender_bare_jid) <= 3071))),
+    CONSTRAINT ingress_origin_aliases_target_jid_check CHECK ((octet_length(target_jid) <= 3071)),
+    CONSTRAINT ingress_origin_aliases_target_kind_check CHECK ((target_kind = ANY (ARRAY[0, 1, 2])))
+);
+
+CREATE TABLE ingress_owner_rejections (
+    source_message_key uuid NOT NULL,
+    child_message_key uuid NOT NULL,
+    CONSTRAINT ingress_owner_rejections_pkey PRIMARY KEY (source_message_key),
+    CONSTRAINT ingress_owner_rejections_child_message_key_key UNIQUE (child_message_key),
+    CONSTRAINT ingress_owner_rejections_check CHECK ((source_message_key <> child_message_key))
+);
+
+CREATE TABLE ingress_protocol_epoch (
+    id integer NOT NULL,
+    epoch bigint DEFAULT 0 NOT NULL,
+    activated_at timestamp with time zone,
+    lineage_uuid uuid,
+    CONSTRAINT ingress_protocol_epoch_pkey PRIMARY KEY (id),
+    CONSTRAINT ingress_protocol_epoch_check CHECK (((epoch = 0) = ((activated_at IS NULL) AND (lineage_uuid IS NULL)))),
+    CONSTRAINT ingress_protocol_epoch_epoch_check CHECK ((epoch BETWEEN 0 AND '4294967295'::bigint)),
+    CONSTRAINT ingress_protocol_epoch_id_check CHECK ((id = 1))
+);
+
+CREATE TABLE ingress_room_occupants (
+    room_jid text NOT NULL,
+    occupant_jid text NOT NULL,
+    nick text NOT NULL,
+    role smallint NOT NULL,
+    affiliation smallint NOT NULL,
+    occupancy_generation text NOT NULL,
+    join_request uuid,
+    presence bytea,
+    room_epoch bigint NOT NULL,
+    occupancy_seat uuid,
+    CONSTRAINT ingress_room_occupants_pkey PRIMARY KEY (room_jid, occupant_jid),
+    CONSTRAINT ingress_room_occupants_epoch_check CHECK ((room_epoch >= 0)),
+    CONSTRAINT ingress_room_occupants_jid_check CHECK (((room_jid <> ''::text) AND (octet_length(room_jid) <= 3071) AND (occupant_jid <> ''::text) AND (octet_length(occupant_jid) <= 3071) AND (nick <> ''::text) AND (octet_length(nick) <= 1023) AND (occupancy_generation <> ''::text) AND (octet_length(occupancy_generation) <= 64))),
+    CONSTRAINT ingress_room_occupants_presence_check CHECK (((presence IS NULL) OR ((octet_length(presence) >= 1) AND (octet_length(presence) <= 16384)))),
+    CONSTRAINT ingress_room_occupants_role_check CHECK (((role BETWEEN 0 AND 3) AND (affiliation BETWEEN 0 AND 4)))
+);
+
+CREATE TABLE ingress_room_requests (
+    request_key uuid NOT NULL,
+    request_kind smallint NOT NULL,
+    room_jid text NOT NULL,
+    occupant_jid text NOT NULL,
+    occupancy_generation text NOT NULL,
+    source_binding_version smallint NOT NULL,
+    source_bare_jid text NOT NULL,
+    source_auth_context_id uuid NOT NULL,
+    source_auth_context_version numeric(20,0) NOT NULL,
+    source_auth_epoch numeric(20,0) NOT NULL,
+    source_sm_ingress_id uuid,
+    source_ingress_ordinal numeric(20,0),
+    stanza bytea NOT NULL,
+    owner_decision smallint DEFAULT 0 NOT NULL,
+    settled_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ingress_room_requests_pkey PRIMARY KEY (request_key),
+    CONSTRAINT ingress_room_requests_decision_check CHECK ((owner_decision = ANY (ARRAY[0, 1, 2]))),
+    CONSTRAINT ingress_room_requests_jid_check CHECK (((room_jid <> ''::text) AND (octet_length(room_jid) <= 3071) AND (occupant_jid <> ''::text) AND (octet_length(occupant_jid) <= 3071) AND (occupancy_generation <> ''::text) AND (octet_length(occupancy_generation) <= 64))),
+    CONSTRAINT ingress_room_requests_kind_check CHECK ((request_kind BETWEEN 1 AND 4)),
+    CONSTRAINT ingress_room_requests_settled_check CHECK (((settled_at IS NULL) OR (owner_decision <> 0))),
+    CONSTRAINT ingress_room_requests_source_binding_check CHECK (((source_binding_version = 1) AND (source_bare_jid <> ''::text) AND (octet_length(source_bare_jid) <= 3071) AND (source_auth_context_version BETWEEN (1)::numeric AND '18446744073709551615'::numeric) AND (source_auth_epoch BETWEEN (1)::numeric AND '18446744073709551615'::numeric) AND (((source_sm_ingress_id IS NULL) AND (source_ingress_ordinal IS NULL)) OR ((source_sm_ingress_id IS NOT NULL) AND (source_ingress_ordinal IS NOT NULL) AND (source_ingress_ordinal BETWEEN (1)::numeric AND '18446744073709551615'::numeric))))),
+    CONSTRAINT ingress_room_requests_stanza_check CHECK (((octet_length(stanza) >= 1) AND (octet_length(stanza) <= 1048576)))
+);
+
+CREATE TABLE ingress_room_responses (
+    request_key uuid NOT NULL,
+    "position" integer NOT NULL,
+    stanza bytea NOT NULL,
+    CONSTRAINT ingress_room_responses_pkey PRIMARY KEY (request_key, "position"),
+    CONSTRAINT ingress_room_responses_position_check CHECK (("position" >= 0)),
+    CONSTRAINT ingress_room_responses_stanza_check CHECK (((octet_length(stanza) >= 1) AND (octet_length(stanza) <= 1048576)))
+);
+
+CREATE TABLE ingress_send_attempts (
+    message_key uuid NOT NULL,
+    kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    recipient text NOT NULL,
+    node_id text NOT NULL,
+    node_incarnation text NOT NULL,
+    lease_token text NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    state integer NOT NULL,
+    recovered integer DEFAULT 0 NOT NULL,
+    CONSTRAINT ingress_send_attempts_pkey PRIMARY KEY (message_key, kind, semantic_identity_hash, recipient),
+    CONSTRAINT ingress_send_attempts_recovered_check CHECK ((recovered = ANY (ARRAY[0, 1]))),
+    CONSTRAINT ingress_send_attempts_state_check CHECK ((state = ANY (ARRAY[0, 1, 2])))
+);
+
+CREATE TABLE ingress_sm_refs (
+    sm_ingress_id uuid NOT NULL,
+    ingress_ordinal numeric(20,0) NOT NULL,
+    message_key uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    wire_h bigint NOT NULL,
+    wire_generation bigint NOT NULL,
+    CONSTRAINT ingress_sm_refs_pkey PRIMARY KEY (sm_ingress_id, ingress_ordinal),
+    CONSTRAINT ingress_sm_refs_sm_ingress_id_wire_generation_wire_h_key UNIQUE (sm_ingress_id, wire_generation, wire_h),
+    CONSTRAINT ingress_sm_refs_ingress_ordinal_check CHECK ((ingress_ordinal BETWEEN (1)::numeric AND '18446744073709551615'::numeric)),
+    CONSTRAINT ingress_sm_refs_wire_generation_check CHECK ((wire_generation >= 0)),
+    CONSTRAINT ingress_sm_refs_wire_h_check CHECK ((wire_h BETWEEN 0 AND '4294967295'::bigint))
+);
+
+CREATE TABLE ingress_sm_streams (
+    sm_ingress_id uuid NOT NULL,
+    stream_id text NOT NULL,
+    handled_ordinal numeric(20,0) DEFAULT 0 NOT NULL,
+    row_revision numeric(20,0) DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    checkpoint_h bigint DEFAULT 0 NOT NULL,
+    wire_generation bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT ingress_sm_streams_pkey PRIMARY KEY (sm_ingress_id),
+    CONSTRAINT ingress_sm_streams_stream_id_key UNIQUE (stream_id),
+    CONSTRAINT ingress_sm_streams_checkpoint_h_check CHECK ((checkpoint_h BETWEEN 0 AND '4294967295'::bigint)),
+    CONSTRAINT ingress_sm_streams_handled_ordinal_check CHECK ((handled_ordinal BETWEEN (0)::numeric AND '18446744073709551615'::numeric)),
+    CONSTRAINT ingress_sm_streams_row_revision_check CHECK ((row_revision BETWEEN (0)::numeric AND '18446744073709551615'::numeric)),
+    CONSTRAINT ingress_sm_streams_stream_id_check CHECK (((stream_id <> ''::text) AND (length(stream_id) <= 3071))),
+    CONSTRAINT ingress_sm_streams_wire_generation_check CHECK ((wire_generation >= 0))
+);
+
+CREATE TABLE link_preview_media_refs (
+    upload_slot_id text NOT NULL,
+    archive_jid text NOT NULL,
+    message_id text NOT NULL,
+    current_archive_id text NOT NULL,
+    state text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT link_preview_media_refs_pkey PRIMARY KEY (upload_slot_id, archive_jid, message_id),
+    CONSTRAINT link_preview_media_refs_state_check CHECK ((state = ANY (ARRAY['current'::text, 'unreferenced'::text])))
+);
+
+CREATE TABLE mam_archive_sequences (
+    archive_jid text NOT NULL,
+    next_seq bigint NOT NULL,
+    CONSTRAINT mam_archive_sequences_pkey PRIMARY KEY (archive_jid)
+);
+
+CREATE TABLE mam_messages (
+    id text NOT NULL,
+    room_jid text NOT NULL,
+    "timestamp" timestamp with time zone NOT NULL,
+    from_jid text NOT NULL,
+    to_jid text NOT NULL,
+    body text,
+    stanza_id text,
+    thread_id text,
+    reply_to_id text,
+    reply_to_jid text,
+    origin_id text,
+    message_type text DEFAULT 'normal'::text NOT NULL,
+    stanza_xml text,
+    rich_payload text,
+    nickname_generation bigint,
+    parent_thread_id text,
+    archive_seq bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT mam_messages_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE messages (
+    id text NOT NULL,
+    channel_id text NOT NULL,
+    author_jid text NOT NULL,
+    content text,
+    reply_to_id text,
+    thread_id text,
+    flags integer DEFAULT 0 NOT NULL,
+    edited_at text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    expires_at text,
+    CONSTRAINT messages_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE muc_invite_claims (
+    message_key uuid NOT NULL,
+    room_jid text NOT NULL,
+    invitee_jid text NOT NULL,
+    inviter_jid text NOT NULL,
+    claimed bigint NOT NULL,
+    CONSTRAINT muc_invite_claims_pkey PRIMARY KEY (message_key, room_jid, invitee_jid, inviter_jid),
+    CONSTRAINT muc_invite_claims_claimed_check CHECK ((claimed = ANY (ARRAY[(0)::bigint, (1)::bigint])))
+);
+
+CREATE TABLE muc_pending_invites (
+    room_jid text NOT NULL,
+    invitee_jid text NOT NULL,
+    inviter_jid text NOT NULL,
+    created_at text NOT NULL,
+    CONSTRAINT muc_pending_invites_pkey PRIMARY KEY (room_jid, invitee_jid, inviter_jid)
+);
+
+CREATE TABLE native_users (
+    id bigint DEFAULT nextval('native_users_id_seq'::regclass) NOT NULL,
+    username text NOT NULL,
+    domain text NOT NULL,
+    password_hash text NOT NULL,
+    salt text NOT NULL,
+    iterations integer DEFAULT 4096 NOT NULL,
+    stored_key bytea NOT NULL,
+    server_key bytea NOT NULL,
+    email text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    jid_key text,
+    account_id text,
+    tenant_id text DEFAULT 'default'::text NOT NULL,
+    CONSTRAINT native_users_pkey PRIMARY KEY (id),
+    CONSTRAINT native_users_username_domain_key UNIQUE (username, domain)
+);
+
+CREATE TABLE notification_activity (
+    owner_bare_jid text NOT NULL,
+    conversation_jid text NOT NULL,
+    last_active_at_ms bigint NOT NULL,
+    last_chat_state text,
+    last_read_at_ms bigint,
+    presence_show text,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT notification_activity_pkey PRIMARY KEY (owner_bare_jid, conversation_jid),
+    CONSTRAINT notification_activity_last_chat_state_check CHECK (((last_chat_state IS NULL) OR (last_chat_state = ANY (ARRAY['active'::text, 'composing'::text, 'paused'::text, 'inactive'::text, 'gone'::text])))),
+    CONSTRAINT notification_activity_presence_show_check CHECK (((presence_show IS NULL) OR (presence_show = ANY (ARRAY['away'::text, 'chat'::text, 'dnd'::text, 'xa'::text]))))
+);
+
+CREATE TABLE notification_candidates (
+    recipient_bare_jid text NOT NULL,
+    conversation_jid text NOT NULL,
+    sender_jid text NOT NULL,
+    thread_id text DEFAULT ''::text NOT NULL,
+    stanza_id_by text NOT NULL,
+    stanza_id text NOT NULL,
+    class text NOT NULL,
+    reason text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    policy_error_count integer DEFAULT 0 NOT NULL,
+    next_attempt_at_ms bigint,
+    outboxed_at_ms bigint,
+    suppressed_reason text,
+    noping integer DEFAULT 0 NOT NULL,
+    no_store integer DEFAULT 0 NOT NULL,
+    no_permanent_store integer DEFAULT 0 NOT NULL,
+    last_message_body text,
+    reaction integer DEFAULT 0 NOT NULL,
+    delivery_id text,
+    quarantined_at_ms bigint,
+    quarantined_suppressed_reason text,
+    call_sid text,
+    call_video integer,
+    CONSTRAINT notification_candidates_pkey PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class),
+    CONSTRAINT notification_candidates_class_check CHECK ((class = ANY (ARRAY['dm'::text, 'dm_mention'::text, 'personal_mention'::text, 'channel_mention'::text, 'active_channel_mention'::text, 'notify_all'::text, 'call'::text, 'missed_call'::text]))),
+    CONSTRAINT notification_candidates_reason_check CHECK ((reason = ANY (ARRAY['offline_dm'::text, 'offline_dm_mention'::text, 'groupchat_personal_mention'::text, 'groupchat_channel_mention'::text, 'groupchat_active_channel_mention'::text, 'groupchat_notify_all'::text, 'offline_call'::text, 'call_retracted'::text, 'call_unanswered'::text]))),
+    CONSTRAINT notification_candidates_suppressed_reason_check CHECK (((suppressed_reason IS NULL) OR (suppressed_reason = ANY (ARRAY['xep0357_self'::text, 'xep0357_no_registration'::text, 'xep0357_registration_disabled'::text, 'xep0492_never'::text, 'xep0492_on_mention_miss'::text, 'xep0191_blocked'::text, 'xep0513_noping'::text, 'xep0513_active_miss'::text, 'waddle_dnd'::text, 'provider_rejected'::text, 'provider_token_expired'::text, 'xep0357_push_service_degraded'::text, 'unread_zero_at_publish'::text, 'policy_retries_exhausted'::text, 'xep0444_reaction'::text]))))
+);
+
+CREATE TABLE notification_outbox (
+    job_id text NOT NULL,
+    recipient_bare_jid text NOT NULL,
+    push_service_jid text NOT NULL,
+    node text NOT NULL,
+    conversation_jid text NOT NULL,
+    sender_jid text NOT NULL,
+    sender_jids text NOT NULL,
+    thread_id text DEFAULT ''::text NOT NULL,
+    class text NOT NULL,
+    message_count integer NOT NULL,
+    context_xml text NOT NULL,
+    summary_sender_jid text,
+    summary_body text,
+    approved_payload_xml text,
+    approved_publish_options_xml text,
+    queue_acceptance_may_exist integer DEFAULT 1 NOT NULL,
+    status text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    policy_error_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    next_attempt_at_ms bigint,
+    claimed_at_ms bigint,
+    claim_token text,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    published_at_ms bigint,
+    CONSTRAINT notification_outbox_pkey PRIMARY KEY (job_id),
+    CONSTRAINT notification_outbox_class_check CHECK ((class = ANY (ARRAY['dm'::text, 'dm_mention'::text, 'personal_mention'::text, 'channel_mention'::text, 'active_channel_mention'::text, 'notify_all'::text, 'call'::text, 'missed_call'::text]))),
+    CONSTRAINT notification_outbox_queue_acceptance_may_exist_check CHECK ((queue_acceptance_may_exist = ANY (ARRAY[0, 1]))),
+    CONSTRAINT notification_outbox_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in-progress'::text, 'published'::text, 'failed'::text])))
+);
+
+CREATE TABLE notification_outbox_lineage (
+    candidate_delivery_id text NOT NULL,
+    job_id text NOT NULL,
+    settled_at_ms bigint,
+    CONSTRAINT notification_outbox_lineage_pkey PRIMARY KEY (candidate_delivery_id, job_id)
+);
+
+CREATE TABLE notification_settings_projection (
+    owner_bare_jid text NOT NULL,
+    conversation_jid text NOT NULL,
+    conversation_kind text NOT NULL,
+    mode text NOT NULL,
+    rich_payload_opt_in integer DEFAULT 0 NOT NULL,
+    source_version bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    source_node text NOT NULL,
+    source_item_id text NOT NULL,
+    CONSTRAINT notification_settings_projection_pkey PRIMARY KEY (owner_bare_jid, conversation_jid),
+    CONSTRAINT notification_settings_projection_conversation_kind_check CHECK ((conversation_kind = ANY (ARRAY['direct'::text, 'private_group'::text, 'public_group'::text]))),
+    CONSTRAINT notification_settings_projection_mode_check CHECK ((mode = ANY (ARRAY['always'::text, 'on-mention'::text, 'never'::text]))),
+    CONSTRAINT notification_settings_projection_rich_payload_opt_in_check CHECK ((rich_payload_opt_in = ANY (ARRAY[0, 1])))
+);
+
+CREATE TABLE notification_settings_projection_source_version (
+    id bigint NOT NULL,
+    current_version bigint NOT NULL,
+    CONSTRAINT notification_settings_projection_source_version_pkey PRIMARY KEY (id),
+    CONSTRAINT notification_settings_projection_source_version_id_check CHECK ((id = 1))
+);
+
+CREATE TABLE p21_receipt_operation_results (
+    operation_id uuid NOT NULL,
+    message_key uuid NOT NULL,
+    receipt_kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    inserted boolean NOT NULL,
+    CONSTRAINT p21_receipt_operation_results_pkey PRIMARY KEY (operation_id),
+    CONSTRAINT p21_receipt_operation_results_hash_size CHECK ((octet_length(semantic_identity_hash) = 32))
+);
+
+CREATE TABLE pending_auth (
+    state text NOT NULL,
+    payload text NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    CONSTRAINT pending_auth_pkey PRIMARY KEY (state)
+);
+
+CREATE TABLE pending_delivery (
+    row_id text NOT NULL,
+    recipient_jid text NOT NULL,
+    original_receipt_at bigint NOT NULL,
+    payload_kind text NOT NULL,
+    archive_stanza_by text,
+    archive_stanza_id text,
+    transient_xml text,
+    flushed_in_session text,
+    outbound_sequence integer,
+    notification_outboxed_at_ms bigint,
+    claimed_at_ms bigint,
+    claim_token text,
+    claim_offered integer DEFAULT 0 NOT NULL,
+    origin_stream_id text,
+    inbound_seq bigint,
+    pair_sequence bigint,
+    notification_recovery_ordinal bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME pending_delivery_notification_recovery_ordinal_seq START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1) NOT NULL,
+    CONSTRAINT pending_delivery_pkey PRIMARY KEY (row_id)
+);
+
+CREATE TABLE pending_delivery_sm_promotions (
+    origin_stream_id text NOT NULL,
+    sequence bigint NOT NULL,
+    created_at_ms bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT pending_delivery_sm_promotions_pkey PRIMARY KEY (origin_stream_id, sequence)
+);
+
+CREATE TABLE pending_delivery_startup_migrations (
+    name text NOT NULL,
+    completed_at bigint NOT NULL,
+    CONSTRAINT pending_delivery_startup_migrations_pkey PRIMARY KEY (name)
+);
+
+CREATE TABLE permission_tuples (
+    id text NOT NULL,
+    object_type text NOT NULL,
+    object_id text NOT NULL,
+    relation text NOT NULL,
+    subject_type text NOT NULL,
+    subject_id text NOT NULL,
+    subject_relation text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT permission_tuples_pkey PRIMARY KEY (id),
+    CONSTRAINT permission_tuples_object_type_object_id_relation_subject_ty_key UNIQUE (object_type, object_id, relation, subject_type, subject_id, subject_relation)
+);
+
+CREATE TABLE private_xml_storage (
+    jid text NOT NULL,
+    namespace text NOT NULL,
+    xml_content text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT private_xml_storage_pkey PRIMARY KEY (jid, namespace)
+);
+
+CREATE TABLE provider_webhook_deliveries (
+    provider_id text NOT NULL,
+    delivery_id text NOT NULL,
+    plugin_id text NOT NULL,
+    event_type text NOT NULL,
+    payload_sha256 text NOT NULL,
+    status text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT provider_webhook_deliveries_pkey PRIMARY KEY (provider_id, delivery_id)
+);
+
+CREATE TABLE pubsub_affiliations (
+    owner_jid text NOT NULL,
+    node_name text NOT NULL,
+    entity_jid text NOT NULL,
+    affiliation text NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT pubsub_affiliations_pkey PRIMARY KEY (owner_jid, node_name, entity_jid)
+);
+
+CREATE TABLE pubsub_items (
+    seq bigint GENERATED BY DEFAULT AS IDENTITY (SEQUENCE NAME pubsub_items_seq_seq START WITH 1 INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 CACHE 1) NOT NULL,
+    owner_jid text NOT NULL,
+    node_name text NOT NULL,
+    item_id text NOT NULL,
+    payload_xml text,
+    publisher_jid text,
+    published_at_ms bigint NOT NULL,
+    CONSTRAINT pubsub_items_pkey PRIMARY KEY (seq),
+    CONSTRAINT pubsub_items_owner_jid_node_name_item_id_key UNIQUE (owner_jid, node_name, item_id)
+);
+
+CREATE TABLE pubsub_nodes (
+    owner_jid text NOT NULL,
+    node_name text NOT NULL,
+    access_model text NOT NULL,
+    publish_model text NOT NULL,
+    node_type text,
+    max_items bigint NOT NULL,
+    persist_items integer NOT NULL,
+    deliver_payloads integer NOT NULL,
+    notify_retract integer NOT NULL,
+    notify_delete integer NOT NULL,
+    send_last_published_item text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    roster_groups_allowed text,
+    item_expire bigint,
+    CONSTRAINT pubsub_nodes_pkey PRIMARY KEY (owner_jid, node_name)
+);
+
+CREATE TABLE pubsub_owner_configured (
+    owner_jid text NOT NULL,
+    node_name text NOT NULL,
+    CONSTRAINT pubsub_owner_configured_pkey PRIMARY KEY (owner_jid, node_name)
+);
+
+CREATE TABLE pubsub_push_publications (
+    service_jid text NOT NULL,
+    node_name text NOT NULL,
+    revision bigint NOT NULL,
+    job_token text NOT NULL,
+    payload_hash text NOT NULL,
+    CONSTRAINT pubsub_push_publications_pkey PRIMARY KEY (service_jid, node_name),
+    CONSTRAINT pubsub_push_publications_revision_check CHECK ((revision > 0))
+);
+
+CREATE TABLE pubsub_schema_version (
+    version integer NOT NULL,
+    CONSTRAINT pubsub_schema_version_pkey PRIMARY KEY (version)
+);
+
+CREATE TABLE pubsub_subscriptions (
+    owner_jid text NOT NULL,
+    node_name text NOT NULL,
+    subid text NOT NULL,
+    subscriber_jid text NOT NULL,
+    state text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    CONSTRAINT pubsub_subscriptions_pkey PRIMARY KEY (owner_jid, node_name, subid)
+);
+
+CREATE TABLE push_delivery_attempts (
+    attempt_id text NOT NULL,
+    node text NOT NULL,
+    device_id text NOT NULL,
+    platform text NOT NULL,
+    item_id text NOT NULL,
+    status text NOT NULL,
+    last_error text,
+    created_at_ms bigint NOT NULL,
+    publish_job_id text,
+    CONSTRAINT push_delivery_attempts_pkey PRIMARY KEY (attempt_id)
+);
+
+CREATE TABLE push_devices (
+    device_id text NOT NULL,
+    node text NOT NULL,
+    platform text NOT NULL,
+    environment text NOT NULL,
+    provider_endpoint text,
+    provider_token text,
+    provider_key_material text,
+    status text NOT NULL,
+    failure_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    provider_auth text,
+    CONSTRAINT push_devices_pkey PRIMARY KEY (node, device_id),
+    CONSTRAINT push_devices_platform_check CHECK ((platform = ANY (ARRAY['web'::text, 'apns'::text, 'fcm'::text]))),
+    CONSTRAINT push_devices_status_check CHECK ((status = ANY (ARRAY['active'::text, 'disabled'::text])))
+);
+
+CREATE TABLE push_node_locks (
+    node text NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT push_node_locks_pkey PRIMARY KEY (node)
+);
+
+CREATE TABLE push_nodes (
+    node text NOT NULL,
+    owner_bare_jid text NOT NULL,
+    app_id text NOT NULL,
+    status text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT push_nodes_pkey PRIMARY KEY (node),
+    CONSTRAINT push_nodes_owner_bare_jid_app_id_key UNIQUE (owner_bare_jid, app_id),
+    CONSTRAINT push_nodes_status_check CHECK ((status = ANY (ARRAY['active'::text, 'disabled'::text])))
+);
+
+CREATE TABLE push_owner_locks (
+    owner_bare_jid text NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT push_owner_locks_pkey PRIMARY KEY (owner_bare_jid)
+);
+
+CREATE TABLE push_publication_orders (
+    node text NOT NULL,
+    next_order bigint NOT NULL,
+    CONSTRAINT push_publication_orders_pkey PRIMARY KEY (node)
+);
+
+CREATE TABLE push_publish_jobs (
+    job_id text NOT NULL,
+    owner_bare_jid text NOT NULL,
+    push_service_jid text,
+    node text NOT NULL,
+    item_id text NOT NULL,
+    payload_xml text NOT NULL,
+    publish_options_xml text,
+    ancestry_job_id text,
+    acceptance_scope text DEFAULT 'legacy'::text NOT NULL,
+    backing_published_at_ms bigint,
+    publication_order bigint DEFAULT 0 NOT NULL,
+    backing_state text DEFAULT 'pending'::text NOT NULL,
+    uncertain_send integer DEFAULT 0 NOT NULL,
+    terminal_disposition text,
+    upstream_completed integer DEFAULT 0 NOT NULL,
+    status text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    next_retry_at_ms bigint,
+    claimed_at_ms bigint,
+    claim_token text,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    published_at_ms bigint,
+    CONSTRAINT push_publish_jobs_pkey PRIMARY KEY (job_id),
+    CONSTRAINT push_publish_jobs_acceptance_scope_check CHECK ((acceptance_scope = ANY (ARRAY['legacy'::text, 'wire'::text, 'canonical'::text]))),
+    CONSTRAINT push_publish_jobs_backing_state_check CHECK ((backing_state = ANY (ARRAY['pending'::text, 'published'::text, 'superseded'::text, 'not-configured'::text]))),
+    CONSTRAINT push_publish_jobs_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in-progress'::text, 'published'::text, 'failed'::text]))),
+    CONSTRAINT push_publish_jobs_terminal_disposition_check CHECK (((terminal_disposition IS NULL) OR (terminal_disposition = 'registration-revoked'::text))),
+    CONSTRAINT push_publish_jobs_uncertain_send_check CHECK ((uncertain_send = ANY (ARRAY[0, 1]))),
+    CONSTRAINT push_publish_jobs_upstream_completed_check CHECK ((upstream_completed = ANY (ARRAY[0, 1])))
+);
+
+CREATE TABLE push_registrations (
+    owner_bare_jid text NOT NULL,
+    push_service_jid text NOT NULL,
+    node text DEFAULT ''::text NOT NULL,
+    publish_options_xml text,
+    status text NOT NULL,
+    failure_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    next_retry_at_ms bigint,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT push_registrations_pkey PRIMARY KEY (owner_bare_jid, push_service_jid, node),
+    CONSTRAINT push_registrations_status_check CHECK ((status = ANY (ARRAY['enabled'::text, 'disabled'::text, 'backoff'::text])))
+);
+
+CREATE TABLE push_service_vapid_keys (
+    kid text NOT NULL,
+    sealed_private_key text NOT NULL,
+    public_key bytea NOT NULL,
+    root_key_version bigint NOT NULL,
+    created_at_ms bigint NOT NULL,
+    retired_at_ms bigint,
+    CONSTRAINT push_service_vapid_keys_pkey PRIMARY KEY (kid)
+);
+
+CREATE TABLE reactions (
+    id bigint DEFAULT nextval('reactions_id_seq'::regclass) NOT NULL,
+    message_id text NOT NULL,
+    user_jid text NOT NULL,
+    emoji text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT reactions_pkey PRIMARY KEY (id),
+    CONSTRAINT reactions_message_id_user_jid_emoji_key UNIQUE (message_id, user_jid, emoji)
+);
+
+CREATE TABLE roster_items (
+    id bigint DEFAULT nextval('roster_items_id_seq'::regclass) NOT NULL,
+    user_jid text NOT NULL,
+    contact_jid text NOT NULL,
+    name text,
+    subscription text DEFAULT 'none'::text NOT NULL,
+    ask text,
+    approved boolean DEFAULT false NOT NULL,
+    groups text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT roster_items_pkey PRIMARY KEY (id),
+    CONSTRAINT roster_items_user_jid_contact_jid_key UNIQUE (user_jid, contact_jid)
+);
+
+CREATE TABLE roster_versions (
+    user_jid text NOT NULL,
+    version text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT roster_versions_pkey PRIMARY KEY (user_jid)
+);
+
+CREATE TABLE sessions (
+    id text NOT NULL,
+    user_jid text NOT NULL,
+    token_hash text NOT NULL,
+    expires_at text,
+    created_at text NOT NULL,
+    last_used_at text NOT NULL,
+    auth_context_id text NOT NULL,
+    auth_context_version bigint DEFAULT 1 NOT NULL,
+    principal_auth_epoch bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT sessions_pkey PRIMARY KEY (id),
+    CONSTRAINT sessions_token_hash_key UNIQUE (token_hash)
+);
+
+CREATE TABLE sm_acknowledged_windows (
+    stream_id text NOT NULL,
+    from_exclusive bigint NOT NULL,
+    to_inclusive bigint NOT NULL,
+    CONSTRAINT sm_acknowledged_windows_pkey PRIMARY KEY (stream_id, from_exclusive, to_inclusive)
+);
+
+CREATE TABLE sm_durable_operations (
+    operation_id text NOT NULL,
+    session_id text NOT NULL,
+    kind integer NOT NULL,
+    outcome integer NOT NULL,
+    generation bigint NOT NULL,
+    ordinal bigint,
+    recorded_at_ms bigint NOT NULL,
+    CONSTRAINT sm_durable_operations_pkey PRIMARY KEY (operation_id),
+    CONSTRAINT sm_durable_operations_kind_check CHECK ((kind = ANY (ARRAY[1, 2, 3]))),
+    CONSTRAINT sm_durable_operations_outcome_check CHECK ((outcome = ANY (ARRAY[1, 2])))
+);
+
+CREATE TABLE sm_durable_sessions (
+    session_id text NOT NULL,
+    resume_token_sha256 text NOT NULL,
+    full_jid text NOT NULL,
+    state integer NOT NULL,
+    terminal_reason integer,
+    generation bigint NOT NULL,
+    binding text NOT NULL,
+    bare_jid text NOT NULL,
+    auth_context_id text NOT NULL,
+    auth_context_version bigint NOT NULL,
+    principal_auth_epoch bigint NOT NULL,
+    owner_node_id text,
+    owner_node_epoch text,
+    claim_epoch bigint,
+    inbound_handled bigint NOT NULL,
+    outbound_acked bigint NOT NULL,
+    outbound_exposure_ceiling bigint NOT NULL,
+    outbound_appended bigint NOT NULL,
+    outbound_unacked_bytes bigint NOT NULL,
+    max_resume_secs bigint NOT NULL,
+    detached_at_ms bigint,
+    enable_operation text NOT NULL,
+    last_operation text NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    occupancy_session text,
+    CONSTRAINT sm_durable_sessions_pkey PRIMARY KEY (session_id),
+    CONSTRAINT sm_durable_sessions_state_check CHECK ((state = ANY (ARRAY[1, 2, 3, 4])))
+);
+
+CREATE TABLE sm_ingress_appends (
+    message_key text NOT NULL,
+    receipt_kind integer NOT NULL,
+    semantic_identity_hash bytea NOT NULL,
+    resource text NOT NULL,
+    accepting_stream_id text NOT NULL,
+    sequence bigint NOT NULL,
+    appended_at_ms bigint NOT NULL,
+    custody_payload text NOT NULL,
+    original_receipt_at_ms bigint NOT NULL,
+    disposition integer NOT NULL,
+    CONSTRAINT sm_ingress_appends_pkey PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource),
+    CONSTRAINT sm_ingress_appends_disposition_check CHECK ((disposition = ANY (ARRAY[0, 1, 2, 3])))
+);
+
+CREATE TABLE sm_sessions (
+    stream_id text NOT NULL,
+    user_id text NOT NULL,
+    full_jid text NOT NULL,
+    occupancy_session text,
+    inbound_count bigint NOT NULL,
+    outbound_count bigint NOT NULL,
+    last_acked bigint NOT NULL,
+    max_resume_secs bigint,
+    detached_at_ms bigint NOT NULL,
+    max_resume_duration_ms bigint NOT NULL,
+    carbons_enabled integer NOT NULL,
+    roster_interested integer NOT NULL,
+    blocklist_interested integer DEFAULT 0 NOT NULL,
+    presence_available integer NOT NULL,
+    presence_show text,
+    presence_status text,
+    presence_priority integer NOT NULL,
+    replay_gap_through bigint,
+    promotion_attempts integer DEFAULT 0 NOT NULL,
+    presence_payloads text,
+    bare_jid text,
+    auth_context_id text,
+    auth_context_version bigint,
+    principal_auth_epoch bigint,
+    CONSTRAINT sm_sessions_pkey PRIMARY KEY (stream_id)
+);
+
+CREATE TABLE sm_unacked (
+    stream_id text NOT NULL,
+    sequence bigint NOT NULL,
+    stanza_xml text NOT NULL,
+    original_receipt_at_ms bigint NOT NULL,
+    ingress_receipts bytea,
+    origin_stream_id text,
+    inbound_seq bigint,
+    pair_sequence bigint,
+    provenance bytea,
+    CONSTRAINT sm_unacked_pkey PRIMARY KEY (stream_id, sequence)
+);
+
+CREATE TABLE spaces_metadata (
+    space_node text NOT NULL,
+    space_jid text NOT NULL,
+    name text NOT NULL,
+    description text,
+    icon_url text,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL,
+    tenant_id text DEFAULT 'default'::text NOT NULL,
+    CONSTRAINT spaces_metadata_pkey PRIMARY KEY (tenant_id, space_node)
+);
+
+CREATE TABLE upload_slots (
+    id text NOT NULL,
+    requester_jid text NOT NULL,
+    filename text NOT NULL,
+    size_bytes bigint NOT NULL,
+    content_type text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    storage_key text,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    expires_at text NOT NULL,
+    uploaded_at text,
+    CONSTRAINT upload_slots_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE user_avatar_fetch_state (
+    xmpp_localpart text NOT NULL,
+    last_attempt_at text NOT NULL,
+    last_error text,
+    updated_at text NOT NULL,
+    last_fetch_policy_digest text,
+    CONSTRAINT user_avatar_fetch_state_pkey PRIMARY KEY (xmpp_localpart)
+);
+
+CREATE TABLE user_avatar_source (
+    xmpp_localpart text NOT NULL,
+    source text NOT NULL,
+    updated_at text DEFAULT to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'::text) NOT NULL,
+    CONSTRAINT user_avatar_source_pkey PRIMARY KEY (xmpp_localpart),
+    CONSTRAINT user_avatar_source_source_check CHECK ((source = ANY (ARRAY['oidc'::text, 'user'::text])))
+);
+
+CREATE TABLE users (
+    jid text NOT NULL,
+    username text NOT NULL,
+    xmpp_localpart text NOT NULL,
+    display_name text,
+    avatar_url text,
+    primary_email text,
+    created_at text NOT NULL,
+    updated_at text NOT NULL,
+    localpart_key text,
+    account_id text,
+    tenant_id text DEFAULT 'default'::text NOT NULL,
+    CONSTRAINT users_pkey PRIMARY KEY (jid)
+);
+
+CREATE TABLE vcard_storage (
+    jid text NOT NULL,
+    vcard_xml text NOT NULL,
+    created_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    updated_at text DEFAULT (CURRENT_TIMESTAMP)::text NOT NULL,
+    CONSTRAINT vcard_storage_pkey PRIMARY KEY (jid)
+);
+
+CREATE TABLE webhook_deliveries (
+    event_id text NOT NULL,
+    status text NOT NULL,
+    attempt_count integer NOT NULL,
+    first_seen_ms bigint NOT NULL,
+    completed_at_ms bigint,
+    CONSTRAINT webhook_deliveries_pkey PRIMARY KEY (event_id),
+    CONSTRAINT webhook_deliveries_status_check CHECK ((status = ANY (ARRAY['processing'::text, 'done'::text])))
+);
+
+CREATE TABLE xmpp_auth_codes (
+    code text NOT NULL,
+    payload text NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    CONSTRAINT xmpp_auth_codes_pkey PRIMARY KEY (code)
+);
+
+CREATE TABLE xmpp_oauth_grants (
+    grant_id text NOT NULL,
+    session_id text NOT NULL,
+    user_jid text NOT NULL,
+    scope text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    CONSTRAINT xmpp_oauth_grants_pkey PRIMARY KEY (grant_id),
+    CONSTRAINT xmpp_oauth_grants_session_id_key UNIQUE (session_id),
+    CONSTRAINT xmpp_oauth_grants_grant_id CHECK ((octet_length(grant_id) BETWEEN 1 AND 128))
+);
+
+CREATE TABLE xmpp_occupancy_authority (
+    full_jid text NOT NULL,
+    generation text NOT NULL,
+    CONSTRAINT xmpp_occupancy_authority_pkey PRIMARY KEY (full_jid)
+);
+
+CREATE TABLE account_last_activity (
+    account_jid text NOT NULL,
+    logged_out_at_ms bigint NOT NULL,
+    status text,
+    CONSTRAINT account_last_activity_pkey PRIMARY KEY (account_jid),
+    CONSTRAINT account_last_activity_account_jid CHECK ((octet_length(account_jid) BETWEEN 3 AND 2047))
+);
+
+CREATE TABLE account_session_ending_acks (
+    request_id text NOT NULL,
+    replica_id text NOT NULL,
+    observed_at_ms bigint NOT NULL,
+    completed_at_ms bigint,
+    streams_closed bigint DEFAULT 0 NOT NULL,
+    detached_sessions_ended bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT account_session_ending_acks_pkey PRIMARY KEY (request_id, replica_id),
+    CONSTRAINT account_session_ending_acks_counts CHECK (((streams_closed >= 0) AND (detached_sessions_ended >= 0))),
+    CONSTRAINT account_session_ending_acks_replica CHECK ((replica_id ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT account_session_ending_acks_request CHECK ((request_id ~ '^[0-9a-f]{32}$'::text))
+);
+
+CREATE TABLE account_session_ending_replicas (
+    replica_id text NOT NULL,
+    node text NOT NULL,
+    registered_at_ms bigint NOT NULL,
+    lease_expires_at_ms bigint NOT NULL,
+    CONSTRAINT account_session_ending_replicas_pkey PRIMARY KEY (replica_id),
+    CONSTRAINT account_session_ending_replicas_id CHECK ((replica_id ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT account_session_ending_replicas_node CHECK ((octet_length(node) BETWEEN 1 AND 255))
+);
+
+CREATE TABLE account_session_ending_requests (
+    request_id text NOT NULL,
+    account_jid text NOT NULL,
+    requested_at_ms bigint NOT NULL,
+    CONSTRAINT account_session_ending_requests_pkey PRIMARY KEY (request_id),
+    CONSTRAINT account_session_ending_requests_account_jid CHECK ((octet_length(account_jid) BETWEEN 3 AND 2047)),
+    CONSTRAINT account_session_ending_requests_id CHECK ((request_id ~ '^[0-9a-f]{32}$'::text))
+);
+
+CREATE TABLE host_grant_authority (
+    singleton boolean DEFAULT true NOT NULL,
+    incarnation text NOT NULL,
+    restore_epoch bigint DEFAULT 0 NOT NULL,
+    lineage_uuid text,
+    authority_id text DEFAULT replace((gen_random_uuid())::text, '-'::text, ''::text) NOT NULL,
+    position_acknowledgement text,
+    CONSTRAINT host_grant_authority_pkey PRIMARY KEY (singleton),
+    CONSTRAINT host_grant_authority_id CHECK ((authority_id ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT host_grant_authority_incarnation CHECK ((incarnation ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT host_grant_authority_position_acknowledgement CHECK ((position_acknowledgement ~ '^(0|[1-9][0-9]{0,9})_(0|[1-9][0-9]{0,19})_(0|[1-9][0-9]{0,9})_(0|[1-9][0-9]{0,19})/(0|[1-9][0-9]{0,19})_(0|[1-9][0-9]{0,9})$'::text)),
+    CONSTRAINT host_grant_authority_restore_epoch CHECK (((restore_epoch >= 0) AND (restore_epoch <= 4294967295::bigint))),
+    CONSTRAINT host_grant_authority_singleton CHECK (singleton)
+);
+
+CREATE TABLE host_grant_fence_acks (
+    replica_id text NOT NULL,
+    lifecycle_id text NOT NULL,
+    generation bigint NOT NULL,
+    acknowledged_at_ms bigint NOT NULL,
+    CONSTRAINT host_grant_fence_acks_pkey PRIMARY KEY (replica_id, lifecycle_id),
+    CONSTRAINT host_grant_fence_acks_generation CHECK ((generation > 0)),
+    CONSTRAINT host_grant_fence_acks_lifecycle CHECK ((lifecycle_id ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT host_grant_fence_acks_replica CHECK ((replica_id ~ '^[0-9a-f]{32}$'::text))
+);
+
+CREATE TABLE host_grant_fence_replicas (
+    replica_id text NOT NULL,
+    registered_at_ms bigint NOT NULL,
+    lease_expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT host_grant_fence_replicas_pkey PRIMARY KEY (replica_id),
+    CONSTRAINT host_grant_fence_replicas_id CHECK ((replica_id ~ '^[0-9a-f]{32}$'::text))
+);
+
+CREATE TABLE host_grant_operation_changes (
+    operation_id text NOT NULL,
+    ordinal integer NOT NULL,
+    room_jid text NOT NULL,
+    subject_jid text NOT NULL,
+    affiliation text NOT NULL,
+    previous_affiliation text NOT NULL,
+    issuance_basis text NOT NULL,
+    CONSTRAINT host_grant_operation_changes_pkey PRIMARY KEY (operation_id, ordinal),
+    CONSTRAINT host_grant_operation_changes_affiliation CHECK ((affiliation = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grant_operation_changes_basis CHECK ((issuance_basis = ANY (ARRAY['local'::text, 'trusted_home'::text, 'unprivileged'::text]))),
+    CONSTRAINT host_grant_operation_changes_ordinal CHECK ((ordinal >= 0)),
+    CONSTRAINT host_grant_operation_changes_previous CHECK ((previous_affiliation = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'none'::text, 'outcast'::text])))
+);
+
+CREATE TABLE host_grant_operations (
+    operation_id text NOT NULL,
+    lifecycle_id text NOT NULL,
+    generation bigint NOT NULL,
+    fingerprint text NOT NULL,
+    kind text NOT NULL,
+    initiator_jid text,
+    authority_incarnation text NOT NULL,
+    projection_digest text NOT NULL,
+    recorded_at_ms bigint NOT NULL,
+    CONSTRAINT host_grant_operations_pkey PRIMARY KEY (operation_id),
+    CONSTRAINT host_grant_operations_generation UNIQUE (lifecycle_id, generation),
+    CONSTRAINT host_grant_operations_digest CHECK ((projection_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT host_grant_operations_fingerprint CHECK ((fingerprint ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT host_grant_operations_generation_positive CHECK ((generation > 0)),
+    CONSTRAINT host_grant_operations_kind CHECK ((kind = ANY (ARRAY['enroll'::text, 'set_affiliation'::text, 'retire'::text, 'exhaust'::text, 'restore'::text, 'reconstruct'::text, 'fence'::text, 'reopen'::text, 'bind_space'::text, 'set_space_affiliations'::text, 'configure_space'::text, 'delete_space'::text])))
+);
+
+CREATE TABLE host_grant_rooms (
+    room_jid text NOT NULL,
+    channel_id text NOT NULL,
+    lifecycle_id text NOT NULL,
+    access_model text NOT NULL,
+    bound_at_ms bigint NOT NULL,
+    CONSTRAINT host_grant_rooms_pkey PRIMARY KEY (room_jid),
+    CONSTRAINT host_grant_rooms_channel UNIQUE (channel_id),
+    CONSTRAINT host_grant_rooms_scope_address UNIQUE (lifecycle_id, room_jid),
+    CONSTRAINT host_grant_rooms_access_model CHECK ((access_model = 'members_only'::text))
+);
+
+CREATE TABLE host_grant_scope_lifecycles (
+    lifecycle_id text NOT NULL,
+    service_jid text NOT NULL,
+    space_node text NOT NULL,
+    enrolled_at_ms bigint NOT NULL,
+    retired_at_ms bigint,
+    CONSTRAINT host_grant_scope_lifecycles_pkey PRIMARY KEY (lifecycle_id),
+    CONSTRAINT host_grant_scope_lifecycles_address UNIQUE (lifecycle_id, service_jid, space_node),
+    CONSTRAINT host_grant_scope_lifecycles_key UNIQUE (service_jid, space_node),
+    CONSTRAINT host_grant_scope_lifecycles_id CHECK ((lifecycle_id ~ '^[0-9a-f]{32}$'::text))
+);
+
+CREATE TABLE host_grant_scopes (
+    lifecycle_id text NOT NULL,
+    authority_incarnation text NOT NULL,
+    policy_version integer NOT NULL,
+    generation bigint NOT NULL,
+    operation_id text NOT NULL,
+    projected_generation bigint NOT NULL,
+    admission_state text NOT NULL,
+    closed_reason text,
+    updated_at_ms bigint NOT NULL,
+    lost_operations boolean DEFAULT false NOT NULL,
+    CONSTRAINT host_grant_scopes_pkey PRIMARY KEY (lifecycle_id),
+    CONSTRAINT host_grant_scopes_generation CHECK ((generation > 0)),
+    CONSTRAINT host_grant_scopes_policy_version CHECK ((policy_version > 0)),
+    CONSTRAINT host_grant_scopes_projected CHECK (((projected_generation >= 0) AND (projected_generation <= generation))),
+    CONSTRAINT host_grant_scopes_reason CHECK ((((admission_state = 'active'::text) AND (closed_reason IS NULL) AND (projected_generation > 0)) OR ((admission_state = 'closed'::text) AND (closed_reason = ANY (ARRAY['enrolled'::text, 'retired'::text, 'exhausted'::text, 'restored'::text, 'reconstructed'::text, 'fenced'::text]))))),
+    CONSTRAINT host_grant_scopes_state CHECK ((admission_state = ANY (ARRAY['closed'::text, 'active'::text])))
+);
+
+CREATE TABLE host_grant_space_affiliations (
+    lifecycle_id text NOT NULL,
+    subject_jid text NOT NULL,
+    affiliation text NOT NULL,
+    effective_affiliation text NOT NULL,
+    issuance_basis text NOT NULL,
+    changed_generation bigint NOT NULL,
+    CONSTRAINT host_grant_space_affiliations_pkey PRIMARY KEY (lifecycle_id, subject_jid),
+    CONSTRAINT host_grant_space_affiliations_affiliation CHECK ((affiliation = ANY (ARRAY['owner'::text, 'publisher'::text, 'publish-only'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grant_space_affiliations_effective CHECK ((effective_affiliation = ANY (ARRAY['owner'::text, 'publisher'::text, 'publish-only'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grant_space_affiliations_issuance CHECK ((issuance_basis = ANY (ARRAY['local'::text, 'trusted_home'::text, 'unprivileged'::text])))
+);
+
+CREATE TABLE host_grant_space_bindings (
+    lifecycle_id text NOT NULL,
+    service_jid text NOT NULL,
+    space_node text NOT NULL,
+    access_model text NOT NULL,
+    federated boolean NOT NULL,
+    authority_incarnation text,
+    CONSTRAINT host_grant_space_bindings_pkey PRIMARY KEY (lifecycle_id),
+    CONSTRAINT host_grant_space_bindings_access_model CHECK ((access_model = 'whitelist'::text)),
+    CONSTRAINT host_grant_space_bindings_incarnation CHECK (((authority_incarnation IS NULL) OR (authority_incarnation ~ '^[0-9a-f]{32}$'::text)))
+);
+
+CREATE TABLE host_grant_space_bookmark_versions (
+    lifecycle_id text NOT NULL,
+    room_jid text NOT NULL,
+    authority_incarnation text NOT NULL,
+    operation_token text NOT NULL,
+    present boolean NOT NULL,
+    publication_order bigint,
+    published_at timestamp with time zone,
+    deliver_payloads boolean DEFAULT false NOT NULL,
+    notify_retract boolean DEFAULT false NOT NULL,
+    CONSTRAINT host_grant_space_bookmark_versions_pkey PRIMARY KEY (lifecycle_id, room_jid),
+    CONSTRAINT host_grant_space_bookmark_notification_order CHECK (((publication_order IS NULL) = (published_at IS NULL))),
+    CONSTRAINT host_grant_space_bookmark_versions_authority_incarnation_check CHECK ((authority_incarnation ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT host_grant_space_bookmark_versions_operation_token_check CHECK ((operation_token ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT host_grant_space_bookmark_versions_publication_order_check CHECK ((publication_order > 0))
+);
+
+CREATE TABLE host_grant_space_deletion_audience (
+    lifecycle_id text NOT NULL,
+    subject_jid text NOT NULL,
+    delivery_kind text NOT NULL,
+    grant_generation bigint NOT NULL,
+    subid text,
+    strength text,
+    trust_profile text,
+    snapshot_generation text,
+    CONSTRAINT host_grant_space_deletion_audience_pkey PRIMARY KEY (lifecycle_id, subject_jid, delivery_kind),
+    CONSTRAINT host_grant_space_deletion_audience_check CHECK ((((delivery_kind = 'local'::text) AND (subid IS NOT NULL) AND (strength IS NULL) AND (trust_profile IS NULL) AND (snapshot_generation IS NULL)) OR ((delivery_kind = 'remote'::text) AND (subid IS NULL) AND (strength IS NOT NULL) AND (strength = ANY (ARRAY['pkix'::text, 'dialback'::text])) AND (snapshot_generation IS NOT NULL) AND ((trust_profile IS NULL) OR (trust_profile = ANY (ARRAY['public_webpki'::text, 'private_ca'::text])))))),
+    CONSTRAINT host_grant_space_deletion_audience_delivery_kind_check CHECK ((delivery_kind = ANY (ARRAY['local'::text, 'remote'::text]))),
+    CONSTRAINT host_grant_space_deletion_audience_grant_generation_check CHECK ((grant_generation > 0))
+);
+
+CREATE TABLE host_grant_space_deletion_bindings (
+    lifecycle_id text NOT NULL,
+    subject_jid text NOT NULL,
+    resource_jid text NOT NULL,
+    binding text NOT NULL,
+    delivery_kind text DEFAULT 'local'::text NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    parent_token uuid,
+    attempt_token uuid,
+    CONSTRAINT host_grant_space_deletion_bindings_pkey PRIMARY KEY (lifecycle_id, subject_jid, resource_jid),
+    CONSTRAINT host_grant_space_deletion_bindings_binding_check CHECK ((octet_length(binding) BETWEEN 1 AND 4096)),
+    CONSTRAINT host_grant_space_deletion_bindings_check CHECK (((state = ANY (ARRAY['leased'::text, 'staging'::text])) = (attempt_token IS NOT NULL))),
+    CONSTRAINT host_grant_space_deletion_bindings_check1 CHECK (((attempt_token IS NULL) = (parent_token IS NULL))),
+    CONSTRAINT host_grant_space_deletion_bindings_delivery_kind_check CHECK ((delivery_kind = 'local'::text)),
+    CONSTRAINT host_grant_space_deletion_bindings_resource_jid_check CHECK ((octet_length(resource_jid) BETWEEN 1 AND 3071)),
+    CONSTRAINT host_grant_space_deletion_bindings_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'leased'::text, 'staging'::text, 'custody'::text, 'ambiguous'::text, 'refused'::text])))
+);
+
+CREATE TABLE host_grant_space_deletion_jobs (
+    lifecycle_id text NOT NULL,
+    subject_jid text NOT NULL,
+    delivery_kind text NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    due_at_ms bigint NOT NULL,
+    local_snapshot_frozen boolean DEFAULT false NOT NULL,
+    attempt_token uuid,
+    lease_until_ms bigint,
+    CONSTRAINT host_grant_space_deletion_jobs_pkey PRIMARY KEY (lifecycle_id, subject_jid, delivery_kind),
+    CONSTRAINT host_grant_space_deletion_jobs_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT host_grant_space_deletion_jobs_check CHECK (((delivery_kind = 'local'::text) OR (NOT local_snapshot_frozen))),
+    CONSTRAINT host_grant_space_deletion_jobs_check1 CHECK (((state = ANY (ARRAY['leased'::text, 'staging'::text])) = (attempt_token IS NOT NULL))),
+    CONSTRAINT host_grant_space_deletion_jobs_check2 CHECK (((attempt_token IS NULL) = (lease_until_ms IS NULL))),
+    CONSTRAINT host_grant_space_deletion_jobs_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'leased'::text, 'staging'::text, 'custody'::text, 'ambiguous'::text, 'refused'::text])))
+);
+
+CREATE TABLE host_grant_space_deletions (
+    lifecycle_id text NOT NULL,
+    operation_id text NOT NULL,
+    CONSTRAINT host_grant_space_deletions_pkey PRIMARY KEY (lifecycle_id),
+    CONSTRAINT host_grant_space_deletions_operation_id_key UNIQUE (operation_id)
+);
+
+CREATE TABLE host_grant_space_operation_changes (
+    operation_id text NOT NULL,
+    ordinal integer NOT NULL,
+    subject_jid text NOT NULL,
+    affiliation text NOT NULL,
+    previous_affiliation text NOT NULL,
+    issuance_basis text NOT NULL,
+    CONSTRAINT host_grant_space_operation_changes_pkey PRIMARY KEY (operation_id, ordinal),
+    CONSTRAINT host_grant_space_operation_changes_operation_id_subject_jid_key UNIQUE (operation_id, subject_jid),
+    CONSTRAINT host_grant_space_operation_changes_affiliation CHECK ((affiliation = ANY (ARRAY['owner'::text, 'publisher'::text, 'publish-only'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grant_space_operation_changes_issuance CHECK ((issuance_basis = ANY (ARRAY['local'::text, 'trusted_home'::text, 'unprivileged'::text]))),
+    CONSTRAINT host_grant_space_operation_changes_ordinal_check CHECK ((ordinal >= 0)),
+    CONSTRAINT host_grant_space_operation_changes_previous_affiliation CHECK ((previous_affiliation = ANY (ARRAY['owner'::text, 'publisher'::text, 'publish-only'::text, 'member'::text, 'none'::text, 'outcast'::text])))
+);
+
+CREATE TABLE host_grants (
+    lifecycle_id text NOT NULL,
+    room_jid text NOT NULL,
+    subject_jid text NOT NULL,
+    affiliation text NOT NULL,
+    effective_affiliation text NOT NULL,
+    changed_generation bigint NOT NULL,
+    operation_id text NOT NULL,
+    issuance_basis text NOT NULL,
+    CONSTRAINT host_grants_pkey PRIMARY KEY (lifecycle_id, room_jid, subject_jid),
+    CONSTRAINT host_grants_affiliation CHECK ((affiliation = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grants_changed_generation CHECK ((changed_generation > 0)),
+    CONSTRAINT host_grants_effective_affiliation CHECK ((effective_affiliation = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'none'::text, 'outcast'::text]))),
+    CONSTRAINT host_grants_issuance_basis CHECK ((issuance_basis = ANY (ARRAY['local'::text, 'trusted_home'::text, 'unprivileged'::text])))
+);
+
+CREATE TABLE local_space_subscriptions (
+    lifecycle_id text NOT NULL,
+    subject_jid text NOT NULL,
+    authority_incarnation text NOT NULL,
+    grant_generation bigint NOT NULL,
+    subid text NOT NULL,
+    birth_order bigint,
+    CONSTRAINT local_space_subscriptions_pkey PRIMARY KEY (lifecycle_id, subject_jid),
+    CONSTRAINT local_space_subscriptions_authority_incarnation_check CHECK ((authority_incarnation ~ '^[0-9a-f]{32}$'::text)),
+    CONSTRAINT local_space_subscriptions_birth_order_check CHECK ((birth_order > 0)),
+    CONSTRAINT local_space_subscriptions_grant_generation_check CHECK ((grant_generation > 0)),
+    CONSTRAINT local_space_subscriptions_subid_check CHECK ((subid ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))
+);
+
+CREATE TABLE retired_account_jids (
+    jid_key text NOT NULL,
+    localpart_key text NOT NULL,
+    retired_at_ms bigint NOT NULL,
+    CONSTRAINT retired_account_jids_pkey PRIMARY KEY (jid_key),
+    CONSTRAINT retired_account_jids_jid_key CHECK ((octet_length(jid_key) BETWEEN 3 AND 2047)),
+    CONSTRAINT retired_account_jids_localpart_key CHECK ((octet_length(localpart_key) BETWEEN 1 AND 1023))
+);
+
+CREATE TABLE s2s_federated_spaces (
+    service_jid text NOT NULL,
+    node_name text NOT NULL,
+    node_created_at_ms bigint NOT NULL,
+    enabled_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_federated_spaces_pkey PRIMARY KEY (service_jid, node_name),
+    CONSTRAINT s2s_federated_spaces_node_name CHECK ((octet_length(node_name) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_federated_spaces_service_jid CHECK ((octet_length(service_jid) BETWEEN 1 AND 1023))
+);
+
+CREATE TABLE s2s_iq_correlation_owners (
+    owner_id text NOT NULL,
+    seen_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_iq_correlation_owners_pkey PRIMARY KEY (owner_id)
+);
+
+CREATE TABLE s2s_iq_correlations (
+    direction text NOT NULL,
+    local_jid text NOT NULL,
+    remote_jid text NOT NULL,
+    stanza_id text NOT NULL,
+    request_type text NOT NULL,
+    payload_ns text NOT NULL,
+    owner_id text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_iq_correlations_pkey PRIMARY KEY (direction, local_jid, remote_jid, stanza_id),
+    CONSTRAINT s2s_iq_correlations_direction CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text]))),
+    CONSTRAINT s2s_iq_correlations_local_jid CHECK ((octet_length(local_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_iq_correlations_remote_jid CHECK ((octet_length(remote_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_iq_correlations_request_type CHECK ((request_type = ANY (ARRAY['get'::text, 'set'::text]))),
+    CONSTRAINT s2s_iq_correlations_stanza_id CHECK ((octet_length(stanza_id) BETWEEN 1 AND 256))
+);
+
+CREATE TABLE s2s_local_room_seats (
+    room_jid text NOT NULL,
+    occupant_jid text NOT NULL,
+    account_jid text NOT NULL,
+    room_domain text NOT NULL,
+    occupant_domain text NOT NULL,
+    nick text NOT NULL,
+    session_id text NOT NULL,
+    strength text NOT NULL,
+    trust_profile text,
+    snapshot_generation text NOT NULL,
+    owner_id text NOT NULL,
+    lost_at_ms bigint,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_local_room_seats_pkey PRIMARY KEY (room_jid, occupant_jid),
+    CONSTRAINT s2s_local_room_seats_nick CHECK ((octet_length(nick) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_local_room_seats_occupant_jid CHECK ((octet_length(occupant_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_local_room_seats_room_jid CHECK ((octet_length(room_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_local_room_seats_strength CHECK ((strength = ANY (ARRAY['pkix'::text, 'dialback'::text]))),
+    CONSTRAINT s2s_local_room_seats_trust_profile CHECK (((trust_profile IS NULL) OR (trust_profile = ANY (ARRAY['public_webpki'::text, 'private_ca'::text]))))
+);
+
+CREATE TABLE s2s_pending_subscriptions (
+    account_jid text NOT NULL,
+    contact_jid text NOT NULL,
+    contact_domain text NOT NULL,
+    stanza text NOT NULL,
+    received_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_pending_subscriptions_pkey PRIMARY KEY (account_jid, contact_jid),
+    CONSTRAINT s2s_pending_subscriptions_account_jid CHECK ((octet_length(account_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_pending_subscriptions_contact_jid CHECK ((octet_length(contact_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_pending_subscriptions_stanza CHECK ((octet_length(stanza) BETWEEN 1 AND 16384))
+);
+
+CREATE TABLE s2s_remote_offline_admissions (
+    id text NOT NULL,
+    account_jid text NOT NULL,
+    sender_jid text NOT NULL,
+    sender_share text NOT NULL,
+    admitted_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_remote_offline_admissions_pkey PRIMARY KEY (id),
+    CONSTRAINT s2s_remote_offline_admissions_account_jid CHECK ((octet_length(account_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_offline_admissions_id CHECK ((octet_length(id) BETWEEN 1 AND 64)),
+    CONSTRAINT s2s_remote_offline_admissions_sender_jid CHECK ((octet_length(sender_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_offline_admissions_sender_share CHECK ((octet_length(sender_share) BETWEEN 1 AND 1023))
+);
+
+CREATE TABLE s2s_remote_pubsub_subscriptions (
+    account_jid text NOT NULL,
+    service_jid text NOT NULL,
+    node text NOT NULL,
+    subscribed_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_remote_pubsub_subscriptions_pkey PRIMARY KEY (account_jid, service_jid, node),
+    CONSTRAINT s2s_remote_pubsub_subscriptions_account_jid CHECK ((octet_length(account_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_pubsub_subscriptions_node CHECK ((octet_length(node) BETWEEN 1 AND 256)),
+    CONSTRAINT s2s_remote_pubsub_subscriptions_service_jid CHECK ((octet_length(service_jid) BETWEEN 1 AND 1023))
+);
+
+CREATE TABLE s2s_remote_room_occupancies (
+    occupant_jid text NOT NULL,
+    room_jid text NOT NULL,
+    account_jid text NOT NULL,
+    local_domain text NOT NULL,
+    room_domain text NOT NULL,
+    nick text NOT NULL,
+    phase text NOT NULL,
+    affiliation text NOT NULL,
+    attempt text NOT NULL,
+    join_id text,
+    leaves_pending bigint NOT NULL,
+    leave_until_ms bigint,
+    owner_id text NOT NULL,
+    deadline_ms bigint,
+    updated_at_ms bigint NOT NULL,
+    revision bigint NOT NULL,
+    CONSTRAINT s2s_remote_room_occupancies_pkey PRIMARY KEY (occupant_jid, room_jid),
+    CONSTRAINT s2s_remote_room_occupancies_affiliation CHECK ((affiliation = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'outcast'::text, 'none'::text]))),
+    CONSTRAINT s2s_remote_room_occupancies_join_id CHECK (((join_id IS NULL) OR (octet_length(join_id) <= 256))),
+    CONSTRAINT s2s_remote_room_occupancies_leaves_pending CHECK ((leaves_pending >= 0)),
+    CONSTRAINT s2s_remote_room_occupancies_nick CHECK ((octet_length(nick) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_room_occupancies_occupant_jid CHECK ((octet_length(occupant_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_room_occupancies_phase CHECK ((phase = ANY (ARRAY['verifying'::text, 'joining'::text, 'joined'::text, 'leaving'::text]))),
+    CONSTRAINT s2s_remote_room_occupancies_room_jid CHECK ((octet_length(room_jid) BETWEEN 1 AND 1023))
+);
+
+CREATE TABLE s2s_remote_room_verdicts (
+    room_jid text NOT NULL,
+    verdict text NOT NULL,
+    expires_at_ms bigint NOT NULL,
+    CONSTRAINT s2s_remote_room_verdicts_pkey PRIMARY KEY (room_jid),
+    CONSTRAINT s2s_remote_room_verdicts_room_jid CHECK ((octet_length(room_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_remote_room_verdicts_verdict CHECK ((verdict = ANY (ARRAY['room'::text, 'not_room'::text])))
+);
+
+CREATE TABLE s2s_space_subscriptions (
+    service_jid text NOT NULL,
+    node_name text NOT NULL,
+    subscriber_jid text NOT NULL,
+    account_jid text NOT NULL,
+    subscriber_domain text NOT NULL,
+    node_created_at_ms bigint NOT NULL,
+    strength text NOT NULL,
+    trust_profile text,
+    snapshot_generation text NOT NULL,
+    subscribed_at_ms bigint NOT NULL,
+    grant_lifecycle_id text,
+    grant_authority_incarnation text,
+    grant_generation bigint,
+    CONSTRAINT s2s_space_subscriptions_pkey PRIMARY KEY (service_jid, node_name, subscriber_jid),
+    CONSTRAINT s2s_space_subscriptions_grant CHECK ((((grant_lifecycle_id IS NULL) AND (grant_authority_incarnation IS NULL) AND (grant_generation IS NULL)) OR ((grant_lifecycle_id IS NOT NULL) AND (grant_lifecycle_id ~ '^[0-9a-f]{32}$'::text) AND (grant_authority_incarnation IS NOT NULL) AND (grant_authority_incarnation ~ '^[0-9a-f]{32}$'::text) AND (grant_generation IS NOT NULL) AND (grant_generation > 0)))),
+    CONSTRAINT s2s_space_subscriptions_node_name CHECK ((octet_length(node_name) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_space_subscriptions_service_jid CHECK ((octet_length(service_jid) BETWEEN 1 AND 255)),
+    CONSTRAINT s2s_space_subscriptions_strength CHECK ((strength = ANY (ARRAY['pkix'::text, 'dialback'::text]))),
+    CONSTRAINT s2s_space_subscriptions_subscriber_jid CHECK ((octet_length(subscriber_jid) BETWEEN 1 AND 1023)),
+    CONSTRAINT s2s_space_subscriptions_trust_profile CHECK (((trust_profile IS NULL) OR (trust_profile = ANY (ARRAY['public_webpki'::text, 'private_ca'::text]))))
+);
+
+CREATE TABLE tenant_placement_leases (
+    tenant_id text NOT NULL,
+    cell_role text NOT NULL,
+    placement_mode text NOT NULL,
+    holder_spiffe_id text NOT NULL,
+    holder_incarnation_pubkey bytea NOT NULL,
+    holder_tls_exporter_proof bytea NOT NULL,
+    generation bigint NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    transfer_state text NOT NULL,
+    transfer_target_json jsonb,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tenant_placement_leases_pkey PRIMARY KEY (tenant_id),
+    CONSTRAINT tenant_placement_leases_generation_check CHECK ((generation >= 1)),
+    CONSTRAINT tenant_placement_leases_holder_incarnation_pubkey_check CHECK ((octet_length(holder_incarnation_pubkey) = 32)),
+    CONSTRAINT tenant_placement_leases_holder_tls_exporter_proof_check CHECK ((octet_length(holder_tls_exporter_proof) BETWEEN 1 AND 128)),
+    CONSTRAINT tenant_placement_leases_placement_mode_check CHECK ((placement_mode = ANY (ARRAY['shared_pool'::text, 'dedicated_cell'::text]))),
+    CONSTRAINT tenant_placement_leases_transfer_state_check CHECK ((transfer_state = ANY (ARRAY['active'::text, 'transferring'::text, 'draining'::text, 'released'::text])))
+);
+
+ALTER TABLE account_resource_bindings ADD CONSTRAINT account_resource_bindings_sm_session_fk FOREIGN KEY (sm_session_id) REFERENCES sm_durable_sessions(session_id) DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE attachments ADD CONSTRAINT attachments_message_id_fkey FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE;
+
+ALTER TABLE auth_identities ADD CONSTRAINT auth_identities_user_jid_fkey FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE;
+
+ALTER TABLE clustering_muc_admin_receipts ADD CONSTRAINT clustering_muc_admin_receipts_lifecycle_id_fkey FOREIGN KEY (lifecycle_id) REFERENCES clustering_muc_room_lifecycles(lifecycle_id) ON DELETE CASCADE;
+
+ALTER TABLE ingress_archive_dispatch ADD CONSTRAINT ingress_archive_dispatch_message_key_kind_semantic_identit_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_carbon_receipts ADD CONSTRAINT ingress_carbon_receipts_message_key_kind_semantic_identity_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_deliveries ADD CONSTRAINT ingress_deliveries_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key);
+
+ALTER TABLE ingress_delivery_receipts ADD CONSTRAINT ingress_delivery_receipts_message_key_kind_semantic_identi_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_direct_requests ADD CONSTRAINT ingress_direct_requests_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_effect_descendants ADD CONSTRAINT ingress_effect_descendants_message_key_kind_semantic_ident_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_effect_intents ADD CONSTRAINT ingress_effect_intents_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_effect_receipts ADD CONSTRAINT ingress_effect_receipts_message_key_kind_semantic_identity_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_mailbox_entries ADD CONSTRAINT ingress_mailbox_entries_direct_key_fkey FOREIGN KEY (direct_key) REFERENCES ingress_direct_requests(request_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_mailbox_entries ADD CONSTRAINT ingress_mailbox_entries_lane_id_fkey FOREIGN KEY (lane_id) REFERENCES ingress_mailbox_lanes(lane_id) ON DELETE RESTRICT;
+
+ALTER TABLE ingress_mailbox_entries ADD CONSTRAINT ingress_mailbox_entries_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_mailbox_entries ADD CONSTRAINT ingress_mailbox_entries_request_key_fkey FOREIGN KEY (request_key) REFERENCES ingress_room_requests(request_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_origin_aliases ADD CONSTRAINT ingress_origin_aliases_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key);
+
+ALTER TABLE ingress_owner_rejections ADD CONSTRAINT ingress_owner_rejections_child_message_key_fkey FOREIGN KEY (child_message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_owner_rejections ADD CONSTRAINT ingress_owner_rejections_source_message_key_fkey FOREIGN KEY (source_message_key) REFERENCES ingress_messages(message_key) ON DELETE RESTRICT;
+
+ALTER TABLE ingress_room_occupants ADD CONSTRAINT ingress_room_occupants_join_request_fkey FOREIGN KEY (join_request) REFERENCES ingress_room_requests(request_key) ON DELETE SET NULL;
+
+ALTER TABLE ingress_room_responses ADD CONSTRAINT ingress_room_responses_request_key_fkey FOREIGN KEY (request_key) REFERENCES ingress_room_requests(request_key) ON DELETE CASCADE;
+
+ALTER TABLE ingress_send_attempts ADD CONSTRAINT ingress_send_attempts_message_key_kind_semantic_identity_h_fkey FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents(message_key, kind, semantic_identity_hash) ON DELETE CASCADE;
+
+ALTER TABLE ingress_sm_refs ADD CONSTRAINT ingress_sm_refs_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key);
+
+ALTER TABLE link_preview_media_refs ADD CONSTRAINT link_preview_media_refs_upload_slot_id_fkey FOREIGN KEY (upload_slot_id) REFERENCES upload_slots(id) ON DELETE CASCADE;
+
+ALTER TABLE messages ADD CONSTRAINT messages_channel_id_fkey FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE;
+
+ALTER TABLE muc_invite_claims ADD CONSTRAINT muc_invite_claims_message_key_fkey FOREIGN KEY (message_key) REFERENCES ingress_messages(message_key) ON DELETE CASCADE;
+
+ALTER TABLE pubsub_affiliations ADD CONSTRAINT pubsub_affiliations_owner_jid_node_name_fkey FOREIGN KEY (owner_jid, node_name) REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE CASCADE;
+
+ALTER TABLE pubsub_items ADD CONSTRAINT pubsub_items_owner_jid_node_name_fkey FOREIGN KEY (owner_jid, node_name) REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE CASCADE;
+
+ALTER TABLE pubsub_owner_configured ADD CONSTRAINT pubsub_owner_configured_owner_jid_node_name_fkey FOREIGN KEY (owner_jid, node_name) REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE CASCADE;
+
+ALTER TABLE pubsub_subscriptions ADD CONSTRAINT pubsub_subscriptions_owner_jid_node_name_fkey FOREIGN KEY (owner_jid, node_name) REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE CASCADE;
+
+ALTER TABLE push_delivery_attempts ADD CONSTRAINT push_delivery_attempts_node_device_id_fkey FOREIGN KEY (node, device_id) REFERENCES push_devices(node, device_id) ON DELETE CASCADE;
+
+ALTER TABLE push_delivery_attempts ADD CONSTRAINT push_delivery_attempts_node_fkey FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE;
+
+ALTER TABLE push_devices ADD CONSTRAINT push_devices_node_fkey FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE;
+
+ALTER TABLE push_node_locks ADD CONSTRAINT push_node_locks_node_fkey FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE;
+
+ALTER TABLE push_publish_jobs ADD CONSTRAINT push_publish_jobs_node_fkey FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE;
+
+ALTER TABLE reactions ADD CONSTRAINT reactions_message_id_fkey FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE;
+
+ALTER TABLE sessions ADD CONSTRAINT sessions_user_jid_fkey FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE;
+
+ALTER TABLE host_grant_space_affiliations ADD CONSTRAINT host_grant_space_affiliations_lifecycle_id_fkey FOREIGN KEY (lifecycle_id) REFERENCES host_grant_space_bindings(lifecycle_id);
+
+ALTER TABLE host_grant_space_affiliations ADD CONSTRAINT host_grant_space_affiliations_operation FOREIGN KEY (lifecycle_id, changed_generation) REFERENCES host_grant_operations(lifecycle_id, generation);
+
+ALTER TABLE host_grant_space_bindings ADD CONSTRAINT host_grant_space_bindings_node FOREIGN KEY (service_jid, space_node) REFERENCES pubsub_nodes(owner_jid, node_name) ON DELETE RESTRICT;
+
+ALTER TABLE host_grant_space_bindings ADD CONSTRAINT host_grant_space_bindings_scope FOREIGN KEY (lifecycle_id, service_jid, space_node) REFERENCES host_grant_scope_lifecycles(lifecycle_id, service_jid, space_node);
+
+ALTER TABLE host_grant_space_bookmark_versions ADD CONSTRAINT host_grant_space_bookmark_versions_lifecycle_id_fkey FOREIGN KEY (lifecycle_id) REFERENCES host_grant_space_bindings(lifecycle_id);
+
+ALTER TABLE host_grant_space_bookmark_versions ADD CONSTRAINT host_grant_space_bookmark_versions_lifecycle_id_room_jid_fkey FOREIGN KEY (lifecycle_id, room_jid) REFERENCES host_grant_rooms(lifecycle_id, room_jid);
+
+ALTER TABLE host_grant_space_deletion_audience ADD CONSTRAINT host_grant_space_deletion_audience_lifecycle_id_fkey FOREIGN KEY (lifecycle_id) REFERENCES host_grant_space_deletions(lifecycle_id);
+
+ALTER TABLE host_grant_space_deletion_bindings ADD CONSTRAINT host_grant_space_deletion_bindings_lifecycle_id_subject_ji_fkey FOREIGN KEY (lifecycle_id, subject_jid, delivery_kind) REFERENCES host_grant_space_deletion_jobs(lifecycle_id, subject_jid, delivery_kind);
+
+ALTER TABLE host_grant_space_deletion_jobs ADD CONSTRAINT host_grant_space_deletion_jobs_lifecycle_id_subject_jid_de_fkey FOREIGN KEY (lifecycle_id, subject_jid, delivery_kind) REFERENCES host_grant_space_deletion_audience(lifecycle_id, subject_jid, delivery_kind);
+
+ALTER TABLE host_grant_space_deletions ADD CONSTRAINT host_grant_space_deletions_lifecycle_id_fkey FOREIGN KEY (lifecycle_id) REFERENCES host_grant_space_bindings(lifecycle_id);
+
+ALTER TABLE host_grant_space_deletions ADD CONSTRAINT host_grant_space_deletions_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES host_grant_operations(operation_id);
+
+ALTER TABLE host_grant_space_operation_changes ADD CONSTRAINT host_grant_space_operation_changes_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES host_grant_operations(operation_id);
+
+ALTER TABLE local_space_subscriptions ADD CONSTRAINT local_space_subscriptions_lifecycle_id_subject_jid_fkey FOREIGN KEY (lifecycle_id, subject_jid) REFERENCES host_grant_space_affiliations(lifecycle_id, subject_jid) ON DELETE CASCADE;
+
+
+CREATE INDEX clustering_claims_entity_type_entity ON clustering_claims USING btree (entity_type, entity);
+
+CREATE INDEX clustering_claims_node_id_node_epoch ON clustering_claims USING btree (node_id, node_epoch);
+
+CREATE INDEX clustering_claims_owner_type_entity ON clustering_claims USING btree (node_id, node_epoch, entity_type, entity);
+
+CREATE INDEX clustering_muc_admin_receipts_created_at_idx ON clustering_muc_admin_receipts USING btree (created_at_ms);
+
+CREATE INDEX clustering_muc_admin_receipts_lifecycle_idx ON clustering_muc_admin_receipts USING btree (lifecycle_id);
+
+CREATE INDEX clustering_muc_destroy_outbox_due_idx ON clustering_muc_destroy_outbox USING btree (available_at_ms, leased_at_ms);
+
+CREATE INDEX clustering_muc_room_affiliations_room_jid_idx ON clustering_muc_room_affiliations USING btree (room_jid);
+
+CREATE INDEX clustering_muc_room_effects_due_idx ON clustering_muc_room_effects USING btree (available_at_ms, lifecycle_id);
+
+CREATE UNIQUE INDEX clustering_muc_room_lifecycles_live_room_idx ON clustering_muc_room_lifecycles USING btree (room_jid) WHERE (state = ANY (ARRAY['preparing'::text, 'active'::text, 'dormant'::text]));
+
+CREATE INDEX clustering_steal_intents_entity_created_at ON clustering_steal_intents USING btree (entity, created_at);
+
+CREATE UNIQUE INDEX extension_grants_active_room ON extension_grants USING btree (plugin_id, room_jid) WHERE ((scope = 1) AND (revoked_at IS NULL));
+
+CREATE UNIQUE INDEX extension_grants_active_send ON extension_grants USING btree (plugin_id) WHERE ((scope = 0) AND (revoked_at IS NULL));
+
+CREATE INDEX extension_room_observation_receipts_recorded ON extension_room_observation_receipts USING btree (recorded_at_ms, plugin_id, generation, room_jid, message_key);
+
+CREATE INDEX extension_room_observation_work_active_guard ON extension_room_observation_work USING btree (plugin_id, generation, room_jid, message_key) WHERE (status = ANY (ARRAY['pending'::text, 'leased'::text, 'started'::text]));
+
+CREATE INDEX extension_room_observation_work_due ON extension_room_observation_work USING btree (plugin_id, room_jid, status, due_at_ms);
+
+CREATE INDEX extension_room_observation_work_settled ON extension_room_observation_work USING btree (settled_at_ms, id) WHERE (status = ANY (ARRAY['completed'::text, 'terminal'::text, 'stale'::text]));
+
+CREATE INDEX extension_room_observation_work_source ON extension_room_observation_work USING btree (source_key);
+
+CREATE INDEX extension_room_publications_pending ON extension_room_publications USING btree (plugin_id, room_jid, status);
+
+CREATE INDEX extension_room_publications_settled ON extension_room_publications USING btree (settled_at_ms, id) WHERE (status = ANY (ARRAY['published'::text, 'stale'::text]));
+
+CREATE INDEX extension_room_publications_source ON extension_room_publications USING btree (source_key);
+
+CREATE INDEX extension_room_source_revisions_source ON extension_room_source_revisions USING btree (source_key, room_jid, room_stanza_id);
+
+CREATE INDEX extension_room_sources_retracted_captured ON extension_room_sources USING btree (captured_at_ms, source_key) WHERE (retracted = 1);
+
+CREATE INDEX idx_account_resource_bindings_account ON account_resource_bindings USING btree (bare_jid);
+
+CREATE INDEX idx_account_resource_bindings_sm_session ON account_resource_bindings USING btree (sm_session_id);
+
+CREATE INDEX idx_account_resource_operations_resource ON account_resource_operations USING btree (full_jid, operation_seq);
+
+CREATE INDEX idx_attachments_message_id ON attachments USING btree (message_id);
+
+CREATE INDEX idx_auth_identities_user_jid ON auth_identities USING btree (user_jid);
+
+CREATE INDEX idx_blocking_list_blocked ON blocking_list USING btree (blocked_jid);
+
+CREATE INDEX idx_blocking_list_user ON blocking_list USING btree (user_jid);
+
+CREATE INDEX idx_call_teardown_outbox_dedupe ON call_teardown_outbox USING btree (status, call_id, action);
+
+CREATE INDEX idx_call_teardown_outbox_status_due ON call_teardown_outbox USING btree (status, next_attempt_at_ms, created_at_ms);
+
+CREATE INDEX idx_channel_space_links_created_at ON channel_space_links USING btree (created_at, channel_jid);
+
+CREATE INDEX idx_channel_space_links_space ON channel_space_links USING btree (space_jid, created_at, channel_jid);
+
+CREATE INDEX idx_channel_space_links_space_node ON channel_space_links USING btree (space_node, created_at, channel_jid);
+
+CREATE INDEX idx_channels_position ON channels USING btree ("position");
+
+CREATE INDEX idx_device_auth_expires_at ON device_auth USING btree (expires_at_ms);
+
+CREATE INDEX idx_entity_caps_verified_at ON entity_caps USING btree (verified_at_ms);
+
+CREATE INDEX idx_groupchat_notification_recovery_completed_prune ON groupchat_notification_recovery USING btree (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) WHERE (completed_at_ms IS NOT NULL);
+
+CREATE INDEX idx_groupchat_notification_recovery_pending ON groupchat_notification_recovery USING btree (created_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id) WHERE (completed_at_ms IS NULL);
+
+CREATE INDEX idx_inbox_entries_user_room_threads ON inbox_entries USING btree (user_jid, partner_jid, thread_id) WHERE (thread_id <> ''::text);
+
+CREATE INDEX idx_inbox_entries_user_updated ON inbox_entries USING btree (user_jid, last_updated DESC);
+
+CREATE INDEX idx_link_preview_media_refs_current ON link_preview_media_refs USING btree (upload_slot_id, state) WHERE (state = 'current'::text);
+
+CREATE INDEX idx_link_preview_media_refs_message ON link_preview_media_refs USING btree (archive_jid, message_id);
+
+CREATE UNIQUE INDEX idx_mam_room_archive_seq ON mam_messages USING btree (room_jid, archive_seq);
+
+CREATE INDEX idx_mam_room_id ON mam_messages USING btree (room_jid, id);
+
+CREATE INDEX idx_mam_room_origin ON mam_messages USING btree (room_jid, origin_id);
+
+CREATE INDEX idx_mam_room_reply_to ON mam_messages USING btree (room_jid, reply_to_id, "timestamp" DESC);
+
+CREATE INDEX idx_mam_room_sender ON mam_messages USING btree (room_jid, from_jid, "timestamp" DESC);
+
+CREATE INDEX idx_mam_room_stanza ON mam_messages USING btree (room_jid, stanza_id);
+
+CREATE INDEX idx_mam_room_thread ON mam_messages USING btree (room_jid, thread_id, "timestamp" DESC);
+
+CREATE INDEX idx_mam_room_timestamp ON mam_messages USING btree (room_jid, "timestamp" DESC);
+
+CREATE INDEX idx_messages_author_jid ON messages USING btree (author_jid);
+
+CREATE INDEX idx_messages_channel_created ON messages USING btree (channel_id, created_at DESC);
+
+CREATE INDEX idx_messages_channel_id ON messages USING btree (channel_id);
+
+CREATE INDEX idx_messages_created_at ON messages USING btree (created_at);
+
+CREATE INDEX idx_messages_expires ON messages USING btree (expires_at) WHERE (expires_at IS NOT NULL);
+
+CREATE INDEX idx_messages_reply_to_id ON messages USING btree (reply_to_id);
+
+CREATE INDEX idx_messages_thread ON messages USING btree (thread_id, created_at);
+
+CREATE INDEX idx_native_users_email ON native_users USING btree (email) WHERE (email IS NOT NULL);
+
+CREATE UNIQUE INDEX idx_native_users_jid_key ON native_users USING btree (jid_key);
+
+CREATE INDEX idx_native_users_username_domain ON native_users USING btree (username, domain);
+
+CREATE INDEX idx_notification_activity_conversation_active ON notification_activity USING btree (conversation_jid, last_active_at_ms);
+
+CREATE UNIQUE INDEX idx_notification_candidates_identity ON notification_candidates USING btree (recipient_bare_jid, conversation_jid, thread_id, stanza_id, class);
+
+CREATE INDEX idx_notification_candidates_outboxed_prune ON notification_candidates USING btree (outboxed_at_ms, recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) WHERE (outboxed_at_ms IS NOT NULL);
+
+CREATE INDEX idx_notification_candidates_pending_worker ON notification_candidates USING btree (created_at_ms, recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class) WHERE (outboxed_at_ms IS NULL);
+
+CREATE INDEX idx_notification_candidates_recipient_created ON notification_candidates USING btree (recipient_bare_jid, created_at_ms);
+
+CREATE INDEX idx_notification_outbox_conversation_status ON notification_outbox USING btree (recipient_bare_jid, conversation_jid, thread_id, status);
+
+CREATE INDEX idx_notification_outbox_lineage_job ON notification_outbox_lineage USING btree (job_id);
+
+CREATE UNIQUE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox USING btree (recipient_bare_jid, push_service_jid, node, conversation_jid, thread_id, class) WHERE ((status = 'queued'::text) AND (approved_payload_xml IS NULL) AND (queue_acceptance_may_exist = 0));
+
+CREATE INDEX idx_notification_outbox_retention_prune ON notification_outbox USING btree (status, updated_at_ms, job_id) WHERE (status = ANY (ARRAY['published'::text, 'failed'::text]));
+
+CREATE INDEX idx_notification_outbox_status_next_attempt ON notification_outbox USING btree (status, next_attempt_at_ms, created_at_ms);
+
+CREATE INDEX idx_notification_settings_projection_owner_mode ON notification_settings_projection USING btree (owner_bare_jid, mode);
+
+CREATE INDEX idx_pending_auth_expires_at ON pending_auth USING btree (expires_at_ms);
+
+CREATE UNIQUE INDEX idx_pending_delivery_archived_unique ON pending_delivery USING btree (recipient_jid, archive_stanza_id) WHERE (payload_kind = 'archived'::text);
+
+CREATE UNIQUE INDEX idx_pending_delivery_dedup ON pending_delivery USING btree (recipient_jid, origin_stream_id, inbound_seq) WHERE ((origin_stream_id IS NOT NULL) AND (inbound_seq IS NOT NULL));
+
+CREATE INDEX idx_pending_delivery_notification_outbox ON pending_delivery USING btree (notification_outboxed_at_ms, row_id) WHERE ((payload_kind = 'archived'::text) AND (flushed_in_session IS NULL));
+
+CREATE INDEX idx_pending_delivery_recipient ON pending_delivery USING btree (recipient_jid, row_id);
+
+CREATE INDEX idx_pending_delivery_session ON pending_delivery USING btree (flushed_in_session);
+
+CREATE INDEX idx_pending_notification_recovery_due ON pending_delivery USING btree (notification_recovery_ordinal) WHERE ((payload_kind = 'archived'::text) AND (flushed_in_session IS NULL) AND (notification_outboxed_at_ms IS NULL));
+
+CREATE UNIQUE INDEX idx_pending_notification_recovery_ordinal ON pending_delivery USING btree (notification_recovery_ordinal);
+
+CREATE INDEX idx_provider_webhook_deliveries_status ON provider_webhook_deliveries USING btree (status, attempts, created_at);
+
+CREATE INDEX idx_pubsub_affs_entity ON pubsub_affiliations USING btree (owner_jid, entity_jid);
+
+CREATE INDEX idx_pubsub_items_node_seq ON pubsub_items USING btree (owner_jid, node_name, seq DESC);
+
+CREATE INDEX idx_pubsub_items_owner_item ON pubsub_items USING btree (owner_jid, item_id);
+
+CREATE INDEX idx_pubsub_subs_subscriber ON pubsub_subscriptions USING btree (owner_jid, subscriber_jid);
+
+CREATE INDEX idx_push_delivery_attempts_acceptance_status ON push_delivery_attempts USING btree (publish_job_id, status, device_id);
+
+CREATE INDEX idx_push_delivery_attempts_device_created ON push_delivery_attempts USING btree (device_id, created_at_ms);
+
+CREATE INDEX idx_push_delivery_attempts_item_status ON push_delivery_attempts USING btree (node, item_id, status, device_id);
+
+CREATE INDEX idx_push_delivery_attempts_node_created ON push_delivery_attempts USING btree (node, created_at_ms);
+
+CREATE INDEX idx_push_devices_node_status ON push_devices USING btree (node, status);
+
+CREATE INDEX idx_push_nodes_owner ON push_nodes USING btree (owner_bare_jid, status);
+
+CREATE UNIQUE INDEX idx_push_publish_jobs_canonical_delivery ON push_publish_jobs USING btree (ancestry_job_id) WHERE (ancestry_job_id IS NOT NULL);
+
+CREATE INDEX idx_push_publish_jobs_node_status ON push_publish_jobs USING btree (node, status);
+
+CREATE INDEX idx_push_publish_jobs_status_created ON push_publish_jobs USING btree (status, created_at_ms);
+
+CREATE INDEX idx_push_registrations_owner_status ON push_registrations USING btree (owner_bare_jid, status);
+
+CREATE INDEX idx_push_service_vapid_keys_active ON push_service_vapid_keys USING btree (retired_at_ms, created_at_ms);
+
+CREATE INDEX idx_reactions_message_id ON reactions USING btree (message_id);
+
+CREATE INDEX idx_roster_items_contact ON roster_items USING btree (contact_jid);
+
+CREATE INDEX idx_roster_items_subscription ON roster_items USING btree (user_jid, subscription);
+
+CREATE INDEX idx_roster_items_user ON roster_items USING btree (user_jid);
+
+CREATE UNIQUE INDEX idx_sessions_auth_context ON sessions USING btree (auth_context_id);
+
+CREATE INDEX idx_sessions_expires_at ON sessions USING btree (expires_at);
+
+CREATE INDEX idx_sessions_user_jid ON sessions USING btree (user_jid);
+
+CREATE INDEX idx_sm_durable_operations_session ON sm_durable_operations USING btree (session_id, kind, ordinal);
+
+CREATE INDEX idx_sm_durable_sessions_detached ON sm_durable_sessions USING btree (state, detached_at_ms);
+
+CREATE INDEX idx_sm_durable_sessions_resource ON sm_durable_sessions USING btree (full_jid);
+
+CREATE UNIQUE INDEX idx_sm_durable_sessions_token ON sm_durable_sessions USING btree (resume_token_sha256);
+
+CREATE INDEX idx_sm_ingress_appends_pending ON sm_ingress_appends USING btree (disposition, appended_at_ms);
+
+CREATE INDEX idx_sm_ingress_appends_stream ON sm_ingress_appends USING btree (accepting_stream_id);
+
+CREATE INDEX idx_sm_sessions_detached ON sm_sessions USING btree (detached_at_ms);
+
+CREATE UNIQUE INDEX idx_sm_unacked_dedup ON sm_unacked USING btree (stream_id, origin_stream_id, inbound_seq) WHERE ((origin_stream_id IS NOT NULL) AND (inbound_seq IS NOT NULL));
+
+CREATE INDEX idx_spaces_metadata_created_at ON spaces_metadata USING btree (created_at, space_node);
+
+CREATE INDEX idx_spaces_metadata_space_jid ON spaces_metadata USING btree (space_jid);
+
+
+CREATE INDEX idx_tuples_check ON permission_tuples USING btree (object_type, object_id, relation, subject_type, subject_id);
+
+CREATE INDEX idx_tuples_object ON permission_tuples USING btree (object_type, object_id);
+
+CREATE INDEX idx_tuples_relation ON permission_tuples USING btree (object_type, relation);
+
+CREATE INDEX idx_tuples_subject ON permission_tuples USING btree (subject_type, subject_id);
+
+CREATE INDEX idx_upload_slots_expires ON upload_slots USING btree (expires_at) WHERE (status = 'pending'::text);
+
+CREATE INDEX idx_upload_slots_requester ON upload_slots USING btree (requester_jid);
+
+CREATE INDEX idx_upload_slots_status ON upload_slots USING btree (status);
+
+CREATE INDEX idx_users_localpart_key ON users USING btree (localpart_key);
+
+CREATE INDEX idx_webhook_deliveries_done_prune ON webhook_deliveries USING btree (status, completed_at_ms);
+
+CREATE INDEX idx_xmpp_auth_codes_expires_at ON xmpp_auth_codes USING btree (expires_at_ms);
+
+CREATE INDEX idx_xmpp_oauth_grants_user_jid ON xmpp_oauth_grants USING btree (user_jid);
+
+CREATE INDEX ingress_archive_dispatch_effect ON ingress_archive_dispatch USING btree (message_key, kind, semantic_identity_hash);
+
+CREATE INDEX ingress_archive_dispatch_pending ON ingress_archive_dispatch USING btree (archive_jid, pending_row_id) WHERE (pending_row_id <> ''::text);
+
+CREATE INDEX ingress_archive_dispatch_predecessors ON ingress_archive_dispatch USING btree (archive_jid, archive_seq, resource);
+
+CREATE INDEX ingress_deliveries_message_key_idx ON ingress_deliveries USING btree (message_key);
+
+CREATE INDEX ingress_direct_requests_message ON ingress_direct_requests USING btree (message_key) WHERE (message_key IS NOT NULL);
+
+CREATE INDEX ingress_direct_requests_settled ON ingress_direct_requests USING btree (settled_at) WHERE (settled_at IS NOT NULL);
+
+CREATE INDEX ingress_direct_requests_unsettled ON ingress_direct_requests USING btree (created_at) WHERE (settled_at IS NULL);
+
+CREATE INDEX ingress_effect_descendants_identity ON ingress_effect_descendants USING btree (descendant_key, message_key);
+
+CREATE INDEX ingress_effect_descendants_pending ON ingress_effect_descendants USING btree (message_key) WHERE (settled_at IS NULL);
+
+CREATE UNIQUE INDEX ingress_mailbox_entries_direct_operation ON ingress_mailbox_entries USING btree (direct_key) WHERE (direct_key IS NOT NULL);
+
+CREATE UNIQUE INDEX ingress_mailbox_entries_message_operation ON ingress_mailbox_entries USING btree (message_key) WHERE (message_key IS NOT NULL);
+
+CREATE INDEX ingress_mailbox_entries_nonterminal ON ingress_mailbox_entries USING btree (message_key) WHERE (disposition < 3);
+
+CREATE UNIQUE INDEX ingress_mailbox_entries_request_operation ON ingress_mailbox_entries USING btree (request_key) WHERE (request_key IS NOT NULL);
+
+CREATE INDEX ingress_mailbox_lanes_backlog ON ingress_mailbox_lanes USING btree (target_node_id, lane_id) WHERE (last_dispositioned < last_sequence);
+
+CREATE INDEX ingress_messages_nonterminal_created_at_idx ON ingress_messages USING btree (created_at) WHERE (terminal_at IS NULL);
+
+CREATE INDEX ingress_messages_retention_eligible ON ingress_messages USING btree (retention_eligible_at, message_key) WHERE (terminal_at IS NOT NULL);
+
+CREATE INDEX ingress_messages_terminal_at_idx ON ingress_messages USING btree (terminal_at) WHERE (terminal_at IS NOT NULL);
+
+CREATE INDEX ingress_origin_aliases_message_key_idx ON ingress_origin_aliases USING btree (message_key);
+
+CREATE INDEX ingress_room_occupants_join_request ON ingress_room_occupants USING btree (join_request) WHERE (join_request IS NOT NULL);
+
+CREATE INDEX ingress_room_requests_settled ON ingress_room_requests USING btree (settled_at) WHERE (settled_at IS NOT NULL);
+
+CREATE INDEX ingress_room_requests_unsettled ON ingress_room_requests USING btree (created_at) WHERE (settled_at IS NULL);
+
+CREATE INDEX ingress_sm_refs_message_key_idx ON ingress_sm_refs USING btree (message_key);
+
+CREATE UNIQUE INDEX ux_device_auth_user_code ON device_auth USING btree (user_code);
+
+CREATE INDEX account_session_ending_acks_replica ON account_session_ending_acks USING btree (replica_id);
+
+CREATE INDEX account_session_ending_requests_requested ON account_session_ending_requests USING btree (requested_at_ms);
+
+CREATE INDEX host_grant_fence_replicas_lease ON host_grant_fence_replicas USING btree (lease_expires_at);
+
+CREATE INDEX host_grant_space_deletion_jobs_due ON host_grant_space_deletion_jobs USING btree (delivery_kind, due_at_ms) WHERE (state = 'pending'::text);
+
+CREATE INDEX host_grant_space_deletion_jobs_expiry ON host_grant_space_deletion_jobs USING btree (delivery_kind, lease_until_ms) WHERE (state = ANY (ARRAY['leased'::text, 'staging'::text]));
+
+CREATE UNIQUE INDEX idx_auth_identities_tenant_issuer_subject ON auth_identities USING btree (tenant_id, issuer, subject);
+
+CREATE INDEX idx_host_grant_operations_incarnation ON host_grant_operations USING btree (lifecycle_id, authority_incarnation);
+
+CREATE INDEX idx_host_grant_rooms_lifecycle ON host_grant_rooms USING btree (lifecycle_id);
+
+CREATE UNIQUE INDEX idx_native_users_account_id ON native_users USING btree (account_id) WHERE (account_id IS NOT NULL);
+
+CREATE UNIQUE INDEX idx_notification_candidates_missed_call ON notification_candidates USING btree (recipient_bare_jid, conversation_jid, call_sid) WHERE (class = 'missed_call'::text);
+
+CREATE INDEX idx_retired_account_jids_localpart_key ON retired_account_jids USING btree (localpart_key);
+
+CREATE INDEX idx_sm_durable_sessions_bare_state ON sm_durable_sessions USING btree (bare_jid, state);
+
+CREATE UNIQUE INDEX idx_users_account_id ON users USING btree (account_id) WHERE (account_id IS NOT NULL);
+
+CREATE UNIQUE INDEX idx_users_tenant_username ON users USING btree (tenant_id, username);
+
+CREATE UNIQUE INDEX idx_users_tenant_xmpp_localpart ON users USING btree (tenant_id, xmpp_localpart);
+
+CREATE INDEX s2s_iq_correlations_expiry ON s2s_iq_correlations USING btree (expires_at_ms);
+
+CREATE INDEX s2s_iq_correlations_owner ON s2s_iq_correlations USING btree (owner_id);
+
+CREATE INDEX s2s_local_room_seats_account ON s2s_local_room_seats USING btree (account_jid);
+
+CREATE INDEX s2s_local_room_seats_owner ON s2s_local_room_seats USING btree (owner_id);
+
+CREATE INDEX s2s_local_room_seats_peer ON s2s_local_room_seats USING btree (occupant_domain, room_domain);
+
+CREATE INDEX s2s_local_room_seats_updated ON s2s_local_room_seats USING btree (updated_at_ms);
+
+CREATE INDEX s2s_pending_subscriptions_domain ON s2s_pending_subscriptions USING btree (account_jid, contact_domain);
+
+CREATE INDEX s2s_remote_offline_admissions_sender ON s2s_remote_offline_admissions USING btree (account_jid, sender_jid);
+
+CREATE INDEX s2s_remote_offline_admissions_share ON s2s_remote_offline_admissions USING btree (account_jid, sender_share);
+
+CREATE INDEX s2s_remote_offline_admissions_window ON s2s_remote_offline_admissions USING btree (account_jid, admitted_at_ms);
+
+CREATE INDEX s2s_remote_room_occupancies_account ON s2s_remote_room_occupancies USING btree (account_jid);
+
+CREATE INDEX s2s_remote_room_occupancies_deadline ON s2s_remote_room_occupancies USING btree (deadline_ms);
+
+CREATE INDEX s2s_remote_room_occupancies_pair ON s2s_remote_room_occupancies USING btree (local_domain, room_domain);
+
+CREATE INDEX s2s_remote_room_occupancies_updated ON s2s_remote_room_occupancies USING btree (updated_at_ms);
+
+CREATE INDEX s2s_remote_room_verdicts_expiry ON s2s_remote_room_verdicts USING btree (expires_at_ms);
+
+CREATE INDEX s2s_space_subscriptions_account ON s2s_space_subscriptions USING btree (account_jid);
+
+CREATE INDEX s2s_space_subscriptions_domain ON s2s_space_subscriptions USING btree (subscriber_domain);
+
+CREATE INDEX s2s_space_subscriptions_subscribed_at ON s2s_space_subscriptions USING btree (subscribed_at_ms);
+
+INSERT INTO ingress_epoch_guard_manifest
+SELECT * FROM jsonb_populate_recordset(NULL::ingress_epoch_guard_manifest,
+    '[{"table_name": "account_resource_bindings"}, {"table_name": "account_resource_operations"}, {"table_name": "ingress_archive_dispatch"}, {"table_name": "ingress_carbon_receipts"}, {"table_name": "ingress_deliveries"}, {"table_name": "ingress_delivery_receipts"}, {"table_name": "ingress_direct_requests"}, {"table_name": "ingress_effect_descendants"}, {"table_name": "ingress_effect_intents"}, {"table_name": "ingress_effect_receipts"}, {"table_name": "ingress_mailbox_entries"}, {"table_name": "ingress_mailbox_lanes"}, {"table_name": "ingress_messages"}, {"table_name": "ingress_origin_aliases"}, {"table_name": "ingress_owner_rejections"}, {"table_name": "ingress_room_occupants"}, {"table_name": "ingress_room_requests"}, {"table_name": "ingress_room_responses"}, {"table_name": "ingress_send_attempts"}, {"table_name": "ingress_sm_refs"}, {"table_name": "ingress_sm_streams"}, {"table_name": "sm_durable_operations"}, {"table_name": "sm_durable_sessions"}]'::jsonb);
+
+INSERT INTO ingress_protocol_epoch
+SELECT * FROM jsonb_populate_recordset(NULL::ingress_protocol_epoch,
+    '[{"activated_at": null, "epoch": 0, "id": 1, "lineage_uuid": null}]'::jsonb);
+
+INSERT INTO host_grant_authority (singleton, incarnation)
+VALUES (true, replace(gen_random_uuid()::text, '-', ''));
+
+INSERT INTO pubsub_schema_version (version)
+VALUES (10);
+
+CREATE FUNCTION pubsub_runtime_attach_lock()
+ RETURNS void
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'pg_temp'
+AS $function$    LOCK TABLE __SCHEMA_QUOTED__."dnd_projection" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."dnd_projection_source_version" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."notification_settings_projection" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."notification_settings_projection_source_version" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_affiliations" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_items" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_nodes" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_owner_configured" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_push_publications" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_schema_marker" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_schema_version" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE __SCHEMA_QUOTED__."pubsub_subscriptions" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT;
+SELECT NULL::void;$function$;
+
+CREATE TRIGGER account_resource_bindings_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON account_resource_bindings FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE account_resource_bindings ENABLE ALWAYS TRIGGER account_resource_bindings_epoch_guard_dml;
+
+CREATE TRIGGER account_resource_bindings_epoch_guard_truncate BEFORE TRUNCATE ON account_resource_bindings FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE account_resource_bindings ENABLE ALWAYS TRIGGER account_resource_bindings_epoch_guard_truncate;
+
+CREATE TRIGGER account_resource_operations_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON account_resource_operations FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE account_resource_operations ENABLE ALWAYS TRIGGER account_resource_operations_epoch_guard_dml;
+
+CREATE TRIGGER account_resource_operations_epoch_guard_truncate BEFORE TRUNCATE ON account_resource_operations FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE account_resource_operations ENABLE ALWAYS TRIGGER account_resource_operations_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_archive_dispatch_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_archive_dispatch FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_archive_dispatch ENABLE ALWAYS TRIGGER ingress_archive_dispatch_epoch_guard_dml;
+
+CREATE TRIGGER ingress_archive_dispatch_epoch_guard_truncate BEFORE TRUNCATE ON ingress_archive_dispatch FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_archive_dispatch ENABLE ALWAYS TRIGGER ingress_archive_dispatch_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_carbon_receipts_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_carbon_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_carbon_receipts ENABLE ALWAYS TRIGGER ingress_carbon_receipts_epoch_guard_dml;
+
+CREATE TRIGGER ingress_carbon_receipts_epoch_guard_truncate BEFORE TRUNCATE ON ingress_carbon_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_carbon_receipts ENABLE ALWAYS TRIGGER ingress_carbon_receipts_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_deliveries_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_deliveries FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_dml;
+
+CREATE TRIGGER ingress_deliveries_epoch_guard_truncate BEFORE TRUNCATE ON ingress_deliveries FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_deliveries ENABLE ALWAYS TRIGGER ingress_deliveries_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_delivery_receipts_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_delivery_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_delivery_receipts ENABLE ALWAYS TRIGGER ingress_delivery_receipts_epoch_guard_dml;
+
+CREATE TRIGGER ingress_delivery_receipts_epoch_guard_truncate BEFORE TRUNCATE ON ingress_delivery_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_delivery_receipts ENABLE ALWAYS TRIGGER ingress_delivery_receipts_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_direct_requests_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_direct_requests FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_direct_requests ENABLE ALWAYS TRIGGER ingress_direct_requests_epoch_guard_dml;
+
+CREATE TRIGGER ingress_direct_requests_epoch_guard_truncate BEFORE TRUNCATE ON ingress_direct_requests FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_direct_requests ENABLE ALWAYS TRIGGER ingress_direct_requests_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_effect_descendants_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_effect_descendants FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_effect_descendants ENABLE ALWAYS TRIGGER ingress_effect_descendants_epoch_guard_dml;
+
+CREATE TRIGGER ingress_effect_descendants_epoch_guard_truncate BEFORE TRUNCATE ON ingress_effect_descendants FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_descendants ENABLE ALWAYS TRIGGER ingress_effect_descendants_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_effect_intents_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_effect_intents FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_effect_intents ENABLE ALWAYS TRIGGER ingress_effect_intents_epoch_guard_dml;
+
+CREATE TRIGGER ingress_effect_intents_epoch_guard_truncate BEFORE TRUNCATE ON ingress_effect_intents FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_intents ENABLE ALWAYS TRIGGER ingress_effect_intents_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_effect_receipts_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_effect_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_effect_receipts ENABLE ALWAYS TRIGGER ingress_effect_receipts_epoch_guard_dml;
+
+CREATE TRIGGER ingress_effect_receipts_epoch_guard_truncate BEFORE TRUNCATE ON ingress_effect_receipts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_receipts ENABLE ALWAYS TRIGGER ingress_effect_receipts_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_epoch_guard_manifest_append_only_row BEFORE INSERT OR DELETE OR UPDATE ON ingress_epoch_guard_manifest FOR EACH ROW EXECUTE FUNCTION waddle_ingress_epoch_guard_manifest_append_only();
+ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row;
+
+CREATE TRIGGER ingress_epoch_guard_manifest_append_only_truncate BEFORE TRUNCATE ON ingress_epoch_guard_manifest FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard_manifest_append_only();
+ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_truncate;
+
+CREATE TRIGGER ingress_mailbox_entries_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_mailbox_entries FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_mailbox_entries ENABLE ALWAYS TRIGGER ingress_mailbox_entries_epoch_guard_dml;
+
+CREATE TRIGGER ingress_mailbox_entries_epoch_guard_truncate BEFORE TRUNCATE ON ingress_mailbox_entries FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_mailbox_entries ENABLE ALWAYS TRIGGER ingress_mailbox_entries_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_mailbox_lanes_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_mailbox_lanes FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_mailbox_lanes ENABLE ALWAYS TRIGGER ingress_mailbox_lanes_epoch_guard_dml;
+
+CREATE TRIGGER ingress_mailbox_lanes_epoch_guard_truncate BEFORE TRUNCATE ON ingress_mailbox_lanes FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_mailbox_lanes ENABLE ALWAYS TRIGGER ingress_mailbox_lanes_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_messages_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_messages FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml;
+
+CREATE TRIGGER ingress_messages_epoch_guard_truncate BEFORE TRUNCATE ON ingress_messages FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_messages_source_binding_guard BEFORE UPDATE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_ingress_source_binding_guard();
+
+CREATE TRIGGER ingress_messages_source_insert_guard BEFORE INSERT ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_ingress_source_insert_guard();
+
+CREATE TRIGGER ingress_origin_aliases_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_origin_aliases FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_dml;
+
+CREATE TRIGGER ingress_origin_aliases_epoch_guard_truncate BEFORE TRUNCATE ON ingress_origin_aliases FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_origin_aliases ENABLE ALWAYS TRIGGER ingress_origin_aliases_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_owner_rejections_delete_guard BEFORE DELETE ON ingress_owner_rejections FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_delete_guard();
+
+CREATE TRIGGER ingress_owner_rejections_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_owner_rejections FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_epoch_guard_dml;
+
+CREATE TRIGGER ingress_owner_rejections_epoch_guard_truncate BEFORE TRUNCATE ON ingress_owner_rejections FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_owner_rejections_insert_guard BEFORE INSERT ON ingress_owner_rejections FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_insert_guard();
+
+CREATE TRIGGER ingress_owner_rejections_update_guard BEFORE UPDATE ON ingress_owner_rejections FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_immutable();
+
+CREATE TRIGGER ingress_protocol_epoch_guard_row BEFORE INSERT OR DELETE OR UPDATE ON ingress_protocol_epoch FOR EACH ROW EXECUTE FUNCTION waddle_ingress_protocol_epoch_guard();
+ALTER TABLE ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row;
+
+CREATE TRIGGER ingress_protocol_epoch_guard_truncate BEFORE TRUNCATE ON ingress_protocol_epoch FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_protocol_epoch_guard();
+ALTER TABLE ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_room_occupants_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_room_occupants FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_room_occupants ENABLE ALWAYS TRIGGER ingress_room_occupants_epoch_guard_dml;
+
+CREATE TRIGGER ingress_room_occupants_epoch_guard_truncate BEFORE TRUNCATE ON ingress_room_occupants FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_room_occupants ENABLE ALWAYS TRIGGER ingress_room_occupants_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_room_requests_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_room_requests FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_room_requests ENABLE ALWAYS TRIGGER ingress_room_requests_epoch_guard_dml;
+
+CREATE TRIGGER ingress_room_requests_epoch_guard_truncate BEFORE TRUNCATE ON ingress_room_requests FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_room_requests ENABLE ALWAYS TRIGGER ingress_room_requests_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_room_responses_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_room_responses FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_room_responses ENABLE ALWAYS TRIGGER ingress_room_responses_epoch_guard_dml;
+
+CREATE TRIGGER ingress_room_responses_epoch_guard_truncate BEFORE TRUNCATE ON ingress_room_responses FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_room_responses ENABLE ALWAYS TRIGGER ingress_room_responses_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_send_attempts_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_send_attempts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_send_attempts ENABLE ALWAYS TRIGGER ingress_send_attempts_epoch_guard_dml;
+
+CREATE TRIGGER ingress_send_attempts_epoch_guard_truncate BEFORE TRUNCATE ON ingress_send_attempts FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_send_attempts ENABLE ALWAYS TRIGGER ingress_send_attempts_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_sm_refs_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_sm_refs FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_dml;
+
+CREATE TRIGGER ingress_sm_refs_epoch_guard_truncate BEFORE TRUNCATE ON ingress_sm_refs FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_sm_refs ENABLE ALWAYS TRIGGER ingress_sm_refs_epoch_guard_truncate;
+
+CREATE TRIGGER ingress_sm_streams_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON ingress_sm_streams FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE ingress_sm_streams ENABLE ALWAYS TRIGGER ingress_sm_streams_epoch_guard_dml;
+
+CREATE TRIGGER ingress_sm_streams_epoch_guard_truncate BEFORE TRUNCATE ON ingress_sm_streams FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_sm_streams ENABLE ALWAYS TRIGGER ingress_sm_streams_epoch_guard_truncate;
+
+CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery FOR EACH ROW EXECUTE FUNCTION pending_notification_recovery_ordinal_immutable();
+
+CREATE TRIGGER sm_durable_operations_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON sm_durable_operations FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE sm_durable_operations ENABLE ALWAYS TRIGGER sm_durable_operations_epoch_guard_dml;
+
+CREATE TRIGGER sm_durable_operations_epoch_guard_truncate BEFORE TRUNCATE ON sm_durable_operations FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE sm_durable_operations ENABLE ALWAYS TRIGGER sm_durable_operations_epoch_guard_truncate;
+
+CREATE TRIGGER sm_durable_sessions_epoch_guard_dml BEFORE INSERT OR DELETE OR UPDATE ON sm_durable_sessions FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+ALTER TABLE sm_durable_sessions ENABLE ALWAYS TRIGGER sm_durable_sessions_epoch_guard_dml;
+
+CREATE TRIGGER sm_durable_sessions_epoch_guard_truncate BEFORE TRUNCATE ON sm_durable_sessions FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE sm_durable_sessions ENABLE ALWAYS TRIGGER sm_durable_sessions_epoch_guard_truncate;
+
+CREATE TRIGGER guard_bound_space_configuration_write BEFORE UPDATE ON pubsub_nodes FOR EACH ROW EXECUTE FUNCTION guard_bound_space_configuration_write();
+
+CREATE TRIGGER guard_bound_space_item_write BEFORE INSERT OR DELETE OR UPDATE ON pubsub_items FOR EACH ROW EXECUTE FUNCTION guard_bound_space_item_write();
+
+CREATE TRIGGER trg_native_users_account_id_immutable BEFORE UPDATE OF account_id ON native_users FOR EACH ROW EXECUTE FUNCTION reject_immutable_account_id_change();
+
+CREATE TRIGGER trg_users_account_id_immutable BEFORE UPDATE OF account_id ON users FOR EACH ROW EXECUTE FUNCTION reject_immutable_account_id_change();
+
+ALTER SEQUENCE blocking_list_id_seq OWNED BY blocking_list.id;
+
+ALTER SEQUENCE native_users_id_seq OWNED BY native_users.id;
+
+ALTER SEQUENCE reactions_id_seq OWNED BY reactions.id;
+
+ALTER SEQUENCE roster_items_id_seq OWNED BY roster_items.id;
+
+GRANT SELECT ON TABLE extension_room_observation_receipts TO pg_monitor;
+
+GRANT SELECT ON TABLE extension_room_observation_work TO pg_monitor;
+
+GRANT SELECT ON TABLE extension_room_observers TO pg_monitor;
+
+GRANT SELECT ON TABLE extension_room_publications TO pg_monitor;
+
+GRANT SELECT ON TABLE extension_room_source_revisions TO pg_monitor;
+
+GRANT SELECT ON TABLE extension_room_sources TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_archive_dispatch TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_carbon_receipts TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_deliveries TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_delivery_receipts TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_direct_requests TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_effect_descendants TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_effect_intents TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_effect_receipts TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_mailbox_entries TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_mailbox_lanes TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_messages TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_origin_aliases TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_owner_rejections TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_room_occupants TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_room_requests TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_room_responses TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_send_attempts TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_sm_refs TO pg_monitor;
+
+GRANT SELECT ON TABLE ingress_sm_streams TO pg_monitor;
+
+GRANT SELECT (row_id) ON TABLE pending_delivery TO pg_monitor;
+
+REVOKE ALL ON FUNCTION pubsub_runtime_attach_lock() FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION waddle_p21_record_effect_receipt(p_operation_id uuid, p_message_key uuid, p_receipt_kind integer, p_semantic_identity_hash bytea) FROM PUBLIC;

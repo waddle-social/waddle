@@ -2,7 +2,7 @@ use kube::KubeSchema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Reference to a key inside a Kubernetes `Secret` in the same namespace as the `WaddleServer`.
+/// Reference to a key inside a Kubernetes `Secret` in the same namespace.
 #[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretKeyRef {
@@ -12,6 +12,265 @@ pub struct SecretKeyRef {
     /// Key inside the `Secret` data map.
     #[x_kube(validation = "size(self) > 0")]
     pub key: String,
+}
+
+/// Reference to a named Kubernetes object in the same namespace.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalObjectRef {
+    /// Name of the referenced Kubernetes resource in the same namespace.
+    #[x_kube(validation = "size(self) > 0")]
+    pub name: String,
+}
+
+/// Storage backend kind for `WaddleServer`.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageBackendKind {
+    /// Per-tenant embedded Turso/libSQL databases stored on local PVC/filesystem.
+    #[default]
+    Turso,
+    /// External PostgreSQL database (CloudNativePG or External Secret).
+    Postgres,
+}
+
+impl StorageBackendKind {
+    /// Returns the lowercase wire value expected by `WADDLE_DB_DRIVER`.
+    #[must_use]
+    pub const fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Turso => "turso",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
+/// Local Turso/libSQL storage settings (`WADDLE_TURSO_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TursoStorageSpec {
+    /// Directory storing per-tenant Turso databases (`WADDLE_TURSO_DATA_DIR`).
+    #[serde(default = "default_turso_data_dir")]
+    #[x_kube(validation = "size(self) > 0")]
+    pub data_dir: String,
+    /// File descriptors reserved for non-tenant I/O (`WADDLE_TURSO_RESERVED_FDS`, default `256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_fds: Option<u32>,
+    /// Optional `RLIMIT_NOFILE` hint (`WADDLE_TURSO_RLIMIT_NOFILE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlimit_nofile: Option<u32>,
+}
+
+impl Default for TursoStorageSpec {
+    fn default() -> Self {
+        Self {
+            data_dir: default_turso_data_dir(),
+            reserved_fds: None,
+            rlimit_nofile: None,
+        }
+    }
+}
+
+/// Pluggable storage backend configuration for `WaddleServer`.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(
+    cel,
+    validation = "(self.backend == 'Turso' && !has(self.postgres)) || (self.backend == 'Postgres' && has(self.postgres) && !has(self.turso))"
+)]
+pub struct StorageSpec {
+    /// Storage backend driver (`Turso` or `Postgres`).
+    #[serde(default)]
+    pub backend: StorageBackendKind,
+    /// Turso storage settings when `backend` is `Turso`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turso: Option<TursoStorageSpec>,
+    /// External PostgreSQL dependency when `backend` is `Postgres`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postgres: Option<PostgresDependencySpec>,
+}
+
+/// Authorization backend kind for `WaddleServer`.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthzBackendKind {
+    /// OpenFGA HTTP API (`WADDLE_AUTHZ_BACKEND=openfga`).
+    #[default]
+    OpenFga,
+    /// SpiceDB gRPC API (`WADDLE_AUTHZ_BACKEND=spicedb`).
+    SpiceDb,
+}
+
+impl AuthzBackendKind {
+    /// Returns the lowercase wire value expected by `WADDLE_AUTHZ_BACKEND`.
+    #[must_use]
+    pub const fn as_env_value(self) -> &'static str {
+        match self {
+            Self::OpenFga => "openfga",
+            Self::SpiceDb => "spicedb",
+        }
+    }
+}
+
+/// OpenFGA service dependency configuration (`WADDLE_OPENFGA_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(
+    cel,
+    validation = "!has(self.consistency) || self.consistency == 'higher_consistency' || self.consistency == 'minimize_latency'"
+)]
+pub struct OpenFgaDependencySpec {
+    /// Name of the same-namespace Kubernetes `Service` exposing OpenFGA.
+    #[x_kube(validation = "size(self) > 0")]
+    pub service_name: String,
+    /// HTTP port exposed by the OpenFGA Service (default `8080`).
+    #[serde(default = "default_openfga_port")]
+    pub port: u16,
+    /// URI scheme (`http` or `https`, default `http`).
+    #[serde(default = "default_http_scheme")]
+    #[x_kube(validation = "self == 'http' || self == 'https'")]
+    pub scheme: String,
+    /// Optional same-namespace Secret key holding `WADDLE_OPENFGA_API_TOKEN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_secret_ref: Option<SecretKeyRef>,
+    /// OpenFGA read consistency (`higher_consistency` default or `minimize_latency`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consistency: Option<String>,
+}
+
+/// Pluggable authorization backend configuration for `WaddleServer`.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(
+    cel,
+    validation = "(self.backend == 'OpenFga' && has(self.openfga) && !has(self.spicedb)) || (self.backend == 'SpiceDb' && has(self.spicedb) && !has(self.openfga))"
+)]
+pub struct AuthzSpec {
+    /// Authorization backend driver (`OpenFga` or `SpiceDb`).
+    #[serde(default)]
+    pub backend: AuthzBackendKind,
+    /// OpenFGA dependency when `backend` is `OpenFga`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openfga: Option<OpenFgaDependencySpec>,
+    /// SpiceDB dependency when `backend` is `SpiceDb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spicedb: Option<SpiceDbDependencySpec>,
+}
+
+/// KMS provider kind for the Waddle credential custody broker.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrokerKmsProviderKind {
+    /// Scaleway Key Manager (`WADDLE_BROKER_KMS_PROVIDER=scaleway`).
+    #[default]
+    Scaleway,
+    /// HashiCorp Vault Transit (`WADDLE_BROKER_KMS_PROVIDER=vault`).
+    Vault,
+    /// Local ephemeral/dev KMS (`WADDLE_BROKER_KMS_PROVIDER=local`).
+    Local,
+}
+
+impl BrokerKmsProviderKind {
+    /// Returns the lowercase wire value expected by `WADDLE_BROKER_KMS_PROVIDER`.
+    #[must_use]
+    pub const fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Scaleway => "scaleway",
+            Self::Vault => "vault",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// Scaleway Key Manager configuration (`WADDLE_SCW_KMS_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScalewayKmsSpec {
+    /// Scaleway API base URL (`WADDLE_SCW_KMS_BASE_URL`, default `https://api.scaleway.com`).
+    #[serde(default = "default_scaleway_base_url")]
+    #[x_kube(validation = "size(self) > 0")]
+    pub base_url: String,
+    /// Scaleway Key Manager region (`WADDLE_SCW_KMS_REGION`, default `fr-par`).
+    #[serde(default = "default_scaleway_region")]
+    #[x_kube(validation = "size(self) > 0")]
+    pub region: String,
+    /// Scaleway Project ID (`WADDLE_SCW_KMS_PROJECT_ID`).
+    #[x_kube(validation = "size(self) > 0")]
+    pub project_id: String,
+    /// Same-namespace Secret key containing the Scaleway secret key (`WADDLE_SCW_KMS_AUTH_TOKEN`).
+    pub auth_secret_ref: SecretKeyRef,
+    /// Optional pre-provisioned Scaleway root key UUID (`WADDLE_SCW_KMS_ROOT_KEY_ID`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_key_id: Option<String>,
+}
+
+/// HashiCorp Vault Transit KMS configuration (`WADDLE_VAULT_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultKmsSpec {
+    /// Vault API base URL (`WADDLE_VAULT_ADDR`).
+    #[x_kube(validation = "size(self) > 0")]
+    pub base_url: String,
+    /// Vault transit mount path (`WADDLE_VAULT_TRANSIT_MOUNT`, default `transit`).
+    #[serde(default = "default_vault_mount")]
+    #[x_kube(validation = "size(self) > 0")]
+    pub mount: String,
+    /// Optional Vault namespace (`WADDLE_VAULT_NAMESPACE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Same-namespace Secret key containing the Vault token (`WADDLE_VAULT_TOKEN`).
+    pub auth_secret_ref: SecretKeyRef,
+}
+
+/// KMS backend configuration for the credential custody broker.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(
+    cel,
+    validation = "(self.provider == 'Scaleway' && has(self.scaleway) && !has(self.vault)) || (self.provider == 'Vault' && has(self.vault) && !has(self.scaleway)) || (self.provider == 'Local' && !has(self.scaleway) && !has(self.vault))"
+)]
+pub struct BrokerKmsSpec {
+    /// KMS provider (`Scaleway`, `Vault`, or `Local`).
+    #[serde(default)]
+    pub provider: BrokerKmsProviderKind,
+    /// Scaleway Key Manager settings when `provider` is `Scaleway`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaleway: Option<ScalewayKmsSpec>,
+    /// HashiCorp Vault Transit settings when `provider` is `Vault`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultKmsSpec>,
+}
+
+/// Credential custody and inference egress broker configuration (`WADDLE_BROKER_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(cel, validation = "!self.enabled || has(self.kms)")]
+pub struct BrokerSpec {
+    /// Enable the credential custody and inference egress broker (`WADDLE_BROKER_ENABLED`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Directory storing broker SQLite/Turso databases (`WADDLE_BROKER_DATA_DIR`).
+    #[serde(default = "default_broker_data_dir")]
+    #[x_kube(validation = "size(self) > 0")]
+    pub data_dir: String,
+    /// Optional explicit admission database path (`WADDLE_BROKER_ADMISSION_DB`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_db: Option<String>,
+    /// KMS backend configuration (required when `enabled` is `true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms: Option<BrokerKmsSpec>,
+    /// Optional SPIFFE ID identifying this cell (`WADDLE_CELL_SPIFFE_ID`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_spiffe_id: Option<String>,
+}
+
+/// Waddle server extension runtime configuration (`WADDLE_EXTENSIONS_*`).
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionsSpec {
+    /// Enable server extensions (`WADDLE_EXTENSIONS_ENABLED`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional path to extension plugin modules (`WADDLE_EXTENSIONS_PLUGINS_DIR`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins_dir: Option<String>,
 }
 
 /// Source mode for PostgreSQL connectivity.
@@ -262,6 +521,34 @@ pub struct ExternalSpiceDbSource {
     /// Optional explicit Secret key reference for `WADDLE_SPICEDB_PRESHARED_KEY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preshared_key_secret_ref: Option<SecretKeyRef>,
+}
+
+fn default_turso_data_dir() -> String {
+    "/var/lib/waddle/tenants".to_owned()
+}
+
+const fn default_openfga_port() -> u16 {
+    8080
+}
+
+fn default_http_scheme() -> String {
+    "http".to_owned()
+}
+
+fn default_scaleway_base_url() -> String {
+    "https://api.scaleway.com".to_owned()
+}
+
+fn default_scaleway_region() -> String {
+    "fr-par".to_owned()
+}
+
+fn default_vault_mount() -> String {
+    "transit".to_owned()
+}
+
+fn default_broker_data_dir() -> String {
+    "/var/lib/waddle/broker".to_owned()
 }
 
 const fn default_pool_size() -> u32 {

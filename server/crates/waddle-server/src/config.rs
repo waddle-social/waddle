@@ -15,11 +15,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::info;
+use waddle_broker::kms::scaleway::ScalewayKmsConfig;
+use waddle_broker::kms::vault::VaultTransitConfig;
+use waddle_broker_core::identity::TenantId;
 use waddle_extensions::ExtensionConfig;
+use waddle_tenancy::turso_store::DEFAULT_RESERVED_FDS;
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -133,6 +139,543 @@ impl SpiceDbConfig {
                 }))
             }
         }
+    }
+}
+
+/// Authorization backend kind (`WADDLE_AUTHZ_BACKEND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthzBackendKind {
+    OpenFga,
+    SpiceDb,
+    Local,
+}
+
+impl AuthzBackendKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenFga => "openfga",
+            Self::SpiceDb => "spicedb",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// Selection policy for the authorization backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthzBackendSelection {
+    /// Auto-select OpenFGA when `WADDLE_OPENFGA_ENDPOINT` is set and
+    /// `WADDLE_SPICEDB_ENDPOINT` is unset; otherwise SpiceDB when configured.
+    #[default]
+    Auto,
+    /// Explicitly pinned via `WADDLE_AUTHZ_BACKEND`.
+    Explicit(AuthzBackendKind),
+}
+
+impl AuthzBackendSelection {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<HashMap<_, _>>();
+        let Some(raw) = vars
+            .get("WADDLE_AUTHZ_BACKEND")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        else {
+            return Ok(Self::Auto);
+        };
+        match raw.to_ascii_lowercase().as_str() {
+            "openfga" => Ok(Self::Explicit(AuthzBackendKind::OpenFga)),
+            "spicedb" => Ok(Self::Explicit(AuthzBackendKind::SpiceDb)),
+            "local" => Ok(Self::Explicit(AuthzBackendKind::Local)),
+            other => Err(format!(
+                "invalid WADDLE_AUTHZ_BACKEND='{other}': expected 'openfga', 'spicedb', or 'local'"
+            )),
+        }
+    }
+}
+
+/// OpenFGA consistency setting parsed from `WADDLE_OPENFGA_CONSISTENCY`.
+///
+/// Broker admission checks always enforce `HIGHER_CONSISTENCY` regardless of
+/// this setting (ADR-0021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenFgaConsistencySetting {
+    #[default]
+    HigherConsistency,
+    MinimizeLatency,
+}
+
+impl OpenFgaConsistencySetting {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "higher_consistency" => Ok(Self::HigherConsistency),
+            "minimize_latency" => Ok(Self::MinimizeLatency),
+            other => Err(format!(
+                "invalid WADDLE_OPENFGA_CONSISTENCY='{other}': expected 'higher_consistency' or 'minimize_latency'"
+            )),
+        }
+    }
+}
+
+/// Pre-provisioned OpenFGA store/model reference entry inside
+/// `WADDLE_OPENFGA_STORE_MAP_JSON`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFgaStoreEntry {
+    pub store_id: String,
+    pub model_id: String,
+}
+
+/// Server-level OpenFGA configuration parsed from `WADDLE_OPENFGA_*`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenFgaConfig {
+    pub endpoint: String,
+    pub api_token: Option<Zeroizing<String>>,
+    pub consistency: OpenFgaConsistencySetting,
+    pub store_map: HashMap<TenantId, OpenFgaStoreEntry>,
+}
+
+impl fmt::Debug for OpenFgaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenFgaConfig")
+            .field("endpoint", &self.endpoint)
+            .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
+            .field("consistency", &self.consistency)
+            .field("store_map_len", &self.store_map.len())
+            .finish()
+    }
+}
+
+impl OpenFgaConfig {
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Option<Self>, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<HashMap<_, _>>();
+        let endpoint = vars
+            .get("WADDLE_OPENFGA_ENDPOINT")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        let api_token = vars
+            .get("WADDLE_OPENFGA_API_TOKEN")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(Zeroizing::new);
+        let consistency = match vars
+            .get("WADDLE_OPENFGA_CONSISTENCY")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            Some(raw) => OpenFgaConsistencySetting::parse(raw)?,
+            None => OpenFgaConsistencySetting::HigherConsistency,
+        };
+        let store_map = match vars
+            .get("WADDLE_OPENFGA_STORE_MAP_JSON")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            None => HashMap::new(),
+            Some(raw) => {
+                let raw_map: HashMap<String, OpenFgaStoreEntry> = serde_json::from_str(raw)
+                    .map_err(|err| format!("invalid WADDLE_OPENFGA_STORE_MAP_JSON: {err}"))?;
+                let mut parsed = HashMap::with_capacity(raw_map.len());
+                for (raw_tenant, entry) in raw_map {
+                    let tenant_id = TenantId::parse(&raw_tenant).map_err(|err| {
+                        format!(
+                            "invalid tenant_id '{raw_tenant}' in WADDLE_OPENFGA_STORE_MAP_JSON: {err}"
+                        )
+                    })?;
+                    if entry.store_id.trim().is_empty() || entry.model_id.trim().is_empty() {
+                        return Err(format!(
+                            "WADDLE_OPENFGA_STORE_MAP_JSON entry for '{raw_tenant}' requires non-empty store_id and model_id"
+                        ));
+                    }
+                    parsed.insert(
+                        tenant_id,
+                        OpenFgaStoreEntry {
+                            store_id: entry.store_id.trim().to_owned(),
+                            model_id: entry.model_id.trim().to_owned(),
+                        },
+                    );
+                }
+                parsed
+            }
+        };
+        Ok(Some(Self {
+            endpoint,
+            api_token,
+            consistency,
+            store_map,
+        }))
+    }
+}
+
+/// Default directory for per-tenant Turso WAL databases when `WADDLE_DB_DRIVER=turso`.
+pub const DEFAULT_TURSO_DATA_DIR: &str = "/var/lib/waddle/tenants";
+
+/// Default directory for broker durable Turso ledgers (`admission.db`,
+/// `destruction_ledger.db`, `custody.db`).
+pub const DEFAULT_BROKER_DATA_DIR: &str = "/var/lib/waddle/broker";
+
+/// Default Scaleway Key Manager API base URL.
+pub const DEFAULT_SCW_KMS_BASE_URL: &str = "https://api.scaleway.com";
+
+/// Default Scaleway Key Manager region.
+pub const DEFAULT_SCW_KMS_REGION: &str = "fr-par";
+
+/// Turso per-tenant storage runtime settings (`WADDLE_TURSO_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TursoRuntimeConfig {
+    pub data_dir: PathBuf,
+    pub reserved_fds: usize,
+    pub rlimit_nofile: Option<usize>,
+}
+
+impl TursoRuntimeConfig {
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Option<Self>, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<HashMap<_, _>>();
+        let driver_is_turso = vars
+            .get("WADDLE_DB_DRIVER")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("turso"));
+        let explicit_dir = vars
+            .get("WADDLE_TURSO_DATA_DIR")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty());
+        if !driver_is_turso && explicit_dir.is_none() {
+            return Ok(None);
+        }
+        let data_dir = PathBuf::from(explicit_dir.unwrap_or(DEFAULT_TURSO_DATA_DIR));
+        let reserved_fds =
+            parse_usize_var(&vars, "WADDLE_TURSO_RESERVED_FDS", DEFAULT_RESERVED_FDS)?;
+        let rlimit_nofile = match vars
+            .get("WADDLE_TURSO_RLIMIT_NOFILE")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            None => None,
+            Some(raw) => {
+                let parsed = raw.parse::<usize>().map_err(|err| {
+                    format!("WADDLE_TURSO_RLIMIT_NOFILE='{raw}' must be a positive integer: {err}")
+                })?;
+                if parsed == 0 {
+                    return Err("WADDLE_TURSO_RLIMIT_NOFILE must be at least 1".to_string());
+                }
+                Some(parsed)
+            }
+        };
+        Ok(Some(Self {
+            data_dir,
+            reserved_fds,
+            rlimit_nofile,
+        }))
+    }
+}
+
+/// Broker KMS backend selection (`WADDLE_BROKER_KMS_PROVIDER`).
+#[derive(Debug, Clone)]
+pub enum BrokerKmsProviderConfig {
+    Local,
+    Scaleway(ScalewayKmsConfig),
+    Vault(VaultTransitConfig),
+}
+
+impl BrokerKmsProviderConfig {
+    pub const fn provider_name(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Scaleway(_) => "scaleway",
+            Self::Vault(_) => "vault",
+        }
+    }
+}
+
+/// Broker custody, admission ledger, and KMS configuration (`WADDLE_BROKER_*`,
+/// `WADDLE_SCW_KMS_*`, `WADDLE_CELL_SPIFFE_ID`).
+#[derive(Debug, Clone)]
+pub struct BrokerRuntimeConfig {
+    pub enabled: bool,
+    pub data_dir: Option<PathBuf>,
+    pub admission_db: Option<PathBuf>,
+    pub kms: BrokerKmsProviderConfig,
+    pub cell_spiffe_id: Option<String>,
+}
+
+impl Default for BrokerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            data_dir: None,
+            admission_db: None,
+            kms: BrokerKmsProviderConfig::Local,
+            cell_spiffe_id: None,
+        }
+    }
+}
+
+impl BrokerRuntimeConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<HashMap<_, _>>();
+        let explicit_enabled = vars
+            .get("WADDLE_BROKER_ENABLED")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty());
+        let enabled = match explicit_enabled {
+            Some(_) => parse_bool_var(&vars, "WADDLE_BROKER_ENABLED", true)?,
+            None => true,
+        };
+        let kms_provider_raw = vars
+            .get("WADDLE_BROKER_KMS_PROVIDER")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        let kms = if !enabled {
+            BrokerKmsProviderConfig::Local
+        } else {
+            match kms_provider_raw.as_deref().unwrap_or("local") {
+                "local" => BrokerKmsProviderConfig::Local,
+                "scaleway" => {
+                    let base_url = vars
+                        .get("WADDLE_SCW_KMS_BASE_URL")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| DEFAULT_SCW_KMS_BASE_URL.to_owned());
+                    let region = vars
+                        .get("WADDLE_SCW_KMS_REGION")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| DEFAULT_SCW_KMS_REGION.to_owned());
+                    let project_id = vars
+                        .get("WADDLE_SCW_KMS_PROJECT_ID")
+                        .map(|v| v.trim().to_string())
+                        .unwrap_or_default();
+                    let root_key_id = vars
+                        .get("WADDLE_SCW_KMS_ROOT_KEY_ID")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty());
+                    if project_id.is_empty() && root_key_id.is_none() {
+                        return Err(
+                            "WADDLE_SCW_KMS_PROJECT_ID is required when WADDLE_BROKER_KMS_PROVIDER=scaleway"
+                                .to_owned(),
+                        );
+                    }
+                    let auth_token = vars
+                        .get("WADDLE_SCW_KMS_AUTH_TOKEN")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| {
+                            "WADDLE_SCW_KMS_AUTH_TOKEN is required when WADDLE_BROKER_KMS_PROVIDER=scaleway"
+                                .to_owned()
+                        })?;
+                    BrokerKmsProviderConfig::Scaleway(ScalewayKmsConfig {
+                        base_url,
+                        region,
+                        project_id,
+                        auth_token: Zeroizing::new(auth_token),
+                        root_key_id,
+                        timeout: Duration::from_secs(10),
+                    })
+                }
+                "vault" => {
+                    let base_url = vars
+                        .get("WADDLE_VAULT_ADDR")
+                        .or_else(|| vars.get("WADDLE_BROKER_VAULT_BASE_URL"))
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| {
+                            "WADDLE_VAULT_ADDR (or WADDLE_BROKER_VAULT_BASE_URL) is required when WADDLE_BROKER_KMS_PROVIDER=vault"
+                                .to_owned()
+                        })?;
+                    let mount = vars
+                        .get("WADDLE_VAULT_TRANSIT_MOUNT")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| "transit".to_owned());
+                    let token = vars
+                        .get("WADDLE_VAULT_TOKEN")
+                        .or_else(|| vars.get("WADDLE_BROKER_VAULT_TOKEN"))
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| {
+                            "WADDLE_VAULT_TOKEN (or WADDLE_BROKER_VAULT_TOKEN) is required when WADDLE_BROKER_KMS_PROVIDER=vault"
+                                .to_owned()
+                        })?;
+                    let namespace = vars
+                        .get("WADDLE_VAULT_NAMESPACE")
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty());
+                    BrokerKmsProviderConfig::Vault(VaultTransitConfig {
+                        base_url,
+                        mount,
+                        token: Zeroizing::new(token),
+                        namespace,
+                        timeout: Duration::from_secs(10),
+                    })
+                }
+                other => {
+                    return Err(format!(
+                        "invalid WADDLE_BROKER_KMS_PROVIDER='{other}': expected 'scaleway', 'vault', or 'local'"
+                    ));
+                }
+            }
+        };
+
+        let explicit_data_dir = vars
+            .get("WADDLE_BROKER_DATA_DIR")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        let data_dir = match explicit_data_dir {
+            Some(dir) => Some(dir),
+            None if enabled
+                && (explicit_enabled.is_some()
+                    || !matches!(kms, BrokerKmsProviderConfig::Local)) =>
+            {
+                Some(PathBuf::from(DEFAULT_BROKER_DATA_DIR))
+            }
+            None => None,
+        };
+        let admission_db = vars
+            .get("WADDLE_BROKER_ADMISSION_DB")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        let cell_spiffe_id = vars
+            .get("WADDLE_CELL_SPIFFE_ID")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        Ok(Self {
+            enabled,
+            data_dir,
+            admission_db,
+            kms,
+            cell_spiffe_id,
+        })
+    }
+
+    /// Resolves the on-disk admission ledger path, preferring
+    /// `WADDLE_BROKER_ADMISSION_DB` and falling back to
+    /// `<WADDLE_BROKER_DATA_DIR>/admission.db`.
+    pub fn resolved_admission_db_path(&self) -> Option<PathBuf> {
+        self.admission_db
+            .clone()
+            .or_else(|| self.data_dir.as_ref().map(|dir| dir.join("admission.db")))
+    }
+
+    /// Resolves the on-disk custody vault and destruction ledger paths
+    /// (`<WADDLE_BROKER_DATA_DIR>/custody.db` and
+    /// `<WADDLE_BROKER_DATA_DIR>/destruction_ledger.db`).
+    pub fn resolved_custody_ledger_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        self.data_dir
+            .as_ref()
+            .map(|dir| (dir.join("custody.db"), dir.join("destruction_ledger.db")))
+    }
+}
+
+/// Multi-tenant bootstrap configuration (`WADDLE_DEFAULT_TENANT_ID`,
+/// `WADDLE_TENANTS_DIR`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MultiTenantConfig {
+    pub default_tenant_id: Option<TenantId>,
+    pub tenants_dir: Option<PathBuf>,
+}
+
+impl MultiTenantConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let vars = vars
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
+            .collect::<HashMap<_, _>>();
+        let default_tenant_id = match vars
+            .get("WADDLE_DEFAULT_TENANT_ID")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            None => None,
+            Some(raw) => Some(
+                TenantId::parse(raw)
+                    .map_err(|err| format!("invalid WADDLE_DEFAULT_TENANT_ID='{raw}': {err}"))?,
+            ),
+        };
+        let tenants_dir = vars
+            .get("WADDLE_TENANTS_DIR")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        Ok(Self {
+            default_tenant_id,
+            tenants_dir,
+        })
+    }
+
+    /// Resolve the canonical default [`TenantId`], falling back to
+    /// `fallback_domain` (typically `xmpp_config.domain`) or `"waddle.social"`.
+    pub fn resolved_default_tenant_id(&self, fallback_domain: &str) -> Result<TenantId, String> {
+        if let Some(ref tenant) = self.default_tenant_id {
+            return Ok(tenant.clone());
+        }
+        let candidate = fallback_domain.trim().to_ascii_lowercase();
+        if !candidate.is_empty() {
+            if let Ok(parsed) = TenantId::parse(&candidate) {
+                return Ok(parsed);
+            }
+        }
+        TenantId::parse("waddle.social")
+            .map_err(|err| format!("failed to parse fallback default tenant id: {err}"))
     }
 }
 
@@ -1153,8 +1696,20 @@ pub struct ServerConfig {
     /// Maximum physical WebSocket connections admitted by this process.
     pub max_websocket_connections: MaxWebSocketConnections,
     /// SpiceDB backend configuration.
-    /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
+    /// OpenFGA backend configuration (`WADDLE_OPENFGA_*`).
+    pub openfga: Option<OpenFgaConfig>,
+    /// Authorization backend selector (`WADDLE_AUTHZ_BACKEND`).
+    pub authz_backend: AuthzBackendSelection,
+    /// Broker custody, admission ledger, and KMS configuration (`WADDLE_BROKER_*`,
+    /// `WADDLE_SCW_KMS_*`, `WADDLE_CELL_SPIFFE_ID`).
+    pub broker: BrokerRuntimeConfig,
+    /// Turso per-tenant WAL storage configuration (`WADDLE_DB_DRIVER=turso` /
+    /// `WADDLE_TURSO_*`).
+    pub turso: Option<TursoRuntimeConfig>,
+    /// Multi-tenant bootstrap configuration (`WADDLE_DEFAULT_TENANT_ID`,
+    /// `WADDLE_TENANTS_DIR`).
+    pub tenancy: MultiTenantConfig,
     /// Per-deployment HMAC key used to derive XEP-0421 occupant
     /// identifiers. Loaded from `WADDLE_OCCUPANT_ID_SECRET` and shared
     /// across the WebSocket dependencies and `RoomRegistryActor` so
@@ -1711,6 +2266,11 @@ impl Default for ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
+            openfga: None,
+            authz_backend: AuthzBackendSelection::Auto,
+            broker: BrokerRuntimeConfig::default(),
+            turso: None,
+            tenancy: MultiTenantConfig::default(),
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
@@ -1750,6 +2310,18 @@ impl ServerConfig {
         let max_websocket_connections = MaxWebSocketConnections::from_raw(capacity_var.as_deref())
             .map_err(|error| error.to_string())?;
         let spicedb = SpiceDbConfig::from_env()?;
+        let openfga = OpenFgaConfig::from_env()?;
+        let authz_backend = AuthzBackendSelection::from_env()?;
+        if authz_backend == AuthzBackendSelection::Explicit(AuthzBackendKind::OpenFga)
+            && openfga.is_none()
+        {
+            return Err(
+                "WADDLE_OPENFGA_ENDPOINT is required when WADDLE_AUTHZ_BACKEND=openfga".to_string(),
+            );
+        }
+        let broker = BrokerRuntimeConfig::from_env()?;
+        let turso = TursoRuntimeConfig::from_env()?;
+        let tenancy = MultiTenantConfig::from_env()?;
 
         let occupant_id_secret =
             parse_occupant_id_secret(std::env::var("WADDLE_OCCUPANT_ID_SECRET").ok().as_deref())?;
@@ -1775,6 +2347,11 @@ impl ServerConfig {
             ws_keepalive,
             max_websocket_connections,
             spicedb,
+            openfga,
+            authz_backend,
+            broker,
+            turso,
+            tenancy,
             occupant_id_secret,
             ingress,
             clustering,
@@ -1783,6 +2360,24 @@ impl ServerConfig {
             trusted_web_origins,
             host_grant_restore_epoch,
         })
+    }
+
+    /// Resolve the effective authorization backend kind from explicit
+    /// `WADDLE_AUTHZ_BACKEND` or auto-selection (`openfga` when
+    /// `WADDLE_OPENFGA_ENDPOINT` is set and `WADDLE_SPICEDB_ENDPOINT` is unset).
+    pub fn resolved_authz_backend(&self) -> Option<AuthzBackendKind> {
+        match self.authz_backend {
+            AuthzBackendSelection::Explicit(kind) => Some(kind),
+            AuthzBackendSelection::Auto => {
+                if self.openfga.is_some() && self.spicedb.is_none() {
+                    Some(AuthzBackendKind::OpenFga)
+                } else if self.spicedb.is_some() {
+                    Some(AuthzBackendKind::SpiceDb)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     pub fn auth_enabled(&self) -> bool {
@@ -1819,6 +2414,11 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
+            openfga: None,
+            authz_backend: AuthzBackendSelection::Auto,
+            broker: BrokerRuntimeConfig::default(),
+            turso: None,
+            tenancy: MultiTenantConfig::default(),
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
@@ -1841,6 +2441,11 @@ impl ServerConfig {
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
             max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
+            openfga: None,
+            authz_backend: AuthzBackendSelection::Auto,
+            broker: BrokerRuntimeConfig::default(),
+            turso: None,
+            tenancy: MultiTenantConfig::default(),
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
@@ -2907,6 +3512,9 @@ pub struct DatabaseRuntimeConfig {
     /// global database's main pool only; the control-plane pool keeps its
     /// fixed bound.
     pub acquire_timeout: Duration,
+    /// Per-tenant Turso WAL storage configuration when `WADDLE_DB_DRIVER=turso`
+    /// or `WADDLE_TURSO_DATA_DIR` is set.
+    pub turso: Option<TursoRuntimeConfig>,
 }
 
 /// Smallest accepted `WADDLE_DB_ACQUIRE_TIMEOUT_SECS`: zero would fail every
@@ -2923,6 +3531,7 @@ impl Default for DatabaseRuntimeConfig {
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool_size: DEFAULT_CONTROL_PLANE_POOL_SIZE,
             acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
+            turso: None,
         }
     }
 }
@@ -2947,6 +3556,7 @@ impl DatabaseRuntimeConfig {
         // whitespace-only after trimming) is a typed error, never a silent
         // fallback — an empty-templated secret in a Postgres deployment must
         // never silently boot sqlite::memory:.
+        let mut turso_driver_selected = false;
         let driver = match vars.get("WADDLE_DB_DRIVER") {
             None => DatabaseDriver::Sqlite,
             Some(raw) => {
@@ -2956,19 +3566,39 @@ impl DatabaseRuntimeConfig {
                         name: "WADDLE_DB_DRIVER",
                     });
                 }
-                trimmed
-                    .parse::<DatabaseDriver>()
-                    .map_err(|e| DatabaseRuntimeConfigError::InvalidDriver(e.to_string()))?
+                if trimmed.eq_ignore_ascii_case("turso") {
+                    turso_driver_selected = true;
+                    DatabaseDriver::Sqlite
+                } else {
+                    trimmed
+                        .parse::<DatabaseDriver>()
+                        .map_err(|e| DatabaseRuntimeConfigError::InvalidDriver(e.to_string()))?
+                }
             }
         };
 
+        let turso = TursoRuntimeConfig::from_vars(&vars)
+            .map_err(DatabaseRuntimeConfigError::InvalidDriver)?;
+
         let database_url = match vars.get("WADDLE_DATABASE_URL") {
-            None => match driver {
-                DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
-                DatabaseDriver::Postgres => {
-                    "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+            None => {
+                if turso_driver_selected {
+                    let control_path = turso
+                        .as_ref()
+                        .map(|cfg| cfg.data_dir.join("control.db"))
+                        .unwrap_or_else(|| {
+                            PathBuf::from(DEFAULT_TURSO_DATA_DIR).join("control.db")
+                        });
+                    format!("sqlite://{}?mode=rwc", control_path.display())
+                } else {
+                    match driver {
+                        DatabaseDriver::Sqlite => "sqlite::memory:".to_string(),
+                        DatabaseDriver::Postgres => {
+                            "postgres://postgres:postgres@localhost:5432/waddle".to_string()
+                        }
+                    }
                 }
-            },
+            }
             Some(raw) => {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
@@ -2994,6 +3624,7 @@ impl DatabaseRuntimeConfig {
             pool_size,
             control_plane_pool_size,
             acquire_timeout,
+            turso,
         })
     }
 }

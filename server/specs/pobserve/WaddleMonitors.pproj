@@ -1,0 +1,10 @@
+<Project>
+  <ProjectName>WaddleMonitors</ProjectName>
+  <InputFiles>
+    <PFile>./Events.p</PFile>
+    <PFile>./AdmissionFenceMonitor.p</PFile>
+    <PFile>./PlacementLeaseMonitor.p</PFile>
+    <PFile>./StreamCancellationMonitor.p</PFile>
+  </InputFiles>
+  <OutputDir>./PGenerated</OutputDir>
+</Project>

@@ -38,7 +38,7 @@ pub(super) enum InboundDisposition {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum StanzaTimeout {
+pub enum StanzaTimeout {
     /// The retryable IQ error accepts responsibility for the request. Keep the
     /// response typed until `frame.rs` reaches the existing transport XML
     /// boundary.
@@ -85,7 +85,7 @@ struct IqReply {
 /// Captured, owned metadata for one inbound stanza: enough to build the
 /// conformant timeout reply and the diagnostic span/log without holding a borrow
 /// on the stanza (which is moved into the dispatch future).
-pub(super) struct StanzaBackstop {
+pub(crate) struct StanzaBackstop {
     /// `"iq"` | `"message"` | `"presence"` — the stanza kind label.
     kind: &'static str,
     /// The request payload namespace (empty when absent), for the metric axis.
@@ -102,7 +102,7 @@ impl StanzaBackstop {
     /// binding happened) stamps the correlation attributes from #1326: the
     /// XMPP resource plus the bare user JID, so one attribute search joins a
     /// browser session's Faro beacons to its server-side spans.
-    pub(super) fn capture(stanza: &Stanza, bound_jid: Option<&jid::FullJid>) -> Self {
+    pub(crate) fn capture(stanza: &Stanza, bound_jid: Option<&jid::FullJid>) -> Self {
         let correlation = MessageCorrelation::capture(stanza);
         match stanza {
             // Only IQ `get`/`set` carry a request payload AND owe a response, so
@@ -265,7 +265,7 @@ impl MessageCorrelation {
 /// `xmpp.stanza.latency` histogram (#1320 wire-up / #1321 dispatch seam);
 /// timeouts keep their dedicated counter and are not double-counted as
 /// processed.
-pub(super) async fn run_with_backstop<F, T>(
+pub(crate) async fn run_with_backstop<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
 ) -> Result<T, StanzaTimeout>
@@ -353,6 +353,97 @@ where
         result,
         authority_revoked_after_start,
     }
+}
+
+/// Handle returned immediately to the WebSocket connection loop when an
+/// inference invocation is admitted as an asynchronous background stream,
+/// decoupling progressive delivery from [`STANZA_HANDLER_WEDGE_TIMEOUT`] (15s).
+pub struct StreamingInferenceSession {
+    pub stream_id: String,
+    pub chunk_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl StreamingInferenceSession {
+    /// Synchronously cancels the background streaming inference task without blocking.
+    pub fn cancel_sync(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
+}
+
+impl Drop for StreamingInferenceSession {
+    fn drop(&mut self) {
+        self.cancel_sync();
+    }
+}
+
+/// Launches a streaming inference execution detached from the 15s synchronous
+/// [`STANZA_HANDLER_WEDGE_TIMEOUT`], wired to `shutdown` (`WADDLE_DRAIN_TIMEOUT_SECS`)
+/// and progressive chunk delivery over a bounded channel.
+pub fn spawn_decoupled_streaming_inference<F, Fut>(
+    stream_id: impl Into<String>,
+    buffer_capacity: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+    worker: F,
+) -> (StreamingInferenceSession, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<Vec<u8>>, tokio::sync::watch::Receiver<bool>) -> Fut
+        + Send
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let tracker = tokio_util::task::TaskTracker::new();
+    let result = spawn_tracked_decoupled_streaming_inference(
+        stream_id,
+        buffer_capacity,
+        shutdown,
+        &tracker,
+        worker,
+    );
+    tracker.close();
+    result
+}
+
+/// Launches and tracks a decoupled streaming inference task in `tracker` so
+/// shutdown drain can signal cancellation and wait for the worker to drop its
+/// Wasmtime store cleanly before runtime teardown.
+pub fn spawn_tracked_decoupled_streaming_inference<F, Fut>(
+    stream_id: impl Into<String>,
+    buffer_capacity: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+    tracker: &tokio_util::task::TaskTracker,
+    worker: F,
+) -> (StreamingInferenceSession, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<Vec<u8>>, tokio::sync::watch::Receiver<bool>) -> Fut
+        + Send
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let stream_id = stream_id.into();
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(buffer_capacity.max(1));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let session = StreamingInferenceSession {
+        stream_id,
+        chunk_rx,
+        cancel_tx: cancel_tx.clone(),
+    };
+    let handle = tracker.spawn(async move {
+        let fut = worker(chunk_tx, cancel_rx);
+        tokio::pin!(fut);
+        let mut shutdown_forwarded = false;
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled(), if !shutdown_forwarded => {
+                    shutdown_forwarded = true;
+                    let _ = cancel_tx.send(true);
+                }
+                () = &mut fut => break,
+            }
+        }
+    });
+    (session, handle)
 }
 
 #[cfg(test)]

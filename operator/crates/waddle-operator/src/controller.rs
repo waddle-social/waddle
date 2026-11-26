@@ -18,7 +18,8 @@ use kube::runtime::watcher;
 use kube::Client;
 use tokio::sync::{oneshot, watch};
 use waddle_operator_crd::{
-    PostgresSourceMode, SecretProviderMode, SpiceDbSourceMode, WaddleServer, WaddleServerPhase,
+    AuthzBackendKind, PostgresSourceMode, SecretProviderMode, SpiceDbSourceMode,
+    StorageBackendKind, WaddleServer, WaddleServerPhase, WaddleTenant,
 };
 use waddle_operator_fsm::{Phase, RequeuePolicy};
 
@@ -31,6 +32,7 @@ use crate::leader_election::{LeaderConfig, LeaderGuard, LeadershipFence};
 use crate::metrics::OperatorMetrics;
 use crate::observer::{self, OperatorPolicy};
 use crate::resources;
+use crate::tenant_controller::{reconcile_tenant, TenantControllerContext};
 
 const ERROR_REQUEUE_SECS: u64 = 15;
 const SERVICEACCOUNT_NS_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
@@ -112,8 +114,8 @@ pub async fn reconcile_single(
     })
 }
 
-/// Runs the Kubernetes controller loop with optional leader election, capability discovery,
-/// scoped watches, and graceful shutdown.
+/// Runs both the `WaddleServer` and `WaddleTenant` Kubernetes controller loops concurrently
+/// with optional leader election, capability discovery, scoped watches, and graceful shutdown.
 ///
 /// # Errors
 /// Returns [`OperatorError::LeadershipLost`] if active lease renewal fails, or Kubernetes client
@@ -188,8 +190,6 @@ pub async fn run_controller(
             watcher::Config::default(),
         );
 
-    // Only watch operator-managed Secrets when YOLO mode is explicitly opted in so production
-    // installations using `config/rbac-eso-only` (`get` only on Secrets) never hit 403 LIST errors.
     if args.enable_yolo_mode {
         controller = controller.owns(
             scoped_api::<Secret>(&client, ns),
@@ -232,6 +232,21 @@ pub async fn run_controller(
         });
     }
 
+    let tenant_api = scoped_api::<WaddleTenant>(&client, ns);
+    let mut tenant_controller = Controller::new(tenant_api, watcher::Config::default());
+    let tenant_store = tenant_controller.store();
+    tenant_controller = tenant_controller
+        .owns(
+            scoped_api::<ConfigMap>(&client, ns),
+            watcher::Config::default(),
+        )
+        .watches_with(
+            scoped_api::<WaddleServer>(&client, ns),
+            (),
+            watcher::Config::default(),
+            move |ws| map_server_to_tenants(&ws, &tenant_store),
+        );
+
     let (_, holder_id) = resolve_lease_identity(&args);
     let recorder = Recorder::new(
         client.clone(),
@@ -252,13 +267,21 @@ pub async fn run_controller(
             allowed_cluster_secret_stores: args.allowed_cluster_secret_stores,
             capabilities,
         },
+        metrics: Arc::clone(&metrics),
+        recorder: Some(recorder.clone()),
+        leadership: leadership.clone(),
+    });
+
+    let tenant_ctx = Arc::new(TenantControllerContext {
+        client: client.clone(),
         metrics,
         recorder: Some(recorder),
         leadership,
+        openfga_endpoint_override: None,
     });
 
     let leadership_lost = Arc::new(AtomicBool::new(false));
-    let (ctrl_stop_tx, ctrl_stop_rx) = oneshot::channel::<()>();
+    let (stop_tx, stop_rx) = watch::channel(false);
     let lost_flag = Arc::clone(&leadership_lost);
     let health_monitor = Arc::clone(&health);
     let mut lost_rx = leader_guard.as_mut().and_then(LeaderGuard::take_lost_rx);
@@ -271,17 +294,17 @@ pub async fn run_controller(
                         lost_flag.store(true, Ordering::Release);
                     }
                     health_monitor.set_ready(false);
-                    let _ = ctrl_stop_tx.send(());
+                    let _ = stop_tx.send(true);
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
                     health_monitor.set_ready(false);
-                    let _ = ctrl_stop_tx.send(());
+                    let _ = stop_tx.send(true);
                 }
             }
         } else {
             wait_for_shutdown(&mut shutdown).await;
             health_monitor.set_ready(false);
-            let _ = ctrl_stop_tx.send(());
+            let _ = stop_tx.send(true);
         }
     });
 
@@ -299,17 +322,31 @@ pub async fn run_controller(
         }
     });
 
-    controller
+    let mut server_stop_rx = stop_rx.clone();
+    let server_fut = controller
         .graceful_shutdown_on(async move {
-            let _ = ctrl_stop_rx.await;
+            wait_for_shutdown(&mut server_stop_rx).await;
         })
         .run(reconcile_single, error_policy, ctx)
         .for_each(|res| async {
             if let Err(err) = res {
-                tracing::warn!(error = %err, "controller stream item failed");
+                tracing::warn!(error = %err, "WaddleServer controller stream item failed");
             }
+        });
+
+    let mut tenant_stop_rx = stop_rx;
+    let tenant_fut = tenant_controller
+        .graceful_shutdown_on(async move {
+            wait_for_shutdown(&mut tenant_stop_rx).await;
         })
-        .await;
+        .run(reconcile_tenant, tenant_error_policy, tenant_ctx)
+        .for_each(|res| async {
+            if let Err(err) = res {
+                tracing::warn!(error = %err, "WaddleTenant controller stream item failed");
+            }
+        });
+
+    tokio::join!(server_fut, tenant_fut);
 
     let _ = ready_cancel_tx.send(());
     let _ = ready_task.await;
@@ -343,7 +380,7 @@ fn error_policy(ws: Arc<WaddleServer>, err: &OperatorError, ctx: Arc<ControllerC
         tracing::warn!(
             namespace = ws.metadata.namespace.as_deref().unwrap_or("<none>"),
             name = ws.metadata.name.as_deref().unwrap_or("<none>"),
-            "leadership lost during reconciliation; halting retries"
+            "leadership lost during WaddleServer reconciliation; halting retries"
         );
         return Action::await_change();
     }
@@ -351,7 +388,30 @@ fn error_policy(ws: Arc<WaddleServer>, err: &OperatorError, ctx: Arc<ControllerC
         namespace = ws.metadata.namespace.as_deref().unwrap_or("<none>"),
         name = ws.metadata.name.as_deref().unwrap_or("<none>"),
         error = %err,
-        "reconcile failed; scheduling retry"
+        "WaddleServer reconcile failed; scheduling retry"
+    );
+    Action::requeue(Duration::from_secs(ERROR_REQUEUE_SECS))
+}
+
+fn tenant_error_policy(
+    wt: Arc<WaddleTenant>,
+    err: &OperatorError,
+    ctx: Arc<TenantControllerContext>,
+) -> Action {
+    ctx.metrics.record_error();
+    if matches!(err, OperatorError::LeadershipLost) {
+        tracing::warn!(
+            namespace = wt.metadata.namespace.as_deref().unwrap_or("<none>"),
+            name = wt.metadata.name.as_deref().unwrap_or("<none>"),
+            "leadership lost during WaddleTenant reconciliation; halting retries"
+        );
+        return Action::await_change();
+    }
+    tracing::warn!(
+        namespace = wt.metadata.namespace.as_deref().unwrap_or("<none>"),
+        name = wt.metadata.name.as_deref().unwrap_or("<none>"),
+        error = %err,
+        "WaddleTenant reconcile failed; scheduling retry"
     );
     Action::requeue(Duration::from_secs(ERROR_REQUEUE_SECS))
 }
@@ -372,6 +432,26 @@ fn scoped_dynamic_api(client: &Client, ns: Option<&str>, ar: &ApiResource) -> Ap
         Some(namespace) => Api::namespaced_with(client.clone(), namespace, ar),
         None => Api::all_with(client.clone(), ar),
     }
+}
+
+fn map_server_to_tenants(
+    ws: &WaddleServer,
+    store: &Store<WaddleTenant>,
+) -> Vec<ObjectRef<WaddleTenant>> {
+    let (Some(ns), Some(server_name)) = (
+        ws.metadata.namespace.as_deref(),
+        ws.metadata.name.as_deref(),
+    ) else {
+        return Vec::new();
+    };
+
+    store
+        .state()
+        .into_iter()
+        .filter(|wt| wt.metadata.namespace.as_deref() == Some(ns))
+        .filter(|wt| wt.spec.server_ref.name == server_name)
+        .map(|wt| ObjectRef::from_obj(wt.as_ref()))
+        .collect()
 }
 
 fn map_endpoint_slice(
@@ -400,32 +480,36 @@ fn map_endpoint_slice(
 }
 
 fn ws_references_service(ws: &WaddleServer, svc_name: &str) -> bool {
-    let pg_matches = ws.spec.postgres.mode == PostgresSourceMode::External
-        && ws
-            .spec
-            .postgres
-            .external
-            .as_ref()
-            .and_then(|e| e.service_name.as_deref())
-            == Some(svc_name);
+    let storage_matches = ws.spec.storage.backend == StorageBackendKind::Postgres
+        && ws.spec.storage.postgres.as_ref().is_some_and(|pg| {
+            pg.mode == PostgresSourceMode::External
+                && pg.external.as_ref().and_then(|e| e.service_name.as_deref()) == Some(svc_name)
+        });
 
-    let sp_matches = match ws.spec.spicedb.mode {
-        SpiceDbSourceMode::SpiceDbOperator => {
-            ws.spec.spicedb.operator.as_ref().is_some_and(|op| {
-                op.service_name.as_deref().unwrap_or(&op.cluster_name) == svc_name
-            })
-        }
-        SpiceDbSourceMode::External => {
-            ws.spec
-                .spicedb
-                .external
+    let authz_matches =
+        match ws.spec.authz.backend {
+            AuthzBackendKind::OpenFga => ws
+                .spec
+                .authz
+                .openfga
                 .as_ref()
-                .and_then(|ext| ext.service_name.as_deref())
-                == Some(svc_name)
-        }
-    };
+                .is_some_and(|fga| fga.service_name == svc_name),
+            AuthzBackendKind::SpiceDb => ws.spec.authz.spicedb.as_ref().is_some_and(|sp| match sp
+                .mode
+            {
+                SpiceDbSourceMode::SpiceDbOperator => sp.operator.as_ref().is_some_and(|op| {
+                    op.service_name.as_deref().unwrap_or(&op.cluster_name) == svc_name
+                }),
+                SpiceDbSourceMode::External => {
+                    sp.external
+                        .as_ref()
+                        .and_then(|ext| ext.service_name.as_deref())
+                        == Some(svc_name)
+                }
+            }),
+        };
 
-    pg_matches || sp_matches
+    storage_matches || authz_matches
 }
 
 fn map_cnpg(cluster: &DynamicObject, store: &Store<WaddleServer>) -> Vec<ObjectRef<WaddleServer>> {
@@ -441,13 +525,14 @@ fn map_cnpg(cluster: &DynamicObject, store: &Store<WaddleServer>) -> Vec<ObjectR
         .into_iter()
         .filter(|ws| ws.metadata.namespace.as_deref() == Some(ns))
         .filter(|ws| {
-            ws.spec.postgres.mode == PostgresSourceMode::CloudNativePg
-                && ws
-                    .spec
-                    .postgres
-                    .cnpg
-                    .as_ref()
-                    .is_some_and(|c| c.cluster_name == cluster_name)
+            ws.spec.storage.backend == StorageBackendKind::Postgres
+                && ws.spec.storage.postgres.as_ref().is_some_and(|pg| {
+                    pg.mode == PostgresSourceMode::CloudNativePg
+                        && pg
+                            .cnpg
+                            .as_ref()
+                            .is_some_and(|c| c.cluster_name == cluster_name)
+                })
         })
         .map(|ws| ObjectRef::from_obj(ws.as_ref()))
         .collect()
@@ -469,13 +554,14 @@ fn map_spicedb(
         .into_iter()
         .filter(|ws| ws.metadata.namespace.as_deref() == Some(ns))
         .filter(|ws| {
-            ws.spec.spicedb.mode == SpiceDbSourceMode::SpiceDbOperator
-                && ws
-                    .spec
-                    .spicedb
-                    .operator
-                    .as_ref()
-                    .is_some_and(|op| op.cluster_name == cluster_name)
+            ws.spec.authz.backend == AuthzBackendKind::SpiceDb
+                && ws.spec.authz.spicedb.as_ref().is_some_and(|sp| {
+                    sp.mode == SpiceDbSourceMode::SpiceDbOperator
+                        && sp
+                            .operator
+                            .as_ref()
+                            .is_some_and(|op| op.cluster_name == cluster_name)
+                })
         })
         .map(|ws| ObjectRef::from_obj(ws.as_ref()))
         .collect()

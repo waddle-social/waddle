@@ -103,18 +103,6 @@ impl ExtensionManager {
         Some(ObserverOutcome { effects })
     }
 
-    /// Apply message hooks in the default `local` community and return the number of
-    /// enrichments appended to the stanza.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the fixed nonblank `local` community identifier violates the
-    /// identifier constructor invariant.
-    pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        self.enrich_message_for_waddle(msg, WaddleId::try_new("local").expect("static waddle id"))
-            .await
-    }
-
     /// Apply message hooks in the specified community and return the number of
     /// enrichments appended to the stanza.
     pub async fn enrich_message_for_waddle(&self, msg: &mut Message, waddle_id: WaddleId) -> usize {
@@ -298,6 +286,9 @@ impl ExtensionManager {
                         | ExtensionEffect::CommandForm(_) => {}
                         ExtensionEffect::HostWarning(warning) => {
                             emitted_effects.push(ExtensionEffect::HostWarning(warning));
+                        }
+                        ExtensionEffect::HostDenial(denial) => {
+                            emitted_effects.push(ExtensionEffect::HostDenial(denial));
                         }
                         ExtensionEffect::Noop => {}
                     }

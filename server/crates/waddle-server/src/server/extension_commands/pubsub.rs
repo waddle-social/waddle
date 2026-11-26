@@ -239,6 +239,11 @@ pub(crate) async fn extension_command_result(
                     message.as_str().to_string(),
                 ));
             }
+            ExtensionEffect::HostDenial(message) => {
+                return waddle_xmpp::commands::CommandResult::Error(
+                    waddle_xmpp::XmppError::forbidden(Some(message.as_str().to_string())),
+                );
+            }
             ExtensionEffect::EnrichMessage(envelope) => {
                 let count = envelope.enrichments.len();
                 if result_form.is_none() {
@@ -385,6 +390,28 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].note_type, NoteType::Error);
         assert_eq!(notes[0].text, "invalid submitted form");
+    }
+
+    #[tokio::test]
+    async fn host_denial_command_result_returns_forbidden_error() {
+        let result = extension_command_result(
+            vec![ExtensionEffect::HostDenial(
+                DisplayText::try_new("broker inference denied").expect("denial text"),
+            )],
+            None,
+            Some("session-123".to_string()),
+        )
+        .await;
+
+        let CommandResult::Error(waddle_xmpp::XmppError::Stanza {
+            condition: waddle_xmpp::StanzaErrorCondition::Forbidden,
+            text,
+            ..
+        }) = result
+        else {
+            panic!("expected forbidden command error");
+        };
+        assert_eq!(text.as_deref(), Some("broker inference denied"));
     }
 
     fn envelope() -> ExtensionEnvelope {

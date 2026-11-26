@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openfga-data
+  namespace: waddle-next
+  labels:
+    app.kubernetes.io/name: openfga
+    app.kubernetes.io/part-of: waddle-next
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: openebs-mayastor
+  resources:
+    requests:
+      storage: 5Gi

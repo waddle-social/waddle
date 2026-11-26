@@ -269,6 +269,34 @@ pub fn decode_subject(
     })
 }
 
+/// Encode a tenant-scoped raw authorization identifier (`"{tenant_id}|{raw_id}"`)
+/// for SpiceDB. Validates that the combined UTF-8 byte length is within
+/// [`MAX_AUTHZ_ID_BYTES`] (765 bytes -> 1023 wire bytes <= 1024) BEFORE base64url
+/// encoding and before any RPC.
+pub fn encode_tenant_scoped_id(
+    tenant_id: &waddle_broker_core::identity::TenantId,
+    raw_id: &str,
+) -> Result<EncodedObjectId, AuthzIdError> {
+    if raw_id.is_empty() {
+        return Err(AuthzIdError::Empty);
+    }
+    let scoped = format!("{}|{raw_id}", tenant_id.as_str());
+    validate_source(&scoped)?;
+    Ok(EncodedObjectId(encode_wire(&scoped)))
+}
+
+/// Decode a tenant-scoped SpiceDB wire identifier back into `(tenant_id, raw_id)`.
+pub fn decode_tenant_scoped_id(wire: &str) -> Result<(String, String), AuthzIdError> {
+    let scoped = decode_wire(wire)?;
+    let (tenant, raw_id) = scoped
+        .split_once('|')
+        .ok_or(AuthzIdError::InvalidEncoding)?;
+    if tenant.is_empty() || raw_id.is_empty() {
+        return Err(AuthzIdError::InvalidEncoding);
+    }
+    Ok((tenant.to_owned(), raw_id.to_owned()))
+}
+
 fn validate_source(value: &str) -> Result<(), AuthzIdError> {
     if value.is_empty() {
         return Err(AuthzIdError::Empty);

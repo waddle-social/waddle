@@ -12,7 +12,7 @@ pub enum OperatorError {
         source: kube::Error,
     },
     /// Resource is missing required metadata (name or namespace).
-    #[error("WaddleServer is missing required metadata field {field}")]
+    #[error("resource is missing required metadata field {field}")]
     MissingMetadata {
         /// Name of the missing metadata field.
         field: &'static str,
@@ -23,6 +23,14 @@ pub enum OperatorError {
     /// Invalid or malformed external dependency or workload state.
     #[error("invalid cluster state: {0}")]
     InvalidClusterState(String),
+    /// OpenFGA HTTP provisioning or API error.
+    #[error("OpenFGA API error during {context}: {detail}")]
+    OpenFga {
+        /// Operation description.
+        context: &'static str,
+        /// Non-secret diagnostic error detail.
+        detail: String,
+    },
     /// Serialization error for CRD or child manifests.
     #[error("serialization error: {0}")]
     Serialization(String),

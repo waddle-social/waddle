@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::Resource;
-use waddle_operator_crd::WaddleServer;
+use waddle_operator_crd::{WaddleServer, WaddleTenant};
 
 use crate::error::OperatorError;
 
@@ -10,6 +10,10 @@ use crate::error::OperatorError;
 pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 /// Label value placed on operator-managed Secrets and resources.
 pub const MANAGED_BY_VALUE: &str = "waddle-operator";
+/// Label linking tenant projection ConfigMaps to their hosting `WaddleServer`.
+pub const SERVER_LABEL: &str = "waddle.social/server";
+/// Label recording the canonical tenant ID on tenant projection ConfigMaps.
+pub const TENANT_LABEL: &str = "waddle.social/tenant";
 
 /// Returns the `WaddleServer` object name or [`OperatorError::MissingMetadata`].
 ///
@@ -50,6 +54,45 @@ pub fn owner_reference(ws: &WaddleServer) -> Result<OwnerReference, OperatorErro
         })
 }
 
+/// Returns the `WaddleTenant` object name or [`OperatorError::MissingMetadata`].
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] when `.metadata.name` is missing.
+pub fn tenant_name(wt: &WaddleTenant) -> Result<&str, OperatorError> {
+    wt.metadata
+        .name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .ok_or(OperatorError::MissingMetadata {
+            field: "metadata.name",
+        })
+}
+
+/// Returns the `WaddleTenant` namespace or [`OperatorError::MissingMetadata`].
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] when `.metadata.namespace` is missing.
+pub fn tenant_namespace(wt: &WaddleTenant) -> Result<&str, OperatorError> {
+    wt.metadata
+        .namespace
+        .as_deref()
+        .filter(|ns| !ns.is_empty())
+        .ok_or(OperatorError::MissingMetadata {
+            field: "metadata.namespace",
+        })
+}
+
+/// Builds the controller `OwnerReference` pointing back to `wt`.
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] if `name` or `uid` is missing.
+pub fn tenant_owner_reference(wt: &WaddleTenant) -> Result<OwnerReference, OperatorError> {
+    wt.controller_owner_ref(&())
+        .ok_or(OperatorError::MissingMetadata {
+            field: "metadata.uid",
+        })
+}
+
 /// Standard pod/service selector labels matching the Helm chart conventions.
 ///
 /// # Errors
@@ -85,6 +128,26 @@ pub fn common_labels(ws: &WaddleServer) -> Result<BTreeMap<String, String>, Oper
 /// Returns [`OperatorError::MissingMetadata`] when `.metadata.name` is absent.
 pub fn config_map_name(ws: &WaddleServer) -> Result<String, OperatorError> {
     Ok(format!("{}-config", workload_name(ws)?))
+}
+
+/// Name of the aggregated tenant manifests ConfigMap (`<name>-tenants`).
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] when `.metadata.name` is absent.
+pub fn tenants_config_map_name(ws: &WaddleServer) -> Result<String, OperatorError> {
+    Ok(format!("{}-tenants", workload_name(ws)?))
+}
+
+/// Name of the aggregated tenant manifests ConfigMap for a server name.
+#[must_use]
+pub fn tenants_config_map_name_for_server(server_name: &str) -> String {
+    format!("{server_name}-tenants")
+}
+
+/// Name of the per-tenant projection ConfigMap (`waddle-tenant-<cr-name>`).
+#[must_use]
+pub fn tenant_projection_config_map_name(cr_name: &str) -> String {
+    format!("waddle-tenant-{cr_name}")
 }
 
 /// Name of the operator-generated YOLO Secret.

@@ -1,3 +1,4 @@
+use crate::config::DEFAULT_TURSO_DATA_DIR;
 use crate::db::lineage::PgSchemaName;
 use crate::db::physical_attestation::{validate_identifier, PgRoleName};
 use anyhow::Context;
@@ -407,12 +408,28 @@ fn parse_optional_canonical_env<T>(
 pub(crate) fn resolve_xmpp_database_url(env_key: &str) -> ResolvedXmppDatabaseUrl {
     let explicit = std::env::var(env_key).ok();
     let global = std::env::var("WADDLE_DATABASE_URL").ok();
-    resolve_xmpp_database_url_values(explicit.as_deref(), global.as_deref())
+    let db_driver = std::env::var("WADDLE_DB_DRIVER").ok();
+    let turso_data_dir = std::env::var("WADDLE_TURSO_DATA_DIR").ok();
+    resolve_xmpp_database_url_with_driver(
+        explicit.as_deref(),
+        global.as_deref(),
+        db_driver.as_deref(),
+        turso_data_dir.as_deref(),
+    )
 }
 
 pub(crate) fn resolve_xmpp_database_url_values(
     explicit: Option<&str>,
     global: Option<&str>,
+) -> ResolvedXmppDatabaseUrl {
+    resolve_xmpp_database_url_with_driver(explicit, global, None, None)
+}
+
+fn resolve_xmpp_database_url_with_driver(
+    explicit: Option<&str>,
+    global: Option<&str>,
+    db_driver: Option<&str>,
+    turso_data_dir: Option<&str>,
 ) -> ResolvedXmppDatabaseUrl {
     let nonempty = |value: Option<&str>| {
         value
@@ -423,5 +440,119 @@ pub(crate) fn resolve_xmpp_database_url_values(
     nonempty(explicit)
         .map(ResolvedXmppDatabaseUrl::Explicit)
         .or_else(|| nonempty(global).map(ResolvedXmppDatabaseUrl::InheritedGlobal))
+        .or_else(|| {
+            let is_turso = db_driver
+                .map(str::trim)
+                .is_some_and(|driver| driver.eq_ignore_ascii_case("turso"));
+            if !is_turso {
+                return None;
+            }
+            let dir = turso_data_dir
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty())
+                .unwrap_or(DEFAULT_TURSO_DATA_DIR);
+            let control_path = PathBuf::from(dir).join("control.db");
+            Some(ResolvedXmppDatabaseUrl::InheritedGlobal(format!(
+                "sqlite://{}?mode=rwc",
+                control_path.display()
+            )))
+        })
         .unwrap_or(ResolvedXmppDatabaseUrl::EphemeralFallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turso_driver_falls_back_to_default_control_db_as_inherited_global() {
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(None, None, Some("turso"), None),
+            ResolvedXmppDatabaseUrl::InheritedGlobal(format!(
+                "sqlite://{DEFAULT_TURSO_DATA_DIR}/control.db?mode=rwc"
+            ))
+        );
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                Some("   "),
+                Some(""),
+                Some("  TuRsO  "),
+                Some("   ")
+            ),
+            ResolvedXmppDatabaseUrl::InheritedGlobal(format!(
+                "sqlite://{DEFAULT_TURSO_DATA_DIR}/control.db?mode=rwc"
+            ))
+        );
+    }
+
+    #[test]
+    fn turso_driver_uses_custom_turso_data_dir() {
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                None,
+                None,
+                Some("turso"),
+                Some("/srv/waddle/tenants")
+            ),
+            ResolvedXmppDatabaseUrl::InheritedGlobal(
+                "sqlite:///srv/waddle/tenants/control.db?mode=rwc".to_string()
+            )
+        );
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                None,
+                None,
+                Some("turso"),
+                Some(" /srv/waddle/tenants/ ")
+            ),
+            ResolvedXmppDatabaseUrl::InheritedGlobal(
+                "sqlite:///srv/waddle/tenants/control.db?mode=rwc".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn explicit_and_global_database_urls_take_precedence_over_turso_fallback() {
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                Some("sqlite:///explicit/mam.db?mode=rwc"),
+                Some("sqlite:///global/waddle.db?mode=rwc"),
+                Some("turso"),
+                Some("/srv/waddle/tenants")
+            ),
+            ResolvedXmppDatabaseUrl::Explicit("sqlite:///explicit/mam.db?mode=rwc".to_string())
+        );
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                None,
+                Some("sqlite:///global/waddle.db?mode=rwc"),
+                Some("turso"),
+                Some("/srv/waddle/tenants")
+            ),
+            ResolvedXmppDatabaseUrl::InheritedGlobal(
+                "sqlite:///global/waddle.db?mode=rwc".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn non_turso_driver_without_urls_falls_back_to_ephemeral() {
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(None, None, None, Some("/srv/waddle/tenants")),
+            ResolvedXmppDatabaseUrl::EphemeralFallback
+        );
+        assert_eq!(
+            resolve_xmpp_database_url_with_driver(
+                None,
+                None,
+                Some("sqlite"),
+                Some("/srv/waddle/tenants")
+            ),
+            ResolvedXmppDatabaseUrl::EphemeralFallback
+        );
+        assert_eq!(
+            resolve_xmpp_database_url_values(None, None),
+            ResolvedXmppDatabaseUrl::EphemeralFallback
+        );
+    }
 }

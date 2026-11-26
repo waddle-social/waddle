@@ -21,7 +21,7 @@ const LOOKUP_CANDIDATE: &str =
 const INGRESS_API_CANDIDATE: &str =
     include_str!("../../src/db/migrations/owner/ingress_definer_api_candidate.sql");
 /// The schema baseline, which creates the receipt journal and its writer.
-const RECEIPT_WRITER_SOURCE: &str = include_str!("../../sql/baseline/postgres.sql");
+const RECEIPT_WRITER_SOURCE: &str = include_str!("../../sql/v1/postgres.sql");
 
 pub(super) async fn exercise(
     fixture: &Fixture,

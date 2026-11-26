@@ -18,7 +18,7 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1] / "crates/waddle-server/src/db"
-BASELINE = ROOT.parents[1] / "sql/baseline/postgres.sql"
+BASELINE = ROOT.parents[1] / "sql/v1/postgres.sql"
 SCHEMA = "restricted_manifest_build"
 API = "restricted_manifest_api"
 RUNTIME = "restricted_manifest_runtime"

@@ -92,8 +92,16 @@ impl ExtensionManager {
         {
             return RoomObservationOutcome::NotApplicable(ObservationSkip::MissingOriginId);
         }
+        let waddle_id = self
+            .tenant_id
+            .as_ref()
+            .and_then(|t| crate::types::WaddleId::try_new(t.as_str().to_owned()).ok())
+            .or_else(|| {
+                crate::types::WaddleId::try_new(source.room.domain().as_str().to_owned()).ok()
+            })
+            .expect("room domain or tenant id is non-empty");
         match actor
-            .observe_room_message(RoomMessageObserve { source, body }, delivery)
+            .observe_room_message(waddle_id, RoomMessageObserve { source, body }, delivery)
             .await
         {
             Ok(response) => {

@@ -21,6 +21,7 @@ impl ExtensionManager {
                 | ExtensionEffect::ReferenceArtifact(_)
                 | ExtensionEffect::CommandForm(_)
                 | ExtensionEffect::HostWarning(_)
+                | ExtensionEffect::HostDenial(_)
                 | ExtensionEffect::Noop => {}
             }
         }

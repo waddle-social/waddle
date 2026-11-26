@@ -35,12 +35,11 @@ object SlashCommandTestTags {
     fun item(node: String) = "slash-command-item:$node"
 }
 
-/** The composer's dispatch seam bound to one host + send pipeline. */
+/** The composer's dispatch seam bound to one host. */
 fun slashDispatchOf(
     host: SlashCommandHost,
-    sendPublicMessage: suspend (String) -> Unit,
 ): suspend (SlashInvocation) -> Boolean = { invocation ->
-    host.controller.dispatch(invocation, host.roomJid, sendPublicMessage)
+    host.controller.dispatch(invocation, host.roomJid)
 }
 
 private const val EXTENSION_COMMANDS_VIEW_MODEL_KEY = "extension-commands"
@@ -70,7 +69,6 @@ fun rememberExtensionCommandController(graph: AppGraph): ExtensionCommandControl
 fun SlashCommandSurfaces(
     host: SlashCommandHost,
     snackbarHostState: SnackbarHostState,
-    sendPublicMessage: suspend (String) -> Unit,
 ) {
     val controller = host.controller
     val phases by controller.phases.collectAsStateWithLifecycle()
@@ -83,7 +81,7 @@ fun SlashCommandSurfaces(
             phase = phases[session.command.node],
             onFieldChange = controller::updateField,
             onAction = { action ->
-                scope.launch { controller.submitForm(action, sendPublicMessage) }
+                scope.launch { controller.submitForm(action) }
             },
             onDismiss = controller::dismissForm,
         )

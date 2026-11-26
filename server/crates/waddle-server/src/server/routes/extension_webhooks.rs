@@ -551,9 +551,12 @@ fn webhook_error_response(error: WebhookError) -> axum::response::Response {
 }
 
 fn webhook_effects_failed(effects: &[ExtensionEffect]) -> bool {
-    effects
-        .iter()
-        .any(|effect| matches!(effect, ExtensionEffect::HostWarning(_)))
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ExtensionEffect::HostWarning(_) | ExtensionEffect::HostDenial(_)
+        )
+    })
 }
 
 fn provider_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

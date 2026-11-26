@@ -1,11 +1,25 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use kameo::actor::Spawn;
 use kameo::message::Context;
 use kameo::Actor;
+use tracing::warn;
+use waddle_broker::authz::local::LocalPermissionBackend;
+use waddle_broker::authz::openfga::{
+    OpenFgaConfig as BrokerOpenFgaConfig, OpenFgaPermissionBackend,
+};
+use waddle_broker::authz::AuthzCallerRole;
+use waddle_broker_core::identity::TenantId;
+use waddle_broker_core::permission::{
+    AuthzConsistency, AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject,
+    AuthzSubjectType, AuthzTuple, CheckDecision, CheckRequest as CoreCheckRequest,
+    PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
+};
 
-use crate::config::ServerConfig;
+use crate::config::{AuthzBackendKind, OpenFgaConsistencySetting, ServerConfig};
 use crate::db::actor::DbActor;
 use crate::db::Database;
-use std::sync::Arc;
 
 use super::host_grant::{
     EnrolledScopes, Enrollment, HostGrantStore, IssuancePolicy, ListedWitness, ProjectionIntent,
@@ -19,17 +33,573 @@ use super::{
     CheckResponse, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
 };
 
-enum PermissionActorBackend {
-    SpiceDb(Box<SpiceDbPermissionBackend>),
-    Local {
-        tuple_store: TupleStore,
-        // Boxed to keep the enum's `Local` variant small: enabling the
-        // `clustering` feature unifies the dependency graph on libp2p's
-        // (larger) transitive crypto crates, which grows `PermissionChecker`
-        // enough to trip `clippy::large_enum_variant` on this two-variant enum
-        // (`SpiceDb` is already boxed for the same reason).
-        checker: Box<PermissionChecker>,
-    },
+#[async_trait]
+trait ActorPermissionBackend: Send + Sync {
+    fn backend_name(&self) -> &'static str;
+
+    fn spicedb_backend(&self) -> Option<SpiceDbPermissionBackend> {
+        None
+    }
+
+    fn permission_backend(&self) -> Option<&Arc<dyn PermissionBackend>> {
+        None
+    }
+
+    async fn check(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError>;
+
+    async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError>;
+
+    async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError>;
+
+    async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError>;
+
+    async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError>;
+
+    async fn list_relations(
+        &self,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError>;
+
+    async fn list_subjects(
+        &self,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError>;
+
+    async fn lookup_resources(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError>;
+
+    async fn lookup_subjects(
+        &self,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError>;
+
+    async fn clear_cache(&self) {}
+
+    async fn ensure_schema(&self) -> Result<(), PermissionError> {
+        Ok(())
+    }
+
+    async fn record_schema_version(&self) -> Result<(), PermissionError> {
+        Ok(())
+    }
+
+    async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ActorPermissionBackend for SpiceDbPermissionBackend {
+    fn backend_name(&self) -> &'static str {
+        "spicedb"
+    }
+
+    fn spicedb_backend(&self) -> Option<SpiceDbPermissionBackend> {
+        Some(self.clone())
+    }
+
+    async fn check(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError> {
+        SpiceDbPermissionBackend::check(self, subject, permission, object).await
+    }
+
+    async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::write_tuple(self, tuple).await
+    }
+
+    async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::delete_tuple(self, tuple).await
+    }
+
+    async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::replace_exclusive_relation(self, msg).await
+    }
+
+    async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        SpiceDbPermissionBackend::swap_exclusive_relation(self, msg).await
+    }
+
+    async fn list_relations(
+        &self,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError> {
+        SpiceDbPermissionBackend::list_relations(self, subject, object).await
+    }
+
+    async fn list_subjects(
+        &self,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        SpiceDbPermissionBackend::list_subjects(self, object, relation).await
+    }
+
+    async fn lookup_resources(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError> {
+        SpiceDbPermissionBackend::lookup_resources(self, subject, permission, object_type).await
+    }
+
+    async fn lookup_subjects(
+        &self,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        SpiceDbPermissionBackend::lookup_subjects(self, object, permission, subject_type).await
+    }
+
+    async fn ensure_schema(&self) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::ensure_schema(self, SPICEDB_SCHEMA).await
+    }
+
+    async fn record_schema_version(&self) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::record_schema_version(self, SPICEDB_SCHEMA).await
+    }
+
+    async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
+        SpiceDbPermissionBackend::ensure_codec_incarnation(self).await
+    }
+}
+
+struct LocalActorBackend {
+    tuple_store: TupleStore,
+    checker: Box<PermissionChecker>,
+}
+
+#[async_trait]
+impl ActorPermissionBackend for LocalActorBackend {
+    fn backend_name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn check(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError> {
+        self.checker
+            .check(CheckRequest {
+                subject: subject.clone(),
+                permission: permission.to_string(),
+                object: object.clone(),
+            })
+            .await
+    }
+
+    async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
+        self.tuple_store.write(tuple).await
+    }
+
+    async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
+        self.tuple_store.delete(tuple).await
+    }
+
+    async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        self.tuple_store
+            .replace_exclusive_relation(
+                &msg.object,
+                &msg.subject,
+                &msg.family,
+                msg.replacement.as_ref(),
+            )
+            .await
+    }
+
+    async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        let swapped = self
+            .tuple_store
+            .swap_exclusive_relation(
+                &msg.object,
+                &msg.subject,
+                &msg.family,
+                msg.expected.as_ref(),
+                msg.replacement.as_ref(),
+            )
+            .await?;
+        Ok(if swapped {
+            ExclusiveRelationSwap::Swapped
+        } else {
+            ExclusiveRelationSwap::Mismatch
+        })
+    }
+
+    async fn list_relations(
+        &self,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError> {
+        self.tuple_store.list_relations(subject, object).await
+    }
+
+    async fn list_subjects(
+        &self,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        self.tuple_store.list_subjects(object, relation).await
+    }
+
+    async fn lookup_resources(
+        &self,
+        _subject: &Subject,
+        _permission: &str,
+        _object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError> {
+        Err(PermissionError::UnsupportedOperation("local"))
+    }
+
+    async fn lookup_subjects(
+        &self,
+        _object: &Object,
+        _permission: &str,
+        _subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        Err(PermissionError::UnsupportedOperation("local"))
+    }
+
+    async fn clear_cache(&self) {
+        self.checker.clear_cache().await;
+    }
+}
+
+struct TenantPermissionBackendAdapter {
+    backend_name: &'static str,
+    tenant_id: TenantId,
+    backend: Arc<dyn PermissionBackend>,
+}
+
+fn to_authz_object_type(object_type: ObjectType) -> AuthzObjectType {
+    match object_type {
+        ObjectType::Server => AuthzObjectType::Server,
+        ObjectType::Space => AuthzObjectType::Space,
+        ObjectType::Channel => AuthzObjectType::Channel,
+        ObjectType::Message => AuthzObjectType::Message,
+        ObjectType::Dm => AuthzObjectType::DirectMessage,
+        ObjectType::Role => AuthzObjectType::Role,
+    }
+}
+
+fn to_authz_object(object: &Object) -> AuthzObject {
+    AuthzObject {
+        object_type: to_authz_object_type(object.object_type),
+        id: object.id.clone(),
+    }
+}
+
+fn from_authz_object(object: AuthzObject) -> Result<Object, PermissionError> {
+    let object_type = match object.object_type {
+        AuthzObjectType::Server => ObjectType::Server,
+        AuthzObjectType::Space => ObjectType::Space,
+        AuthzObjectType::Channel => ObjectType::Channel,
+        AuthzObjectType::Message => ObjectType::Message,
+        AuthzObjectType::DirectMessage => ObjectType::Dm,
+        AuthzObjectType::Role => ObjectType::Role,
+        AuthzObjectType::TenantCredential
+        | AuthzObjectType::UserCredential
+        | AuthzObjectType::InstalledExtension
+        | AuthzObjectType::RoomInferencePolicy => {
+            return Err(PermissionError::InvalidObject(format!(
+                "inference object type {:?} cannot be represented in chat Object",
+                object.object_type
+            )));
+        }
+    };
+    Ok(Object {
+        object_type,
+        id: object.id,
+    })
+}
+
+fn to_authz_subject_type(subject_type: SubjectType) -> AuthzSubjectType {
+    match subject_type {
+        SubjectType::User => AuthzSubjectType::Account,
+        SubjectType::Space => AuthzSubjectType::Space,
+        SubjectType::Channel => AuthzSubjectType::Channel,
+        SubjectType::Role => AuthzSubjectType::Role,
+    }
+}
+
+fn to_authz_subject(subject: &Subject) -> AuthzSubject {
+    AuthzSubject {
+        subject_type: to_authz_subject_type(subject.subject_type),
+        id: subject.id.clone(),
+        relation: subject.relation.clone(),
+    }
+}
+
+fn from_authz_subject(subject: AuthzSubject) -> Result<Subject, PermissionError> {
+    let subject_type = match subject.subject_type {
+        AuthzSubjectType::Account => SubjectType::User,
+        AuthzSubjectType::Space => SubjectType::Space,
+        AuthzSubjectType::Channel => SubjectType::Channel,
+        AuthzSubjectType::Role => SubjectType::Role,
+        AuthzSubjectType::Extension => {
+            return Err(PermissionError::InvalidSubject(
+                "extension subject cannot be represented in legacy chat Subject".to_owned(),
+            ));
+        }
+    };
+    Ok(Subject {
+        subject_type,
+        id: subject.id,
+        relation: subject.relation,
+    })
+}
+
+fn map_backend_error(err: PermissionBackendError) -> PermissionError {
+    match err {
+        PermissionBackendError::ModuleWriteForbidden(module) => {
+            PermissionError::Denied(format!("module write forbidden: {module:?}"))
+        }
+        PermissionBackendError::ContextualTuplesForbidden => {
+            PermissionError::Denied("contextual tuples forbidden".to_owned())
+        }
+        other => PermissionError::SpiceDbError(other.to_string()),
+    }
+}
+
+#[async_trait]
+impl ActorPermissionBackend for TenantPermissionBackendAdapter {
+    fn backend_name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    fn permission_backend(&self) -> Option<&Arc<dyn PermissionBackend>> {
+        Some(&self.backend)
+    }
+
+    async fn check(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError> {
+        let decision = self
+            .backend
+            .check(&CoreCheckRequest {
+                tenant_id: self.tenant_id.clone(),
+                object: to_authz_object(object),
+                permission: AuthzRelation::new(permission),
+                subject: to_authz_subject(subject),
+                consistency: AuthzConsistency::Strong,
+            })
+            .await
+            .map_err(map_backend_error)?;
+        Ok(CheckResponse {
+            allowed: decision == CheckDecision::Allowed,
+            reason: None,
+        })
+    }
+
+    async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
+        let authz_tuple = AuthzTuple {
+            object: to_authz_object(&tuple.object),
+            relation: AuthzRelation::new(tuple.relation.name),
+            subject: to_authz_subject(&tuple.subject),
+        };
+        self.backend
+            .write_tuples(&self.tenant_id, AuthzModule::Chat, &[authz_tuple])
+            .await
+            .map_err(map_backend_error)
+    }
+
+    async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
+        let authz_tuple = AuthzTuple {
+            object: to_authz_object(&tuple.object),
+            relation: AuthzRelation::new(tuple.relation.name.clone()),
+            subject: to_authz_subject(&tuple.subject),
+        };
+        self.backend
+            .delete_tuples(&self.tenant_id, AuthzModule::Chat, &[authz_tuple])
+            .await
+            .map_err(map_backend_error)
+    }
+
+    async fn replace_exclusive_relation(
+        &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        let obj = to_authz_object(&msg.object);
+        let subj = to_authz_subject(&msg.subject);
+        let to_delete: Vec<AuthzTuple> = msg
+            .family
+            .iter()
+            .map(|rel| AuthzTuple {
+                object: obj.clone(),
+                relation: AuthzRelation::new(rel.name.clone()),
+                subject: subj.clone(),
+            })
+            .collect();
+        if !to_delete.is_empty() {
+            self.backend
+                .delete_tuples(&self.tenant_id, AuthzModule::Chat, &to_delete)
+                .await
+                .map_err(map_backend_error)?;
+        }
+        if let Some(replacement) = msg.replacement {
+            let new_tuple = AuthzTuple {
+                object: obj,
+                relation: AuthzRelation::new(replacement.name),
+                subject: subj,
+            };
+            self.backend
+                .write_tuples(&self.tenant_id, AuthzModule::Chat, &[new_tuple])
+                .await
+                .map_err(map_backend_error)?;
+        }
+        Ok(())
+    }
+
+    async fn swap_exclusive_relation(
+        &self,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        let obj = to_authz_object(&msg.object);
+        let subj = to_authz_subject(&msg.subject);
+        let existing = self
+            .backend
+            .read_tuples(&self.tenant_id, &obj, None)
+            .await
+            .map_err(map_backend_error)?;
+        let held: Vec<String> = existing
+            .into_iter()
+            .filter(|t| {
+                t.subject == subj && msg.family.iter().any(|fam| fam.name == t.relation.as_str())
+            })
+            .map(|t| t.relation.as_str().to_owned())
+            .collect();
+        let expected_match = match &msg.expected {
+            None => held.is_empty(),
+            Some(exp) => held.len() == 1 && held[0] == exp.name,
+        };
+        if !expected_match {
+            return Ok(ExclusiveRelationSwap::Mismatch);
+        }
+        self.replace_exclusive_relation(ReplaceExclusiveRelation {
+            object: msg.object,
+            subject: msg.subject,
+            family: msg.family,
+            replacement: msg.replacement,
+        })
+        .await?;
+        Ok(ExclusiveRelationSwap::Swapped)
+    }
+
+    async fn list_relations(
+        &self,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError> {
+        let obj = to_authz_object(object);
+        let subj = to_authz_subject(subject);
+        let tuples = self
+            .backend
+            .read_tuples(&self.tenant_id, &obj, None)
+            .await
+            .map_err(map_backend_error)?;
+        Ok(tuples
+            .into_iter()
+            .filter(|t| t.subject == subj)
+            .map(|t| t.relation.as_str().to_owned())
+            .collect())
+    }
+
+    async fn list_subjects(
+        &self,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        let obj = to_authz_object(object);
+        let rel = AuthzRelation::new(relation);
+        let tuples = self
+            .backend
+            .read_tuples(&self.tenant_id, &obj, Some(&rel))
+            .await
+            .map_err(map_backend_error)?;
+        tuples
+            .into_iter()
+            .map(|t| from_authz_subject(t.subject))
+            .collect()
+    }
+
+    async fn lookup_resources(
+        &self,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError> {
+        let objects = self
+            .backend
+            .list_objects(
+                &self.tenant_id,
+                &to_authz_subject(subject),
+                &AuthzRelation::new(permission),
+                to_authz_object_type(object_type),
+            )
+            .await
+            .map_err(map_backend_error)?;
+        objects.into_iter().map(from_authz_object).collect()
+    }
+
+    async fn lookup_subjects(
+        &self,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        let subjects = self
+            .backend
+            .list_users(
+                &self.tenant_id,
+                &to_authz_object(object),
+                &AuthzRelation::new(permission),
+                to_authz_subject_type(subject_type),
+            )
+            .await
+            .map_err(map_backend_error)?;
+        subjects.into_iter().map(from_authz_subject).collect()
+    }
 }
 
 /// Typed permission names used by runtime actor messages.
@@ -96,7 +666,7 @@ impl Permission {
 /// typed message passing.
 #[derive(Actor)]
 pub struct PermissionActor {
-    backend: PermissionActorBackend,
+    backend: Arc<dyn ActorPermissionBackend>,
     /// The canonical host-grant store, when this deployment has one. The
     /// tuple-writing messages refuse an object that belongs to one of its
     /// enrolled scopes, decided from the store on every write: only the
@@ -150,11 +720,44 @@ static WRITE_UNREADABLE: super::host_grant::RateLimitedWarning =
 impl PermissionActor {
     pub fn new(backend: SpiceDbPermissionBackend) -> Self {
         Self {
-            backend: PermissionActorBackend::SpiceDb(Box::new(backend)),
+            backend: Arc::new(backend),
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
         }
+    }
+
+    /// Construct a `PermissionActor` backed by any `waddle_broker_core::permission::PermissionBackend`
+    /// (OpenFGA, tenant-scoped SpiceDB, or Local).
+    pub fn from_permission_backend(
+        tenant_id: TenantId,
+        backend: Arc<dyn PermissionBackend>,
+    ) -> Self {
+        Self::from_permission_backend_named("permission_backend", tenant_id, backend)
+    }
+
+    /// Construct a `PermissionActor` backed by a `PermissionBackend` with an
+    /// explicit backend label (`"openfga"`, `"local"`, `"permission_backend"`).
+    pub fn from_permission_backend_named(
+        backend_name: &'static str,
+        tenant_id: TenantId,
+        backend: Arc<dyn PermissionBackend>,
+    ) -> Self {
+        Self {
+            backend: Arc::new(TenantPermissionBackendAdapter {
+                backend_name,
+                tenant_id,
+                backend,
+            }),
+            host_grants: None,
+            enrolled: EnrolledScopes::default(),
+            privileged_issuance: None,
+        }
+    }
+
+    /// Returns the underlying `PermissionBackend` if constructed via [`Self::from_permission_backend`].
+    pub fn permission_backend(&self) -> Option<&Arc<dyn PermissionBackend>> {
+        self.backend.permission_backend()
     }
 
     /// Fence the legacy stores against the scopes enrolled in `store`, with
@@ -184,11 +787,104 @@ impl PermissionActor {
     }
 
     pub async fn from_server_config(config: &ServerConfig) -> Result<Self, PermissionError> {
-        let spicedb = config
-            .spicedb
-            .as_ref()
-            .ok_or(PermissionError::SpiceDbConfigMissing)?;
-        Self::connect(spicedb).await
+        let fallback_domain = std::env::var("WADDLE_XMPP_DOMAIN")
+            .ok()
+            .unwrap_or_else(|| "waddle.social".to_owned());
+        let (actor, _broker_backend) =
+            Self::from_server_config_with_broker_backend(config, &fallback_domain, &[]).await?;
+        Ok(actor)
+    }
+
+    /// Build a `PermissionActor` from `config` together with an optional
+    /// broker-role [`PermissionBackend`] sharing the same underlying OpenFGA /
+    /// Local tenant store map so `PermissionActor` and `BrokerAdmissionService`
+    /// operate against the exact same provisioned stores.
+    pub async fn from_server_config_with_broker_backend(
+        config: &ServerConfig,
+        fallback_domain: &str,
+        extra_openfga_stores: &[TenantAuthzStoreRef],
+    ) -> Result<(Self, Option<Arc<dyn PermissionBackend>>), PermissionError> {
+        match config.resolved_authz_backend() {
+            Some(AuthzBackendKind::OpenFga) => {
+                let openfga_cfg = config
+                    .openfga
+                    .as_ref()
+                    .ok_or(PermissionError::OpenFgaConfigMissing)?;
+                if openfga_cfg.consistency == OpenFgaConsistencySetting::MinimizeLatency {
+                    warn!(
+                        "WADDLE_OPENFGA_CONSISTENCY=minimize_latency requested; broker admission \
+                         and strong permission checks continue enforcing HIGHER_CONSISTENCY"
+                    );
+                }
+                let default_tenant = config
+                    .tenancy
+                    .resolved_default_tenant_id(fallback_domain)
+                    .map_err(PermissionError::SpiceDbError)?;
+                let broker_backend = OpenFgaPermissionBackend::new(BrokerOpenFgaConfig {
+                    endpoint: openfga_cfg.endpoint.clone(),
+                    bearer_token: openfga_cfg
+                        .api_token
+                        .as_ref()
+                        .map(|t| t.as_str().to_owned()),
+                    caller_role: AuthzCallerRole::Broker,
+                    pinned_model_version: None,
+                })
+                .map_err(map_backend_error)?;
+
+                for (tenant_id, entry) in &openfga_cfg.store_map {
+                    broker_backend
+                        .register_store_ref(TenantAuthzStoreRef {
+                            tenant_id: tenant_id.clone(),
+                            store_id: entry.store_id.clone(),
+                            model_version: entry.model_id.clone(),
+                        })
+                        .map_err(map_backend_error)?;
+                }
+                for store_ref in extra_openfga_stores {
+                    broker_backend
+                        .register_store_ref(store_ref.clone())
+                        .map_err(map_backend_error)?;
+                }
+                let _ = broker_backend
+                    .provision_tenant_store(&default_tenant)
+                    .await
+                    .map_err(map_backend_error)?;
+
+                let cell_backend: Arc<dyn PermissionBackend> =
+                    Arc::new(broker_backend.with_caller_role(AuthzCallerRole::Cell));
+                let broker_arc: Arc<dyn PermissionBackend> = Arc::new(broker_backend);
+                Ok((
+                    Self::from_permission_backend_named("openfga", default_tenant, cell_backend),
+                    Some(broker_arc),
+                ))
+            }
+            Some(AuthzBackendKind::Local) => {
+                let default_tenant = config
+                    .tenancy
+                    .resolved_default_tenant_id(fallback_domain)
+                    .map_err(PermissionError::SpiceDbError)?;
+                let broker_backend = LocalPermissionBackend::new(AuthzCallerRole::Broker);
+                let _ = broker_backend
+                    .provision_tenant_store(&default_tenant)
+                    .await
+                    .map_err(map_backend_error)?;
+                let cell_backend: Arc<dyn PermissionBackend> =
+                    Arc::new(broker_backend.with_caller_role(AuthzCallerRole::Cell));
+                let broker_arc: Arc<dyn PermissionBackend> = Arc::new(broker_backend);
+                Ok((
+                    Self::from_permission_backend_named("local", default_tenant, cell_backend),
+                    Some(broker_arc),
+                ))
+            }
+            Some(AuthzBackendKind::SpiceDb) => {
+                let spicedb = config
+                    .spicedb
+                    .as_ref()
+                    .ok_or(PermissionError::SpiceDbConfigMissing)?;
+                Ok((Self::connect(spicedb).await?, None))
+            }
+            None => Err(PermissionError::SpiceDbConfigMissing),
+        }
     }
 
     /// An actor on the SpiceDB `config` names, without the server's startup
@@ -206,10 +902,10 @@ impl PermissionActor {
         let checker = PermissionChecker::new(actor, schema);
 
         Self {
-            backend: PermissionActorBackend::Local {
+            backend: Arc::new(LocalActorBackend {
                 tuple_store,
                 checker: Box::new(checker),
-            },
+            }),
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
@@ -323,29 +1019,20 @@ impl PermissionActor {
 
     /// The SpiceDB backend, if this actor uses one.
     fn spicedb_backend(&self) -> Option<SpiceDbPermissionBackend> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => Some(backend.as_ref().clone()),
-            PermissionActorBackend::Local { .. } => None,
-        }
+        self.backend.spicedb_backend()
     }
 
     /// The backend a host-grant projection is read from and written to.
     /// The local backend is not a projection target: it establishes neither
     /// SpiceDB nor cross-store behaviour.
     fn host_grant_projection_backend(&self) -> Result<SpiceDbPermissionBackend, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => Ok(backend.as_ref().clone()),
-            PermissionActorBackend::Local { .. } => {
-                Err(PermissionError::UnsupportedOperation("local"))
-            }
-        }
+        self.backend
+            .spicedb_backend()
+            .ok_or_else(|| PermissionError::UnsupportedOperation(self.backend.backend_name()))
     }
 
     pub fn backend_name(&self) -> &'static str {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(_) => "spicedb",
-            PermissionActorBackend::Local { .. } => "local",
-        }
+        self.backend.backend_name()
     }
 
     async fn check(
@@ -354,80 +1041,29 @@ impl PermissionActor {
         permission: &str,
         object: &Object,
     ) -> Result<CheckResponse, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend.check(subject, permission, object).await
-            }
-            PermissionActorBackend::Local { checker, .. } => {
-                checker
-                    .check(CheckRequest {
-                        subject: subject.clone(),
-                        permission: permission.to_string(),
-                        object: object.clone(),
-                    })
-                    .await
-            }
-        }
+        self.backend.check(subject, permission, object).await
     }
 
     async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => backend.write_tuple(tuple).await,
-            PermissionActorBackend::Local { tuple_store, .. } => tuple_store.write(tuple).await,
-        }
+        self.backend.write_tuple(tuple).await
     }
 
     async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => backend.delete_tuple(tuple).await,
-            PermissionActorBackend::Local { tuple_store, .. } => tuple_store.delete(tuple).await,
-        }
+        self.backend.delete_tuple(tuple).await
     }
 
     async fn replace_exclusive_relation(
         &self,
         msg: ReplaceExclusiveRelation,
     ) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend.replace_exclusive_relation(msg).await
-            }
-            PermissionActorBackend::Local { tuple_store, .. } => {
-                tuple_store
-                    .replace_exclusive_relation(
-                        &msg.object,
-                        &msg.subject,
-                        &msg.family,
-                        msg.replacement.as_ref(),
-                    )
-                    .await
-            }
-        }
+        self.backend.replace_exclusive_relation(msg).await
     }
 
     async fn swap_exclusive_relation(
         &self,
         msg: SwapExclusiveRelation,
     ) -> Result<ExclusiveRelationSwap, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => backend.swap_exclusive_relation(msg).await,
-            PermissionActorBackend::Local { tuple_store, .. } => {
-                let swapped = tuple_store
-                    .swap_exclusive_relation(
-                        &msg.object,
-                        &msg.subject,
-                        &msg.family,
-                        msg.expected.as_ref(),
-                        msg.replacement.as_ref(),
-                    )
-                    .await?;
-                Ok(if swapped {
-                    ExclusiveRelationSwap::Swapped
-                } else {
-                    ExclusiveRelationSwap::Mismatch
-                })
-            }
-        }
+        self.backend.swap_exclusive_relation(msg).await
     }
 
     async fn list_relations(
@@ -435,14 +1071,7 @@ impl PermissionActor {
         subject: &Subject,
         object: &Object,
     ) -> Result<Vec<String>, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend.list_relations(subject, object).await
-            }
-            PermissionActorBackend::Local { tuple_store, .. } => {
-                tuple_store.list_relations(subject, object).await
-            }
-        }
+        self.backend.list_relations(subject, object).await
     }
 
     async fn list_subjects(
@@ -450,14 +1079,7 @@ impl PermissionActor {
         object: &Object,
         relation: &str,
     ) -> Result<Vec<Subject>, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend.list_subjects(object, relation).await
-            }
-            PermissionActorBackend::Local { tuple_store, .. } => {
-                tuple_store.list_subjects(object, relation).await
-            }
-        }
+        self.backend.list_subjects(object, relation).await
     }
 
     async fn lookup_resources(
@@ -466,16 +1088,9 @@ impl PermissionActor {
         permission: &str,
         object_type: ObjectType,
     ) -> Result<Vec<Object>, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend
-                    .lookup_resources(subject, permission, object_type)
-                    .await
-            }
-            PermissionActorBackend::Local { .. } => {
-                Err(PermissionError::UnsupportedOperation("local"))
-            }
-        }
+        self.backend
+            .lookup_resources(subject, permission, object_type)
+            .await
     }
 
     async fn lookup_subjects(
@@ -484,49 +1099,25 @@ impl PermissionActor {
         permission: &str,
         subject_type: SubjectType,
     ) -> Result<Vec<Subject>, PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend
-                    .lookup_subjects(object, permission, subject_type)
-                    .await
-            }
-            PermissionActorBackend::Local { .. } => {
-                Err(PermissionError::UnsupportedOperation("local"))
-            }
-        }
+        self.backend
+            .lookup_subjects(object, permission, subject_type)
+            .await
     }
 
     async fn clear_cache(&self) {
-        if let PermissionActorBackend::Local { checker, .. } = &self.backend {
-            checker.clear_cache().await;
-        }
+        self.backend.clear_cache().await;
     }
 
     async fn ensure_schema(&self) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => backend.ensure_schema(SPICEDB_SCHEMA).await,
-            PermissionActorBackend::Local { .. } => Ok(()),
-        }
+        self.backend.ensure_schema().await
     }
 
     async fn record_schema_version(&self) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => {
-                backend.record_schema_version(SPICEDB_SCHEMA).await
-            }
-            // The local backend evaluates the compiled schema directly and
-            // stores no schema to version.
-            PermissionActorBackend::Local { .. } => Ok(()),
-        }
+        self.backend.record_schema_version().await
     }
 
     async fn ensure_codec_incarnation(&self) -> Result<(), PermissionError> {
-        match &self.backend {
-            PermissionActorBackend::SpiceDb(backend) => backend.ensure_codec_incarnation().await,
-            // The local backend stores identifiers unencoded in its own
-            // tables, so it has no codec to bind.
-            PermissionActorBackend::Local { .. } => Ok(()),
-        }
+        self.backend.ensure_codec_incarnation().await
     }
 }
 

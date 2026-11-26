@@ -13,7 +13,7 @@ pub(crate) fn select_host_tools(
     context_limit: u32,
 ) -> Vec<HostToolRequest> {
     let mut tools = Vec::new();
-    if context_limit > 0 {
+    if context_limit > 0 && context.response_target.is_some() {
         tools.push(host_tool(HostTool::QueryMam));
     }
     if context.response_target.is_some() {
@@ -22,8 +22,6 @@ pub(crate) fn select_host_tools(
     if context.response_target.is_none() {
         tools.push(host_tool(HostTool::Channels));
         tools.push(host_tool(HostTool::Spaces));
-        tools.push(host_tool(HostTool::Presence));
-        tools.push(host_tool(HostTool::Roster));
     }
     tools
 }
@@ -51,8 +49,6 @@ pub(crate) fn execute_provider_tool_call_content(
     match name {
         "query_mam" => query_mam_tool(request, &args),
         "list_room_members" => list_room_members_tool(request, &args),
-        "get_presence" => get_presence_tool(request, &args),
-        "get_roster" => get_roster_tool(request, &args),
         "list_channels" => list_channels_tool(),
         "list_spaces" => list_spaces_tool(),
         _ => Err(format!("unsupported tool {name}")),
@@ -83,13 +79,7 @@ fn list_room_members_tool(
         }
         target.room.clone()
     } else {
-        requested_room
-            .map(|room| types::RoomJid {
-                value: room.as_str().to_string(),
-            })
-            .ok_or_else(|| {
-                "list_room_members requires a room outside a room invocation".to_string()
-            })?
+        return Err("list_room_members requires an active room invocation".to_string());
     };
     let response = host_tools::list_room_members(&types::ListRoomMembersRequest { room })
         .map_err(|error| error.message.value)?;
@@ -108,63 +98,6 @@ fn list_room_members_tool(
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({ "members": members }).to_string())
-}
-
-#[cfg(not(test))]
-fn get_presence_tool(
-    request: &ProviderRequest,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let subject = optional_non_empty_arg(args, "subject")
-        .map(|subject| types::BareJid {
-            value: subject.as_str().to_string(),
-        })
-        .or_else(|| request.requester.clone())
-        .ok_or_else(|| "get_presence requires a requester or subject".to_string())?;
-    let response = host_tools::get_presence(&types::GetPresenceRequest { subject })
-        .map_err(|error| error.message.value)?;
-    let resources = response
-        .resources
-        .into_iter()
-        .take(MAX_CONTEXT_ITEMS_PER_SOURCE)
-        .map(|presence| {
-            serde_json::json!({
-                "jid": presence.jid.value,
-                "availability": format!("{:?}", presence.availability),
-                "show": presence.show.map(|show| format!("{show:?}")),
-                "status": presence.status.map(|status| status.value),
-                "priority": presence.priority,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(serde_json::json!({ "resources": resources }).to_string())
-}
-
-#[cfg(not(test))]
-fn get_roster_tool(request: &ProviderRequest, args: &serde_json::Value) -> Result<String, String> {
-    let owner = optional_non_empty_arg(args, "owner")
-        .map(|owner| types::BareJid {
-            value: owner.as_str().to_string(),
-        })
-        .or_else(|| request.requester.clone())
-        .ok_or_else(|| "get_roster requires a requester or owner".to_string())?;
-    let response = host_tools::get_roster(&types::GetRosterRequest { owner })
-        .map_err(|error| error.message.value)?;
-    let entries = response
-        .entries
-        .into_iter()
-        .take(MAX_CONTEXT_ITEMS_PER_SOURCE)
-        .map(|entry| {
-            serde_json::json!({
-                "jid": entry.jid.value,
-                "name": entry.name.map(|name| name.value),
-                "subscription": format!("{:?}", entry.subscription),
-                "ask": entry.ask.map(|ask| format!("{ask:?}")),
-                "groups": entry.groups.into_iter().map(|group| group.value).collect::<Vec<_>>(),
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(serde_json::json!({ "entries": entries }).to_string())
 }
 
 #[cfg(not(test))]
@@ -211,6 +144,9 @@ pub(crate) fn provider_tool_mam_query(
     request: &ProviderRequest,
     args: &serde_json::Value,
 ) -> Result<types::MamQuery, String> {
+    let Some(current_target) = request.tool_target.as_ref() else {
+        return Err("query_mam is only permitted within an active room invocation".to_string());
+    };
     let target_arg = args.get("target").and_then(serde_json::Value::as_object);
     let target = match target_arg {
         Some(target) => {
@@ -222,52 +158,23 @@ pub(crate) fn provider_tool_mam_query(
                 .get("jid")
                 .and_then(serde_json::Value::as_str)
                 .and_then(NonEmptyString::try_new);
-            if let Some(current_target) = request.tool_target.as_ref() {
-                match (kind, jid) {
-                    ("room", Some(jid)) if jid.as_str() == current_target.room.value.as_str() => {
-                        types::MamTarget::Room(current_target.room.clone())
-                    }
-                    ("room", None) => types::MamTarget::Room(current_target.room.clone()),
-                    ("room", Some(_)) => {
-                        return Err(
-                            "query_mam room invocations cannot target another room".to_string()
-                        )
-                    }
-                    ("conversation", _) => {
-                        return Err(
-                            "query_mam room invocations cannot target a direct conversation"
-                                .to_string(),
-                        )
-                    }
-                    _ => {
-                        return Err("query_mam target.kind must be room or conversation".to_string())
-                    }
+            match (kind, jid) {
+                ("room", Some(jid)) if jid.as_str() == current_target.room.value.as_str() => {
+                    types::MamTarget::Room(current_target.room.clone())
                 }
-            } else {
-                match (kind, jid) {
-                    ("room", Some(jid)) => types::MamTarget::Room(types::RoomJid {
-                        value: jid.as_str().to_string(),
-                    }),
-                    ("conversation", Some(jid)) => types::MamTarget::Conversation(types::BareJid {
-                        value: jid.as_str().to_string(),
-                    }),
-                    ("room", None) => {
-                        return Err("query_mam target.jid is required outside a room".to_string())
-                    }
-                    ("conversation", None) => {
-                        return Err("query_mam conversation target requires target.jid".to_string())
-                    }
-                    _ => {
-                        return Err("query_mam target.kind must be room or conversation".to_string())
-                    }
+                ("room", None) => types::MamTarget::Room(current_target.room.clone()),
+                ("room", Some(_)) => {
+                    return Err("query_mam room invocations cannot target another room".to_string())
                 }
+                ("conversation", _) => {
+                    return Err(
+                        "query_mam does not permit direct conversation archive queries".to_string(),
+                    )
+                }
+                _ => return Err("query_mam target.kind must be room".to_string()),
             }
         }
-        None => request
-            .tool_target
-            .as_ref()
-            .map(|target| types::MamTarget::Room(target.room.clone()))
-            .ok_or_else(|| "query_mam requires a target outside a room invocation".to_string())?,
+        None => types::MamTarget::Room(current_target.room.clone()),
     };
     if request.context_limit == 0 {
         return Err("query_mam is disabled by context_limit".to_string());
@@ -284,12 +191,11 @@ pub(crate) fn provider_tool_mam_query(
         optional_non_empty_arg(args, "thread_id").map(|thread_id| types::ThreadId {
             value: thread_id.as_str().to_string(),
         });
-    let default_thread = request.tool_target.as_ref().and_then(|target| {
-        target
-            .focus_thread
-            .then(|| target.thread_id.clone())
-            .flatten()
-    });
+    let default_thread = if current_target.focus_thread {
+        current_target.thread_id.clone()
+    } else {
+        None
+    };
     Ok(types::MamQuery {
         target,
         start: optional_non_empty_arg(args, "start").map(|value| types::Timestamp {

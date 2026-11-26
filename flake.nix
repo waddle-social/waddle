@@ -806,6 +806,38 @@
               doCheck = false;
             }
           );
+          operatorRustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./operator/rust-toolchain.toml;
+          operatorCraneLib = (crane.mkLib pkgs).overrideToolchain operatorRustToolchain;
+          operatorPackageSrc = lib.fileset.toSource {
+            root = ./operator;
+            fileset = lib.fileset.unions [
+              ./operator/Cargo.toml
+              ./operator/Cargo.lock
+              ./operator/crates
+            ];
+          };
+          operatorBaseArgs = {
+            pname = "waddle-operator";
+            version = "0.1.0";
+            src = operatorPackageSrc;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --package waddle-operator --bin waddle-operator";
+          };
+          operatorCargoArtifacts = operatorCraneLib.buildDepsOnly (
+            operatorBaseArgs
+            // {
+              doCheck = false;
+              cargoCheckExtraArgs = "";
+            }
+          );
+          waddle-operator = operatorCraneLib.buildPackage (
+            operatorBaseArgs
+            // {
+              cargoArtifacts = operatorCargoArtifacts;
+              doCheck = false;
+              meta.mainProgram = "waddle-operator";
+            }
+          );
           image = pkgs.dockerTools.streamLayeredImage {
             name = "ghcr.io/waddle-social/waddle";
             tag = "nix";
@@ -832,9 +864,25 @@
               };
             };
           };
+          operatorImage = pkgs.dockerTools.streamLayeredImage {
+            name = "ghcr.io/waddle-social/waddle-operator";
+            tag = "nix";
+            contents = [
+              waddle-operator
+              pkgs.cacert
+              pkgs.iana-etc
+            ];
+            config = {
+              Entrypoint = [ "${lib.getExe waddle-operator}" ];
+              User = "65532:65532";
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
+            };
+          };
         in
         {
-          inherit waddle-server;
+          inherit waddle-server waddle-operator;
           waddle-server-deps = cargoArtifacts;
           waddle-server-workspace-deps = workspaceArtifacts;
           waddle-server-workspace-all-features-deps = workspaceAllFeaturesArtifacts;
@@ -844,6 +892,7 @@
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           waddle-server-image-stream = image;
+          waddle-operator-image-stream = operatorImage;
           # Fail before compiling if a CI runner cannot create the namespaces
           # required by the four co-located test sandboxes.
           waddle-ci-sandbox-probe =
@@ -1483,6 +1532,88 @@
               };
             }
           );
+          # Bundled formal verification tools for `nix develop` (TLA+/Quint, Verus, P/PObserve)
+          # without altering the workspace Rust toolchain (1.98.1 in server/rust-toolchain.toml).
+          verusRustToolchain = pkgs.rust-bin.stable."1.100.0".minimal;
+          verus = pkgs.stdenv.mkDerivation rec {
+            pname = "verus";
+            version = "0.2026.11.22.1ce6a59";
+            src =
+              let
+                release =
+                  platform: hash:
+                  pkgs.fetchurl {
+                    url = "https://github.com/verus-lang/verus/releases/download/release/${version}/verus-${version}-${platform}.zip";
+                    inherit hash;
+                  };
+              in
+              {
+                "x86_64-linux" = release "x86-linux" "sha256-yVXVlYh39PkHzOgKqZbUI5pIGYSCnYLjJZOMe/JCsNs=";
+                "aarch64-linux" = release "arm64-linux" "sha256-aeBZ4CVs39SM5fZbcraNxUrFxA4oeOBxld2H+ytYLA4=";
+                "x86_64-darwin" = release "x86-macos" "sha256-mDNELI1ALzKaHqLP8BF+d+BACQMSYNbIi4x3HfG2mYI=";
+                "aarch64-darwin" = release "arm64-macos" "sha256-jv0ha20QS/pP6UY3P+fSYK0NthPCxx0HR0TxyR7aHk0=";
+              }
+              .${system};
+            nativeBuildInputs =
+              [
+                pkgs.unzip
+                pkgs.makeWrapper
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+            buildInputs =
+              [ verusRustToolchain ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            dontConfigure = true;
+            dontBuild = true;
+            unpackPhase = ''
+              unzip -q "$src" -d unpacked
+            '';
+            installPhase = ''
+              runHook preInstall
+              source_root=$(find unpacked -mindepth 1 -maxdepth 1 -type d | head -n 1)
+              mkdir -p "$out/bin" "$out/libexec/verus"
+              cp -R "$source_root"/. "$out/libexec/verus/"
+              for exe in verus rust_verify z3 cargo-verus; do
+                if [ -f "$out/libexec/verus/$exe" ]; then
+                  chmod 0755 "$out/libexec/verus/$exe"
+                fi
+              done
+              makeWrapper "$out/libexec/verus/verus" "$out/bin/verus" \
+                --set VERUS_USE_RUSTUP 0 \
+                --set VERUS_Z3_PATH "$out/libexec/verus/z3" \
+                --unset RUSTUP_TOOLCHAIN \
+                --prefix PATH : "${verusRustToolchain}/bin" \
+                --prefix ${if pkgs.stdenv.hostPlatform.isDarwin then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"} : "${verusRustToolchain}/lib"
+              runHook postInstall
+            '';
+          };
+          p-lang = pkgs.stdenvNoCC.mkDerivation rec {
+            pname = "p-lang";
+            version = "3.1.0";
+            src = pkgs.fetchurl {
+              url = "https://api.nuget.org/v3-flatcontainer/p/${version}/p.${version}.nupkg";
+              hash = "sha256-sqIS47GvG/L9ybgImdopAdZiXRouR41HjjACiHKkvcE=";
+            };
+            nativeBuildInputs = [
+              pkgs.unzip
+              pkgs.makeWrapper
+            ];
+            dontConfigure = true;
+            dontBuild = true;
+            unpackPhase = ''
+              unzip -q "$src" -d unpacked
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin" "$out/share/p"
+              cp -R unpacked/tools/net8.0/any/. "$out/share/p/"
+              makeWrapper "${pkgs.dotnetCorePackages.runtime_8_0}/bin/dotnet" "$out/bin/p" \
+                --add-flags "$out/share/p/p.dll" \
+                --set DOTNET_ROOT "${pkgs.dotnetCorePackages.runtime_8_0}" \
+                --prefix PATH : "${pkgs.temurin-bin-21}/bin"
+              runHook postInstall
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -1527,6 +1658,9 @@
               pkgs.temurin-bin-21
               pkgs.cargo-ndk
               pkgs.gh
+              pkgs.quint
+              verus
+              p-lang
             ];
 
             env.JAVA_HOME = "${pkgs.temurin-bin-21}";
@@ -1548,7 +1682,7 @@
                 # unavailable inside the network-isolated cuenv Linux sandbox.
                 exec ${toolchain}/bin/cargo run --config ${vendor}/config.toml \
                   --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C", "linker-features=-lld"]' \
-                  --offline --locked -p waddle-operator -- crd
+                  --offline --locked -p waddle-operator -- crd "$@"
               '';
             in
             pkgs.mkShell {

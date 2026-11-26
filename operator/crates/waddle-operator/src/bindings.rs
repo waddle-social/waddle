@@ -2,6 +2,22 @@ use waddle_operator_crd::{ContentDigest, RestrictedRuntimeSpec};
 
 use crate::external_crds::DiscoveredEsoVersion;
 
+/// Resolved non-secret storage binding for pod manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageBinding {
+    /// Local per-tenant Turso/libSQL databases stored on the mounted data volume.
+    Turso {
+        /// Value for `WADDLE_TURSO_DATA_DIR`.
+        data_dir: String,
+        /// Value for `WADDLE_TURSO_RESERVED_FDS`.
+        reserved_fds: u32,
+        /// Optional value for `WADDLE_TURSO_RLIMIT_NOFILE`.
+        rlimit_nofile: Option<u32>,
+    },
+    /// External PostgreSQL database binding.
+    Postgres(PostgresBinding),
+}
+
 /// Resolved non-secret PostgreSQL credential and endpoint binding for pod manifests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostgresBinding {
@@ -34,6 +50,26 @@ pub enum PostgresBinding {
     },
 }
 
+/// Resolved non-secret authorization backend binding for pod manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthzBinding {
+    /// OpenFGA HTTP API binding.
+    OpenFga(OpenFgaBinding),
+    /// SpiceDB gRPC binding.
+    SpiceDb(SpiceDbBinding),
+}
+
+/// Resolved non-secret OpenFGA endpoint and optional auth token reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFgaBinding {
+    /// OpenFGA HTTP endpoint URL (`http://<service>:<port>` or `https://...`).
+    pub endpoint: String,
+    /// Value for `WADDLE_OPENFGA_CONSISTENCY`.
+    pub consistency: String,
+    /// Optional `(secret_name, secret_key)` pair for `WADDLE_OPENFGA_API_TOKEN`.
+    pub auth_secret_ref: Option<(String, String)>,
+}
+
 /// Resolved non-secret SpiceDB endpoint and preshared-key reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpiceDbBinding {
@@ -53,10 +89,10 @@ pub struct SpiceDbBinding {
 /// raw secret values NEVER appear here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRuntimeBindings {
-    /// PostgreSQL wiring for the `waddle-server` container.
-    pub postgres: PostgresBinding,
-    /// SpiceDB wiring for the `waddle-server` container.
-    pub spicedb: SpiceDbBinding,
+    /// Storage wiring (`Turso` or `Postgres`) for the `waddle-server` container.
+    pub storage: StorageBinding,
+    /// Authorization wiring (`OpenFga` or `SpiceDb`) for the `waddle-server` container.
+    pub authz: AuthzBinding,
     /// Same-namespace Secret providing `WADDLE_SESSION_KEY` and `WADDLE_OCCUPANT_ID_SECRET`.
     pub runtime_secret_name: String,
     /// Additional same-namespace Secrets mounted via `envFrom`.

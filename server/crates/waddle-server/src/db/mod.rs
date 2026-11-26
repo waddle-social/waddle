@@ -15,6 +15,7 @@ pub mod lineage;
 pub mod local_space_subscriptions;
 mod migrations;
 pub mod physical_attestation;
+pub mod placement_fence;
 mod pool;
 pub(crate) mod private_xml;
 pub(crate) mod read_only_timeout;
@@ -24,6 +25,8 @@ pub(crate) mod runtime_store_acl;
 pub mod s2s_accounts;
 pub mod s2s_spaces;
 mod schema;
+pub mod tenant_registry;
+pub mod turso_tenant_store;
 mod value;
 
 use sqlx::postgres::PgPool;
@@ -38,6 +41,7 @@ use tracing::{debug, info, instrument};
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use backend::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
+pub(crate) use migrations::postgres_function_body;
 pub(crate) use migrations::verify_relation_guard_candidate_in_transaction;
 pub(crate) use migrations::verify_room_observation_migration_v1023_in_transaction;
 pub(crate) use migrations::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
@@ -59,7 +63,7 @@ pub use migrations::{
 };
 pub use migrations::{
     select_schema_baseline_from_env, BaselineAction, BaselineActionError, BASELINE_ACTION_ENV,
-    BASELINE_VERSION,
+    BASELINE_VERSION, INITIAL_SCHEMA_VERSION,
 };
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};

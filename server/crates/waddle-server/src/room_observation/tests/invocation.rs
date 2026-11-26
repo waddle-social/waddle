@@ -162,35 +162,24 @@ async fn callback_retries_after_cancel_and_lease_expiry(fixture: IngressFixture)
             .expect("due"),
         vec![room]
     );
-    let retry = RoomObservationRepository::claim(&mut tx, &subscription, retry_at)
-        .await
-        .expect("claim")
-        .expect("retry");
-    assert_ne!(retry.lease, work.lease);
-    let started = RoomObservationRepository::start(&mut tx, &retry, retry_at)
-        .await
-        .expect("retry start");
-    let outcome = invoke_after_commit(tx, started, async || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        RoomObservationOutcome::NotInvoked
-    })
+    // Expired started callback quarantines immediately instead of re-invoking.
+    assert!(
+        RoomObservationRepository::claim(&mut tx, &subscription, retry_at)
+            .await
+            .expect("claim quarantines")
+            .is_none()
+    );
+    assert!(!RoomObservationRepository::finish(
+        &mut tx,
+        &work,
+        &RoomObservationOutcome::NotInvoked,
+        retry_at
+    )
     .await
-    .expect("retry invoke")
-    .expect("outcome");
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let mut tx = fixture.uow.begin().await.expect("finish retry");
-    assert!(
-        !RoomObservationRepository::finish(&mut tx, &work, &outcome, retry_at)
-            .await
-            .expect("old result fenced")
-    );
-    assert!(
-        RoomObservationRepository::finish(&mut tx, &retry, &outcome, retry_at)
-            .await
-            .expect("retry result")
-    );
-    tx.commit().await.expect("finish commit");
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    .expect("old result fenced"));
+    tx.commit().await.expect("quarantine commit");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }

@@ -1094,7 +1094,7 @@ async fn exercise(resources: &mut Resources, base_url: &str) -> anyhow::Result<(
         .context("closed MAM profile after sequential extra owner phase")?;
 
     // A complete V1030 ledger is checked again for every pinned diagnostic.
-    sqlx::query("DELETE FROM guarded._migrations WHERE version = 2000")
+    sqlx::query("DELETE FROM guarded._migrations WHERE version = 1")
         .execute(&admin)
         .await?;
     ensure!(

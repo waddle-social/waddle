@@ -620,8 +620,8 @@ mod tests {
             generation: 1,
             deleting: false,
             spec_validation: SpecValidationState::Valid,
-            postgres: ready_pg(),
-            spicedb: ready_spicedb(),
+            storage: ready_pg(),
+            authz: ready_spicedb(),
             secrets: eso_secrets_ready(),
             workload: WorkloadObservation::NotCreated,
             existing_conditions: Vec::new(),
@@ -630,10 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn enters_pending_until_both_postgres_and_spicedb_exist_and_are_ready() {
+    fn enters_pending_until_both_storage_and_authz_exist_and_are_ready() {
         let mut world = base_world();
-        world.postgres = missing_pg();
-        world.spicedb = missing_spicedb();
+        world.storage = missing_pg();
+        world.authz = missing_spicedb();
 
         let out = evaluate(Phase::Initializing, &world);
         assert_eq!(out.to_phase, Phase::Pending);
@@ -645,16 +645,16 @@ mod tests {
             out.commands
         );
 
-        world.postgres = ready_pg();
+        world.storage = ready_pg();
         let out2 = evaluate(Phase::Pending, &world);
         assert_eq!(
             out2.to_phase,
             Phase::Pending,
-            "Must stay Pending while SpiceDB is missing"
+            "Must stay Pending while authz is missing"
         );
         assert!(out2.commands.is_empty());
 
-        world.spicedb = ready_spicedb();
+        world.authz = ready_spicedb();
         let out3 = evaluate(Phase::Pending, &world);
         assert_eq!(out3.to_phase, Phase::Reconciling);
         assert!(out3.commands.contains(&ReconcileCommand::ApplyWorkload));
@@ -726,7 +726,7 @@ mod tests {
             drift_detected: false,
         };
 
-        world.spicedb = missing_spicedb();
+        world.authz = missing_spicedb();
         let dep_lost = evaluate(Phase::Ready, &world);
         assert_eq!(dep_lost.to_phase, Phase::Degraded);
         assert!(
@@ -734,7 +734,7 @@ mod tests {
             "Must preserve last-known-good Deployment when dependency disappears"
         );
 
-        world.spicedb = ready_spicedb();
+        world.authz = ready_spicedb();
         world.spec_validation = SpecValidationState::Invalid {
             summary: "bad edit".to_owned(),
         };
@@ -918,8 +918,8 @@ mod tests {
                         summary: "invalid".to_owned(),
                     }
                 },
-                postgres: pg,
-                spicedb,
+                storage: pg,
+                authz: spicedb,
                 secrets: SecretsObservation {
                     source,
                     yolo_allowed_by_operator: yolo_allowed,

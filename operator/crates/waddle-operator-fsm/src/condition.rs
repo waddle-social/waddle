@@ -10,10 +10,10 @@ pub enum ConditionKind {
     Ready,
     /// Spec and operator-policy validation result.
     SpecValid,
-    /// PostgreSQL dependency readiness.
-    PostgresReady,
-    /// SpiceDB dependency readiness.
-    SpiceDbReady,
+    /// Storage backend dependency readiness (`Turso` or `Postgres`).
+    StorageReady,
+    /// Authorization backend dependency readiness (`OpenFga` or `SpiceDb`).
+    AuthzReady,
     /// Runtime secrets readiness.
     SecretsReady,
     /// Waddle `Deployment` rollout and pod availability.
@@ -29,8 +29,8 @@ impl ConditionKind {
         match self {
             Self::Ready => "Ready",
             Self::SpecValid => "SpecValid",
-            Self::PostgresReady => "PostgresReady",
-            Self::SpiceDbReady => "SpiceDbReady",
+            Self::StorageReady => "StorageReady",
+            Self::AuthzReady => "AuthzReady",
             Self::SecretsReady => "SecretsReady",
             Self::WorkloadReady => "WorkloadReady",
             Self::ConfigurationWarning => "ConfigurationWarning",
@@ -43,8 +43,8 @@ impl ConditionKind {
         match raw {
             "Ready" => Some(Self::Ready),
             "SpecValid" => Some(Self::SpecValid),
-            "PostgresReady" => Some(Self::PostgresReady),
-            "SpiceDbReady" => Some(Self::SpiceDbReady),
+            "StorageReady" => Some(Self::StorageReady),
+            "AuthzReady" => Some(Self::AuthzReady),
             "SecretsReady" => Some(Self::SecretsReady),
             "WorkloadReady" => Some(Self::WorkloadReady),
             "ConfigurationWarning" => Some(Self::ConfigurationWarning),
@@ -112,13 +112,13 @@ pub fn compute_conditions(phase: Phase, world: &ObservedWorld) -> Vec<ConditionR
     records.push(build_ready_condition(phase, world));
     records.push(build_spec_valid_condition(world));
     records.push(build_dependency_condition(
-        ConditionKind::PostgresReady,
-        &world.postgres,
+        ConditionKind::StorageReady,
+        &world.storage,
         world,
     ));
     records.push(build_dependency_condition(
-        ConditionKind::SpiceDbReady,
-        &world.spicedb,
+        ConditionKind::AuthzReady,
+        &world.authz,
         world,
     ));
     records.push(build_secrets_condition(world));
@@ -312,11 +312,11 @@ fn build_workload_condition(world: &ObservedWorld) -> ConditionRecord {
 
 fn pending_summary(world: &ObservedWorld) -> String {
     let mut waiting = Vec::new();
-    if !world.postgres.is_ready() {
-        waiting.push("Postgres");
+    if !world.storage.is_ready() {
+        waiting.push("Storage");
     }
-    if !world.spicedb.is_ready() {
-        waiting.push("SpiceDB");
+    if !world.authz.is_ready() {
+        waiting.push("Authz");
     }
     if !world.secrets.is_ready() {
         waiting.push("Secrets");
@@ -332,19 +332,19 @@ fn degraded_summary(world: &ObservedWorld) -> String {
     if let Some((_, msg)) = world.policy_or_spec_blocker() {
         return msg;
     }
-    if !world.postgres.is_ready() {
+    if !world.storage.is_ready() {
         return world
-            .postgres
+            .storage
             .to_status_summary()
             .message
-            .unwrap_or_else(|| "Postgres is not ready".to_owned());
+            .unwrap_or_else(|| "Storage backend is not ready".to_owned());
     }
-    if !world.spicedb.is_ready() {
+    if !world.authz.is_ready() {
         return world
-            .spicedb
+            .authz
             .to_status_summary()
             .message
-            .unwrap_or_else(|| "SpiceDB is not ready".to_owned());
+            .unwrap_or_else(|| "Authorization backend is not ready".to_owned());
     }
     if !world.secrets.is_ready() {
         return world

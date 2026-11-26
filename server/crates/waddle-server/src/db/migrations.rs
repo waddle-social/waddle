@@ -1,13 +1,9 @@
 //! Database migration system for Waddle Server.
 //!
-//! The migration catalog is the schema baseline (version 2000, generated
-//! from the retired migration history and embedded from
-//! `sql/baseline/`) followed by the migrations in [`after_baseline`]. The
-//! ledger table `_migrations` records each applied version with its
-//! checksum. A database the retired history built is recognised by its
-//! ledger and structure and stamped onto the baseline; see [`baseline`].
+//! The migration catalog starts at version 1 (`initial schema v1`, embedded
+//! from `sql/v1/`). The ledger table `_migrations` records each applied
+//! version with its checksum.
 
-mod after_baseline;
 mod baseline;
 mod checksum;
 mod ledger_error;
@@ -22,7 +18,7 @@ mod types;
 pub(crate) use baseline::postgres_function_body;
 pub use baseline::{
     select_from_env as select_schema_baseline_from_env, BaselineAction, BaselineActionError,
-    BASELINE_ACTION_ENV, BASELINE_VERSION,
+    BASELINE_ACTION_ENV, BASELINE_VERSION, INITIAL_SCHEMA_VERSION,
 };
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;

@@ -72,7 +72,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0184 | Message Delivery Receipts                            | urn:xmpp:receipts                  |   -   |   -    |    Y    | conformant | Not advertised: the server routes `<request/>` and `<received/>` verbatim and does not generate acks (#1247). Tests: `waddle-xmpp/tests/xep0184_message_delivery_receipts.rs`. |
 | 0185 | Dialback Key Generation and Validation               |                                    |   -   |   Y    |    Y    | conformant | S2S only. Tests: `waddle-server/tests/xep0220_s2s_dialback/keys.rs`. |
 | 0191 | Blocking Command                                     | urn:xmpp:blocking                  |   Y   |   Y    |    Y    | fixed      | IQ get/set to or from a blocked local bare JID is gated in both directions (#2702). Block items may carry XEP-0377 `<report/>` (#2694). The shared Rust client and UniFFI bridge support block-list retrieval, block, targeted unblock, unblock-all, and trusted pushes (#2462). Client tests cover wire shapes, driver acknowledgment, and FFI argument validation. Client suite: `waddle-xmpp-client/src/blocking/tests.rs`, `waddle-xmpp-client-ffi/src/blocking_tests.rs`. |
-| 0198 | Stream Management                                    | urn:xmpp:sm:3                      |   Y   |   Y    |    Y    | fixed      | Malformed `<resume/>` or ack and a second `<enable/>` are rejected (#2706). |
+| 0198 | Stream Management                                    | urn:xmpp:sm:3                      |   Y   |   Y    |    Y    | fixed      | Malformed `<resume/>` or ack and a second `<enable/>` are rejected (#2706). Credential lifecycle IQs (`urn:waddle:credential:1`) use idempotent replay nonces and opaque results/errors (`payload: None` on error) so `sm_unacked` never stores secret material. |
 | 0199 | XMPP Ping                                            | urn:xmpp:ping                      |  Y  |  Y   |   Y   | unaudited  | |
 | 0201 | Best Practices for Message Threads                   | (none, &lt;thread/&gt; element)    |   -   |   Y    |    Y    | conformant | `<thread/>` and its `parent` attribute are preserved. No `urn:xmpp:threads:0` is advertised; the Waddle threads query uses `urn:waddle:threads:0`. Tests: `waddle-xmpp/tests/xep0201_thread_parent.rs`. |
 | 0202 | Entity Time                                          | urn:xmpp:time                      |  Y  |  Y   |   Y   | unaudited  | |
@@ -94,7 +94,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0317 | Hats                                                 | urn:xmpp:hats:0                    |  Y  |  Y   |   Y   | partial    | Authority stays in XEP-0045 (#611). The deployment assigns hats through `ServerHats`; every server-built occupant presence (join, late-joiner replay, role/affiliation change, leave) carries them, and client-sent hats are stripped. Today only extension bots wear one (`urn:waddle:hats:bot`). Hat list/assign commands (§3.2–3.6) are not implemented. Tests: `waddle-xmpp/tests/xep0317_hats.rs`. |
 | 0319 | Last User Interaction in Presence                    | urn:xmpp:idle:1                    |   -   |   Y    |    Y    | unaudited  | Tests: `waddle-xmpp/tests/xep0319_last_user_interaction.rs`. |
 | 0333 | Displayed Markers                                    | urn:xmpp:chat-markers:0            |   Y   |   Y    |    Y    | fixed      | Markers are read through the marked message only: a stale marker, or one for a message not in the chat, does not clear newer unread (#2741). |
-| 0334 | Message Processing Hints                             | urn:xmpp:hints                     |  -  |  Y   |   Y   | unaudited  | |
+| 0334 | Message Processing Hints                             | urn:xmpp:hints                     |  -  |  Y   |   Y   | unaudited  | Hints are bypassed on bare/server JIDs, so credential lifecycle operations use `<iq/>` (`urn:waddle:credential:1`) rather than `<message/>`. |
 | 0352 | Client State Indication                              | urn:xmpp:csi:0                     |   -   |   -    |    -    | not-implemented | Neither advertised nor implemented. `Feature::csi()` has no production caller, and Bind 2 does not offer CSI inline. |
 | 0357 | Push Notifications                                   | urn:xmpp:push:0                    |   Y   |   Y    |    Y    | fixed      | Third-party (client app) push services are published to over S2S (#2728). |
 | 0359 | Unique and Stable Stanza IDs                         | urn:xmpp:sid:0                     |  Y  |  Y   |   Y   | unaudited  | |
@@ -145,7 +145,7 @@ or advertises. One row per XEP. Each gap becomes an isolated PR.
 | 0511 | Link Metadata                                        | rdf:Description (OGP) payload      |   -   |   Y    |    Y    | unaudited  | Tests: `waddle-xmpp/tests/xep0511_link_metadata.rs`, `waddle-server/tests/xep0511_s2s_account_link_metadata_ws.rs`. |
 | 0513 | Intentional Mention Markup                           | urn:xmpp:mentions:0                |   Y   |   Y    |    Y    | fixed      | Plus `#channel` profile. Mentions are carried as `<mention type target active/>` inside XEP-0394 `<markup><span start end>`; Waddle-only `jid`/`uri`/`noping` moved to a sibling `urn:waddle:mentions:0` element (#2683). Client sends `@everyone` as `#channel` and `@here` as `#channel` with `active='true'`; the removed permissions IQ/form (`<query/>` in `urn:xmpp:mentions:0`) is no longer answered, and the count cap is local abuse-mitigation policy. |
 | —    | (Waddle) Call lifecycle reports                      | urn:waddle:call-lifecycle:0        |  Y  |  Y   |   Y   | fixed      | Closed-set client operational reports; counted and acknowledged without call-state changes. Dedicated `xep_waddle_call_lifecycle` and `calls_e2e_ws` coverage. |
-| —    | (Waddle) Call lifecycle reports                      | urn:waddle:call-lifecycle:0        |  Y  |  Y   |   Y   | fixed      | Closed-set client operational reports; counted and acknowledged without call-state changes. Dedicated `xep_waddle_call_lifecycle` and `calls_e2e_ws` coverage. |
+| —    | (Waddle) Inference credential lifecycle              | urn:waddle:credential:1            |  Y  |  Y   |   Y   | fixed      | Server-domain IQ-only client-sealed credential lifecycle (subkey fetch, device enrollment, credential enroll/status/rotate/revoke, policy mutation); stripped recursively across all IQ error-bounce paths. Dedicated core + server integration suites. |
 
 ## Currently identified gaps
 
@@ -194,6 +194,47 @@ applies and what the wire commitment is.
   covers replies, rate limits and exported counters; core inline tests
   cover the typed wire shape, and `calls_e2e_ws` covers discovery and
   report acknowledgement over WebSocket.
+
+### `urn:waddle:credential:1`
+
+- **Carrier**: Authenticated `<iq type='get'|'set'>` addressed to the user's
+  own server domain (or with `to` omitted). Never carried in `<message/>`
+  (XEP-0334 hints are bypassed on bare/server JIDs) and never carried in
+  XEP-0050 forms on `extensions.<domain>`.
+- **Operations & Args**:
+  - `<get-subkey/>` (`IQ-get`): fetches the broker's active rotatable P-256
+    ECDH subkey bundle (`<subkey-bundle/>`) signed by the client-pinned Root
+    Broker-Key-Signing Key (BKSK).
+  - `<enroll-device/>` (`IQ-set`): enrolls a P-256 device signing key with
+    mandatory independent IdP proof (`Colony` JWT `cnf.jkt` or WebAuthn) and
+    proof-of-possession signature.
+  - `<enroll-credential/>`, `<rotate-credential/>`, `<revoke-credential/>`
+    (`IQ-set`): client-sealed (`ECDH-ES + HKDF-SHA256 + AES-256-GCM`)
+    credential custody mutations with single-use XEP-0198 replay nonces.
+  - `<credential-status/>` (`IQ-get`): lists opaque credential metadata only.
+  - `<mutate-policy/>` (`IQ-set`): tenant/room inference policy mutation
+    requiring broker-verified IdP admin proof.
+- **Result & Error Opacity**: Results return only opaque identifiers, statuses,
+  versions, and public keys. Every error returns `payload: None`. All four
+  server IQ error-bounce paths (`route_to_connection`, `destination`,
+  `full_jid_forward`, `transport_xml`/`muc_admin`) and XEP-0191/XEP-0363 error
+  helpers recursively strip `urn:waddle:credential:*` and
+  `urn:waddle:inference:credential:*` elements so `sm_unacked` stays secret-free.
+- **ACL & Proof Enforcement**: Cell-local `native_users` SCRAM accounts are
+  explicitly rejected (`forbidden`), and cell-asserted admin flags
+  (`serverOwnerLocalparts`, `pubsub_affiliations`) are rejected without
+  broker-verified IdP admin proof.
+- **Advert**: `Feature::waddle_credential()` in `waddle-xmpp-core`, advertised
+  only when broker custody is configured.
+- **Why a Waddle namespace?** No XEP defines client-pinned root-signed broker
+  subkeys, ECDH-ES sealed inference credential enrollment with XEP-0198
+  idempotent nonces, or broker-custodied inference policy mutations.
+- **Tests**: `waddle-xmpp-core::waddle_credential` unit tests,
+  `waddle-broker` crypto/KMS/IdP/restore suites, and `waddle-server`
+  integration tests (`credential_iq_contract`, `credential_iq_sm_replay`,
+  `credential_iq_bounce_stripping`, `credential_iq_nonce_boundaries`,
+  `credential_iq_malformed_xml`, `credential_iq_four_bounce_paths`,
+  `credential_iq_bounce_m3`, `pairwise_sealed_enroll_bounce_strip`).
 
 ### `urn:waddle:admin:users:list:0` — Admin V1 Users panel
 

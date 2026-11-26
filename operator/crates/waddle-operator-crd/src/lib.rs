@@ -1,5 +1,5 @@
 //! Custom Resource Definition types, schema generation, and pure spec validation
-//! for the `WaddleServer` Kubernetes resource (`waddle.social/v1alpha1`).
+//! for `WaddleServer` and `WaddleTenant` Kubernetes resources (`waddle.social/v1alpha1`).
 
 mod dependencies;
 mod identifiers;
@@ -7,11 +7,15 @@ mod secrets;
 mod server_config;
 mod validation;
 mod waddle_server;
+mod waddle_tenant;
 
 pub use dependencies::{
-    CloudNativePgSource, ExternalPostgresSource, ExternalSpiceDbSource, PostgresDependencySpec,
-    PostgresSourceMode, RestrictedRuntimeRolesSpec, RestrictedRuntimeSpec, SecretKeyRef,
-    SpiceDbDependencySpec, SpiceDbOperatorSource, SpiceDbSourceMode,
+    AuthzBackendKind, AuthzSpec, BrokerKmsProviderKind, BrokerKmsSpec, BrokerSpec,
+    CloudNativePgSource, ExtensionsSpec, ExternalPostgresSource, ExternalSpiceDbSource,
+    LocalObjectRef, OpenFgaDependencySpec, PostgresDependencySpec, PostgresSourceMode,
+    RestrictedRuntimeRolesSpec, RestrictedRuntimeSpec, ScalewayKmsSpec, SecretKeyRef,
+    SpiceDbDependencySpec, SpiceDbOperatorSource, SpiceDbSourceMode, StorageBackendKind,
+    StorageSpec, TursoStorageSpec, VaultKmsSpec,
 };
 pub use identifiers::{
     ContentDigest, DeploymentUuid, GitSha, IdentifierParseError, ImageDigest, PgIdentifier,
@@ -34,4 +38,9 @@ pub use validation::{validate_spec, ValidatedSpec, ValidationReport, ValidationV
 pub use waddle_server::{
     DependenciesStatus, DependencyHealthPhase, DependencyStatusSummary, WaddleServer,
     WaddleServerPhase, WaddleServerSpec, WaddleServerStatus,
+};
+pub use waddle_tenant::{
+    validate_tenant_spec, TenantExtensionsSpec, TenantPlacementMode, TenantQuotasSpec,
+    TenantValidationReport, TenantValidationViolation, WaddleTenant, WaddleTenantPhase,
+    WaddleTenantSpec, WaddleTenantStatus,
 };
