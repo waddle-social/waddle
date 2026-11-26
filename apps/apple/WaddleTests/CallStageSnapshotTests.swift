@@ -55,7 +55,7 @@ final class CallStageSnapshotTests: XCTestCase {
         title: String = "#design", subtitle: String = "2 others in call", status: CallSessionStatus = .connected,
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
         isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, issues: [CallMediaIssue] = [],
-        checkingIssues: Set<CallMediaIssue.Kind> = [],
+        checkingIssues: Set<CallMediaIssue.Kind> = [], isChromeHidden: Bool = false,
         stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
         let controls = Self.stageControls(
@@ -68,7 +68,7 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
                 promotedSpeaker: promotedSpeaker, controls: controls, issues: issues, checkingIssues: checkingIssues,
-                tileSource: Self.cameras, announcesChanges: false,
+                isChromeHidden: isChromeHidden, tileSource: Self.cameras, announcesChanges: false,
                 perform: { _ in }
             )
             .frame(width: size.width, height: size.height),
@@ -161,6 +161,24 @@ final class CallStageSnapshotTests: XCTestCase {
             subtitle: "4 others in call",
             tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken, Self.mika],
             stageSize: .expanded, size: CGSize(width: 1000, height: 640)
+        )
+    }
+
+    /// Full screen: the header and the controls lie over the tiles.
+    func testRoomFullScreen() {
+        assertStage(
+            subtitle: "4 others in call",
+            tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken, Self.mika],
+            stageSize: .immersive, size: CGSize(width: 1000, height: 640)
+        )
+    }
+
+    /// Full screen with the pointer at rest: the tiles have the window to themselves.
+    func testRoomFullScreenAtRest() {
+        assertStage(
+            subtitle: "4 others in call",
+            tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken, Self.mika],
+            isChromeHidden: true, stageSize: .immersive, size: CGSize(width: 1000, height: 640)
         )
     }
 

@@ -451,8 +451,10 @@
 		88217DEEB8B68D79BEB98F48 /* MemberRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24FC01964BF3C9A444AC8C8C /* MemberRows.swift */; };
 		88CB2E770489DF42DD51E711 /* ProfileSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 212084C0987439901E238C8C /* ProfileSharingSection.swift */; };
 		88F2CD9DE93781F62A736BAC /* FFIXmppPort+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */; };
+		892B98BE7AC490E051D1646B /* CallChromeFading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5EC1FB3595E641FF542F11 /* CallChromeFading.swift */; };
 		89595B61161D4DF7D2CCD997 /* QuickSwitcherResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0EC3BBBD56E38C392A73A0 /* QuickSwitcherResults.swift */; };
 		898A6AE30F6BDEE06534B821 /* RoomDetailsForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */; };
+		89AAC8850A8BB244328D912F /* CallChromeFading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5EC1FB3595E641FF542F11 /* CallChromeFading.swift */; };
 		89B11E70D2B4FEE87EAD1E64 /* RecipientInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45389C112F24924C4ADC88C3 /* RecipientInput.swift */; };
 		89F7DC5EE24626C9FC914750 /* SplitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23892C2B3A078BA52981F443 /* SplitShell.swift */; };
 		8A79AD8FC309A56A1CCD2B76 /* ScreenSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56272EFA683B51640DA6142 /* ScreenSnapshot.swift */; };
@@ -974,6 +976,7 @@
 		4CE564FF3A2D80291A80B47B /* ShellScreenSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellScreenSnapshotTests.swift; sourceTree = "<group>"; };
 		4D6A2286FEDA8D46D8F81698 /* TimelineFeedLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineFeedLayout.swift; sourceTree = "<group>"; };
 		4F3FB80C78A0D56B621847DC /* MentionHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionHighlight.swift; sourceTree = "<group>"; };
+		4F5EC1FB3595E641FF542F11 /* CallChromeFading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallChromeFading.swift; sourceTree = "<group>"; };
 		4F7FC6CFC6DF2EAEE334F027 /* NotificationModeSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationModeSection.swift; sourceTree = "<group>"; };
 		4FAD211209A40B8E63E80BBC /* StoryClip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryClip.swift; sourceTree = "<group>"; };
 		4FD3364EDD46C6BC806C8958 /* EventEditorParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventEditorParts.swift; sourceTree = "<group>"; };
@@ -2079,6 +2082,7 @@
 		B65B5283C379A0FDF7ECC7E1 /* Stage */ = {
 			isa = PBXGroup;
 			children = (
+				4F5EC1FB3595E641FF542F11 /* CallChromeFading.swift */,
 				CFC8D95D5BADEA4D6991B578 /* CallControlBar.swift */,
 				4CBB552FE231D709F6DB925E /* CallFullScreen.swift */,
 				CC909209BA9C54C4A1194213 /* CallMediaNotice.swift */,
@@ -2511,6 +2515,7 @@
 				5E9324CFA5AB9954D2988F71 /* CallBackgroundProcessor.swift in Sources */,
 				C9EBAE164CB7D3CD21970A10 /* CallCamera.swift in Sources */,
 				4870BBF3B2C03366C4E65D0C /* CallCaptureSources.swift in Sources */,
+				89AAC8850A8BB244328D912F /* CallChromeFading.swift in Sources */,
 				9318BA8E9F9BE0AD8FA8EAF6 /* CallControlBar.swift in Sources */,
 				6D2C8FE6E22C4CD0086394AB /* CallDeviceCatalog.swift in Sources */,
 				CF31EC6ECBD11B78A393FEBA /* CallDock.swift in Sources */,
@@ -2924,6 +2929,7 @@
 				8C4C9EEFC89E448A36BCBFA8 /* CallBackgroundProcessor.swift in Sources */,
 				99B1E91F15F962B8686AC896 /* CallCamera.swift in Sources */,
 				E7B3EDD4368522FCBBF408C6 /* CallCaptureSources.swift in Sources */,
+				892B98BE7AC490E051D1646B /* CallChromeFading.swift in Sources */,
 				D6B197EAAECDB9DCA6D90E70 /* CallControlBar.swift in Sources */,
 				90EE1ACC01A0CEEA3760BC11 /* CallDeviceCatalog.swift in Sources */,
 				0C36753DC620BCF8966005B4 /* CallDock.swift in Sources */,
