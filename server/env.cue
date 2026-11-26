@@ -145,40 +145,6 @@ schema.#Project & {
 		wc.#NamespaceBazelCache,
 		wc.#CuenvRelease,
 		c.#OnePassword,
-		schema.#Contributor & {
-			id: "flakehub"
-			when: environment: ["flakehub"]
-			tasks: [
-				{
-					id:       "checkout.tag"
-					label:    "Checkout tag"
-					priority: 1
-					provider: github: {
-						uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-						with: {
-							"persist-credentials": false
-							ref:                   "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
-						}
-					}
-				},
-				{
-					id:       "push"
-					label:    "Push to FlakeHub"
-					priority: 5
-					dependsOn: ["checkout.tag", "hestia.setup"]
-					ci: github: permissions: "id-token": "write"
-					provider: github: {
-						uses: "DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425"
-						with: {
-							visibility:             "public"
-							name:                   "waddle-social/waddle"
-							tag:                    "${{ inputs.tag }}"
-							"include-output-paths": true
-						}
-					}
-				},
-			]
-		},
 	]
 
 	ci: provider: github: {
@@ -250,23 +216,6 @@ schema.#Project & {
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
-		}
-		"Publish tags to FlakeHub": {
-			environment: "flakehub"
-			when: {
-				tag: ["v?[0-9]+.[0-9]+.[0-9]+*"]
-				manual: tag: {
-					description: "The existing tag to publish to FlakeHub"
-					type:        "string"
-					required:    true
-				}
-			}
-			provider: github: permissions: {
-				"id-token":      "write"
-				contents:        "read"
-				"pull-requests": "none"
-			}
-			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
 			when: manual: true
@@ -626,7 +575,6 @@ schema.#Project & {
 					".github/workflows/waddle-server-queuechecks.yml",
 					".github/workflows/waddle-server-namespacerustchecks.yml",
 					".github/workflows/waddle-server-parentmovenative.yml",
-					".github/workflows/waddle-server-publish-tags-to-flakehub.yml",
 					".github/workflows/waddle-server-pullrequest.yml",
 					".github/workflows/waddle-server-roomchildcontract.yml",
 					".github/workflows/waddle-server-rootsync.yml",
@@ -1766,13 +1714,6 @@ schema.#Project & {
 				// Postgres + all-features lane ran every required cluster
 				// test on this exact commit.
 				tasks.nixTestLocal,
-			]
-		}
-
-		flakehubPublished: schema.#Task & {
-			command: "true"
-			inputs: [
-				schema.#ModuleFiles & {paths: ["flake.nix", "flake.lock"]},
 			]
 		}
 

@@ -401,9 +401,3 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
 });
 
 
-test("0.76.1 retains source-declared manual and tag FlakeHub triggers", () => {
-  const workflow = Bun.YAML.parse(readFileSync(".github/workflows/waddle-server-publish-tags-to-flakehub.yml", "utf8")) as any;
-  expect(workflow.on.push.tags).toEqual(["v?[0-9]+.[0-9]+.[0-9]+*"]);
-  expect(workflow.on.workflow_dispatch.inputs.tag.required).toBe(true);
-  expect(workflow.on.workflow_dispatch.inputs.tag.type).toBe("string");
-});

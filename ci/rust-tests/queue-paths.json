@@ -208,7 +208,6 @@
     ".github/workflows/waddle-server-federationgrantfence.yml",
     ".github/workflows/waddle-server-namespacerustchecks.yml",
     ".github/workflows/waddle-server-parentmovenative.yml",
-    ".github/workflows/waddle-server-publish-tags-to-flakehub.yml",
     ".github/workflows/waddle-server-pullrequest.yml",
     ".github/workflows/waddle-server-queuechecks.yml",
     ".github/workflows/waddle-server-roomchildcontract.yml",
