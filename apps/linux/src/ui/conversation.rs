@@ -1250,8 +1250,9 @@ fn row_widget() -> gtk::Box {
         .label("Reply in Thread")
         .halign(gtk::Align::Start)
         .build();
-    thread.add_css_class("flat");
-    thread.add_css_class("caption");
+    for class in ["flat", "caption", "thread-link"] {
+        thread.add_css_class(class);
+    }
     content.append(&thread);
     row.append(&gutter);
     row.append(&content);
@@ -1442,8 +1443,9 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
         .label("Reply in Thread")
         .halign(gtk::Align::Start)
         .build();
-    button.add_css_class("flat");
-    button.add_css_class("caption");
+    for class in ["flat", "caption", "thread-link"] {
+        button.add_css_class(class);
+    }
     button.set_visible(
         !item.retracted
             && item.reference_id.is_some()

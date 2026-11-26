@@ -171,11 +171,12 @@ mod tests {
             message_order: MessageOrder::Social,
             notifications: false,
             rooms_mentions_only: false,
+            colorize_names: true,
         })
         .expect("serializes");
         assert_eq!(
             json,
-            r#"{"appearance":"light","message_order":"social","notifications":false,"rooms_mentions_only":false}"#
+            r#"{"appearance":"light","message_order":"social","notifications":false,"rooms_mentions_only":false,"colorize_names":true}"#
         );
     }
 
