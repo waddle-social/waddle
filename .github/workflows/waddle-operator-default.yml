@@ -18,6 +18,10 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - infrastructure/waddle.cloud/gitops/waddle-operator/crds/waddleservers.waddle.social.yaml
+    - infrastructure/waddle.cloud/gitops/waddle-operator/crds/waddleservers.waddle.social.yaml/**
+    - infrastructure/waddle.cloud/gitops/waddle-operator/crds/waddletenants.waddle.social.yaml
+    - infrastructure/waddle.cloud/gitops/waddle-operator/crds/waddletenants.waddle.social.yaml/**
     - operator/*.cue
     - operator/Cargo.lock
     - operator/Cargo.lock/**
@@ -25,6 +29,8 @@ on:
     - operator/Cargo.toml/**
     - operator/config/crd/waddleservers.waddle.social.yaml
     - operator/config/crd/waddleservers.waddle.social.yaml/**
+    - operator/config/crd/waddletenants.waddle.social.yaml
+    - operator/config/crd/waddletenants.waddle.social.yaml/**
     - operator/crates/**
     - operator/rust-toolchain.toml
     - operator/rust-toolchain.toml/**
@@ -39,8 +45,9 @@ jobs:
       checks: write
       contents: read
       id-token: write
+      packages: write
     name: waddle-operator-default
-    runs-on: namespace-profile-linux-x86
+    runs-on: namespace-profile-linux-x86;container.privileged=true
     steps:
     - name: Checkout
       uses: actions/checkout@v7

@@ -806,6 +806,38 @@
               doCheck = false;
             }
           );
+          operatorRustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./operator/rust-toolchain.toml;
+          operatorCraneLib = (crane.mkLib pkgs).overrideToolchain operatorRustToolchain;
+          operatorPackageSrc = lib.fileset.toSource {
+            root = ./operator;
+            fileset = lib.fileset.unions [
+              ./operator/Cargo.toml
+              ./operator/Cargo.lock
+              ./operator/crates
+            ];
+          };
+          operatorBaseArgs = {
+            pname = "waddle-operator";
+            version = "0.1.0";
+            src = operatorPackageSrc;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --package waddle-operator --bin waddle-operator";
+          };
+          operatorCargoArtifacts = operatorCraneLib.buildDepsOnly (
+            operatorBaseArgs
+            // {
+              doCheck = false;
+              cargoCheckExtraArgs = "";
+            }
+          );
+          waddle-operator = operatorCraneLib.buildPackage (
+            operatorBaseArgs
+            // {
+              cargoArtifacts = operatorCargoArtifacts;
+              doCheck = false;
+              meta.mainProgram = "waddle-operator";
+            }
+          );
           image = pkgs.dockerTools.streamLayeredImage {
             name = "ghcr.io/waddle-social/waddle";
             tag = "nix";
@@ -832,9 +864,25 @@
               };
             };
           };
+          operatorImage = pkgs.dockerTools.streamLayeredImage {
+            name = "ghcr.io/waddle-social/waddle-operator";
+            tag = "nix";
+            contents = [
+              waddle-operator
+              pkgs.cacert
+              pkgs.iana-etc
+            ];
+            config = {
+              Entrypoint = [ "${lib.getExe waddle-operator}" ];
+              User = "65532:65532";
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
+            };
+          };
         in
         {
-          inherit waddle-server;
+          inherit waddle-server waddle-operator;
           waddle-server-deps = cargoArtifacts;
           waddle-server-workspace-deps = workspaceArtifacts;
           waddle-server-workspace-all-features-deps = workspaceAllFeaturesArtifacts;
@@ -844,6 +892,7 @@
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           waddle-server-image-stream = image;
+          waddle-operator-image-stream = operatorImage;
           # Fail before compiling if a CI runner cannot create the namespaces
           # required by the four co-located test sandboxes.
           waddle-ci-sandbox-probe =
@@ -1633,7 +1682,7 @@
                 # unavailable inside the network-isolated cuenv Linux sandbox.
                 exec ${toolchain}/bin/cargo run --config ${vendor}/config.toml \
                   --config 'target.x86_64-unknown-linux-gnu.rustflags=["-C", "linker-features=-lld"]' \
-                  --offline --locked -p waddle-operator -- crd
+                  --offline --locked -p waddle-operator -- crd "$@"
               '';
             in
             pkgs.mkShell {
