@@ -26,8 +26,8 @@ public enum MessageAction: Hashable, Sendable {
         case .reply: "Reply"
         case .startThread: "Reply in thread"
         case .openThread: "Open thread"
-        case .pin: "Pin to room"
-        case .unpin: "Unpin from room"
+        case .pin: "Pin message"
+        case .unpin: "Unpin message"
         case .selectText: "Select text"
         case .edit: "Edit"
         case .delete: "Delete"
@@ -43,9 +43,10 @@ public enum MessageAction: Hashable, Sendable {
     public var isOwn: Bool { self == .edit || self == .delete }
 }
 
-/// Whether the account may pin in a conversation. Only in a room it is in:
-/// owners and admins always may, anyone else where the room lets anyone
-/// pin, which its disco#info says. A 1:1 conversation has no pins.
+/// Whether the account may pin in a conversation. In a room, only one it
+/// is in: owners and admins always may, anyone else where the room lets
+/// anyone pin, which its disco#info says. In a conversation of two either
+/// person may, when both are on this server.
 public enum PinAccess: Hashable, Sendable {
     case allowed
     case unknown
@@ -87,7 +88,7 @@ public enum MessageActions {
         if item.threadTarget(inside: context.thread) != nil {
             actions.append(context.replyCount > 0 ? .openThread : .startThread)
         }
-        if item.conversation.isRoom, canTarget, context.pinning != .denied {
+        if item.pinTargetID != nil, context.pinning != .denied {
             actions.append(context.isPinned ? .unpin : .pin)
         }
         if hasWords(item) {

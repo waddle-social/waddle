@@ -233,8 +233,20 @@ final class FakePort: XmppPort {
         return true
     }
 
-    func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool { true }
-    func fetchPins(in room: BareJID) async throws -> [PinEntry] { [] }
+    struct PinWrite: Equatable {
+        let pinned: Bool
+        let targetID: String
+        let conversation: ConversationID
+    }
+
+    var pinWrites: [PinWrite] = []
+    var pinsByConversation: [BareJID: [PinEntry]] = [:]
+
+    func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool {
+        pinWrites.append(PinWrite(pinned: pinned, targetID: targetID, conversation: conversation))
+        return true
+    }
+    func fetchPins(in room: BareJID) async throws -> [PinEntry] { pinsByConversation[room] ?? [] }
 
     /// While set, history fetches suspend until `releaseHistory()`.
     var holdsHistory = false

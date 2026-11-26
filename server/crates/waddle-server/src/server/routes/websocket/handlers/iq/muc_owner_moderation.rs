@@ -2251,11 +2251,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq_as(
                         frames.push(stanza_to_xml(&Stanza::Message(outbound)));
                         continue;
                     }
-                    let _ = state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .try_send_to(&occupant_jid, Stanza::Message(outbound));
+                    // The occupant's connection may be on another node.
+                    crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                        state,
+                        &room_jid,
+                        &occupant_jid,
+                        Stanza::Message(outbound),
+                    )
+                    .await;
                 }
             }
         }

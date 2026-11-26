@@ -1031,11 +1031,13 @@ async fn apply_muc_owner_config_form(
                 &applied,
             );
             for (recipient, presence) in applied.presence_updates {
-                let _ = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&recipient, Stanza::Presence(presence));
+                crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                    state,
+                    room_jid,
+                    &recipient,
+                    Stanza::Presence(presence),
+                )
+                .await;
             }
         }
         converge_flip(
@@ -1163,11 +1165,13 @@ async fn apply_muc_owner_config_form(
         );
         if applied.outbox_reservation.is_none() {
             for (recipient, presence) in applied.presence_updates {
-                let _ = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&recipient, Stanza::Presence(presence));
+                crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                    state,
+                    room_jid,
+                    &recipient,
+                    Stanza::Presence(presence),
+                )
+                .await;
             }
         }
     }
@@ -1254,11 +1258,13 @@ async fn drain_or_broadcast_config_change(
                 &recipient_jid,
                 status_codes,
             );
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(&recipient_jid, Stanza::Message(message));
+            crate::server::routes::websocket::handlers::presence::route_room_presence_to_occupant(
+                state,
+                room_jid,
+                &recipient_jid,
+                Stanza::Message(message),
+            )
+            .await;
         }
     }
     ResponseBatch::default()

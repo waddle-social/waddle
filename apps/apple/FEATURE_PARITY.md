@@ -47,7 +47,7 @@ name the issue that tracks them.
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events |
+| Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events, in rooms and in a conversation of two with someone on this server, where either person may pin as on web (the server keeps no pins with a person on another server, and none are offered there). The toolbar's Pinned messages opens the list in both. In a conversation of two a pin is asked for and matched by the message's `@id`, the id both people have; the server's notice that something was pinned is never a row there |
 | `/me` actions | 0245 | ❌ | ✅ | Rendered as "* Name action" in italics, keeping the action's markup, mentions and links; conversation-list, reply and VoiceOver previews match |
 | @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references and, in rooms, offers people with no presence from the XEP-0055 user directory; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
 | Nick colors | 0392 | ❌ | ❌ | Not rendered: avatars use static tints and names use foreground colors. Linux and web chat render XEP-0392 colors |

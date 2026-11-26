@@ -4721,6 +4721,347 @@ async fn pep_notification_reaches_a_contact_connected_to_another_node() {
     drop(server_b);
 }
 
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
+
+/// An attribute name for the element builder, which takes owned `NcName`s.
+fn attr_name(name: &str) -> minidom::rxml::NcName {
+    <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+        .expect("valid attribute name")
+}
+
+fn parse_frame(frame: &str) -> Option<minidom::Element> {
+    frame.parse::<minidom::Element>().ok()
+}
+
+/// Whether `frame` is the `result` IQ answering request `id`, read from the
+/// parsed stanza so either attribute quote style matches.
+fn frame_is_iq_result(frame: &str, id: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "iq"
+            && element.attr("id") == Some(id)
+            && element.attr("type") == Some("result")
+    })
+}
+
+fn iq_set_xml(id: &str, payload: minidom::Element) -> String {
+    stanza_xml(Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload,
+    })))
+}
+
+fn pep_publish_payload(node: &str, item_id: &str) -> minidom::Element {
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+    minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            minidom::Element::builder("publish", NS_PUBSUB)
+                .attr(attr_name("node"), node)
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(attr_name("id"), item_id)
+                        .append(
+                            minidom::Element::builder("tune", node)
+                                .append(minidom::Element::builder("artist", node).append("Waddle")),
+                        ),
+                ),
+        )
+        .build()
+}
+
+/// Send `payload` as an IQ set and require its `result`.
+async fn send_iq_set_expecting_result(
+    client: &mut WsXmppClient,
+    id: &str,
+    payload: minidom::Element,
+) {
+    client
+        .send(&iq_set_xml(id, payload))
+        .await
+        .unwrap_or_else(|error| panic!("send {id}: {error}"));
+    client
+        .recv_matching(|frame| {
+            parse_frame(frame).is_some_and(|element| {
+                element.name() == "iq"
+                    && element.attr("id") == Some(id)
+                    && matches!(element.attr("type"), Some("result" | "error"))
+            })
+        })
+        .await
+        .map(|frame| {
+            assert!(
+                frame_is_iq_result(&frame, id),
+                "{id} is answered with a result: {frame}"
+            );
+        })
+        .unwrap_or_else(|error| panic!("{id} is answered: {error}"));
+}
+
+/// The first `<message>` the client receives within `budget` that carries a
+/// XEP-0060 event for `node` listing item `item_id`.
+async fn wait_for_pep_event_item(
+    client: &mut WsXmppClient,
+    node: &str,
+    item_id: &str,
+    budget: Duration,
+) -> Option<minidom::Element> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = client.recv_timeout(remaining).await.ok()?;
+        let Some(message) = parse_frame(&frame).filter(|element| element.name() == "message")
+        else {
+            continue;
+        };
+        let carries_item = message
+            .get_child("event", NS_PUBSUB_EVENT)
+            .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+            .is_some_and(|items| {
+                items.attr("node") == Some(node)
+                    && items.children().any(|item| {
+                        item.is("item", NS_PUBSUB_EVENT) && item.attr("id") == Some(item_id)
+                    })
+            });
+        if carries_item {
+            return Some(message);
+        }
+    }
+}
+
+/// XEP-0060 section 7.1 on a cluster: a publication is delivered to every
+/// resource of an explicit subscriber, wherever it is connected. A bare-JID
+/// subscription expands to the account's resources on every node (section
+/// 6.1.6), but the node that processed the publish holds only its own
+/// sockets, so a resource connected to another node was neither written to
+/// nor reached through the cluster.
+///
+/// Admin subscribes to its own tune node from a resource on node B, without
+/// advertising caps so the caps-driven pass of XEP-0163 section 3 cannot
+/// notify it, and publishes from a resource on node A. Only the explicit
+/// subscription can carry the event to node B.
+#[tokio::test]
+async fn explicit_pubsub_subscriber_on_another_node_receives_the_publication() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping explicit_pubsub_subscriber_on_another_node_receives_the_publication: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const ADMIN_BARE: &str = "admin@localhost";
+    const TUNE_NODE: &str = "http://jabber.org/protocol/tune";
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Node B started last: its generated password is admin's live credential.
+    let admin_password = server_b.fixed_account_password().to_string();
+    let run = uuid::Uuid::new_v4();
+    let mut publisher = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("sub-xnode-pub-{run}"),
+    )
+    .await
+    .expect("admin connects to node A");
+    let mut subscriber = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("sub-xnode-sub-{run}"),
+    )
+    .await
+    .expect("admin's second resource connects to node B");
+
+    // The first publication creates the node; the subscription follows it.
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "sub-xnode-publish-1",
+        pep_publish_payload(TUNE_NODE, "first"),
+    )
+    .await;
+    send_iq_set_expecting_result(
+        &mut subscriber,
+        "sub-xnode-subscribe",
+        minidom::Element::builder("pubsub", NS_PUBSUB)
+            .append(
+                minidom::Element::builder("subscribe", NS_PUBSUB)
+                    .attr(attr_name("node"), TUNE_NODE)
+                    .attr(attr_name("jid"), ADMIN_BARE),
+            )
+            .build(),
+    )
+    .await;
+
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "sub-xnode-publish-2",
+        pep_publish_payload(TUNE_NODE, "second"),
+    )
+    .await;
+
+    let event = wait_for_pep_event_item(
+        &mut subscriber,
+        TUNE_NODE,
+        "second",
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("an explicit subscriber's resource on another node receives the publication");
+    assert_eq!(
+        event.attr("from"),
+        Some(ADMIN_BARE),
+        "the event comes from the node's owner: {event:?}"
+    );
+    assert!(
+        event
+            .attr("to")
+            .is_some_and(|to| to.starts_with(&format!("{ADMIN_BARE}/sub-xnode-sub-"))),
+        "the event is addressed to the subscriber's resource on node B: {event:?}"
+    );
+
+    let _ = publisher.close().await;
+    let _ = subscriber.close().await;
+    drop(server_a);
+    drop(server_b);
+}
+
+/// XEP-0163 "Sending the Last Published Item" on a cluster: a resource that
+/// becomes available on a node other than the one that took the publication
+/// is sent the node's last item. The item lives in the shared store and the
+/// resource's own connection receives it, so no cross-node hand-over is
+/// involved, and this pins that the replay reads the shared store rather
+/// than anything the publishing node held.
+///
+/// Admin publishes on node A and configures the node to send the last item
+/// on presence, then a second admin resource on node B goes available with
+/// caps advertising `+notify`.
+#[tokio::test]
+async fn last_item_replay_reaches_a_resource_that_becomes_available_on_another_node() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping last_item_replay_reaches_a_resource_that_becomes_available_on_another_node: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const TUNE_NODE: &str = "http://jabber.org/protocol/tune";
+    const TUNE_NOTIFY: &str = "http://jabber.org/protocol/tune+notify";
+    const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+    const NS_DATA: &str = "jabber:x:data";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let admin_password = server_b.fixed_account_password().to_string();
+    let run = uuid::Uuid::new_v4();
+    let mut publisher = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("last-xnode-pub-{run}"),
+    )
+    .await
+    .expect("admin connects to node A");
+
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "last-xnode-publish",
+        pep_publish_payload(TUNE_NODE, "last"),
+    )
+    .await;
+    let field = |var: &str, value: &str| {
+        minidom::Element::builder("field", NS_DATA)
+            .attr(attr_name("var"), var)
+            .append(minidom::Element::builder("value", NS_DATA).append(value))
+    };
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "last-xnode-configure",
+        minidom::Element::builder("pubsub", NS_PUBSUB_OWNER)
+            .append(
+                minidom::Element::builder("configure", NS_PUBSUB_OWNER)
+                    .attr(attr_name("node"), TUNE_NODE)
+                    .append(
+                        minidom::Element::builder("x", NS_DATA)
+                            .attr(attr_name("type"), "submit")
+                            .append(
+                                field("FORM_TYPE", "http://jabber.org/protocol/pubsub#node_config")
+                                    .attr(attr_name("type"), "hidden"),
+                            )
+                            .append(field(
+                                "pubsub#send_last_published_item",
+                                "on_sub_and_presence",
+                            )),
+                    ),
+            )
+            .build(),
+    )
+    .await;
+
+    let name = format!("last-xnode-late-{run}");
+    let mut late =
+        WsXmppClient::connect_and_auth(&server_b.ws_url(), DOMAIN, "admin", &admin_password, &name)
+            .await
+            .expect("admin's second resource connects to node B");
+    let _ = send_roster_get(&mut late, "last-xnode-roster").await;
+    pep_caps_support::go_available_with_caps(
+        &mut late,
+        &name,
+        &["http://jabber.org/protocol/disco#info", TUNE_NOTIFY],
+    )
+    .await;
+
+    let replay = wait_for_pep_event_item(&mut late, TUNE_NODE, "last", Duration::from_secs(10))
+        .await
+        .expect("a resource that became available on another node is sent the last item");
+    assert!(
+        replay.children().any(|child| child.name() == "delay"),
+        "the replayed item carries its publication time (XEP-0203): {replay:?}"
+    );
+
+    let _ = publisher.close().await;
+    let _ = late.close().await;
+    drop(server_a);
+    drop(server_b);
+}
+
 /// ADR-0017 Phase 3 Slice 11 (this slice's own harness-fencing scaffold,
 /// deferred from Phase 2, activated here per the phase plan's own Slice 11
 /// text). Originally named `partial_partition_degrades_without_fencing`

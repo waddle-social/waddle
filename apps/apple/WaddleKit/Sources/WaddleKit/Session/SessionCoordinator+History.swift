@@ -34,8 +34,11 @@ extension SessionCoordinator {
                 in: timelines.timeline(for: conversation).feedItems, unreadCount: unreadAtOpen)
         }
         await markDisplayedIfVisible(conversation)
-        if conversation.isRoom {
+        // A room's pins, or those of a conversation of two: one query, to the room or to the other person.
+        if keepsPins(conversation) {
             await refreshPins(in: conversation.jid)
+        }
+        if conversation.isRoom {
             await refreshRoomBots(in: conversation.jid)
         }
     }
@@ -197,12 +200,6 @@ extension SessionCoordinator {
                 directory.touchDirect(item.conversation.jid, at: item.sentAt, preview: preview(of: item))
             }
         }
-    }
-
-    func refreshPins(in room: BareJID) async {
-        let version = pins.versionBeforeFetch(room)
-        guard let entries = try? await port.fetchPins(in: room) else { return }
-        pins.seed(entries, in: room, fetchedAt: version)
     }
 }
 
