@@ -138,6 +138,40 @@ headerbar .title, .section-heading, .waddle-message .sender {
   font-weight: 700;
 }
 
+/* Header bars sit flat on the rail and page colours with a soft rule. */
+headerbar {
+  box-shadow: none;
+  border-bottom: 1px solid var(--wd-border-soft);
+}
+
+/* Sidebar rows: rounded, with a gold or navy bar on the open one. */
+.navigation-sidebar > row {
+  margin: 1px 8px;
+  border-radius: 8px;
+}
+
+.navigation-sidebar > row:selected,
+.navigation-sidebar > row:selected:hover {
+  background-color: var(--wd-surface-2);
+  color: var(--wd-fg);
+  box-shadow: inset 3px 0 0 var(--wd-action);
+}
+
+.section-heading {
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--wd-fg-soft);
+}
+
+/* "Load Earlier" is a quiet link, not a primary pill in the header. */
+headerbar button.load-earlier {
+  color: var(--wd-action-text);
+  background: none;
+  box-shadow: none;
+  font-weight: 600;
+}
+
 /* Timeline */
 .timeline {
   background: none;

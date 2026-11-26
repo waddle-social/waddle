@@ -1082,10 +1082,11 @@ fn section_header(kind: Kind) -> gtk::Label {
             Kind::Direct => "Direct Messages",
         })
         .xalign(0.0)
-        .margin_start(12)
+        .margin_start(16)
         .margin_top(12)
         .margin_bottom(6)
         .build();
+    label.add_css_class("section-heading");
     label.add_css_class("heading");
     label.add_css_class("dim-label");
     label
