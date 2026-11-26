@@ -30,7 +30,7 @@ spec:
       containers:
         - name: waddle-operator
           image: ghcr.io/waddle-social/waddle-operator:main
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - run
             - --enable-yolo-mode=false

@@ -12,7 +12,7 @@ spec:
   image:
     repository: ghcr.io/waddle-social/waddle
     tag: main
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   xmpp:
     enabled: true
     domain: waddle.social
@@ -58,7 +58,6 @@ spec:
         - waddle-livekit-config
       apnsSecretRef:
         secretName: waddle-apns-production
-        secretKey: WADDLE_APNS_KEY_PEM
         teamId: 6KXCJGJ45W
         keyId: CJR7U5CXHP
         bundleId: p4x.waddle.social
