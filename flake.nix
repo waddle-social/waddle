@@ -79,13 +79,6 @@
             runHook postInstall
           '';
         };
-      mkTestRustcWrapper =
-        pkgs:
-        pkgs.writeShellScript "waddle-test-archive-rustc" ''
-          # Keep Nix's linker wrapper, including its runtime library paths.
-          export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
-          exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
-        '';
       # Nextest arguments of the all-features test archive. Its member
       # layers compile with exactly these, so Cargo finds their units fresh.
       # Cargo tracks the per-package overrides explicitly for the two largest
@@ -241,6 +234,13 @@
         in
         assert memberLayerCoverage lib;
         mkLayer "members-xmpp" memberLayerPaths.xmpp base;
+      mkTestRustcWrapper =
+        pkgs:
+        pkgs.writeShellScript "waddle-test-archive-rustc" ''
+          # Keep Nix's linker wrapper, including its runtime library paths.
+          export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
+          exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
+        '';
     in
     {
       packages = forAllSystems (
