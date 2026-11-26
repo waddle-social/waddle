@@ -222,7 +222,7 @@ jobs:
       contents: read
       id-token: write
     name: fmt
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -416,7 +416,7 @@ jobs:
       contents: read
       id-token: write
     name: mainBuildExtensionModules
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -562,7 +562,7 @@ jobs:
       contents: read
       id-token: write
     name: mainBuildImageStream
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -708,7 +708,7 @@ jobs:
       contents: read
       id-token: write
     name: mainChecks
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -904,7 +904,7 @@ jobs:
       contents: read
       id-token: write
     name: mainClippy
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1050,7 +1050,7 @@ jobs:
       contents: read
       id-token: write
     name: mainDoctest
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1196,7 +1196,7 @@ jobs:
       contents: read
       id-token: write
     name: mainTest
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1342,7 +1342,7 @@ jobs:
       contents: read
       id-token: write
     name: nixTestLocal
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -1544,7 +1544,7 @@ jobs:
       id-token: write
       packages: write
     name: publishContainerImage
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     - mainChecks

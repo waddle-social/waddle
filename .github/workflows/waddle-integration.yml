@@ -646,7 +646,7 @@ jobs:
     permissions:
       contents: read
     name: waddle-server-namespaceRustChecks / nixDefaultTest
-    runs-on: namespace-profile-linux-x86
+    runs-on: namespace-profile-linux-x86;container.privileged=true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

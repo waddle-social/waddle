@@ -192,7 +192,13 @@ schema.#Project & {
 				// and uses the normal profile. The JSON round trip permits a
 				// lookup of a dependency the job does not have; CI checks the
 				// generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				//
+				// The profile runner is privileged too: unprivileged, Nix
+				// silently disables its build sandbox and builds each
+				// derivation in a random directory, and Cargo (whose crate
+				// identity includes the workspace path) then recompiles every
+				// workspace member instead of reusing the member layers.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -330,6 +336,8 @@ schema.#Project & {
 			}
 			// The queue runs the default-feature, no-Postgres suite; mainTest
 			// repeats that configuration on the revision eligible to publish.
+			// Privileged so the Nix sandbox works and member layers are reused.
+			provider: github: runner: "namespace-profile-linux-x86;container.privileged=true"
 			tasks: [_t.nixDefaultTest]
 		}
 		// The manual-only rustTests workflow (workflow_dispatch) runs the same
