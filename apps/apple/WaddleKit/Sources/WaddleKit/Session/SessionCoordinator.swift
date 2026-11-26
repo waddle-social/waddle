@@ -35,6 +35,7 @@ public final class SessionCoordinator {
     public let unread: UnreadStore
     public let deliveries: DeliveryStore
     public let pins: PinStore
+    public let blockList = BlockListStore()
     public let avatars: AvatarStore
     /// The account's contact list; nil until it has been loaded once, so
     /// "not known yet" is never shown as "no contacts".
@@ -459,6 +460,7 @@ public final class SessionCoordinator {
         unread.silence([])
         deliveries.clear()
         pins.clear()
+        blockList.clear()
         avatars.clear()
         history.clear()
         inbox.clear()
@@ -609,6 +611,8 @@ public final class SessionCoordinator {
             presence.activityChanged(activity, of: jid)
         case let .inboxPush(entry):
             applyInbox(entry)
+        case let .blockListChanged(change):
+            if !isStopped { blockList.apply(change) }
         case let .roomConfigurationChanged(room):
             readPinPermissionAgain(of: room)
         case .authenticationFailed:
@@ -634,6 +638,8 @@ public final class SessionCoordinator {
 
     /// The ready pipeline: presence, directory, joins, read state, queue.
     private func sessionReady() async {
+        // Every bind needs a fresh fetch to receive subsequent pushes.
+        async let blockListBootstrap: Void = loadBlockList()
         await refreshOwnPresence()
         guard !Task.isCancelled else { return }
         // Start loading the roster in parallel with topology discovery, room
@@ -673,6 +679,7 @@ public final class SessionCoordinator {
         await drainPendingDisplayed()
         await reloadActiveConversation()
         await contactsBootstrap
+        await blockListBootstrap
         guard !Task.isCancelled else { return }
         // Only a session that got all the way through resets the backoff,
         // so a stream that drops right after binding keeps backing off.

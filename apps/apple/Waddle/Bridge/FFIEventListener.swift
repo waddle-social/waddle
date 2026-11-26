@@ -35,8 +35,15 @@ final class FFIEventListener: WaddleEventListener {
         case .mamResult:
             // Pages come back from the fetch and search calls.
             return nil
-        case .blockListChanged:
-            return nil
+        case let .blockListChanged(change):
+            switch change {
+            case let .blocked(jids):
+                return .blockListChanged(.blocked(jids.compactMap(JID.init(parsing:))))
+            case let .unblocked(jids):
+                return .blockListChanged(.unblocked(jids.compactMap(JID.init(parsing:))))
+            case .unblockedAll:
+                return .blockListChanged(.unblockedAll)
+            }
         case let .deliveryAcked(stanzaId):
             return .deliveryAcked(stanzaID: stanzaId)
         case let .deliveryFailed(stanzaId):

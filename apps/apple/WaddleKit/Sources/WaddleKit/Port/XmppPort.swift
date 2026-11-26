@@ -60,6 +60,8 @@ public enum XmppEvent: Sendable {
     case activityChanged(jid: BareJID, activity: UserActivity?)
     /// Live `urn:waddle:inbox:0` unread push.
     case inboxPush(InboxEntry)
+    /// XEP-0191 push to a session that requested the account's block list.
+    case blockListChanged(BlockListChange)
     /// The room's configuration changed in a way that is not
     /// privacy-related (XEP-0045 §10.2.1, status 104).
     case roomConfigurationChanged(BareJID)
@@ -103,6 +105,15 @@ public protocol MessagingPort: AnyObject, Sendable {
     func sendChatState(_ state: ChatState, in conversation: ConversationID) async -> Bool
     func setPinned(_ pinned: Bool, targetID: String, in conversation: ConversationID) async -> Bool
     func fetchPins(in room: BareJID) async throws -> [PinEntry]
+}
+
+/// Account-wide blocking (XEP-0191).
+public protocol BlockingPort: AnyObject, Sendable {
+    /// Fetches the list and subscribes this connection to block-list pushes.
+    func fetchBlockList() async throws -> [JID]
+    func block(_ jids: [JID]) async throws
+    func unblock(_ jids: [JID]) async throws
+    func unblockAll() async throws
 }
 
 /// History (XEP-0313) and search. Both throw when the query failed, so a
@@ -363,4 +374,4 @@ public protocol AdminPort: AnyObject, Sendable {
 }
 
 /// The full surface the session coordinator drives.
-public typealias XmppPort = ConnectionPort & MessagingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort & AdminPort
+public typealias XmppPort = ConnectionPort & MessagingPort & BlockingPort & ArchivePort & ReadStatePort & DirectoryPort & ProfilePort & UploadPort & PushPort & CommandPort & CallPort & CommunityPort & EventsPort & StickerPort & AdminPort

@@ -1,5 +1,12 @@
 import Foundation
 
+/// A change to the account's XEP-0191 block list.
+public enum BlockListChange: Sendable {
+    case blocked([JID])
+    case unblocked([JID])
+    case unblockedAll
+}
+
 /// The XEP-0201 thread a message goes to: `<thread parent='…'>id</thread>`.
 public struct ThreadTarget: Hashable, Sendable {
     public let id: String

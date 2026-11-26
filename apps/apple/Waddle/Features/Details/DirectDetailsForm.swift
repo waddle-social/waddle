@@ -33,6 +33,7 @@ struct DirectDetailsForm: View {
                     navigation.sheet = .search(.direct(peer))
                 }
             }
+            PeerBlockSection(peer: peer, name: session.directory.title(for: .direct(peer)))
         }
         .huddleForm()
         .peerDetails(of: peer, session: session, into: $details)

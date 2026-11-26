@@ -12,6 +12,17 @@ final class FakePort: XmppPort {
     var holdExternalServicesFetch = false
     var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
 
+    var blockListFetchCount = 0
+    var blockListResult: Result<[JID], PortError> = .success([])
+    let blockListFetches = HeldCalls()
+    var blockRequests: [[JID]] = []
+    var unblockRequests: [[JID]] = []
+    var unblockAllCount = 0
+    var blockResult: Result<Void, PortError> = .success(())
+    var unblockResult: Result<Void, PortError> = .success(())
+    var unblockAllResult: Result<Void, PortError> = .success(())
+    let blockingWrites = HeldCalls()
+
     var callLifecycleReports: [CallLifecycleReport] = []
     var callLifecycleReportResult: CallLifecycleReportResult = .accepted
     var holdCallLifecycleReports = false
@@ -193,6 +204,30 @@ final class FakePort: XmppPort {
     }
     func sendPresence(_ availability: Availability, status: String?, idleSince: Date?) async {
         presenceSends.append(PresenceSend(availability: availability, status: status, idleSince: idleSince))
+    }
+
+    func fetchBlockList() async throws -> [JID] {
+        blockListFetchCount += 1
+        let result = blockListResult
+        await blockListFetches.wait()
+        return try result.get()
+    }
+
+    func block(_ jids: [JID]) async throws {
+        blockRequests.append(jids)
+        await blockingWrites.wait()
+        try blockResult.get()
+    }
+
+    func unblock(_ jids: [JID]) async throws {
+        unblockRequests.append(jids)
+        await blockingWrites.wait()
+        try unblockResult.get()
+    }
+
+    func unblockAll() async throws {
+        unblockAllCount += 1
+        try unblockAllResult.get()
     }
 
     func send(_ message: OutboundMessage) async -> SendOutcome {
