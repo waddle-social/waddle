@@ -95,7 +95,13 @@
         let
           lib = pkgs.lib;
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./apps/linux/rust-toolchain.toml;
-          craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+          # libwebrtc is built against Chromium's libc++, and its C++ bridges
+          # need clang 21 or later. Setting CXX alone is not enough: stdenv's
+          # cc-wrapper hook re-exports CXX=g++ at build time, so the whole
+          # derivation uses the clang 21 stdenv.
+          craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
+            _final: _prev: { stdenvSelector = p: p.llvmPackages_21.stdenv; }
+          );
           # The livekit crate's build script would download this prebuilt
           # libwebrtc archive, which the sandbox forbids; LK_CUSTOM_WEBRTC
           # points it at the unpacked copy instead. The tag is the
@@ -168,9 +174,6 @@
             pkgs.pkg-config
             pkgs.blueprint-compiler
             pkgs.wrapGAppsHook4
-            # libwebrtc is built against Chromium's libc++, and its C++
-            # bridges need clang 21 or later.
-            pkgs.clang_21
           ];
           buildInputs = [
             pkgs.gtk4
@@ -179,10 +182,7 @@
             pkgs.glib
           ]
           ++ runtimeLibs;
-          env = {
-            CXX = "${pkgs.clang_21}/bin/clang++";
-            LK_CUSTOM_WEBRTC = "${webrtc}";
-          };
+          env.LK_CUSTOM_WEBRTC = "${webrtc}";
           preFixup = ''
             gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs})
           '';
