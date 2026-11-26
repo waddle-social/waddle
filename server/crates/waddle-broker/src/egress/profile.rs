@@ -84,11 +84,25 @@ pub struct ProviderProfile {
     pub base_origin: String,
     /// Exact operation path (must begin with `/` and must never match an admin path).
     pub operation_path: String,
-    /// Optional explicit PEM-encoded CA certificate for internal/test TLS endpoints.
+    /// Optional explicit PEM-encoded CA certificate(s) for pinned/test TLS endpoints.
+    ///
+    /// When `Some`, ONLY the pinned root certificate(s) are trusted (system/built-in
+    /// roots are disabled via `tls_certs_only`). When `None`, standard system/built-in
+    /// roots are trusted.
     pub pinned_ca_pem: Option<Vec<u8>>,
-    /// When `false` (default), system/built-in roots are also trusted. When `true`
-    /// with `pinned_ca_pem`, only the pinned root is trusted.
     pub caps: EgressCaps,
+}
+
+/// Optional additive dispatch-binding policy attached to a registered profile.
+///
+/// Allows scoping a registered provider profile to a specific trust domain,
+/// extension IDs, and/or extension SHA-256 digests without changing
+/// [`ProviderProfile`] struct fields.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EgressBindingPolicy {
+    pub expected_trust_domain: Option<String>,
+    pub allowed_extension_ids: Vec<String>,
+    pub allowed_extension_digests: Vec<[u8; 32]>,
 }
 
 /// Errors raised while registering or resolving a provider egress profile.
@@ -96,7 +110,7 @@ pub struct ProviderProfile {
 pub enum ProfileError {
     #[error("provider, deployment, and model must be non-empty")]
     EmptyField,
-    #[error("provider profile origin must be HTTPS without userinfo or query")]
+    #[error("provider profile origin must be HTTPS domain without literal IP, userinfo, or query")]
     InvalidOrigin,
     #[error("provider admin or credential inspection endpoint is unconditionally blocked")]
     BlockedAdminEndpoint,
@@ -222,6 +236,7 @@ struct ProfileKey {
 #[derive(Debug, Clone, Default)]
 pub struct EgressProfileRegistry {
     profiles: BTreeMap<ProfileKey, ProviderProfile>,
+    policies: BTreeMap<ProfileKey, EgressBindingPolicy>,
 }
 
 impl EgressProfileRegistry {
@@ -230,7 +245,15 @@ impl EgressProfileRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, mut profile: ProviderProfile) -> Result<(), ProfileError> {
+    pub fn register(&mut self, profile: ProviderProfile) -> Result<(), ProfileError> {
+        self.register_with_policy(profile, EgressBindingPolicy::default())
+    }
+
+    pub fn register_with_policy(
+        &mut self,
+        mut profile: ProviderProfile,
+        policy: EgressBindingPolicy,
+    ) -> Result<(), ProfileError> {
         if profile.provider.trim().is_empty()
             || profile.deployment.trim().is_empty()
             || profile.model.trim().is_empty()
@@ -252,6 +275,12 @@ impl EgressProfileRegistry {
         {
             return Err(ProfileError::InvalidOrigin);
         }
+        if matches!(
+            parsed.host(),
+            Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None
+        ) {
+            return Err(ProfileError::InvalidOrigin);
+        }
         let host = parsed.host_str().ok_or(ProfileError::InvalidOrigin)?;
         profile.base_origin = match parsed.port() {
             Some(port) => format!("https://{host}:{port}"),
@@ -264,7 +293,8 @@ impl EgressProfileRegistry {
             model: profile.model.clone(),
             operation: profile.operation,
         };
-        self.profiles.insert(key, profile);
+        self.profiles.insert(key.clone(), profile);
+        self.policies.insert(key, policy);
         Ok(())
     }
 
@@ -289,5 +319,30 @@ impl EgressProfileRegistry {
                 model: model.to_owned(),
                 operation: operation.as_str(),
             })
+    }
+
+    pub fn resolve_with_policy(
+        &self,
+        provider: &str,
+        deployment: &str,
+        model: &str,
+        operation: ProviderOperation,
+    ) -> Result<(&ProviderProfile, Option<&EgressBindingPolicy>), ProfileError> {
+        let key = ProfileKey {
+            provider: provider.to_owned(),
+            deployment: deployment.to_owned(),
+            model: model.to_owned(),
+            operation,
+        };
+        let profile =
+            self.profiles
+                .get(&key)
+                .ok_or_else(|| ProfileError::UnapprovedProfile {
+                    provider: provider.to_owned(),
+                    deployment: deployment.to_owned(),
+                    model: model.to_owned(),
+                    operation: operation.as_str(),
+                })?;
+        Ok((profile, self.policies.get(&key)))
     }
 }

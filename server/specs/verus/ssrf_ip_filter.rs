@@ -63,6 +63,20 @@ pub open spec fn is_blocked_ipv6_spec(segs: [u16; 8]) -> bool {
     let z = segs[0] == 0u16 && segs[1] == 0u16 && segs[2] == 0u16 && segs[3] == 0u16 && segs[4] == 0u16;
     let unspecified = z && segs[5] == 0u16 && segs[6] == 0u16 && segs[7] == 0u16;
     let loopback = z && segs[5] == 0u16 && segs[6] == 0u16 && segs[7] == 1u16;
+    let ipv4_compatible = z && segs[5] == 0u16;
+    let ipv4_translated = segs[0] == 0u16
+        && segs[1] == 0u16
+        && segs[2] == 0u16
+        && segs[3] == 0u16
+        && segs[4] == 0xffffu16
+        && segs[5] == 0u16;
+    let nat64 = segs[0] == 0x0064u16
+        && segs[1] == 0xff9bu16
+        && ((segs[2] == 0u16 && segs[3] == 0u16 && segs[4] == 0u16 && segs[5] == 0u16)
+            || segs[2] == 0x0001u16);
+    let six_to_four = segs[0] == 0x2002u16;
+    let teredo = segs[0] == 0x2001u16 && segs[1] == 0u16;
+    let discard_only = segs[0] == 0x0100u16 && segs[1] == 0u16 && segs[2] == 0u16 && segs[3] == 0u16;
     let ula = segs[0] >= 0xfc00u16 && segs[0] <= 0xfdffu16;
     let link_local = segs[0] >= 0xfe80u16 && segs[0] <= 0xfebfu16;
     let multicast = segs[0] >= 0xff00u16;
@@ -73,7 +87,18 @@ pub open spec fn is_blocked_ipv6_spec(segs: [u16; 8]) -> bool {
             (segs[7] >> 8u16) as u8,
             (segs[7] & 0xffu16) as u8,
         );
-    unspecified || loopback || ula || link_local || multicast || mapped_v4_blocked
+    unspecified
+        || loopback
+        || ipv4_compatible
+        || ipv4_translated
+        || nat64
+        || six_to_four
+        || teredo
+        || discard_only
+        || ula
+        || link_local
+        || multicast
+        || mapped_v4_blocked
 }
 
 pub fn is_blocked_ipv6(segs: [u16; 8]) -> (blocked: bool)
@@ -83,6 +108,20 @@ pub fn is_blocked_ipv6(segs: [u16; 8]) -> (blocked: bool)
     let z = segs[0] == 0u16 && segs[1] == 0u16 && segs[2] == 0u16 && segs[3] == 0u16 && segs[4] == 0u16;
     let unspecified = z && segs[5] == 0u16 && segs[6] == 0u16 && segs[7] == 0u16;
     let loopback = z && segs[5] == 0u16 && segs[6] == 0u16 && segs[7] == 1u16;
+    let ipv4_compatible = z && segs[5] == 0u16;
+    let ipv4_translated = segs[0] == 0u16
+        && segs[1] == 0u16
+        && segs[2] == 0u16
+        && segs[3] == 0u16
+        && segs[4] == 0xffffu16
+        && segs[5] == 0u16;
+    let nat64 = segs[0] == 0x0064u16
+        && segs[1] == 0xff9bu16
+        && ((segs[2] == 0u16 && segs[3] == 0u16 && segs[4] == 0u16 && segs[5] == 0u16)
+            || segs[2] == 0x0001u16);
+    let six_to_four = segs[0] == 0x2002u16;
+    let teredo = segs[0] == 0x2001u16 && segs[1] == 0u16;
+    let discard_only = segs[0] == 0x0100u16 && segs[1] == 0u16 && segs[2] == 0u16 && segs[3] == 0u16;
     let s0 = segs[0];
     let ula = (s0 & 0xfe00u16) == 0xfc00u16;
     let link_local = (s0 & 0xffc0u16) == 0xfe80u16;
@@ -106,7 +145,18 @@ pub fn is_blocked_ipv6(segs: [u16; 8]) -> (blocked: bool)
         false
     };
 
-    unspecified || loopback || ula || link_local || multicast || mapped_v4_blocked
+    unspecified
+        || loopback
+        || ipv4_compatible
+        || ipv4_translated
+        || nat64
+        || six_to_four
+        || teredo
+        || discard_only
+        || ula
+        || link_local
+        || multicast
+        || mapped_v4_blocked
 }
 
 pub proof fn lemma_metadata_and_loopback_blocked(c: u8, d: u8)
@@ -116,6 +166,18 @@ pub proof fn lemma_metadata_and_loopback_blocked(c: u8, d: u8)
         is_blocked_ipv4_spec(10u8, 0u8, c, d),
         is_blocked_ipv4_spec(192u8, 168u8, c, d),
         is_blocked_ipv4_spec(255u8, 255u8, 255u8, 255u8),
+{
+}
+
+pub proof fn lemma_ipv6_transition_and_discard_blocked(s6: u16, s7: u16)
+    ensures
+        is_blocked_ipv6_spec([0u16, 0u16, 0u16, 0u16, 0u16, 0u16, s6, s7]),
+        is_blocked_ipv6_spec([0u16, 0u16, 0u16, 0u16, 0xffffu16, 0u16, s6, s7]),
+        is_blocked_ipv6_spec([0x0064u16, 0xff9bu16, 0u16, 0u16, 0u16, 0u16, s6, s7]),
+        is_blocked_ipv6_spec([0x0064u16, 0xff9bu16, 0x0001u16, 0u16, 0u16, 0u16, s6, s7]),
+        is_blocked_ipv6_spec([0x2002u16, s6, s7, 0u16, 0u16, 0u16, 0u16, 1u16]),
+        is_blocked_ipv6_spec([0x2001u16, 0u16, 0u16, 0u16, 0u16, 0u16, s6, s7]),
+        is_blocked_ipv6_spec([0x0100u16, 0u16, 0u16, 0u16, 0u16, 0u16, s6, s7]),
 {
 }
 

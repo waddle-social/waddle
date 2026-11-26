@@ -45,15 +45,35 @@ pub const fn is_blocked_ipv4(octets: [u8; 4]) -> bool {
 
 /// Returns `true` if the IPv6 address falls in any blocked non-public or
 /// SSRF-sensitive range, including IPv4-mapped `::ffff:0:0/96` addresses
-/// whose embedded IPv4 address is blocked.
+/// whose embedded IPv4 address is blocked, as well as IPv4-compatible `::/96`,
+/// IPv4-translated `::ffff:0:0:0/96`, NAT64 `64:ff9b::/96` & `64:ff9b:1::/48`,
+/// 6to4 `2002::/16`, Teredo `2001::/32`, and Discard-Only `100::/64`.
 pub const fn is_blocked_ipv6(segs: [u16; 8]) -> bool {
     let all_zero_prefix =
         segs[0] == 0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0 && segs[4] == 0;
 
-    // :: (unspecified)
+    // :: (unspecified) and ::1 (loopback), both within ::/96
     let unspecified = all_zero_prefix && segs[5] == 0 && segs[6] == 0 && segs[7] == 0;
-    // ::1 (loopback)
     let loopback = all_zero_prefix && segs[5] == 0 && segs[6] == 0 && segs[7] == 1;
+    // ::/96 (deprecated IPv4-compatible IPv6)
+    let ipv4_compatible = all_zero_prefix && segs[5] == 0;
+    // ::ffff:0:0:0/96 (IPv4-translated / SIIT)
+    let ipv4_translated = segs[0] == 0
+        && segs[1] == 0
+        && segs[2] == 0
+        && segs[3] == 0
+        && segs[4] == 0xffff
+        && segs[5] == 0;
+    // 64:ff9b::/96 (NAT64) and 64:ff9b:1::/48 (local-use NAT64)
+    let nat64 = segs[0] == 0x0064
+        && segs[1] == 0xff9b
+        && ((segs[2] == 0 && segs[3] == 0 && segs[4] == 0 && segs[5] == 0) || segs[2] == 0x0001);
+    // 2002::/16 (6to4)
+    let six_to_four = segs[0] == 0x2002;
+    // 2001::/32 (Teredo)
+    let teredo = segs[0] == 0x2001 && segs[1] == 0;
+    // 100::/64 (Discard-Only)
+    let discard_only = segs[0] == 0x0100 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0;
     // fc00::/7 (ULA)
     let ula = (segs[0] & 0xfe00) == 0xfc00;
     // fe80::/10 (link-local)
@@ -73,7 +93,18 @@ pub const fn is_blocked_ipv6(segs: [u16; 8]) -> bool {
         false
     };
 
-    unspecified || loopback || ula || link_local || multicast || ipv4_mapped_blocked
+    unspecified
+        || loopback
+        || ipv4_compatible
+        || ipv4_translated
+        || nat64
+        || six_to_four
+        || teredo
+        || discard_only
+        || ula
+        || link_local
+        || multicast
+        || ipv4_mapped_blocked
 }
 
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
@@ -123,6 +154,14 @@ mod tests {
         let blocked_v6 = [
             Ipv6Addr::UNSPECIFIED,
             Ipv6Addr::LOCALHOST,
+            "::127.0.0.1".parse::<Ipv6Addr>().expect("valid"),
+            "::169.254.169.254".parse::<Ipv6Addr>().expect("valid"),
+            "::ffff:0:127.0.0.1".parse::<Ipv6Addr>().expect("valid"),
+            "64:ff9b::127.0.0.1".parse::<Ipv6Addr>().expect("valid"),
+            "64:ff9b:1::1".parse::<Ipv6Addr>().expect("valid"),
+            "2002:7f00:1::1".parse::<Ipv6Addr>().expect("valid"),
+            "2001::1".parse::<Ipv6Addr>().expect("valid"),
+            "100::1".parse::<Ipv6Addr>().expect("valid"),
             "fc00::1".parse::<Ipv6Addr>().expect("valid"),
             "fd12:3456::1".parse::<Ipv6Addr>().expect("valid"),
             "fe80::1".parse::<Ipv6Addr>().expect("valid"),
@@ -142,6 +181,9 @@ mod tests {
         )));
         assert!(!is_blocked_ip(IpAddr::V6(
             "2606:4700::1111".parse::<Ipv6Addr>().expect("valid")
+        )));
+        assert!(!is_blocked_ip(IpAddr::V6(
+            "2001:4860:4860::8888".parse::<Ipv6Addr>().expect("valid")
         )));
     }
 }

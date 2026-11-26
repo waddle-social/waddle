@@ -9,10 +9,11 @@ pub mod ssrf;
 
 pub use client::{
     verify_dispatch_matches_request, BrokerEgressClient, EgressChunk, EgressError,
-    EgressInferenceRequest, EgressResponse, EgressStream, ProviderOperationWire,
+    EgressInferenceRequest, EgressResponse, EgressStream, EgressStreamEvent,
+    ExpectedEgressBinding, ProviderOperationWire,
 };
 pub use profile::{
-    is_blocked_admin_path, validate_operation_path, EgressCaps, EgressProfileRegistry,
-    ProfileError, ProviderOperation, ProviderProfile,
+    is_blocked_admin_path, validate_operation_path, EgressBindingPolicy, EgressCaps,
+    EgressProfileRegistry, ProfileError, ProviderOperation, ProviderProfile,
 };
 pub use ssrf::{resolve_and_validate_addrs, DnsResolver, SsrfError, TokioDnsResolver};

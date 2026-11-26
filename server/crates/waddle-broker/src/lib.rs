@@ -52,9 +52,10 @@ pub use custody::{
 };
 pub use egress::{
     is_blocked_admin_path, resolve_and_validate_addrs, validate_operation_path, BrokerEgressClient,
-    DnsResolver, EgressCaps, EgressChunk, EgressError, EgressInferenceRequest,
-    EgressProfileRegistry, EgressResponse, EgressStream, ProfileError, ProviderOperation,
-    ProviderOperationWire, ProviderProfile, SsrfError, TokioDnsResolver,
+    DnsResolver, EgressBindingPolicy, EgressCaps, EgressChunk, EgressError,
+    EgressInferenceRequest, EgressProfileRegistry, EgressResponse, EgressStream, EgressStreamEvent,
+    ExpectedEgressBinding, ProfileError, ProviderOperation, ProviderOperationWire, ProviderProfile,
+    SsrfError, TokioDnsResolver,
 };
 pub use envelope::{
     decrypt_secret, encrypt_secret, EnvelopeCipher, EnvelopeContext, SealedEnvelope,
