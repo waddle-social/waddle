@@ -4,7 +4,6 @@ import Observation
 import WaddleKit
 
 @MainActor
-@Observable
 final class CallRemoteVolumes {
     private let roomAccess: CallRoomAccess
     @ObservationIgnored private var remoteAudioTracks: [String: [RemoteAudioTrack]] = [:]

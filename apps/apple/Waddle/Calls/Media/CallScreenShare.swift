@@ -14,7 +14,6 @@ final class CallScreenShare {
         self.capture = capture
     }
 
-    var isScreenShareOn = false
     private(set) var isScreenShareBlocked = false
     /// A pick is being published; the button already offers to stop it.
     private(set) var isScreenShareStarting = false
