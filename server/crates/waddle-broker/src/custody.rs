@@ -85,6 +85,44 @@ fn versioned_cred_target(credential_id: Uuid, version: u32) -> String {
     format!("{credential_id}:v{version}")
 }
 
+fn destruction_matches_envelope(
+    destruction: &DestructionRecord,
+    env: &StoredEnvelopeRecord,
+) -> bool {
+    if destruction.tenant_id != env.tenant_id {
+        return false;
+    }
+    match destruction.target_kind {
+        DestructionTargetKind::Tenant => destruction.target_id == env.tenant_id.as_str(),
+        DestructionTargetKind::Credential => destruction.target_id == env.credential_id.to_string(),
+        DestructionTargetKind::CredentialVersion => {
+            destruction.target_id == versioned_cred_target(env.credential_id, env.version)
+        }
+        DestructionTargetKind::Account => env
+            .account_id
+            .is_some_and(|acct| destruction.target_id == acct.to_string()),
+        DestructionTargetKind::KmsKey => false,
+    }
+}
+
+fn envelope_should_be_purged(
+    env: &StoredEnvelopeRecord,
+    destructions: &[DestructionRecord],
+    retired_accounts: &[RetiredAccountRecord],
+) -> bool {
+    if destructions
+        .iter()
+        .any(|destruction| destruction_matches_envelope(destruction, env))
+    {
+        return true;
+    }
+    env.account_id.is_some_and(|acct| {
+        retired_accounts
+            .iter()
+            .any(|retired| retired.tenant_id == env.tenant_id && retired.account_id == acct)
+    })
+}
+
 fn verify_replayed_nonce(
     existing: &EnrollmentNonceRecord,
     expected_tenant: &TenantId,
@@ -498,46 +536,7 @@ impl BrokerCustodyService {
 
         let mut purged_envelopes = 0usize;
         for env in &envelopes {
-            let mut should_purge = false;
-            for d in &destructions {
-                if d.tenant_id != env.tenant_id {
-                    continue;
-                }
-                match d.target_kind {
-                    DestructionTargetKind::Tenant if d.target_id == env.tenant_id.as_str() => {
-                        should_purge = true;
-                    }
-                    DestructionTargetKind::Credential
-                        if d.target_id == env.credential_id.to_string() =>
-                    {
-                        should_purge = true;
-                    }
-                    DestructionTargetKind::CredentialVersion
-                        if d.target_id == versioned_cred_target(env.credential_id, env.version) =>
-                    {
-                        should_purge = true;
-                    }
-                    DestructionTargetKind::Account => {
-                        if let Some(acct) = env.account_id {
-                            if d.target_id == acct.to_string() {
-                                should_purge = true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if !should_purge {
-                if let Some(acct) = env.account_id {
-                    if retired_accounts
-                        .iter()
-                        .any(|r| r.tenant_id == env.tenant_id && r.account_id == acct)
-                    {
-                        should_purge = true;
-                    }
-                }
-            }
-            if should_purge
+            if envelope_should_be_purged(env, &destructions, &retired_accounts)
                 && self
                     .ledger
                     .delete_envelope(&env.tenant_id, env.credential_id)

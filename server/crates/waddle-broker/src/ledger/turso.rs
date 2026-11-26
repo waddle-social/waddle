@@ -74,7 +74,8 @@ struct TursoDbHandle {
 
 async fn open_wal_db(path: &Path, ddl: &[&str]) -> Result<TursoDbHandle, LedgerError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|err| LedgerError::Backend(format!("create db dir failed: {err}")))?;
     }
     let path_str = path
@@ -151,16 +152,17 @@ impl TursoLedgerStore {
         // Explicitly drop connection & database so all file handles flush before copy.
         drop(guard.take());
 
-        std::fs::copy(&self.vault_path, backup_path)
+        tokio::fs::copy(&self.vault_path, backup_path)
+            .await
             .map_err(|err| LedgerError::Backend(format!("vault backup copy failed: {err}")))?;
         let src_wal = PathBuf::from(format!("{}-wal", self.vault_path.display()));
         let dst_wal = PathBuf::from(format!("{}-wal", backup_path.display()));
-        if src_wal.exists() {
-            std::fs::copy(&src_wal, &dst_wal).map_err(|err| {
+        if matches!(tokio::fs::try_exists(&src_wal).await, Ok(true)) {
+            tokio::fs::copy(&src_wal, &dst_wal).await.map_err(|err| {
                 LedgerError::Backend(format!("vault backup wal copy failed: {err}"))
             })?;
-        } else if dst_wal.exists() {
-            let _ = std::fs::remove_file(&dst_wal);
+        } else if matches!(tokio::fs::try_exists(&dst_wal).await, Ok(true)) {
+            let _ = tokio::fs::remove_file(&dst_wal).await;
         }
 
         let reopened = open_wal_db(&self.vault_path, &[VAULT_SCHEMA]).await?;
@@ -178,18 +180,21 @@ impl TursoLedgerStore {
 
         for suffix in ["-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{suffix}", self.vault_path.display()));
-            if sidecar.exists() {
-                let _ = std::fs::remove_file(&sidecar);
+            if matches!(tokio::fs::try_exists(&sidecar).await, Ok(true)) {
+                let _ = tokio::fs::remove_file(&sidecar).await;
             }
         }
-        std::fs::copy(backup_path, &self.vault_path)
+        tokio::fs::copy(backup_path, &self.vault_path)
+            .await
             .map_err(|err| LedgerError::Backend(format!("vault restore copy failed: {err}")))?;
         let backup_wal = PathBuf::from(format!("{}-wal", backup_path.display()));
         let dst_wal = PathBuf::from(format!("{}-wal", self.vault_path.display()));
-        if backup_wal.exists() {
-            std::fs::copy(&backup_wal, &dst_wal).map_err(|err| {
-                LedgerError::Backend(format!("vault restore wal copy failed: {err}"))
-            })?;
+        if matches!(tokio::fs::try_exists(&backup_wal).await, Ok(true)) {
+            tokio::fs::copy(&backup_wal, &dst_wal)
+                .await
+                .map_err(|err| {
+                    LedgerError::Backend(format!("vault restore wal copy failed: {err}"))
+                })?;
         }
         let reopened = open_wal_db(&self.vault_path, &[VAULT_SCHEMA]).await?;
         *guard = Some(reopened);

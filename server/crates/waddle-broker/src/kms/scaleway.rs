@@ -9,14 +9,16 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use waddle_broker_core::identity::{AccountId, TenantId};
 use zeroize::Zeroizing;
 
 use crate::error::KmsError;
-use crate::kms::{KmsKeyRef, KmsProvider, WrappedKeyBlob};
+use crate::kms::{
+    decode_b64, decode_b64_key256, encode_b64, prefixed_tenant_key_ref, prefixed_user_key_ref,
+    validate_non_empty_config, verify_wrapped_key_ref, HttpKmsClient, KmsKeyRef, KmsProvider,
+    WrappedKeyBlob,
+};
 use crate::secret::Key256;
 
 /// Configuration for [`ScalewayKmsProvider`].
@@ -63,33 +65,43 @@ struct ScalewayDecryptResponse {
 
 /// Scaleway Key Manager broker-only KMS provider.
 pub struct ScalewayKmsProvider {
-    config: ScalewayKmsConfig,
-    client: reqwest::Client,
+    base_url: String,
+    region: String,
+    http: HttpKmsClient,
 }
 
 impl ScalewayKmsProvider {
     pub fn new(config: ScalewayKmsConfig) -> Result<Self, KmsError> {
-        if config.base_url.trim().is_empty() || config.region.trim().is_empty() {
-            return Err(KmsError::InvalidConfig(
-                "Scaleway KMS base_url and region must be non-empty".to_owned(),
-            ));
-        }
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.timeout)
-            .build()
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-        Ok(Self { config, client })
+        validate_non_empty_config(
+            &config.base_url,
+            &config.region,
+            "Scaleway KMS base_url and region must be non-empty",
+        )?;
+        let http = HttpKmsClient::new(
+            "Scaleway KMS",
+            "X-Auth-Token",
+            config.auth_token,
+            None,
+            config.timeout,
+        )?;
+        Ok(Self {
+            base_url: config.base_url,
+            region: config.region,
+            http,
+        })
+    }
+
+    fn key_base_url(&self, key_ref: &KmsKeyRef) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        format!(
+            "{base}/key-manager/v1alpha1/regions/{}/keys/{}",
+            self.region,
+            key_ref.as_str()
+        )
     }
 
     fn key_url(&self, key_ref: &KmsKeyRef, action: &str) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        format!(
-            "{base}/key-manager/v1alpha1/regions/{}/keys/{}/{action}",
-            self.config.region,
-            key_ref.as_str()
-        )
+        format!("{}/{action}", self.key_base_url(key_ref))
     }
 }
 
@@ -102,31 +114,12 @@ impl KmsProvider for ScalewayKmsProvider {
         aad: &[u8],
     ) -> Result<WrappedKeyBlob, KmsError> {
         let req = ScalewayEncryptRequest {
-            plaintext: STANDARD.encode(plaintext.as_bytes()),
-            associated_data: STANDARD.encode(aad),
+            plaintext: encode_b64(plaintext.as_bytes()),
+            associated_data: encode_b64(aad),
         };
-        let resp = self
-            .client
-            .post(self.key_url(key_ref, "encrypt"))
-            .header("X-Auth-Token", self.config.auth_token.as_str())
-            .json(&req)
-            .send()
-            .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(KmsError::Unavailable(format!(
-                "Scaleway KMS encrypt returned HTTP {}",
-                resp.status()
-            )));
-        }
-        let body: ScalewayEncryptResponse = resp
-            .json()
-            .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-        let ciphertext = STANDARD
-            .decode(body.ciphertext)
-            .map_err(|err| KmsError::Crypto(err.to_string()))?;
+        let url = self.key_url(key_ref, "encrypt");
+        let body: ScalewayEncryptResponse = self.http.post_json(&url, "encrypt", &req).await?;
+        let ciphertext = decode_b64(&body.ciphertext)?;
         Ok(WrappedKeyBlob {
             key_ref: key_ref.clone(),
             ciphertext,
@@ -139,39 +132,14 @@ impl KmsProvider for ScalewayKmsProvider {
         wrapped: &WrappedKeyBlob,
         aad: &[u8],
     ) -> Result<Key256, KmsError> {
-        if wrapped.key_ref != *key_ref {
-            return Err(KmsError::Crypto("wrapped blob key_ref mismatch".to_owned()));
-        }
+        verify_wrapped_key_ref(key_ref, wrapped)?;
         let req = ScalewayDecryptRequest {
-            ciphertext: STANDARD.encode(&wrapped.ciphertext),
-            associated_data: STANDARD.encode(aad),
+            ciphertext: encode_b64(&wrapped.ciphertext),
+            associated_data: encode_b64(aad),
         };
-        let resp = self
-            .client
-            .post(self.key_url(key_ref, "decrypt"))
-            .header("X-Auth-Token", self.config.auth_token.as_str())
-            .json(&req)
-            .send()
-            .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-
-        if !resp.status().is_success() {
-            return Err(KmsError::Unavailable(format!(
-                "Scaleway KMS decrypt returned HTTP {}",
-                resp.status()
-            )));
-        }
-        let body: ScalewayDecryptResponse = resp
-            .json()
-            .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-        let pt = STANDARD
-            .decode(body.plaintext)
-            .map_err(|err| KmsError::Crypto(err.to_string()))?;
-        let arr: [u8; 32] = pt
-            .try_into()
-            .map_err(|_| KmsError::Crypto("unwrapped key is not 32 bytes".to_owned()))?;
-        Ok(Key256::from_bytes(arr))
+        let url = self.key_url(key_ref, "decrypt");
+        let body: ScalewayDecryptResponse = self.http.post_json(&url, "decrypt", &req).await?;
+        decode_b64_key256(&body.plaintext)
     }
 
     fn user_wrapping_secret_ref(
@@ -179,11 +147,11 @@ impl KmsProvider for ScalewayKmsProvider {
         tenant: &TenantId,
         account: AccountId,
     ) -> Result<KmsKeyRef, KmsError> {
-        KmsKeyRef::new(format!("scw-user-{}-{}", tenant.as_str(), account))
+        prefixed_user_key_ref("scw", tenant, account)
     }
 
     fn tenant_kek_ref(&self, tenant: &TenantId) -> Result<KmsKeyRef, KmsError> {
-        KmsKeyRef::new(format!("scw-tenant-{}", tenant.as_str()))
+        prefixed_tenant_key_ref("scw", tenant)
     }
 
     async fn ensure_user_wrapping_secret(
@@ -199,42 +167,14 @@ impl KmsProvider for ScalewayKmsProvider {
     }
 
     async fn destroy_wrapping_secret(&self, key_ref: &KmsKeyRef) -> Result<(), KmsError> {
-        let resp = self
-            .client
-            .post(self.key_url(key_ref, "delete-key-material"))
-            .header("X-Auth-Token", self.config.auth_token.as_str())
-            .send()
+        let url = self.key_url(key_ref, "delete-key-material");
+        self.http
+            .destroy_key(reqwest::Method::POST, &url, "delete-key-material", key_ref)
             .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Err(KmsError::KeyNotFound(key_ref.as_str().to_owned()));
-        }
-        if status.as_u16() == 410 {
-            return Err(KmsError::KeyDestroyed(key_ref.as_str().to_owned()));
-        }
-        if !status.is_success() {
-            return Err(KmsError::Unavailable(format!(
-                "Scaleway KMS delete-key-material returned HTTP {status}"
-            )));
-        }
-        Ok(())
     }
 
     async fn is_destroyed(&self, key_ref: &KmsKeyRef) -> Result<bool, KmsError> {
-        let base = self.config.base_url.trim_end_matches('/');
-        let url = format!(
-            "{base}/key-manager/v1alpha1/regions/{}/keys/{}",
-            self.config.region,
-            key_ref.as_str()
-        );
-        let resp = self
-            .client
-            .get(url)
-            .header("X-Auth-Token", self.config.auth_token.as_str())
-            .send()
-            .await
-            .map_err(|err| KmsError::Transport(err.to_string()))?;
-        Ok(resp.status().as_u16() == 404 || resp.status().as_u16() == 410)
+        let status = self.http.get_status(&self.key_base_url(key_ref)).await?;
+        Ok(matches!(status.as_u16(), 404 | 410))
     }
 }

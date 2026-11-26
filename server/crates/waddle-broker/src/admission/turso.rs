@@ -102,7 +102,7 @@ impl TursoAdmissionLedgerStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, AdmissionError> {
         let path_buf = path.as_ref().to_path_buf();
         if let Some(parent) = path_buf.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
                 AdmissionError::Backend(format!("create admission db dir failed: {err}"))
             })?;
         }
