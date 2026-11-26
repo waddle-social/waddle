@@ -5,8 +5,8 @@
 //!   + `InProcessOpenFgaServer` + `OpenFgaPermissionBackend`
 //! - Stack B: `SqliteCompatPostgresStore` + `SqliteCompatPlacementLeaseStore`
 //!   + `SqliteCompatAdmissionLedgerStore` + `TenantSpiceDbPermissionBackend`
-//!   (plus optional live native PostgreSQL/SpiceDB via `waddle_native_fixture::fixture::Fixture`
-//!   when `FENCE_POSTGRES_BIN` and `FENCE_SPICEDB_BIN` are set)
+//!     (plus optional live native PostgreSQL/SpiceDB via `waddle_native_fixture::fixture::Fixture`
+//!     when `FENCE_POSTGRES_BIN` and `FENCE_SPICEDB_BIN` are set)
 //!
 //! Across two cells sharing one `CellRole` (`cell-a`, `cell-b`) and two brokers
 //! (`broker-a`, `broker-b`), real sealed credential enrollment & workload rotation,
@@ -199,16 +199,26 @@ async fn read_tls_http_request(
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-async fn enroll_and_sign_invocation(
-    device_keys: &DeviceKeyRegistry,
-    tenant: &TenantId,
+struct InvocationTarget<'a> {
+    tenant: &'a TenantId,
     account: AccountId,
     cred_id: Uuid,
-    room: &RoomScopeKey,
+    room: &'a RoomScopeKey,
+}
+
+async fn enroll_and_sign_invocation(
+    device_keys: &DeviceKeyRegistry,
+    target: InvocationTarget<'_>,
     now_ms: i64,
     nonce: [u8; 32],
     budget: BudgetLimits,
 ) -> SignedInferenceInvocation {
+    let InvocationTarget {
+        tenant,
+        account,
+        cred_id,
+        room,
+    } = target;
     let sk = SigningKey::random(&mut OsRng);
     let pk = sk
         .verifying_key()
@@ -470,10 +480,12 @@ where
     let nonce1 = [0x41; 32];
     let signed1 = enroll_and_sign_invocation(
         &device_keys,
-        &acme,
-        account,
-        receipt.credential_id,
-        &room,
+        InvocationTarget {
+            tenant: &acme,
+            account,
+            cred_id: receipt.credential_id,
+            room: &room,
+        },
         now_ms,
         nonce1,
         budget,
@@ -782,10 +794,12 @@ where
     let nonce3 = [0x43; 32];
     let signed3 = enroll_and_sign_invocation(
         &device_keys,
-        &acme,
-        account,
-        receipt.credential_id,
-        &room,
+        InvocationTarget {
+            tenant: &acme,
+            account,
+            cred_id: receipt.credential_id,
+            room: &room,
+        },
         now_ms,
         nonce3,
         budget,

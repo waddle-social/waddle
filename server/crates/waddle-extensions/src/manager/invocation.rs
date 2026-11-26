@@ -146,10 +146,12 @@ impl ExtensionManager {
                     _ = cancel_rx.changed() => Vec::new(),
                     res = timed => match res {
                         Ok(effects) => self.sign_effects(effects),
-                        Err(_) => vec![ExtensionEffect::HostDenial(
-                            DisplayText::try_new(format!("Extension command {command_node} timed out"))
-                                .expect("timeout denial is non-empty"),
-                        )],
+                        Err(_) => match DisplayText::try_new(format!(
+                            "Extension command {command_node} timed out"
+                        )) {
+                            Ok(denial) => vec![ExtensionEffect::HostDenial(denial)],
+                            Err(_) => Vec::new(),
+                        },
                     },
                 };
             }

@@ -1582,6 +1582,7 @@ mod tests {
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
+            active_inference_sessions: None,
         };
 
         let frames = super::handle_sans_io_iq_with_relay_override(
@@ -1795,6 +1796,7 @@ mod tests {
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
+            active_inference_sessions: None,
         };
 
         // An INITIATE (not a terminate — those fall back silently) for
@@ -1854,6 +1856,7 @@ mod tests {
             registry_owner: None,
             state_machine: None,
             ordered_relay_origin: None,
+            active_inference_sessions: None,
         };
 
         let outcome = super::relay_muji_to_room_owner(

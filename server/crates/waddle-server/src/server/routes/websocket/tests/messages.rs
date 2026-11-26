@@ -5237,6 +5237,7 @@ async fn inbox_query_requires_ready_phase() {
         registry_owner: None,
         state_machine: None,
         ordered_relay_origin: None,
+        active_inference_sessions: None,
     };
     let responses = handle_iq_with_conn_state(
         parse_iq_for_test(frame),

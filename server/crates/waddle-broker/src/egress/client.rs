@@ -908,8 +908,7 @@ fn verify_binding_policy(
     if !policy.allowed_extension_digests.is_empty()
         && !policy
             .allowed_extension_digests
-            .iter()
-            .any(|digest| *digest == context.extension_digest_sha256)
+            .contains(&context.extension_digest_sha256)
     {
         return Err(EgressError::BindingMismatch(
             "admitted extension_digest_sha256 is not permitted by profile binding policy",
