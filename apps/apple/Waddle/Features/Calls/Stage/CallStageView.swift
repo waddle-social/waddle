@@ -52,10 +52,30 @@ struct CallStageView: View {
 
     /// In full screen the header and controls lie over the tiles, so the
     /// picture has the whole window once they fade (web `chromeOverlayClass`).
-    /// An open participants panel holds them on screen anyway, and keeps its
-    /// place between them.
     private var overlaysChrome: Bool {
-        controls.size == .immersive && participants == nil
+        controls.size == .immersive
+    }
+
+    /// How tall the header and the control bar are while they lie over the tiles.
+    @State private var chromeHeights = ChromeHeights()
+
+    private struct ChromeHeights: Equatable {
+        var header: CGFloat = 0
+        var bar: CGFloat = 0
+    }
+
+    /// Around the tiles. In full screen they reach under the header and
+    /// controls; an open participants panel holds those on screen, so
+    /// tiles and panel then stand between them (web `dockImmersiveClass`).
+    private var tileInsets: EdgeInsets {
+        guard overlaysChrome else {
+            return EdgeInsets(
+                top: WaddleTokens.Spacing.s1Half, leading: Theme.Spacing.l, bottom: Theme.Spacing.m, trailing: Theme.Spacing.l
+            )
+        }
+        let edge = Theme.Spacing.s
+        guard participants != nil else { return EdgeInsets(top: edge, leading: edge, bottom: edge, trailing: edge) }
+        return EdgeInsets(top: chromeHeights.header, leading: edge, bottom: chromeHeights.bar, trailing: edge)
     }
 
     private var header: some View {
@@ -117,21 +137,28 @@ struct CallStageView: View {
                 }
             }
             .huddleAnimation(.settle, value: participants == nil)
-            .padding(.horizontal, overlaysChrome ? Theme.Spacing.s : Theme.Spacing.l)
-            .padding(.top, overlaysChrome ? Theme.Spacing.s : WaddleTokens.Spacing.s1Half)
-            .padding(.bottom, overlaysChrome ? Theme.Spacing.s : Theme.Spacing.m)
+            .padding(tileInsets)
             if !overlaysChrome { controlBar }
         }
         .overlay(alignment: .top) {
             if overlaysChrome {
                 VStack(spacing: 0) {
-                    header.callChrome(isHidden: isChromeHidden, edge: .top)
+                    header
+                        .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.header = $0 }
+                        .callChrome(isHidden: isChromeHidden, edge: .top)
+                    // A notice stays, and takes the header's place once that has gone.
                     notices
+                        .offset(y: isChromeHidden ? -chromeHeights.header + Theme.Spacing.s : 0)
+                        .callChromeMotion(value: isChromeHidden)
                 }
             }
         }
         .overlay(alignment: .bottom) {
-            if overlaysChrome { controlBar.callChrome(isHidden: isChromeHidden, edge: .bottom) }
+            if overlaysChrome {
+                controlBar
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.bar = $0 }
+                    .callChrome(isHidden: isChromeHidden, edge: .bottom)
+            }
         }
         .background(Theme.Colors.seaDeep)
         .background(CallShortcutKeys(shortcuts: shortcuts) { perform($0.action(size: controls.size)) })

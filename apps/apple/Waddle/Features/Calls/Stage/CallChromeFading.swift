@@ -22,6 +22,11 @@ extension View {
     /// - Parameters:
     ///   - isOn: the call is shown full screen.
     ///   - isHeld: something open keeps them on screen, as the participants panel does.
+    /// Moves with a full-screen call's header and controls as they come and go; at once with Reduce Motion.
+    func callChromeMotion(value isHidden: Bool) -> some View {
+        modifier(CallChromeMotion(isHidden: isHidden))
+    }
+
     func callChromeFade(_ fader: CallChromeFader, isOn: Bool, isHeld: Bool) -> some View {
         modifier(CallChromeFading(fader: fader, isOn: isOn, isHeld: isHeld))
     }
@@ -45,13 +50,22 @@ private struct CallChrome: ViewModifier {
             .opacity(isHidden ? 0 : 1)
             .offset(y: isHidden && !reduceMotion ? (edge == .top ? -Metrics.slip : Metrics.slip) : 0)
             .allowsHitTesting(!isHidden)
-            .animation(reduceMotion ? nil : .easeOut(duration: Metrics.fade), value: isHidden)
+            .callChromeMotion(value: isHidden)
     }
 
-    /// The web's `180ms ease` and `translateY(8px)`.
+    /// The web's `translateY(8px)`.
     private enum Metrics {
-        static let fade = 0.18
         static let slip: CGFloat = 8
+    }
+}
+
+private struct CallChromeMotion: ViewModifier {
+    let isHidden: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        // The web's `180ms ease`. The ticket asks for no fade at all with Reduce Motion.
+        content.animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isHidden)
     }
 }
 
@@ -65,8 +79,11 @@ final class CallChromeFader {
     @ObservationIgnored private var fade = CallChromeFade()
     @ObservationIgnored private var wait: Task<Void, Never>?
     @ObservationIgnored private var isWatching = false
-    /// Something keeps them on screen now; asked when a rest is over.
-    @ObservationIgnored var isHeld: @MainActor () -> Bool = { false }
+    /// Something keeps them on screen now. What begins to hold them shows
+    /// them, and they stay a rest longer once it has gone.
+    @ObservationIgnored var isHeld = false {
+        didSet { if isHeld != oldValue { stir() } }
+    }
     #if os(macOS)
     @ObservationIgnored private var monitor: Any?
     @ObservationIgnored private var observers: [any NSObjectProtocol] = []
@@ -80,7 +97,7 @@ final class CallChromeFader {
     func stir() {
         guard isWatching else { return }
         fade.stirred(at: Self.now)
-        if !isShown { isShown = true }
+        publish()
         guard wait == nil else { return }
         wait = Task { [weak self] in
             while let delay = self?.check() {
@@ -92,14 +109,19 @@ final class CallChromeFader {
 
     /// `nil` once they are hidden: the wait is over until the next stir.
     private func check() -> Double? {
-        var held = isHeld()
+        var held = isHeld
         #if os(macOS)
         held = held || isMenuOpen
         #endif
-        if let delay = fade.check(at: Self.now, isHeld: held) { return delay }
-        isShown = false
-        wait = nil
-        return nil
+        let delay = fade.check(at: Self.now, isHeld: held)
+        publish()
+        if delay == nil { wait = nil }
+        return delay
+    }
+
+    /// Only a change is told to whoever draws them.
+    private func publish() {
+        if isShown != fade.isShown { isShown = fade.isShown }
     }
 
     /// The call went full screen.
@@ -135,7 +157,7 @@ final class CallChromeFader {
         wait?.cancel()
         wait = nil
         fade = CallChromeFade()
-        if !isShown { isShown = true }
+        publish()
         #if os(macOS)
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
@@ -171,10 +193,10 @@ private struct CallChromeFading: ViewModifier {
                 if isOn { fader.start() } else { fader.stop() }
             }
             .onChange(of: holds, initial: true) { _, holds in
-                fader.isHeld = { holds }
-                // What held them has gone: they stay a rest longer, and what begins to hold them shows them.
-                fader.stir()
+                fader.isHeld = holds
             }
+            // A stage that comes back still full screen fades again.
+            .onAppear { if isOn { fader.start() } }
             .onDisappear { fader.stop() }
     }
 }

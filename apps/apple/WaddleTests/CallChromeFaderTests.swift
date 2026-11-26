@@ -34,7 +34,7 @@ final class CallChromeFaderTests: XCTestCase {
 
     func testSomethingOpenKeepsThem() async throws {
         let fader = CallChromeFader()
-        fader.isHeld = { true }
+        fader.isHeld = true
         fader.start()
         defer { fader.stop() }
         try await rest()

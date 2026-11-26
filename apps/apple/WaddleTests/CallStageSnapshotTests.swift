@@ -313,12 +313,12 @@ final class CallStageSnapshotTests: XCTestCase {
     #if os(macOS)
     /// Drawn in a window: `ImageRenderer` leaves a scroll view and a slider blank.
     private func assertParticipants(
-        tiles: [CallStageTile] = roster, coverTiles: Bool, size: CGSize, testName: String = #function, line: UInt = #line
+        tiles: [CallStageTile] = roster, coverTiles: Bool, stageSize: CallSurface.Size = .expanded, size: CGSize, testName: String = #function, line: UInt = #line
     ) async throws {
         let status: CallSessionStatus = .connected
         let presentation = CallStagePresentation()
         let participants = Self.rows(of: tiles)
-        let controls = Self.stageControls(status: status, presentation: presentation, participants: participants, size: .expanded)
+        let controls = Self.stageControls(status: status, presentation: presentation, participants: participants, size: stageSize)
         try await assertScreenSnapshot(
             of: CallStageView(
                 title: "#design", subtitle: "3 others in call", status: status, tiles: tiles,
@@ -332,6 +332,11 @@ final class CallStageSnapshotTests: XCTestCase {
 
     func testRoomExpandedWithParticipants() async throws {
         try await assertParticipants(coverTiles: false, size: CGSize(width: 1000, height: 640))
+    }
+
+    /// Full screen with the panel open: it holds the header and controls, and stands between them.
+    func testRoomFullScreenWithParticipants() async throws {
+        try await assertParticipants(coverTiles: false, stageSize: .immersive, size: CGSize(width: 1000, height: 640))
     }
 
     /// The "+N more" tile stays a plain button beside the open panel.
