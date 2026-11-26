@@ -26,6 +26,7 @@ use quick_xml::Reader;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -59,21 +60,21 @@ const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// `env!` form of that variable names the build directory, which does not
 /// exist on an archive's runner, so callers spawn this path instead.
 ///
-/// Without that variable (a test-support target cargo did not give it to),
-/// the binary is found next to the test's `deps/` directory: integration
-/// test executables run from `<target>/<profile>/deps/`, and cargo places
-/// package binaries one directory up. Running the tests through cargo
-/// (`cargo test -p waddle-server`, `cargo test --workspace`) always builds
-/// the binary before the tests execute.
+/// When running a test executable directly, locate the binary in Cargo's
+/// profile directory. Cargo puts test executables in
+/// `build/<package>/<hash>/out/` under that directory, or in `deps/` on
+/// older toolchains.
 pub fn waddle_server_binary() -> std::path::PathBuf {
     if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_waddle-server") {
         return bin.into();
     }
     let exe = std::env::current_exe().expect("current test executable path");
-    let profile_dir = exe
-        .parent() // <target>/<profile>/deps
-        .and_then(std::path::Path::parent) // <target>/<profile>
-        .expect("test executable directory layout");
+    let profile_dir = cargo_test_profile_dir(&exe).unwrap_or_else(|| {
+        panic!(
+            "unrecognized Cargo test executable layout at {}; set CARGO_BIN_EXE_waddle-server",
+            exe.display()
+        )
+    });
     let bin = profile_dir.join(format!("waddle-server{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.exists(),
@@ -82,6 +83,20 @@ pub fn waddle_server_binary() -> std::path::PathBuf {
         bin.display()
     );
     bin
+}
+
+fn cargo_test_profile_dir(exe: &Path) -> Option<&Path> {
+    let parent = exe.parent()?;
+    if parent.ends_with("deps") {
+        return parent.parent();
+    }
+    if parent.ends_with("out") {
+        let build = parent.ancestors().nth(3)?;
+        if build.ends_with("build") {
+            return build.parent();
+        }
+    }
+    None
 }
 
 /// Suspend a child process the calling test spawned and still owns, so the
@@ -1076,4 +1091,33 @@ pub fn extract_attr_after(xml: &str, marker: &str, attr: &str) -> Option<String>
         return rest.find('\'').map(|end| rest[..end].to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod cargo_layout_tests {
+    use super::cargo_test_profile_dir;
+    use std::path::Path;
+
+    #[test]
+    fn locates_package_binaries_for_both_cargo_layouts() {
+        for profile in ["target/debug", "target/aarch64-unknown-linux-gnu/ci-test"] {
+            let profile = Path::new(profile);
+            for relative in [
+                "build/waddle-server/123abc/out/test-123abc",
+                "deps/test-123abc",
+            ] {
+                assert_eq!(
+                    cargo_test_profile_dir(&profile.join(relative)),
+                    Some(profile)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognized_layouts() {
+        for exe in ["target/debug/test", "target/debug/other/pkg/hash/out/test"] {
+            assert_eq!(cargo_test_profile_dir(Path::new(exe)), None);
+        }
+    }
 }
