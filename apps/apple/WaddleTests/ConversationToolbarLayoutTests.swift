@@ -13,12 +13,11 @@ final class ConversationToolbarLayoutTests: XCTestCase {
     }
 
     /// iPhone 1:1: voice and video share one call menu, as Android's DM
-    /// bar has one call button. A DM has no pins, and a More menu holding
-    /// only details would be a tap for nothing.
+    /// bar has one call button. Pins and details fold away as in a room.
     func testAPhoneDirectChatSharesOneCallMenu() {
         let layout = ConversationToolbarLayout(isRoom: false, isCompact: true)
-        XCTAssertEqual(layout.inline, [.call, .search, .details])
-        XCTAssertEqual(layout.more, [])
+        XCTAssertEqual(layout.inline, [.call, .search])
+        XCTAssertEqual(layout.more, [.pins, .details])
     }
 
     /// iPad and Mac have the width for every action.
@@ -30,7 +29,7 @@ final class ConversationToolbarLayoutTests: XCTestCase {
 
     func testAWideDirectChatHasVoiceAndVideoButtons() {
         let layout = ConversationToolbarLayout(isRoom: false, isCompact: false)
-        XCTAssertEqual(layout.inline, [.voiceCall, .videoCall, .search, .details])
+        XCTAssertEqual(layout.inline, [.voiceCall, .videoCall, .search, .pins, .details])
         XCTAssertEqual(layout.more, [])
     }
 }

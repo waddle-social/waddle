@@ -47,7 +47,7 @@ name the issue that tracks them.
 
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
-| Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events |
+| Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events, in rooms and in a conversation of two with someone on this server, where either person may pin as on web (the server keeps no pins with a person on another server, and none are offered there). The toolbar's Pinned messages opens the list in both. In a conversation of two a pin is asked for and matched by the message's `@id`, the id both people have; the server's notice that something was pinned is never a row there |
 | `/me` actions | 0245 | ❌ | ✅ | Rendered as "* Name action" in italics, keeping the action's markup, mentions and links; conversation-list, reply and VoiceOver previews match |
 | @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references and, in rooms, offers people with no presence from the XEP-0055 user directory; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
 | Nick colors | 0392 | ❌ | ❌ | Not rendered: avatars use static tints and names use foreground colors. Linux and web chat render XEP-0392 colors |
@@ -77,7 +77,7 @@ name the issue that tracks them.
 | Auto-away | 0319 | — | ✅ | While the status is Automatic: Away after 10 minutes without input and Extended Away after 30, stamped with when input stopped; input brings it back within 30 seconds. A Mac reads the system's idle time, so use of any app counts. An iPhone or iPad counts touches in Waddle, typing in a conversation and sent messages, so reading without touching the screen turns Away. A call in progress holds it off. A peer's idle time is shown in DM details |
 | Cross-device manual status | urn:waddle:status-preference:0 | — | ✅ | A status picked by hand is stored on the account and taken up by every device, at once when both are online and otherwise on connect; Automatic resets it everywhere. A pick made offline is stored on the next connect and wins over the stored one. Signing out leaves the account's pick in place. "Free to chat" picked on another client shows as Online in the picker |
 | DND schedule | urn:waddle:dnd:0 | — | ❌ | No quiet-hours screen; only the `/dnd` presence command. The core has no verb yet (#2463) |
-| Blocking | 0191 | — | ❌ | No block or unblock. The core has no verb yet; server maturity is experimental (#2462) |
+| Blocking | 0191 | — | 🟡 | Block and unblock a person from their profile (opened from a message's author, a member list or People) or from a direct message's details, after a confirmation; Settings lists who is blocked, including a whole server or a single device another client blocked, each with Unblock. The list is read again on every connection, since the server tells only a session that has asked, and follows changes made on other devices. Not yet: hiding a blocked person's old messages, a composer that says the person is blocked, and their last presence stays shown until the next connection. In a room both are in, what a blocked person says still arrives. Web and Android have no blocking. Never run against a server |
 
 ## Notifications
 

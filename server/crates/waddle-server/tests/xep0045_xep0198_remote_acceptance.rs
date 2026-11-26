@@ -34,10 +34,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use cluster_support::{
-    cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool, join_fanout_room,
-    open_control_db, reset_and_enroll, reset_node_lease_tables, spawn_cluster_server_with_envs,
-    wait_for_node_lease_lapse, wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD,
-    CLUSTER_PEER_USERNAME,
+    cluster_e2e_serial_lock, epoch_zero_schema_url, fanout_message, free_tcp_port, generate_pool,
+    join_fanout_room, open_control_db, reset_and_enroll, reset_node_lease_tables,
+    spawn_cluster_server_with_envs, wait_for_node_lease_lapse, wait_for_readiness, EnrolledPool,
+    CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use minidom::rxml::xml_ncname;
 use minidom::Element;
@@ -97,47 +97,6 @@ async fn protocol_epoch(db: &Database) -> i64 {
 
 /// Prefix of the schemas the relay scenarios run on.
 const RELAY_SCHEMA_PREFIX: &str = "waddle_test_relay_acceptance_";
-
-/// A URL of the database at `postgres_url` whose connections use a new,
-/// empty schema, so the nodes started on it build their schema at protocol
-/// epoch 0 whatever epoch the shared schema has reached. Schemas left by
-/// earlier relay scenarios are dropped first; the suite's scenarios run one
-/// at a time.
-async fn relay_epoch_url(postgres_url: &str) -> String {
-    let admin = sqlx::PgPool::connect(postgres_url)
-        .await
-        .expect("connect PostgreSQL admin pool");
-    let stale: Vec<String> = sqlx::query_scalar(
-        "SELECT nspname::text FROM pg_catalog.pg_namespace WHERE starts_with(nspname, $1)",
-    )
-    .bind(RELAY_SCHEMA_PREFIX)
-    .fetch_all(&admin)
-    .await
-    .expect("list relay scenario schemas");
-    for schema in stale {
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .expect("drop an earlier relay scenario schema");
-    }
-    let schema = format!("{RELAY_SCHEMA_PREFIX}{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .expect("create the relay scenario schema");
-    admin.close().await;
-    let mut url = url::Url::parse(postgres_url).expect("parse PostgreSQL URL");
-    let retained: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(key, _)| key != "options")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    url.query_pairs_mut()
-        .clear()
-        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
-        .append_pair("options", &format!("-c search_path={schema}"));
-    url.to_string()
-}
 
 const HOLD_BEFORE_COMMIT: &str = "hold-before-commit";
 const HOLD_AFTER_COMMIT: &str = "hold-after-commit";
@@ -439,7 +398,7 @@ impl Scenario {
             .expect("the remote acceptance suite needs PostgreSQL: set WADDLE_TEST_POSTGRES_URL");
         let serial = cluster_e2e_serial_lock().lock().await;
         let postgres_url = match acceptance {
-            Acceptance::Relay => relay_epoch_url(&shared_url).await,
+            Acceptance::Relay => epoch_zero_schema_url(&shared_url, RELAY_SCHEMA_PREFIX).await,
             Acceptance::Mailbox => shared_url,
         };
         let db = open_control_db(&postgres_url).await;

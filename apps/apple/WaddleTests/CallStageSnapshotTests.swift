@@ -13,10 +13,6 @@ import XCTest
 final class CallStageSnapshotTests: XCTestCase {
     /// Buttons in a snapshot are only drawn, never pressed.
     private static let noAction: @MainActor () -> Void = { /* nothing to do */ }
-    private static let actions = CallStageActions(
-        toggleMicrophone: noAction, toggleCamera: noAction, toggleHand: noAction, setViewMode: { _ in /* drawn only */ },
-        toggleSelfView: noAction, hangUp: noAction
-    )
     /// Stands in for a camera: a flat colour where the video would be.
     private static let cameras = CallTileSource(
         video: { tile in AnyView(tile.isSelf ? Theme.Colors.halo : Theme.Colors.seaShallow) },
@@ -73,7 +69,7 @@ final class CallStageSnapshotTests: XCTestCase {
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
                 promotedSpeaker: promotedSpeaker, controls: controls, issues: issues, checkingIssues: checkingIssues,
                 tileSource: Self.cameras, announcesChanges: false,
-                actions: Self.actions
+                perform: { _ in }
             )
             .frame(width: size.width, height: size.height),
             width: size.width + 2 * Theme.Spacing.l,
@@ -193,7 +189,7 @@ final class CallStageSnapshotTests: XCTestCase {
                 ownScreen: CallStageTile(
                     identity: Self.you.identity, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
                 ),
-                tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             )
             .frame(width: 1000, height: 640),
             width: 1000 + 2 * Theme.Spacing.l
@@ -250,7 +246,7 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: title, subtitle: "2 others in call", status: status,
                 tiles: [Self.you, Self.linus, Self.grace], presentation: presentation, controls: controls,
-                connection: quality, tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                connection: quality, tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             )
             .frame(width: size.width, height: size.height),
             width: size.width + 2 * Theme.Spacing.l, testName: testName, line: line
@@ -310,7 +306,7 @@ final class CallStageSnapshotTests: XCTestCase {
                 title: "#design", subtitle: "3 others in call", status: status, tiles: tiles,
                 presentation: presentation, controls: controls, participants: participants, canResetVolumes: true,
                 participantsCoverTiles: coverTiles,
-                tileSource: Self.cameras, announcesChanges: false, actions: Self.actions
+                tileSource: Self.cameras, announcesChanges: false, perform: { _ in }
             ),
             size: size, testName: testName, line: line
         )
@@ -364,7 +360,7 @@ final class CallStageSnapshotTests: XCTestCase {
         )
         assertHuddleSnapshot(
             precision: 0.97,
-            of: CallControlBar(controls: controls, actions: Self.actions)
+            of: CallControlBar(controls: controls, perform: { _ in })
             .padding(Theme.Spacing.l)
             .background(Theme.Colors.seaDeep)
             .environment(\.colorScheme, .dark),

@@ -162,7 +162,7 @@ private struct MessageRowContent: View {
             thread: actions.thread,
             replyCount: entry.replyCount,
             isPinned: session.isPinned(item),
-            pinning: session.pinAccess(in: item.conversation)
+            pinning: session.pinAccess(for: item)
         )
     }
 

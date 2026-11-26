@@ -27,6 +27,11 @@ final class CallTileSource {
 /// Equatable, and drawn with `.equatable()`: the stage redraws whenever
 /// anyone starts or stops speaking, and on a Mac every picture is drawn on
 /// the main thread (#2625), so a tile whose values did not change must cost nothing.
+///
+/// Not from the first moment: SwiftUI asks `==` only once it has worked out,
+/// in the background, how to compare this kind of view, and counts every
+/// update before that as a change (#2701). So a redraw is cheap, never
+/// free, and nothing here may rely on a body not running.
 struct CallTileView: View, Equatable {
     let tile: CallStageTile
     var isPinned = false

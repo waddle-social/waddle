@@ -43,6 +43,7 @@ private struct SettingsTabs: View {
 
             SettingsTabForm {
                 SettingsAccountSection(app: app)
+                SettingsBlockedSection(app: app)
             }
             .tabItem { Label("Account", systemImage: "person.crop.circle") }
         }
@@ -76,6 +77,7 @@ private struct SettingsForm: View {
                 notificationPermissionGranted: app.notificationPermissionGranted
             )
             SettingsPrivacySection(preferences: app.preferences)
+            SettingsBlockedSection(app: app)
             SettingsAccountSection(app: app)
             SettingsAboutSection()
         }

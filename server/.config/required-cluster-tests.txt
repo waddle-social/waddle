@@ -530,6 +530,14 @@ waddle-server::clustering_cluster_e2e consecutive_room_destroys_are_each_answere
 # different nodes; the shared `entity_caps` table carries the caps.
 waddle-server::clustering_cluster_e2e pep_notification_reaches_a_contact_connected_to_another_node
 
+# XEP-0060 section 7.1 / XEP-0163 on a cluster: an explicit subscriber's
+# resource connected to a node other than the one that took the publication
+# receives the event, and a resource that becomes available on another node is
+# sent the last item. Only a two-node PostgreSQL run has a publisher and a
+# subscriber on different nodes.
+waddle-server::clustering_cluster_e2e explicit_pubsub_subscriber_on_another_node_receives_the_publication
+waddle-server::clustering_cluster_e2e last_item_replay_reaches_a_resource_that_becomes_available_on_another_node
+
 # #1986 durable mailbox core: lane sequences must stay gap-free and unique
 # under concurrent appenders, one operation key must hold one responsibility
 # across lanes and across a replan to a new room owner, the owner must

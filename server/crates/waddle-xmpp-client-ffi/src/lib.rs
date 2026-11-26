@@ -9,6 +9,7 @@ use minidom::Element;
 use tokio::sync::Mutex;
 use url::Url;
 
+mod blocking;
 mod boundary_convert;
 mod calendar;
 mod call_lifecycle;
@@ -42,6 +43,8 @@ mod types;
 
 #[cfg(test)]
 mod activity_tests;
+#[cfg(test)]
+mod blocking_tests;
 #[cfg(test)]
 mod call_lifecycle_tests;
 #[cfg(test)]

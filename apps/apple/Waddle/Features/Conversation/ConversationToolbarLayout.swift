@@ -24,13 +24,13 @@ struct ConversationToolbarLayout: Equatable {
             inline = [.call, .search]
             more = [.pins, .details]
         case (false, true):
-            inline = [.call, .search, .details]
-            more = []
+            inline = [.call, .search]
+            more = [.pins, .details]
         case (true, false):
             inline = [.call, .search, .pins, .details]
             more = []
         case (false, false):
-            inline = [.voiceCall, .videoCall, .search, .details]
+            inline = [.voiceCall, .videoCall, .search, .pins, .details]
             more = []
         }
     }

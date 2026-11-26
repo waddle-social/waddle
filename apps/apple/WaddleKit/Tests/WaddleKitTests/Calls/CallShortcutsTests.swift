@@ -7,6 +7,15 @@ struct CallShortcutsTests {
         #expect(CallShortcut.allCases.map(\.key) == ["m", "v", "s", "r", "f"])
     }
 
+    @Test func eachShortcutAsksForItsStageAction() {
+        let actions = CallShortcut.allCases.map { $0.action(size: .split) }
+        #expect(actions == [.toggleMicrophone, .toggleCamera, .toggleScreenShare, .toggleHand, .setSize(.expanded)])
+    }
+
+    @Test func stepUpUsesTheCurrentSize() {
+        #expect(CallShortcut.stepUp.action(size: .expanded) == .setSize(.immersive))
+    }
+
     @Test func aRoomsCallOnAMacHasEveryKey() {
         let controls = CallControls(devices: .init(isSharingScreen: false), isHandRaised: false)
         let keys = CallShortcut.available(for: controls)

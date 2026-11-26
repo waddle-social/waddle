@@ -263,7 +263,8 @@ private fun MediaViewerDialog(model: Any, contentDescription: String?, onDismiss
                             val event = awaitPointerEvent()
                             val zoom = event.calculateZoom()
                             val pan = event.calculatePan()
-                            if (event.changes.size > 1 || transform.isZoomed) {
+                            val active = event.changes.any { it.pressed }
+                            if (active && (event.changes.size > 1 || transform.isZoomed)) {
                                 transform = transform.transformed(viewport, event.calculateCentroid(), pan, zoom)
                                 event.changes.forEach { if (it.positionChanged()) it.consume() }
                             }

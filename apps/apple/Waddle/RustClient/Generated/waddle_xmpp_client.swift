@@ -632,6 +632,28 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func disconnect() async
 
     /**
+     * Block one or more JIDs.
+     */
+    func blockJids(jids: [String]) async throws
+
+    /**
+     * Fetch the account's XEP-0191 block list after authentication and
+     * before changing it. This session receives block-list pushes only
+     * after it requests the list.
+     */
+    func fetchBlockList() async throws  -> [Jid]
+
+    /**
+     * Unblock every JID on the account's block list.
+     */
+    func unblockAll() async throws
+
+    /**
+     * Unblock one or more JIDs.
+     */
+    func unblockJids(jids: [String]) async throws
+
+    /**
      * Cancels the one occurrence of a repeating event that starts at
      * `occurrence` (its `recurrence_id`), keeping the rest of the series.
      */
@@ -1670,6 +1692,88 @@ open func disconnect()async   {
             liftFunc: { $0 },
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * Block one or more JIDs.
+     */
+open func blockJids(jids: [String])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_block_jids(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(jids)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Fetch the account's XEP-0191 block list after authentication and
+     * before changing it. This session receives block-list pushes only
+     * after it requests the list.
+     */
+open func fetchBlockList()async throws  -> [Jid]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_block_list(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeJid.lift,
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Unblock every JID on the account's block list.
+     */
+open func unblockAll()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_all(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Unblock one or more JIDs.
+     */
+open func unblockJids(jids: [String])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_jids(
+                    self.uniffiCloneHandle(),
+                    FfiConverterSequenceString.lower(jids)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -14469,6 +14573,98 @@ public func FfiConverterTypeWaddleAttendanceStatus_lower(_ value: WaddleAttendan
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Changes announced in XEP-0191 block-list pushes.
+ */
+
+public enum WaddleBlockListChange: Equatable, Hashable {
+
+    /**
+     * The listed JIDs were blocked.
+     */
+    case blocked(jids: [Jid]
+    )
+    /**
+     * The listed JIDs were unblocked.
+     */
+    case unblocked(jids: [Jid]
+    )
+    /**
+     * Every JID was unblocked.
+     */
+    case unblockedAll
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleBlockListChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleBlockListChange: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleBlockListChange
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleBlockListChange {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .blocked(jids: try FfiConverterSequenceTypeJid.read(from: &buf)
+        )
+
+        case 2: return .unblocked(jids: try FfiConverterSequenceTypeJid.read(from: &buf)
+        )
+
+        case 3: return .unblockedAll
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleBlockListChange, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .blocked(jids):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceTypeJid.write(jids, into: &buf)
+
+
+        case let .unblocked(jids):
+            writeInt(&buf, Int32(2))
+            FfiConverterSequenceTypeJid.write(jids, into: &buf)
+
+
+        case .unblockedAll:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBlockListChange_lift(_ buf: RustBuffer) throws -> WaddleBlockListChange {
+    return try FfiConverterTypeWaddleBlockListChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleBlockListChange_lower(_ value: WaddleBlockListChange) -> RustBuffer {
+    return FfiConverterTypeWaddleBlockListChange.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Which room members a XEP-0513 `#channel` mention addresses.
  */
 
@@ -15635,6 +15831,11 @@ public enum WaddleClientEvent: Equatable, Hashable {
      */
     case activityChanged(jid: BareJid, activity: WaddleActivity?
     )
+    /**
+     * XEP-0191 block-list push received by this session.
+     */
+    case blockListChanged(change: WaddleBlockListChange
+    )
 
 
 
@@ -15697,6 +15898,9 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         )
 
         case 15: return .activityChanged(jid: try FfiConverterTypeBareJid.read(from: &buf), activity: try FfiConverterOptionTypeWaddleActivity.read(from: &buf)
+        )
+
+        case 16: return .blockListChanged(change: try FfiConverterTypeWaddleBlockListChange.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -15782,6 +15986,11 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             writeInt(&buf, Int32(15))
             FfiConverterTypeBareJid.write(jid, into: &buf)
             FfiConverterOptionTypeWaddleActivity.write(activity, into: &buf)
+
+
+        case let .blockListChanged(change):
+            writeInt(&buf, Int32(16))
+            FfiConverterTypeWaddleBlockListChange.write(change, into: &buf)
 
         }
     }
@@ -22436,6 +22645,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeJid: FfiConverterRustBuffer {
+    typealias SwiftType = [Jid]
+
+    public static func write(_ value: [Jid], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeJid.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Jid] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Jid]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeJid.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -22684,6 +22918,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_block_jids() != 55748) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_block_list() != 34056) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_all() != 37974) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_jids() != 4865) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence() != 61272) {

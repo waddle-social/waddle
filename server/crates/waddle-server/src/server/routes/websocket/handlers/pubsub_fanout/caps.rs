@@ -265,24 +265,13 @@ async fn deliver_to_user_resources(
                     metrics.dropped_closed += 1;
                 }
             },
-            BroadcastOutcome::NotConnected => match state
-                .deps
-                .protocol
-                .sm_session_registry
-                .record_stanza_for_detached_bound_resource(&resource, &stanza, chrono::Utc::now())
-                .await
-            {
-                Ok(true) => metrics.delivered += 1,
-                Ok(false) => metrics.not_connected += 1,
-                Err(error) => {
-                    warn!(
-                        resource = %resource,
-                        error = %error,
-                        "Failed to stash §3 fan-out for not-connected detached resource"
-                    );
-                    metrics.not_connected += 1;
+            BroadcastOutcome::NotConnected => {
+                match super::deliver_beyond_this_node(state, &resource, &stanza).await {
+                    super::BeyondThisNode::Delivered => metrics.delivered += 1,
+                    super::BeyondThisNode::Dropped => metrics.dropped_closed += 1,
+                    super::BeyondThisNode::NotConnected => metrics.not_connected += 1,
                 }
-            },
+            }
         }
     }
 }

@@ -68,10 +68,11 @@ mod pep_caps_support;
 
 use base64::Engine;
 use cluster_support::{
-    activate_mailbox_epoch, cluster_e2e_serial_lock, fanout_message, free_tcp_port, generate_pool,
-    join_fanout_room, muc_join_presence, open_control_db, readiness_status, reset_and_enroll,
-    reset_node_lease_tables, spawn_cluster_server, spawn_cluster_server_with_envs,
-    wait_for_readiness, EnrolledPool, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+    activate_mailbox_epoch, cluster_e2e_serial_lock, epoch_zero_schema_url, fanout_message,
+    free_tcp_port, generate_pool, join_fanout_room, muc_join_presence, open_control_db,
+    readiness_status, reset_and_enroll, reset_node_lease_tables, spawn_cluster_node,
+    spawn_cluster_server, spawn_cluster_server_with_envs, wait_for_readiness, ClusterNode,
+    EnrolledPool, NodeSelectors, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
 };
 use libp2p::identity::ed25519;
 use std::time::{Duration, Instant};
@@ -233,6 +234,24 @@ fn presence_xml(
 
 fn frame_has_attr(frame: &str, name: &str, value: &str) -> bool {
     frame.contains(&format!("{name}='{value}'")) || frame.contains(&format!("{name}=\"{value}\""))
+}
+
+/// Whether `frame` is the room's presence for `occupant` carrying `role` in
+/// its `muc#user` item, read from the parsed stanza so either attribute
+/// quote style matches.
+fn frame_is_occupant_role(frame: &str, occupant: &str, role: &str) -> bool {
+    frame.parse::<minidom::Element>().is_ok_and(|element| {
+        element.is("presence", waddle_xmpp::ns::JABBER_CLIENT)
+            && element.attr("from") == Some(occupant)
+            && element
+                .get_child("x", "http://jabber.org/protocol/muc#user")
+                .is_some_and(|x| {
+                    x.children().any(|child| {
+                        child.is("item", "http://jabber.org/protocol/muc#user")
+                            && child.attr("role") == Some(role)
+                    })
+                })
+    })
 }
 
 fn frame_attr_starts_with(frame: &str, name: &str, prefix: &str) -> bool {
@@ -1033,15 +1052,10 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    partial_room_fanout_completes_on_retransmission_after_relay_recovery(
-        &db,
-        &server_a,
-        &server_b,
-        &mut relay_b,
-        &node_a,
-        &node_b,
-    )
-    .await;
+    // The relay-fault scenario of a blocked remote occupant lives in
+    // `xep0045_partial_fanout`: this test activated the mailbox epoch above,
+    // where the durable mailbox, not the relay `RelaySleep` blocks, carries
+    // the remote occupant's copy.
 
     // --- Exit criterion (part 1): the receiver-applied ask budgets. A 5s
     // handler exceeds relay_a's receiver-side reply budget (1.5s): the
@@ -2488,6 +2502,9 @@ async fn muc_join_routes_to_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B, a SEPARATE bare JID on node B (a different process),
     // attempts to join the SAME room while A is still live. Node B must not
@@ -2746,6 +2763,27 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     node_a: &str,
     node_b: &str,
 ) {
+    let epoch: i64 = {
+        let conn = db.guard().await.expect("epoch guard");
+        let mut rows = conn
+            .query(
+                "SELECT epoch::bigint FROM ingress_protocol_epoch WHERE id = 1",
+                (),
+            )
+            .await
+            .expect("ingress protocol epoch");
+        rows.next()
+            .await
+            .expect("epoch query")
+            .expect("epoch row")
+            .get(0)
+            .expect("epoch")
+    };
+    assert!(
+        epoch < 2,
+        "blocking B's relay blocks the remote copy only below the mailbox epoch (epoch {epoch}); \
+         the durable mailbox carries it from epoch 2 on"
+    );
     let room: jid::BareJid = format!("partial-{}@muc.localhost", uuid::Uuid::new_v4())
         .parse()
         .expect("unique partial room");
@@ -3384,6 +3422,9 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B joins the same room THROUGH NODE B (relayed join), so B
     // is an occupant whose occupancy lives on node A.
@@ -3465,14 +3506,28 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
         .send(&muji_active_presence(&room, "joiner-b"))
         .await
         .expect("client B advertises an active call");
-    client_a
-        .recv_matching(|frame| {
-            frame.contains("<presence")
-                && frame.contains(&format!("{room}/joiner-b"))
-                && frame.contains("<muji")
-        })
-        .await
-        .expect("client A sees client B's active call presence");
+    // Frames A receives are kept, so a failure shows what arrived instead.
+    let mut seen_by_a = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let saw_active_call = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match client_a.recv_timeout(remaining).await {
+            Ok(frame) => {
+                let matched = frame.contains("<presence")
+                    && frame.contains(&format!("{room}/joiner-b"))
+                    && frame.contains("<muji");
+                seen_by_a.push(frame);
+                if matched {
+                    break true;
+                }
+            }
+            Err(_) => break false,
+        }
+    };
+    assert!(
+        saw_active_call,
+        "client A sees client B's active call presence; frames received: {seen_by_a:#?}"
+    );
     client_b
         .send(&String::from(&muji_initiate_iq(&room, "cross-node-2")))
         .await
@@ -3564,10 +3619,35 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
 
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, _node_a, _peer_a) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, _node_b, _peer_b) =
-        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    // The harness's server-owner accounts (`admin`, `cluster-peer`) hold the
+    // owner affiliation in every room, and XEP-0045 section 8.4 forbids
+    // revoking an owner's voice by anyone. The visitor is therefore a plain
+    // account, seeded on both nodes under one password.
+    const VISITOR_USERNAME: &str = "voice-visitor";
+    const VISITOR_PASSWORD: &str = "voice-visitor-password";
+    let accounts = [(VISITOR_USERNAME, VISITOR_PASSWORD)];
+    let ports_a = [port_b];
+    let ports_b = [port_a];
+    let (server_a, _node_a, _peer_a) = spawn_cluster_node(ClusterNode {
+        postgres_url: &postgres_url,
+        pool_env: &pool.pool_env,
+        swarm_port: port_a,
+        bootstrap_ports: &ports_a,
+        selectors: NodeSelectors::DURABLE_COORDINATOR,
+        accounts: &accounts,
+        extra_envs: &[],
+    })
+    .await;
+    let (server_b, _node_b, _peer_b) = spawn_cluster_node(ClusterNode {
+        postgres_url: &postgres_url,
+        pool_env: &pool.pool_env,
+        swarm_port: port_b,
+        bootstrap_ports: &ports_b,
+        selectors: NodeSelectors::DURABLE_COORDINATOR,
+        accounts: &accounts,
+        extra_envs: &[],
+    })
+    .await;
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
 
@@ -3614,7 +3694,15 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         }
     };
     let mut moderator = connect_b("voice-mod").await;
-    let mut visitor = connect_b("voice-visitor").await;
+    let mut visitor = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        VISITOR_USERNAME,
+        VISITOR_PASSWORD,
+        &format!("voice-visitor-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("the visitor account connects to node B");
     for (client, nick) in [(&mut moderator, "mod-b"), (&mut visitor, "visitor-b")] {
         client
             .send(&format!(
@@ -3640,16 +3728,20 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
             .send(&set_role(id, nick, role))
             .await
             .expect("the owner changes a role");
-        owner
-            .recv_matching(|frame| frame.contains(id))
+        let answer = owner
+            .recv_matching(|frame| frame.contains(id) && frame.contains("<iq"))
             .await
             .expect("the role change is answered");
+        assert!(
+            frame_has_attr(&answer, "type", "result"),
+            "the owner's role change succeeds: {answer}"
+        );
     }
     // The visitor has been told of its role before it asks.
+    let visitor_occupant = format!("{room}/visitor-b");
     visitor
-        .recv_until(|frame| {
-            frame.contains(&format!("{room}/visitor-b"))
-                && (frame.contains("role=\"visitor\"") || frame.contains("role='visitor'"))
+        .recv_matching_within(Duration::from_secs(15), |frame| {
+            frame_is_occupant_role(frame, &visitor_occupant, "visitor")
         })
         .await
         .expect("the visitor learns of its role");
@@ -3719,11 +3811,7 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         .await
         .expect("the moderator approves");
     let granted = visitor
-        .recv_until(|frame| {
-            frame.contains(&format!("{room}/visitor-b")) && frame.contains("role=\"participant\"")
-                || frame.contains(&format!("{room}/visitor-b"))
-                    && frame.contains("role='participant'")
-        })
+        .recv_until(|frame| frame_is_occupant_role(frame, &visitor_occupant, "participant"))
         .await
         .expect("the visitor is granted voice");
     assert!(
@@ -3733,10 +3821,7 @@ async fn voice_request_and_approval_route_to_foreign_room_owner() {
         "{granted:?}"
     );
     owner
-        .recv_matching(|frame| {
-            frame.contains(&format!("{room}/visitor-b"))
-                && (frame.contains("role=\"participant\"") || frame.contains("role='participant'"))
-        })
+        .recv_matching(|frame| frame_is_occupant_role(frame, &visitor_occupant, "participant"))
         .await
         .expect("the owner sees the role change");
 
@@ -3871,6 +3956,9 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         .recv_until(|frame| frame.contains("<subject"))
         .await
         .expect("client A's join completes (room created, A is Owner)");
+    // A new room is locked until its owner configures it (XEP-0045
+    // section 10.1.1); unlock it so client B's join is admitted.
+    waddle_ws_test_support::iq::unlock_created_room(&mut client_a, &room).await;
 
     // Client B joins the same room THROUGH NODE B (relayed join), so
     // B's occupancy — and therefore B's voice — lives on node A while
@@ -4629,6 +4717,347 @@ async fn pep_notification_reaches_a_contact_connected_to_another_node() {
     let _ = admin.close().await;
     let _ = interested.close().await;
     let _ = uninterested.close().await;
+    drop(server_a);
+    drop(server_b);
+}
+
+const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
+
+/// An attribute name for the element builder, which takes owned `NcName`s.
+fn attr_name(name: &str) -> minidom::rxml::NcName {
+    <minidom::rxml::NcName as std::convert::TryFrom<&str>>::try_from(name)
+        .expect("valid attribute name")
+}
+
+fn parse_frame(frame: &str) -> Option<minidom::Element> {
+    frame.parse::<minidom::Element>().ok()
+}
+
+/// Whether `frame` is the `result` IQ answering request `id`, read from the
+/// parsed stanza so either attribute quote style matches.
+fn frame_is_iq_result(frame: &str, id: &str) -> bool {
+    parse_frame(frame).is_some_and(|element| {
+        element.name() == "iq"
+            && element.attr("id") == Some(id)
+            && element.attr("type") == Some("result")
+    })
+}
+
+fn iq_set_xml(id: &str, payload: minidom::Element) -> String {
+    stanza_xml(Stanza::Iq(Box::new(xmpp_parsers::iq::Iq::Set {
+        from: None,
+        to: None,
+        id: id.to_string(),
+        payload,
+    })))
+}
+
+fn pep_publish_payload(node: &str, item_id: &str) -> minidom::Element {
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+    minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            minidom::Element::builder("publish", NS_PUBSUB)
+                .attr(attr_name("node"), node)
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(attr_name("id"), item_id)
+                        .append(
+                            minidom::Element::builder("tune", node)
+                                .append(minidom::Element::builder("artist", node).append("Waddle")),
+                        ),
+                ),
+        )
+        .build()
+}
+
+/// Send `payload` as an IQ set and require its `result`.
+async fn send_iq_set_expecting_result(
+    client: &mut WsXmppClient,
+    id: &str,
+    payload: minidom::Element,
+) {
+    client
+        .send(&iq_set_xml(id, payload))
+        .await
+        .unwrap_or_else(|error| panic!("send {id}: {error}"));
+    client
+        .recv_matching(|frame| {
+            parse_frame(frame).is_some_and(|element| {
+                element.name() == "iq"
+                    && element.attr("id") == Some(id)
+                    && matches!(element.attr("type"), Some("result" | "error"))
+            })
+        })
+        .await
+        .map(|frame| {
+            assert!(
+                frame_is_iq_result(&frame, id),
+                "{id} is answered with a result: {frame}"
+            );
+        })
+        .unwrap_or_else(|error| panic!("{id} is answered: {error}"));
+}
+
+/// The first `<message>` the client receives within `budget` that carries a
+/// XEP-0060 event for `node` listing item `item_id`.
+async fn wait_for_pep_event_item(
+    client: &mut WsXmppClient,
+    node: &str,
+    item_id: &str,
+    budget: Duration,
+) -> Option<minidom::Element> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = client.recv_timeout(remaining).await.ok()?;
+        let Some(message) = parse_frame(&frame).filter(|element| element.name() == "message")
+        else {
+            continue;
+        };
+        let carries_item = message
+            .get_child("event", NS_PUBSUB_EVENT)
+            .and_then(|event| event.get_child("items", NS_PUBSUB_EVENT))
+            .is_some_and(|items| {
+                items.attr("node") == Some(node)
+                    && items.children().any(|item| {
+                        item.is("item", NS_PUBSUB_EVENT) && item.attr("id") == Some(item_id)
+                    })
+            });
+        if carries_item {
+            return Some(message);
+        }
+    }
+}
+
+/// XEP-0060 section 7.1 on a cluster: a publication is delivered to every
+/// resource of an explicit subscriber, wherever it is connected. A bare-JID
+/// subscription expands to the account's resources on every node (section
+/// 6.1.6), but the node that processed the publish holds only its own
+/// sockets, so a resource connected to another node was neither written to
+/// nor reached through the cluster.
+///
+/// Admin subscribes to its own tune node from a resource on node B, without
+/// advertising caps so the caps-driven pass of XEP-0163 section 3 cannot
+/// notify it, and publishes from a resource on node A. Only the explicit
+/// subscription can carry the event to node B.
+#[tokio::test]
+async fn explicit_pubsub_subscriber_on_another_node_receives_the_publication() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping explicit_pubsub_subscriber_on_another_node_receives_the_publication: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const ADMIN_BARE: &str = "admin@localhost";
+    const TUNE_NODE: &str = "http://jabber.org/protocol/tune";
+    const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    // Node B started last: its generated password is admin's live credential.
+    let admin_password = server_b.fixed_account_password().to_string();
+    let run = uuid::Uuid::new_v4();
+    let mut publisher = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("sub-xnode-pub-{run}"),
+    )
+    .await
+    .expect("admin connects to node A");
+    let mut subscriber = WsXmppClient::connect_and_auth(
+        &server_b.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("sub-xnode-sub-{run}"),
+    )
+    .await
+    .expect("admin's second resource connects to node B");
+
+    // The first publication creates the node; the subscription follows it.
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "sub-xnode-publish-1",
+        pep_publish_payload(TUNE_NODE, "first"),
+    )
+    .await;
+    send_iq_set_expecting_result(
+        &mut subscriber,
+        "sub-xnode-subscribe",
+        minidom::Element::builder("pubsub", NS_PUBSUB)
+            .append(
+                minidom::Element::builder("subscribe", NS_PUBSUB)
+                    .attr(attr_name("node"), TUNE_NODE)
+                    .attr(attr_name("jid"), ADMIN_BARE),
+            )
+            .build(),
+    )
+    .await;
+
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "sub-xnode-publish-2",
+        pep_publish_payload(TUNE_NODE, "second"),
+    )
+    .await;
+
+    let event = wait_for_pep_event_item(
+        &mut subscriber,
+        TUNE_NODE,
+        "second",
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("an explicit subscriber's resource on another node receives the publication");
+    assert_eq!(
+        event.attr("from"),
+        Some(ADMIN_BARE),
+        "the event comes from the node's owner: {event:?}"
+    );
+    assert!(
+        event
+            .attr("to")
+            .is_some_and(|to| to.starts_with(&format!("{ADMIN_BARE}/sub-xnode-sub-"))),
+        "the event is addressed to the subscriber's resource on node B: {event:?}"
+    );
+
+    let _ = publisher.close().await;
+    let _ = subscriber.close().await;
+    drop(server_a);
+    drop(server_b);
+}
+
+/// XEP-0163 "Sending the Last Published Item" on a cluster: a resource that
+/// becomes available on a node other than the one that took the publication
+/// is sent the node's last item. The item lives in the shared store and the
+/// resource's own connection receives it, so no cross-node hand-over is
+/// involved, and this pins that the replay reads the shared store rather
+/// than anything the publishing node held.
+///
+/// Admin publishes on node A and configures the node to send the last item
+/// on presence, then a second admin resource on node B goes available with
+/// caps advertising `+notify`.
+#[tokio::test]
+async fn last_item_replay_reaches_a_resource_that_becomes_available_on_another_node() {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        eprintln!(
+            "skipping last_item_replay_reaches_a_resource_that_becomes_available_on_another_node: \
+             WADDLE_TEST_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    reset_node_lease_tables(&db).await;
+    reset_fixed_pair_roster(&db).await;
+
+    const DOMAIN: &str = "localhost";
+    const TUNE_NODE: &str = "http://jabber.org/protocol/tune";
+    const TUNE_NOTIFY: &str = "http://jabber.org/protocol/tune+notify";
+    const NS_PUBSUB_OWNER: &str = "http://jabber.org/protocol/pubsub#owner";
+    const NS_DATA: &str = "jabber:x:data";
+
+    let port_a = free_tcp_port();
+    let port_b = free_tcp_port();
+    let (server_a, _node_a, _peer_a) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (server_b, _node_b, _peer_b) =
+        spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
+    wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
+
+    let admin_password = server_b.fixed_account_password().to_string();
+    let run = uuid::Uuid::new_v4();
+    let mut publisher = WsXmppClient::connect_and_auth(
+        &server_a.ws_url(),
+        DOMAIN,
+        "admin",
+        &admin_password,
+        &format!("last-xnode-pub-{run}"),
+    )
+    .await
+    .expect("admin connects to node A");
+
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "last-xnode-publish",
+        pep_publish_payload(TUNE_NODE, "last"),
+    )
+    .await;
+    let field = |var: &str, value: &str| {
+        minidom::Element::builder("field", NS_DATA)
+            .attr(attr_name("var"), var)
+            .append(minidom::Element::builder("value", NS_DATA).append(value))
+    };
+    send_iq_set_expecting_result(
+        &mut publisher,
+        "last-xnode-configure",
+        minidom::Element::builder("pubsub", NS_PUBSUB_OWNER)
+            .append(
+                minidom::Element::builder("configure", NS_PUBSUB_OWNER)
+                    .attr(attr_name("node"), TUNE_NODE)
+                    .append(
+                        minidom::Element::builder("x", NS_DATA)
+                            .attr(attr_name("type"), "submit")
+                            .append(
+                                field("FORM_TYPE", "http://jabber.org/protocol/pubsub#node_config")
+                                    .attr(attr_name("type"), "hidden"),
+                            )
+                            .append(field(
+                                "pubsub#send_last_published_item",
+                                "on_sub_and_presence",
+                            )),
+                    ),
+            )
+            .build(),
+    )
+    .await;
+
+    let name = format!("last-xnode-late-{run}");
+    let mut late =
+        WsXmppClient::connect_and_auth(&server_b.ws_url(), DOMAIN, "admin", &admin_password, &name)
+            .await
+            .expect("admin's second resource connects to node B");
+    let _ = send_roster_get(&mut late, "last-xnode-roster").await;
+    pep_caps_support::go_available_with_caps(
+        &mut late,
+        &name,
+        &["http://jabber.org/protocol/disco#info", TUNE_NOTIFY],
+    )
+    .await;
+
+    let replay = wait_for_pep_event_item(&mut late, TUNE_NODE, "last", Duration::from_secs(10))
+        .await
+        .expect("a resource that became available on another node is sent the last item");
+    assert!(
+        replay.children().any(|child| child.name() == "delay"),
+        "the replayed item carries its publication time (XEP-0203): {replay:?}"
+    );
+
+    let _ = publisher.close().await;
+    let _ = late.close().await;
     drop(server_a);
     drop(server_b);
 }

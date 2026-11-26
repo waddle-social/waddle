@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 
 internal const val VIEWER_MIN_SCALE = 1f
 internal const val VIEWER_MAX_SCALE = 5f
@@ -17,6 +18,10 @@ internal data class ViewerTransform(val scale: Float = VIEWER_MIN_SCALE, val off
 
     /** Apply one pinch/pan step; [centroid] is the gesture centre in viewport coordinates. */
     fun transformed(viewport: Size, centroid: Offset, pan: Offset, zoom: Float): ViewerTransform {
+        // The gesture helpers return Offset.Unspecified (NaN) for the centroid on the
+        // event where the last finger lifts; one NaN would poison the layer's
+        // translation and the image would vanish.
+        if (!centroid.isSpecified || !pan.isSpecified || !zoom.isFinite() || zoom <= 0f) return this
         val newScale = (scale * zoom).coerceIn(VIEWER_MIN_SCALE, VIEWER_MAX_SCALE)
         val applied = newScale / scale
         val centre = Offset(viewport.width / 2f, viewport.height / 2f)

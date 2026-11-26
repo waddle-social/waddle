@@ -499,28 +499,13 @@ pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_o
                         dropped_closed += 1;
                     }
                 },
-                BroadcastOutcome::NotConnected => match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .record_stanza_for_detached_bound_resource(
-                        &resource,
-                        &stanza,
-                        chrono::Utc::now(),
-                    )
-                    .await
-                {
-                    Ok(true) => delivered += 1,
-                    Ok(false) => not_connected += 1,
-                    Err(error) => {
-                        warn!(
-                            resource = %resource,
-                            error = %error,
-                            "Failed to record fan-out stanza for detached resource"
-                        );
-                        not_connected += 1;
+                BroadcastOutcome::NotConnected => {
+                    match super::deliver_beyond_this_node(state, &resource, &stanza).await {
+                        super::BeyondThisNode::Delivered => delivered += 1,
+                        super::BeyondThisNode::Dropped => dropped_closed += 1,
+                        super::BeyondThisNode::NotConnected => not_connected += 1,
                     }
-                },
+                }
             }
         }
     }

@@ -14,7 +14,10 @@ use jid::{BareJid, FullJid};
 use minidom::Element;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use url::Url;
+use xmpp_parsers::blocking::{Block, BlocklistResult};
+use xmpp_parsers::iq::Iq;
 
+use crate::blocking::{build_block_list_iq, BlockingPush};
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::command::XmppCommand;
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
@@ -273,6 +276,89 @@ async fn send_iq_resolves_via_mock_driver() {
 
     let result = handle.send_iq(iq).await.unwrap();
     assert_eq!(result.attr("type"), Some("result"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn xep0191_driver_acknowledges_and_broadcasts_only_the_trusted_push() {
+    let shared = MockTransportShared::default();
+    let (mut task, _cmd_tx, mut events) =
+        make_driver_task(MockTransport::new(vec![], vec![], shared.clone()));
+    let open = TransportMessage::Open(StreamOpen::from_server(
+        "waddle.example".parse().expect("valid server JID"),
+    ));
+    task.runtime.queue_request(ClientRequest::Connect).unwrap();
+    task.apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+        .await;
+    for message in [
+        open.clone(),
+        TransportMessage::Element(pre_auth_features()),
+        TransportMessage::Element(Element::builder("success", NS_SASL).build()),
+        open,
+        TransportMessage::Element(post_auth_features()),
+        TransportMessage::Element(bind_result("bind-1")),
+    ] {
+        assert!(
+            task.apply_transport_event(TransportEvent::MessageReceived(message))
+                .await
+        );
+    }
+    assert_eq!(task.runtime.snapshot().client_state(), ClientState::Ready);
+
+    let (responder, mut result) = oneshot::channel();
+    assert!(
+        task.handle_command(XmppCommand::SendIq {
+            stanza: Element::from(build_block_list_iq("list-1")),
+            responder,
+        })
+        .await
+    );
+    let list_result = Element::from(Iq::from_result(
+        "list-1",
+        Some(BlocklistResult { items: vec![] }),
+    ));
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        list_result.clone(),
+    )))
+    .await;
+    assert_eq!(result.try_recv().unwrap().unwrap(), list_result);
+
+    let jid = "bob@example.com/phone".parse::<jid::Jid>().unwrap();
+    let push = Iq::from_set(
+        "block-push",
+        Block {
+            items: vec![jid.clone()],
+        },
+    )
+    .with_to("alice@example.com/macbook".parse().unwrap());
+    let foreign = push
+        .clone()
+        .with_id("foreign-push".to_string())
+        .with_from("mallory@example.com".parse().unwrap());
+    let sent_before_pushes = shared.sent_messages().len();
+    for iq in [foreign, push] {
+        task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::from(iq),
+        )))
+        .await;
+    }
+
+    let ack = Element::from(Iq::Result {
+        from: None,
+        to: None,
+        id: "block-push".to_string(),
+        payload: None,
+    });
+    assert_eq!(
+        &shared.sent_messages()[sent_before_pushes..],
+        &[TransportMessage::Element(ack)]
+    );
+    let changes: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            ClientEvent::BlockListChanged(change) => Some(change),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changes, vec![BlockingPush::Blocked(vec![jid])]);
 }
 
 #[tokio::test(flavor = "current_thread")]

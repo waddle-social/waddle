@@ -106,6 +106,11 @@ pub(super) fn dispatch_event(
                 activity: activity.map(activity_from_core),
             });
         }
+        ClientEvent::BlockListChanged(change) => {
+            listener.on_event(WaddleClientEvent::BlockListChanged {
+                change: change.into(),
+            });
+        }
         ClientEvent::StatusPreferenceChanged(preference) => {
             listener.on_event(WaddleClientEvent::StatusPreferenceChanged {
                 preference: crate::status_preference::status_preference_to_ffi(preference),

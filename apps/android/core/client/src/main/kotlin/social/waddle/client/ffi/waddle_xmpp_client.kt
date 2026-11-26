@@ -677,6 +677,14 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_connect(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_block_jids(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_block_list(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_all(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_jids(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_community_events(
@@ -977,6 +985,14 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_constructor_waddleclient_new(`conf
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_connect(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disconnect(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_block_jids(`ptr`: Long,`jids`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_block_list(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_all(`ptr`: Long,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_jids(`ptr`: Long,`jids`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_cancel_community_event_occurrence(`ptr`: Long,`communityJid`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,`occurrence`: RustBuffer.ByValue,
 ): Long
@@ -1386,6 +1402,18 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disconnect() != 16481) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_block_jids() != 55748) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_block_list() != 34056) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_all() != 37974) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_jids() != 4865) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_cancel_community_event_occurrence() != 61272) {
@@ -2393,6 +2421,28 @@ public interface WaddleClientInterface {
     suspend fun `connect`()
 
     suspend fun `disconnect`()
+
+    /**
+     * Block one or more JIDs.
+     */
+    suspend fun `blockJids`(`jids`: List<kotlin.String>)
+
+    /**
+     * Fetch the account's XEP-0191 block list after authentication and
+     * before changing it. This session receives block-list pushes only
+     * after it requests the list.
+     */
+    suspend fun `fetchBlockList`(): List<Jid>
+
+    /**
+     * Unblock every JID on the account's block list.
+     */
+    suspend fun `unblockAll`()
+
+    /**
+     * Unblock one or more JIDs.
+     */
+    suspend fun `unblockJids`(`jids`: List<kotlin.String>)
 
     /**
      * Cancels the one occurrence of a repeating event that starts at
@@ -3483,6 +3533,107 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Block one or more JIDs.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `blockJids`(`jids`: List<kotlin.String>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_block_jids(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`jids`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Fetch the account's XEP-0191 block list after authentication and
+     * before changing it. This session receives block-list pushes only
+     * after it requests the list.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchBlockList`() : List<Jid> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_block_list(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeJid.lift(it) },
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Unblock every JID on the account's block list.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `unblockAll`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_all(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Unblock one or more JIDs.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `unblockJids`(`jids`: List<kotlin.String>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unblock_jids(
+                uniffiHandle,
+                FfiConverterSequenceString.lower(`jids`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -14421,6 +14572,115 @@ public object FfiConverterTypeWaddleAttendanceStatus: FfiConverterRustBuffer<Wad
 
 
 /**
+ * Changes announced in XEP-0191 block-list pushes.
+ */
+sealed class WaddleBlockListChange {
+
+    /**
+     * The listed JIDs were blocked.
+     */
+    data class Blocked(
+        val `jids`: List<social.waddle.client.ffi.Jid>) : WaddleBlockListChange()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * The listed JIDs were unblocked.
+     */
+    data class Unblocked(
+        val `jids`: List<social.waddle.client.ffi.Jid>) : WaddleBlockListChange()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * Every JID was unblocked.
+     */
+    object UnblockedAll : WaddleBlockListChange()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleBlockListChange : FfiConverterRustBuffer<WaddleBlockListChange>{
+    override fun read(buf: ByteBuffer): WaddleBlockListChange {
+        return when(buf.getInt()) {
+            1 -> WaddleBlockListChange.Blocked(
+                FfiConverterSequenceTypeJid.read(buf),
+                )
+            2 -> WaddleBlockListChange.Unblocked(
+                FfiConverterSequenceTypeJid.read(buf),
+                )
+            3 -> WaddleBlockListChange.UnblockedAll
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleBlockListChange) = when(value) {
+        is WaddleBlockListChange.Blocked -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterSequenceTypeJid.allocationSize(value.`jids`)
+            )
+        }
+        is WaddleBlockListChange.Unblocked -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterSequenceTypeJid.allocationSize(value.`jids`)
+            )
+        }
+        is WaddleBlockListChange.UnblockedAll -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddleBlockListChange, buf: ByteBuffer) {
+        when(value) {
+            is WaddleBlockListChange.Blocked -> {
+                buf.putInt(1)
+                FfiConverterSequenceTypeJid.write(value.`jids`, buf)
+                Unit
+            }
+            is WaddleBlockListChange.Unblocked -> {
+                buf.putInt(2)
+                FfiConverterSequenceTypeJid.write(value.`jids`, buf)
+                Unit
+            }
+            is WaddleBlockListChange.UnblockedAll -> {
+                buf.putInt(3)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
  * Which room members a XEP-0513 `#channel` mention addresses.
  */
 
@@ -15384,6 +15644,18 @@ sealed class WaddleClientEvent {
         companion object
     }
 
+    /**
+     * XEP-0191 block-list push received by this session.
+     */
+    data class BlockListChanged(
+        val `change`: social.waddle.client.ffi.WaddleBlockListChange) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
 
 
 
@@ -15444,6 +15716,9 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             15 -> WaddleClientEvent.ActivityChanged(
                 FfiConverterTypeBareJid.read(buf),
                 FfiConverterOptionalTypeWaddleActivity.read(buf),
+                )
+            16 -> WaddleClientEvent.BlockListChanged(
+                FfiConverterTypeWaddleBlockListChange.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -15557,6 +15832,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterOptionalTypeWaddleActivity.allocationSize(value.`activity`)
             )
         }
+        is WaddleClientEvent.BlockListChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleBlockListChange.allocationSize(value.`change`)
+            )
+        }
     }
 
     override fun write(value: WaddleClientEvent, buf: ByteBuffer) {
@@ -15636,6 +15918,11 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 buf.putInt(15)
                 FfiConverterTypeBareJid.write(value.`jid`, buf)
                 FfiConverterOptionalTypeWaddleActivity.write(value.`activity`, buf)
+                Unit
+            }
+            is WaddleClientEvent.BlockListChanged -> {
+                buf.putInt(16)
+                FfiConverterTypeWaddleBlockListChange.write(value.`change`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -21519,6 +21806,34 @@ public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleWeekday.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeJid: FfiConverterRustBuffer<List<Jid>> {
+    override fun read(buf: ByteBuffer): List<Jid> {
+        val len = buf.getInt()
+        return List<Jid>(len) {
+            FfiConverterTypeJid.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Jid>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeJid.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Jid>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeJid.write(it, buf)
         }
     }
 }
