@@ -5,6 +5,7 @@
 use crate::calls::call_candidate;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::support::{
     bare, candidate, drain_deps_with_noop_activity, enqueue_jobs_for_test,
@@ -19,10 +20,10 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use waddle_server::db::Database;
 use waddle_server::notification_outbox::{
-    DrainBatch, DrainScope, NoopDndReader, NoopRoomPolicy, NotificationCandidate,
-    NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
-    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
-    PushDisplayNameRequest, PushDisplayNameResolver, PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
+    DrainBatch, DrainScope, NoopDndReader, NotificationCandidate, NotificationClass,
+    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStatus,
+    NotificationOutboxStore, NotificationOutboxTarget, PushDisplayNameRequest,
+    PushDisplayNameResolver, PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
 };
 use waddle_xmpp::push::names::{DisplayName, PushNames, NS_PUSH_NAMES};
 use waddle_xmpp::push::PushSubscriptionStore;
@@ -536,41 +537,92 @@ async fn assert_frozen_names_on_retry(
     );
 }
 
-#[derive(Default)]
-struct SlowDisplayNames(AtomicUsize);
+struct DelayedDisplayNames {
+    delay: Option<Duration>,
+    calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
-impl PushDisplayNameResolver for SlowDisplayNames {
+impl PushDisplayNameResolver for DelayedDisplayNames {
     async fn resolve(&self, _request: PushDisplayNameRequest<'_>) -> PushNames {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        std::future::pending().await
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let Some(delay) = self.delay else {
+            return std::future::pending().await;
+        };
+        tokio::time::sleep(delay).await;
+        PushNames {
+            sender: DisplayName::parse("Bob Builder"),
+            room: DisplayName::parse("General"),
+        }
     }
 }
 
 #[tokio::test]
+async fn display_names_fill_a_fast_batch_beyond_the_old_shared_budget() {
+    let (lookups, named, _) =
+        publish_with_delayed_display_names(40, Some(Duration::from_millis(15))).await;
+    assert_eq!(lookups, 40);
+    assert_eq!(named, 40);
+}
+
+#[tokio::test]
 async fn display_name_timeout_skips_remaining_lookups_in_the_drain() {
+    let (lookups, named, elapsed) = publish_with_delayed_display_names(2, None).await;
+    assert_eq!(lookups, 1);
+    assert_eq!(named, 0);
+    assert!(
+        (Duration::from_millis(250)..Duration::from_secs(2)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn display_name_pass_ceiling_skips_remaining_lookups() {
+    let (lookups, named, elapsed) =
+        publish_with_delayed_display_names(48, Some(Duration::from_millis(120))).await;
+    // Each completed lookup costs at least 120 ms. Allow for storage and
+    // scheduling time between attempts, or a cutoff during an attempt.
+    assert!((20..=42).contains(&lookups), "{lookups} lookups");
+    assert!(
+        (lookups - 1..=lookups).contains(&named),
+        "{named} named jobs"
+    );
+    assert!(elapsed >= Duration::from_secs(5), "{elapsed:?}");
+}
+
+async fn publish_with_delayed_display_names(
+    job_count: usize,
+    delay: Option<Duration>,
+) -> (usize, usize, Duration) {
     let store = store().await;
     let recipient = bare("alice@example.com");
     let (push_service, push_store, _) = first_party_push_setup(&recipient).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
     let inbox = waddle_xmpp::inbox::storage::InMemoryInboxStorage::new();
-    let names = Arc::new(SlowDisplayNames::default());
+    let names = Arc::new(DelayedDisplayNames {
+        delay,
+        calls: AtomicUsize::new(0),
+    });
     assert!(store.attach_push_display_names(names.clone()));
     let projection = settings_projection().await;
-    for (sender, id) in [
-        ("bob@example.com", "first"),
-        ("charlie@example.com", "second"),
-    ] {
-        let sender = bare(sender);
-        opt_in_rich_payload(&projection, &recipient, &sender).await;
+    for i in 0..job_count {
+        let room = bare(&format!("room-{i}@conference.example.com"));
+        let sender = format!("{room}/bob").parse().expect("room occupant");
+        opt_in_rich_payload(&projection, &recipient, &room).await;
         store
-            .insert_candidate(&crate::support::candidate_for(&recipient, &sender, id))
+            .insert_candidate(&groupchat_candidate_for(
+                &recipient,
+                &room,
+                sender,
+                &format!("archive-message-{i}"),
+                NotificationClass::PersonalMention,
+            ))
             .await
             .expect("candidate");
     }
     let batch = DrainBatch {
         scope: DrainScope::All,
-        batch_size: 16,
+        batch_size: job_count,
     };
     let service = bare("push.example.com");
     store
@@ -578,12 +630,17 @@ async fn display_name_timeout_skips_remaining_lookups_in_the_drain() {
             &push_store,
             &blocking,
             &projection,
-            drain_deps_with_noop_activity(&NoopRoomPolicy, &NoopDndReader, noop_activity_reader()),
+            drain_deps_with_noop_activity(
+                &StubRoomPolicy::new(),
+                &NoopDndReader,
+                noop_activity_reader(),
+            ),
             &service,
             batch,
         )
         .await
         .expect("drain opted-in candidates");
+    let start = tokio::time::Instant::now();
     let outcomes = store
         .drain_due_outbox_jobs(
             &push_service,
@@ -594,20 +651,42 @@ async fn display_name_timeout_skips_remaining_lookups_in_the_drain() {
             batch,
         )
         .await
-        .expect("publish both jobs");
-    assert_eq!(outcomes.len(), 2);
+        .expect("publish all jobs");
+    let elapsed = start.elapsed();
+    assert_eq!(outcomes.len(), job_count);
     assert!(outcomes
         .iter()
         .all(|outcome| matches!(outcome, NotificationOutboxPublishOutcome::Published { .. })));
-    assert_eq!(names.0.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        push_service
-            .queued_publish_jobs()
-            .await
-            .expect("push jobs")
-            .len(),
-        2
-    );
+    let mut rows = crate::support::db_query(
+        &push_service.database(),
+        "SELECT payload_xml FROM push_publish_jobs",
+        (),
+    )
+    .await
+    .expect("queued push payloads");
+    let mut published = 0;
+    let mut named = 0;
+    while let Some(row) = rows.next().await.expect("next payload") {
+        published += 1;
+        let xml: String = row.get(0).expect("payload XML");
+        let payload: minidom::Element = xml.parse().expect("notification");
+        if let Some(names) = payload.get_child("names", NS_PUSH_NAMES) {
+            named += 1;
+            assert_eq!(
+                names
+                    .get_child("sender", NS_PUSH_NAMES)
+                    .expect("sender")
+                    .text(),
+                "Bob Builder"
+            );
+            assert_eq!(
+                names.get_child("room", NS_PUSH_NAMES).expect("room").text(),
+                "General"
+            );
+        }
+    }
+    assert_eq!(published, job_count);
+    (names.calls.load(Ordering::SeqCst), named, elapsed)
 }
 
 // #779: coalescing must keep the context's stanza-id pointing at the

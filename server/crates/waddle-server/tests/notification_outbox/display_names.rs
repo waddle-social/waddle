@@ -171,6 +171,101 @@ async fn create_room(state: &WebSocketState) -> ActorRef<RoomActor> {
         .expect("room actor")
 }
 
+#[cfg(feature = "clustering")]
+mod durable_rooms {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use waddle_server::test_support::websocket_state_with_muc_durable_store;
+    use waddle_xmpp::muc::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+        RoomCommitFuture, RoomDurableMutation, RoomMutationEffects,
+    };
+
+    use super::{bare, create_room, parse_jid, resolve_room, BareJid, RoomConfig, StanzaId, ROOM};
+
+    struct PublishedRoomConfig {
+        config: Option<RoomConfig>,
+        was_read: AtomicBool,
+    }
+
+    impl MucDurableStore for PublishedRoomConfig {
+        fn load_published_room_config<'a>(
+            &'a self,
+            room: &'a BareJid,
+        ) -> MucDurableFuture<'a, Option<RoomConfig>> {
+            assert_eq!(*room, bare(ROOM));
+            Box::pin(async {
+                self.was_read.store(true, Ordering::Relaxed);
+                Ok(self.config.clone())
+            })
+        }
+
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            _room: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            panic!("presentation must not load a fenced room state")
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            _room: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            panic!("presentation must not check an ownership fence")
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            _room: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+            _intent: RoomDurableMutation,
+            _effects: RoomMutationEffects,
+        ) -> RoomCommitFuture<'a> {
+            panic!("presentation must not write durable room state")
+        }
+    }
+
+    async fn assert_resolved_room_name(published: Option<RoomConfig>, expected: &str) {
+        let store = Arc::new(PublishedRoomConfig {
+            config: published,
+            was_read: AtomicBool::new(false),
+        });
+        let state = websocket_state_with_muc_durable_store(store.clone()).await;
+        create_room(&state).await;
+        let names = resolve_room(
+            &state,
+            &parse_jid("park@muc.example.com/bob"),
+            StanzaId::new("missing-id", parse_jid(ROOM)),
+        )
+        .await;
+        assert!(
+            store.was_read.load(Ordering::Relaxed),
+            "read published config"
+        );
+        assert_eq!(
+            names.room.as_ref().map(|name| name.as_str()),
+            Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn published_room_name_takes_precedence_over_the_live_room_name() {
+        let shared = RoomConfig {
+            name: "Shared Park".into(),
+            ..RoomConfig::default()
+        };
+        assert_resolved_room_name(Some(shared), "Shared Park").await;
+    }
+
+    #[tokio::test]
+    async fn missing_published_room_config_uses_the_live_room_name() {
+        assert_resolved_room_name(None, "The Park").await;
+    }
+}
+
 async fn archive_room_message(state: &WebSocketState, sender: Jid, id: &StanzaId) {
     let room = bare(ROOM);
     let mut message = ArchivedMessage::for_test(sender, Jid::from(room.clone()));
