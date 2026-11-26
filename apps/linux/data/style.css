@@ -88,6 +88,21 @@
   --popover-fg-color: var(--wd-fg);
 }
 
+/* Polar Huddle type (src/fonts.rs installs the files). The system families
+ * follow, so the app still reads well if the files could not be installed. */
+window {
+  font-family: "Atkinson Hyperlegible Next", system-ui, sans-serif;
+}
+
+.title-1, .title-2, .title-3, .title-4, .large-title,
+headerbar .title, .section-heading, .waddle-message .sender {
+  font-family: "Bricolage Grotesque", "Atkinson Hyperlegible Next", system-ui, sans-serif;
+}
+
+.monospace, .keycap, textview.code {
+  font-family: "Atkinson Hyperlegible Mono", ui-monospace, monospace;
+}
+
 /* Avatar tints: DJB2 over the name picks one (src/ui/avatar.rs). */
 /* Adw.Avatar draws in an inner `avatar` node that carries its own colour. */
 .waddle-avatar avatar {
