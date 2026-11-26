@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -246,10 +246,7 @@ impl TenantResourceController {
         quotas: &TenantResourceQuotas,
     ) -> Result<(), QuotaError> {
         quotas.validate()?;
-        let mut guard = self
-            .buckets
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
         guard.insert(
             tenant_id.clone(),
             Arc::new(TenantResourceBucket::new(tenant_id, quotas)),
@@ -259,27 +256,18 @@ impl TenantResourceController {
 
     /// Remove a tenant's resource bucket (e.g., on tenant purge).
     pub fn remove_tenant(&self, tenant_id: &TenantId) {
-        let mut guard = self
-            .buckets
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
         guard.remove(tenant_id);
     }
 
     fn bucket_for(&self, tenant_id: &TenantId) -> Arc<TenantResourceBucket> {
         {
-            let guard = self
-                .buckets
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let guard = self.buckets.read().unwrap_or_else(PoisonError::into_inner);
             if let Some(bucket) = guard.get(tenant_id) {
                 return Arc::clone(bucket);
             }
         }
-        let mut guard = self
-            .buckets
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.buckets.write().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(guard.entry(tenant_id.clone()).or_insert_with(|| {
             Arc::new(TenantResourceBucket::new(
                 tenant_id.clone(),

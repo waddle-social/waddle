@@ -43,7 +43,7 @@ pub struct TursoPlacementLeaseStore {
 impl TursoPlacementLeaseStore {
     pub async fn open(path: &Path) -> Result<Self, LeaseError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
                 LeaseError::Backend(format!("create placement dir failed: {err}"))
             })?;
         }
