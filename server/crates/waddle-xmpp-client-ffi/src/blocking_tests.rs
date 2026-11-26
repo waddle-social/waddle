@@ -90,10 +90,10 @@ fn blocking_pushes_reach_the_ffi_listener_as_typed_changes() {
         listener.0.into_inner().expect("test listener lock"),
         vec![
             WaddleBlockListChange::Blocked {
-                jids: vec!["bob@example.net/phone".to_string()],
+                jids: vec!["bob@example.net/phone".parse().expect("valid JID")],
             },
             WaddleBlockListChange::Unblocked {
-                jids: vec!["example.org/service".to_string()],
+                jids: vec!["example.org/service".parse().expect("valid JID")],
             },
             WaddleBlockListChange::UnblockedAll,
         ]

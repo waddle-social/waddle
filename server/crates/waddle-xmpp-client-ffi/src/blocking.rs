@@ -18,13 +18,12 @@ impl WaddleClient {
     /// Fetch the account's XEP-0191 block list after authentication and
     /// before changing it. This session receives block-list pushes only
     /// after it requests the list.
-    pub async fn fetch_block_list(&self) -> Result<Vec<String>, WaddleError> {
+    pub async fn fetch_block_list(&self) -> Result<Vec<Jid>, WaddleError> {
         let result = self
             .send_blocking_iq(build_block_list_iq(&Uuid::new_v4().to_string()))
             .await?;
         let iq = Iq::try_from(result).map_err(|_| WaddleError::MalformedResponse)?;
-        let jids = parse_block_list_result(&iq).ok_or(WaddleError::MalformedResponse)?;
-        Ok(jids.into_iter().map(Jid::into_inner).collect())
+        parse_block_list_result(&iq).ok_or(WaddleError::MalformedResponse)
     }
 
     /// Block one or more JIDs.
@@ -69,12 +68,8 @@ fn parse_jids(jids: &[String]) -> Result<Vec<Jid>, WaddleError> {
 impl From<BlockingPush> for WaddleBlockListChange {
     fn from(change: BlockingPush) -> Self {
         match change {
-            BlockingPush::Blocked(jids) => Self::Blocked {
-                jids: jids.into_iter().map(Jid::into_inner).collect(),
-            },
-            BlockingPush::Unblocked(jids) => Self::Unblocked {
-                jids: jids.into_iter().map(Jid::into_inner).collect(),
-            },
+            BlockingPush::Blocked(jids) => Self::Blocked { jids },
+            BlockingPush::Unblocked(jids) => Self::Unblocked { jids },
             BlockingPush::UnblockedAll => Self::UnblockedAll,
         }
     }
