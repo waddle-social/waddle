@@ -393,7 +393,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             Task {
                 for extra in all where extra !== kept {
                     try? await room.localParticipant.unpublish(publication: extra)
-                    if kind == .video { camera.cameraWasDropped(extra, from: room) }
+                    if kind == .video { await camera.cameraWasDropped(extra, from: room) }
                 }
             }
         }
