@@ -330,7 +330,7 @@ export function createLocalStorageResumePersistence(
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
       const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = envelope;
-      const safeOutboundEntries = filterSensitiveSmResumeEntries(unhandledOutboundEntries);
+      const safeOutboundEntries = redactSensitiveSmResumeEntries(unhandledOutboundEntries);
       return {
         previd,
         ...(resumable !== undefined ? { resumable } : {}),
@@ -354,7 +354,7 @@ export function createLocalStorageResumePersistence(
         reportStorageOwnerSlotLimit("sm-resume");
         return;
       }
-      const safeOutboundEntries = filterSensitiveSmResumeEntries(state.unhandledOutboundEntries);
+      const safeOutboundEntries = redactSensitiveSmResumeEntries(state.unhandledOutboundEntries);
       const { unhandledOutboundEntries: _discarded, ...restState } = state;
       const envelope: PersistedSmEnvelope = {
         ...restState,
@@ -534,13 +534,13 @@ function readMissingRemoteRooms(key: string): string[] {
   return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
 }
 
-const SENSITIVE_SM_RESUME_NS_PATTERN = /urn:waddle:(?:credential|inference)/i;
+const SENSITIVE_SM_RESUME_NS_PATTERN = /urn:waddle:credential|urn:waddle:inference/i;
 
 type PersistedSmUnhandledEntry = NonNullable<
   PersistedSmResumeState["unhandledOutboundEntries"]
 >[number];
 
-function filterSensitiveSmResumeEntries(
+function redactSensitiveSmResumeEntries(
   entries?: ReadonlyArray<PersistedSmUnhandledEntry>,
 ): PersistedSmUnhandledEntry[] | undefined {
   if (!entries?.length) return undefined;
@@ -592,7 +592,7 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
     }));
     s.removeItem(key);
     const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = claimed;
-    const safeOutboundEntries = filterSensitiveSmResumeEntries(unhandledOutboundEntries);
+    const safeOutboundEntries = redactSensitiveSmResumeEntries(unhandledOutboundEntries);
     return {
       previd,
       ...(resumable !== undefined ? { resumable } : {}),
