@@ -139,7 +139,11 @@ def probe(args: argparse.Namespace) -> int:
         )
     result["build_seconds"] = round(time.monotonic() - build_started, 1)
     result["build_success"] = build.returncode == 0
-    result["members"] = checked_members(log_path.read_text(encoding="utf-8", errors="replace"))
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    result["members"] = checked_members(log_text)
+    # Without the sandbox each derivation builds in a different directory and
+    # Cargo cannot reuse any member layer; record it so a result is not misread.
+    result["sandboxed"] = "auto-disabling sandboxing" not in log_text
     result["total_seconds"] = round(time.monotonic() - started, 1)
     write(args.output, "probe.json", result)
     print(json.dumps(result, indent=2))
@@ -165,16 +169,19 @@ def read(path: Path) -> dict:
 
 def render(rows: list[dict]) -> str:
     lines = [
-        "| Phase | Volume paths at start | deps | layer-base | layer-xmpp | Derivations built | Members compiled | Build s | Result |",
-        "|---|---:|---|---|---|---:|---|---:|---|",
+        "| Phase | Sandbox | Volume paths at start | deps | layer-base | layer-xmpp | Derivations built | Lane compiled | Build s | Result |",
+        "|---|---|---:|---|---|---|---:|---|---:|---|",
     ]
     for row in rows:
         volume_state, result = row.get("volume", {}), row.get("probe", {})
         targets = result.get("targets", {})
         mark = lambda name: "hit" if targets.get(name, {}).get("present") else "miss"  # noqa: E731
-        compiled = sorted({crate for crates in result.get("members", {}).values() for crate in crates})
+        # Crates the lane itself compiled; a warm layer leaves only waddle-server.
+        compiled = result.get("members", {}).get("waddle-server-clippy", [])
+        sandbox = {True: "yes", False: "no"}.get(result.get("sandboxed"), "?")
         lines.append(
             f"| {result.get('phase', volume_state.get('phase', '?'))} "
+            f"| {sandbox} "
             f"| {volume_state.get('store_paths', 0)} "
             f"| {mark('deps')} | {mark('layer-base')} | {mark('layer-xmpp')} "
             f"| {len(result.get('plan', {}).get('built', []))} "

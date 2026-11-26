@@ -743,9 +743,10 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume' }}
     name: nix-volume/0-seed
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-      - nscloud-cache-tag-waddle-nix-layers-trial-1
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
+      - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
+      - namespace-features:container.privileged=true
     timeout-minutes: 90
     permissions:
       contents: read
@@ -780,6 +781,8 @@ jobs:
             accept-flake-config = true
             substituters = https://cache.nixos.org/
             build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -806,9 +809,10 @@ jobs:
       - volume-seed
     name: nix-volume/1-immediate
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-      - nscloud-cache-tag-waddle-nix-layers-trial-1
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
+      - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
+      - namespace-features:container.privileged=true
     timeout-minutes: 90
     permissions:
       contents: read
@@ -843,6 +847,8 @@ jobs:
             accept-flake-config = true
             substituters = https://cache.nixos.org/
             build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -880,9 +886,10 @@ jobs:
       - volume-wait-1
     name: nix-volume/2-after-10m
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-      - nscloud-cache-tag-waddle-nix-layers-trial-1
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
+      - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
+      - namespace-features:container.privileged=true
     timeout-minutes: 90
     permissions:
       contents: read
@@ -917,6 +924,8 @@ jobs:
             accept-flake-config = true
             substituters = https://cache.nixos.org/
             build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -954,9 +963,10 @@ jobs:
       - volume-wait-2
     name: nix-volume/3-after-30m
     runs-on:
-      - nscloud-ubuntu-24.04-amd64-8x16-with-cache
-      - nscloud-cache-tag-waddle-nix-layers-trial-1
+      - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
+      - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
+      - namespace-features:container.privileged=true
     timeout-minutes: 90
     permissions:
       contents: read
@@ -991,6 +1001,8 @@ jobs:
             accept-flake-config = true
             substituters = https://cache.nixos.org/
             build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
       - name: Verify Nix daemon without building
         run: |-
           for attempt in 1 2 3 4 5; do
@@ -1011,6 +1023,26 @@ jobs:
           path: .ci/nix-volume
           include-hidden-files: true
           if-no-files-found: error
+  profile-sandbox:
+    name: nix-volume/profile-sandbox
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume' }}
+    runs-on: namespace-profile-linux-x86;container.privileged=true
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            sandbox = true
+            sandbox-fallback = false
+      - name: Build a derivation that only succeeds inside the sandbox
+        run: |-
+          set -euo pipefail
+          nix build --no-link --print-build-logs --impure --expr 'derivation { name = "sandbox-probe-${toString builtins.currentTime}"; system = "x86_64-linux"; builder = "/bin/sh"; args = ["-c" "test $PWD = /build && echo sandboxed > $out"]; }'
   volume-summary:
     name: nix-volume/summary
     needs:

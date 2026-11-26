@@ -15,11 +15,17 @@ let _nix = wc.#Nix.tasks[0].provider.github
 let _volume = "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1
 let _checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
 let _upload = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-let _tag = "waddle-nix-layers-trial-1"
+// Trial 1 ran unprivileged: Nix disabled its sandbox, built every
+// derivation in a different random directory, and Cargo (whose crate
+// identity includes the absolute workspace path) recompiled every member in
+// every layer and in the lane. Layers need the sandbox's fixed /build/source,
+// so trial 2 runs privileged with the sandbox required.
+let _tag = "waddle-nix-layers-trial-2"
 let _volumeJobRunner = [
-	"nscloud-ubuntu-24.04-amd64-8x16-with-cache",
+	"nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features",
 	"nscloud-cache-tag-\(_tag)",
 	"nscloud-cache-size-20gb",
+	"namespace-features:container.privileged=true",
 ]
 let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume'"
 
@@ -74,6 +80,8 @@ let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'na
 				accept-flake-config = true
 				substituters = https://cache.nixos.org/
 				build-dir = /var/lib/nix-build
+				sandbox = true
+				sandbox-fallback = false
 				"""
 		},
 		{
@@ -141,6 +149,36 @@ workflow: jobs: {
 		_phase: "3-after-30m"
 		needs: ["volume-wait-2"]
 		if: "${{ !cancelled() && \(_volumeIf) }}"
+	}
+	// The main pipeline's profile runner is unprivileged, so Nix falls back
+	// to unsandboxed builds and member layers never match. Check that the
+	// documented profile option gives a working, required sandbox.
+	"profile-sandbox": {
+		name:              "nix-volume/profile-sandbox"
+		if:                "${{ \(_volumeIf) }}"
+		"runs-on":         "namespace-profile-linux-x86;container.privileged=true"
+		"timeout-minutes": 15
+		permissions: contents: "read"
+		steps: [
+			{name: "Checkout", uses: _checkout},
+			{
+				name: "Install Determinate Nix"
+				uses: _nix.uses
+				with: "extra-conf": """
+					sandbox = true
+					sandbox-fallback = false
+					"""
+			},
+			{
+				name: "Build a derivation that only succeeds inside the sandbox"
+				// The sandbox runs builds at /build; unsandboxed builds use a
+				// random directory under the build-dir.
+				run: """
+					set -euo pipefail
+					nix build --no-link --print-build-logs --impure --expr 'derivation { name = "sandbox-probe-${toString builtins.currentTime}"; system = "x86_64-linux"; builder = "/bin/sh"; args = ["-c" "test $PWD = /build && echo sandboxed > $out"]; }'
+					"""
+			},
+		]
 	}
 	"volume-summary": {
 		name: "nix-volume/summary"

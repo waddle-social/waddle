@@ -50,10 +50,11 @@ class ProbeTests(unittest.TestCase):
                 "members": {"waddle-server-clippy": ["waddle-server"]},
                 "build_seconds": 321.5,
                 "build_success": False,
+                "sandboxed": True,
             },
         }]
         line = probe.render(rows).splitlines()[-1]
-        self.assertEqual(line, "| probe-1 | 812 | hit | hit | miss | 2 | waddle-server | 321.5 | FAILED |")
+        self.assertEqual(line, "| probe-1 | yes | 812 | hit | hit | miss | 2 | waddle-server | 321.5 | FAILED |")
 
 
 if __name__ == "__main__":
