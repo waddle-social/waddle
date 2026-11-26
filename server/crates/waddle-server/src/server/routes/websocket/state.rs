@@ -2042,6 +2042,11 @@ pub(super) struct WsConnState {
     /// replacement in [`Self::ensure_state_machine`] re-seeds the
     /// policy with the same configuration the pre-bind machine used.
     pub(super) keepalive_config: waddle_xmpp::protocol::KeepaliveConfig,
+    /// Active decoupled streaming inference sessions launched from XEP-0050
+    /// extension commands on this WebSocket connection. Dropping `WsConnState`
+    /// on disconnect synchronously drops each [`StreamingInferenceSession`],
+    /// firing `cancel_sync()` -> `InferenceStream::Drop` -> upstream egress cancel.
+    pub(super) active_inference_sessions: Vec<super::frame_backstop::StreamingInferenceSession>,
 }
 
 impl WsConnState {
@@ -2125,6 +2130,7 @@ impl WsConnState {
             send_window_last_request_acked: 0,
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
+            active_inference_sessions: Vec::new(),
         }
     }
 

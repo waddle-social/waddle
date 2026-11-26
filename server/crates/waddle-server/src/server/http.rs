@@ -48,6 +48,7 @@ use crate::server::extension_bot_avatar::BotAvatars;
 use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
 use crate::server::extension_host_adapter;
 use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::extension_inference_host::DeferredExtensionInferenceHost;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
@@ -1282,10 +1283,12 @@ async fn create_websocket_state(
     let pubsub_storage = Arc::clone(&state.pubsub_storage);
 
     let deferred_extension_host_tools = Arc::new(DeferredExtensionHostTools::default());
+    let deferred_extension_inference_host = Arc::new(DeferredExtensionInferenceHost::default());
     let extension_manager = build_extension_manager(
         server_config,
         &xmpp_domain,
         Arc::clone(&deferred_extension_host_tools),
+        Arc::clone(&deferred_extension_inference_host),
     )
     .await?;
     crate::server::extension_bot::install_bot_hats(

@@ -49,6 +49,7 @@ pub async fn handle_iq(
         registry_owner: registry_owner.as_ref(),
         state_machine: None,
         ordered_relay_origin: None,
+        active_inference_sessions: None,
     };
     handle_iq_with_conn_state(
         *iq,

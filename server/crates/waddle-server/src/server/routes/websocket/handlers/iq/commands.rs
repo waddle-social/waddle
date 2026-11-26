@@ -1,12 +1,20 @@
 use super::extension_forms::CommandBoundary;
+use super::permissions::stanza_error_from_parts;
 use super::{
     build_command_result, build_xmpp_error_response, get_managed_channel_for_room, get_room_actor,
     iq_to_xml, parse_command_from_iq, AdHocCommandCondition, Affiliation, BareJid, CheckPermission,
     Command, CommandContext, CommandError, CommandResult, CommandStatus, DbQueryOne, FullJid,
-    GetSnapshot, Jid, Object, ObjectType, Permission, Subject, WebSocketState, XmppError,
+    GetSnapshot, Jid, Object, ObjectType, Permission, StanzaErrorCondition, StanzaErrorType,
+    Subject, WebSocketState, XmppError,
+};
+use crate::server::routes::interpret::{deliver_direct_to_full, FullJidDeliveryOutcome};
+use crate::server::routes::websocket::frame_backstop::{
+    spawn_decoupled_streaming_inference, StreamingInferenceSession,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
+use std::sync::Arc;
 use waddle_xmpp::xep::RsmResponse;
+use waddle_xmpp::Stanza;
 
 /// Language of all responder-authored command text (XEP-0050 §2.4).
 const RESPONSE_LANG: &str = "en";
@@ -18,14 +26,109 @@ pub(super) struct CommandTargets<'a> {
     pub(super) push_domain: &'a str,
 }
 
+fn command_result_to_stanza(
+    request_iq: &xmpp_parsers::iq::Iq,
+    node: &str,
+    session_id: Option<String>,
+    result: CommandResult,
+) -> Stanza {
+    let response_command = match result {
+        CommandResult::Executing {
+            form,
+            session_id,
+            notes,
+            actions,
+        } => {
+            let mut command = Command::new(node.to_owned()).with_lang(RESPONSE_LANG);
+            command.status = Some(CommandStatus::Executing);
+            command.session_id = Some(session_id);
+            command.form = Some(form);
+            command.notes = notes;
+            command.actions = actions;
+            command
+        }
+        CommandResult::Completed {
+            session_id: response_session_id,
+            form,
+            notes,
+        } => {
+            let mut command = Command::new(node.to_owned()).with_lang(RESPONSE_LANG);
+            command.status = Some(CommandStatus::Completed);
+            command.session_id = response_session_id.or(session_id);
+            command.form = form;
+            command.notes = notes;
+            command
+        }
+        CommandResult::CompletedPage {
+            session_id: response_session_id,
+            form,
+            next_cursor,
+            notes,
+        } => {
+            let mut command = Command::new(node.to_owned());
+            command.status = Some(CommandStatus::Completed);
+            command.session_id = response_session_id.or(session_id);
+            command.form = Some(form);
+            command.result_set = next_cursor.map(|cursor| RsmResponse::new().with_last(cursor));
+            command.notes = notes;
+            command
+        }
+        CommandResult::Canceled {
+            session_id: response_session_id,
+            notes,
+        } => {
+            let mut command = Command::new(node.to_owned()).with_lang(RESPONSE_LANG);
+            command.status = Some(CommandStatus::Canceled);
+            command.session_id = response_session_id.or(session_id);
+            command.notes = notes;
+            command
+        }
+        CommandResult::Error(err) => {
+            let stanza_err = match err {
+                XmppError::Stanza {
+                    condition,
+                    error_type,
+                    text,
+                } => stanza_error_from_parts(error_type, condition, text, None),
+                XmppError::AdHocCommand { condition, text } => {
+                    let (error_type, general) = condition.stanza_error();
+                    let child = xmpp_parsers::minidom::Element::builder(
+                        condition.element_name(),
+                        waddle_xmpp::xep::xep0050::NS_COMMANDS,
+                    )
+                    .build();
+                    stanza_error_from_parts(error_type, general, text, Some(child))
+                }
+                other => stanza_error_from_parts(
+                    StanzaErrorType::Wait,
+                    StanzaErrorCondition::InternalServerError,
+                    Some(other.to_string()),
+                    None,
+                ),
+            };
+            let mut iq = xmpp_parsers::iq::Iq::from_error(request_iq.id().to_owned(), stanza_err);
+            if let Some(to) = request_iq.to() {
+                iq = iq.with_from(to.clone());
+            }
+            if let Some(from) = request_iq.from() {
+                iq = iq.with_to(from.clone());
+            }
+            return Stanza::Iq(Box::new(iq));
+        }
+    };
+
+    Stanza::Iq(Box::new(build_command_result(request_iq, &response_command)))
+}
+
 pub(super) async fn handle_command_iq(
     request_iq: &xmpp_parsers::iq::Iq,
     state: &WebSocketState,
     targets: CommandTargets<'_>,
     principal: Option<ResolvedPrincipal<'_>>,
     bound_jid: Option<&FullJid>,
+    active_inference_sessions: Option<&mut Vec<StreamingInferenceSession>>,
 ) -> Vec<String> {
-    let sender_jid: Jid = match bound_jid.cloned().map(Jid::from) {
+    let sender_full_jid = match bound_jid.cloned() {
         Some(jid) => jid,
         None => {
             return vec![build_xmpp_error_response(
@@ -34,6 +137,7 @@ pub(super) async fn handle_command_iq(
             )];
         }
     };
+    let sender_jid: Jid = Jid::from(sender_full_jid.clone());
 
     let command = match parse_command_from_iq(request_iq) {
         Ok(command) => command,
@@ -95,65 +199,59 @@ pub(super) async fn handle_command_iq(
         placement_generation: None,
     };
 
-    let result = state.deps.protocol.command_registry.dispatch(ctx).await;
-    let response_command = match result {
-        CommandResult::Executing {
-            form,
-            session_id,
-            notes,
-            actions,
-        } => {
-            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
-            command.status = Some(CommandStatus::Executing);
-            command.session_id = Some(session_id);
-            command.form = Some(form);
-            command.notes = notes;
-            command.actions = actions;
-            command
+    if boundary == CommandBoundary::Extensions {
+        let registry = Arc::clone(&state.deps.protocol.command_registry);
+        let user_registry = state.deps.protocol.user_registry.clone();
+        let sm_session_registry = Arc::clone(&state.deps.protocol.sm_session_registry);
+        let shutdown = state.deps.shutdown.stop_token();
+        let req_iq = request_iq.clone();
+        let node_for_task = node.clone();
+        let stream_id = format!("ext-cmd:{}:{}", req_iq.id(), node);
+        let (session, _handle) = spawn_decoupled_streaming_inference(
+            stream_id,
+            16,
+            shutdown,
+            move |_chunk_tx, mut cancel_rx| async move {
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel_rx.changed() => CommandResult::Canceled {
+                        session_id: session_id.clone(),
+                        notes: vec![waddle_xmpp::commands::Note::info(
+                            "Extension command canceled".to_owned(),
+                        )],
+                    },
+                    res = registry.dispatch(ctx) => res,
+                };
+                let reply_stanza =
+                    command_result_to_stanza(&req_iq, &node_for_task, session_id, result);
+                let _outcome: FullJidDeliveryOutcome = deliver_direct_to_full(
+                    Some(&user_registry),
+                    Some(&sm_session_registry),
+                    &sender_full_jid,
+                    &reply_stanza,
+                    None,
+                )
+                .await;
+            },
+        );
+        if let Some(sessions) = active_inference_sessions {
+            sessions.retain(|existing| !existing.chunk_rx.is_closed());
+            sessions.push(session);
+        } else {
+            tokio::spawn(async move {
+                let mut s = session;
+                while s.chunk_rx.recv().await.is_some() {}
+            });
         }
-        CommandResult::Completed {
-            session_id: response_session_id,
-            form,
-            notes,
-        } => {
-            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
-            command.status = Some(CommandStatus::Completed);
-            command.session_id = response_session_id.or(session_id);
-            command.form = form;
-            command.notes = notes;
-            command
-        }
-        CommandResult::CompletedPage {
-            session_id: response_session_id,
-            form,
-            next_cursor,
-            notes,
-        } => {
-            let mut command = Command::new(node.clone());
-            command.status = Some(CommandStatus::Completed);
-            command.session_id = response_session_id.or(session_id);
-            command.form = Some(form);
-            command.result_set = next_cursor.map(|cursor| RsmResponse::new().with_last(cursor));
-            command.notes = notes;
-            command
-        }
-        CommandResult::Canceled {
-            session_id: response_session_id,
-            notes,
-        } => {
-            let mut command = Command::new(node.clone()).with_lang(RESPONSE_LANG);
-            command.status = Some(CommandStatus::Canceled);
-            command.session_id = response_session_id.or(session_id);
-            command.notes = notes;
-            command
-        }
-        CommandResult::Error(err) => return vec![build_xmpp_error_response(request_iq, err)],
-    };
+        return Vec::new();
+    }
 
-    vec![iq_to_xml(build_command_result(
-        request_iq,
-        &response_command,
-    ))]
+    let result = state.deps.protocol.command_registry.dispatch(ctx).await;
+    let reply = command_result_to_stanza(request_iq, &node, session_id, result);
+    let Stanza::Iq(reply_iq) = reply else {
+        return Vec::new();
+    };
+    vec![iq_to_xml(*reply_iq)]
 }
 
 fn exact_bare_muc_room_target(

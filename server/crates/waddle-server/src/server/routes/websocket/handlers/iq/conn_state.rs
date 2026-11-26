@@ -1,4 +1,5 @@
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::server::routes::websocket::frame_backstop::StreamingInferenceSession;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -33,4 +34,7 @@ pub struct IqConnState<'a> {
     /// tests; production (`handle_xmpp_frame`) always supplies it.
     pub state_machine: Option<&'a mut waddle_xmpp::protocol::XmppStateMachine>,
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
+    /// Optional per-connection tracker for decoupled streaming inference
+    /// sessions spawned by `CommandBoundary::Extensions` commands.
+    pub active_inference_sessions: Option<&'a mut Vec<StreamingInferenceSession>>,
 }

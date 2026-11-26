@@ -38,7 +38,7 @@ pub(super) enum InboundDisposition {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum StanzaTimeout {
+pub enum StanzaTimeout {
     /// The retryable IQ error accepts responsibility for the request. Keep the
     /// response typed until `frame.rs` reaches the existing transport XML
     /// boundary.
@@ -85,7 +85,7 @@ struct IqReply {
 /// Captured, owned metadata for one inbound stanza: enough to build the
 /// conformant timeout reply and the diagnostic span/log without holding a borrow
 /// on the stanza (which is moved into the dispatch future).
-pub(super) struct StanzaBackstop {
+pub(crate) struct StanzaBackstop {
     /// `"iq"` | `"message"` | `"presence"` — the stanza kind label.
     kind: &'static str,
     /// The request payload namespace (empty when absent), for the metric axis.
@@ -102,7 +102,7 @@ impl StanzaBackstop {
     /// binding happened) stamps the correlation attributes from #1326: the
     /// XMPP resource plus the bare user JID, so one attribute search joins a
     /// browser session's Faro beacons to its server-side spans.
-    pub(super) fn capture(stanza: &Stanza, bound_jid: Option<&jid::FullJid>) -> Self {
+    pub(crate) fn capture(stanza: &Stanza, bound_jid: Option<&jid::FullJid>) -> Self {
         let correlation = MessageCorrelation::capture(stanza);
         match stanza {
             // Only IQ `get`/`set` carry a request payload AND owe a response, so
@@ -265,7 +265,7 @@ impl MessageCorrelation {
 /// `xmpp.stanza.latency` histogram (#1320 wire-up / #1321 dispatch seam);
 /// timeouts keep their dedicated counter and are not double-counted as
 /// processed.
-pub(super) async fn run_with_backstop<F, T>(
+pub(crate) async fn run_with_backstop<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
 ) -> Result<T, StanzaTimeout>
