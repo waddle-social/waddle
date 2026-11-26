@@ -45,6 +45,10 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// the room, so a reconnect or a replacement session does not unmute
     /// them or turn their camera back on.
     @ObservationIgnored private var captureChoices: [AVMediaType: Bool] = [:]
+    /// What the call in progress agreed to start with, for a device the person has not chosen for.
+    @ObservationIgnored private var agreedMedia: CallMedia?
+    /// The camera is meant to be on: their choice, or failing one what the call agreed.
+    private var wantsCamera: Bool { captureChoices[.video] ?? agreedMedia?.video ?? false }
     /// The person chose to mute in this call, whether or not the microphone
     /// is publishing yet. What the system's call screen shows as muted.
     private(set) var isMicrophoneMutedByChoice = false
@@ -133,7 +137,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     }
 
     func restartBackground() async {
-        await camera.restartBackground(wantsCamera: { captureChoices[.video] == true }) { room in
+        await camera.restartBackground(wantsCamera: { wantsCamera }) { room in
             await self.setSource(.video, enabled: true, in: room)
         }
     }
@@ -163,6 +167,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         roomAccess.room = room
         self.observer = observer
         joinedIdentity = join.identity
+        agreedMedia = media
         phase = .connecting
         // XEP-0215: an advertised list is the ICE set to use. An empty list
         // means no advertisement, and the SDK keeps the servers the SFU
@@ -291,10 +296,13 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
         guard roomAccess.holds(room) else { return false }
         let isAllowed = await capture.requestAccess(for: kind)
+        // A prompt can be answered long after the call that asked has ended:
+        // the answer is not the idle state's, nor the next call's.
+        guard roomAccess.holds(room) else { return false }
         // Kept for the dock, which says why the control does nothing.
         if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
         if !isAllowed { roomAccess.recordRefusal(kind == .audio ? .microphone : .camera) }
-        return isAllowed && roomAccess.holds(room)
+        return isAllowed
     }
 
     private func forgetRoom() {
@@ -302,6 +310,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         roomAccess.room = nil
         observer = nil
         joinedIdentity = nil
+        agreedMedia = nil
         remoteVolumes.roomDidClose()
         phase = .idle
         connectedSince = nil
@@ -384,6 +393,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
             Task {
                 for extra in all where extra !== kept {
                     try? await room.localParticipant.unpublish(publication: extra)
+                    if kind == .video { camera.cameraWasDropped(extra, from: room) }
                 }
             }
         }

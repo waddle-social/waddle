@@ -80,6 +80,28 @@ final class CallStageCommandsTests: XCTestCase {
         XCTAssertFalse(other.showsParticipants)
     }
 
+    /// The check is asked while it is the call, and the call ends before it runs (#2823).
+    func testARetryWhoseCallEndsBeforeItRunsTurnsNothingOn() async throws {
+        let sample = await activeSession()
+        let calls = sample.coordinator.calls
+        let sid = try XCTUnwrap(calls.state.sid)
+        let media = FakeCallMedia()
+        let prompts = CallStagePrompts()
+        let commands = makeCommands(sid: sid, in: sample, media: media, prompts: prompts)
+        let acted = expectation(description: "a device is turned on for a call that is over")
+        acted.isInverted = true
+        // Two things are asked, and either would be one too many.
+        acted.assertForOverFulfill = false
+        media.onCall = { _ in acted.fulfill() }
+
+        commands.perform(.retry(.camera))
+        commands.perform(.toggleScreenShare)
+        calls.clear()
+
+        await fulfillment(of: [acted], timeout: 0.25)
+        XCTAssertTrue(media.calls.isEmpty)
+    }
+
     func testTwoMicrophoneRetriesStartOneCheck() async throws {
         let sample = await activeSession()
         let sid = try XCTUnwrap(sample.coordinator.calls.state.sid)

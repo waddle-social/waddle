@@ -93,6 +93,9 @@ struct CallStageCommands {
         }
     }
 
+    /// The slot still holds the call this stage was drawn for.
+    private var isThisCall: Bool { calls.state.sid == sid }
+
     private func setViewMode(_ mode: CallStagePresentation.ViewMode) {
         stage.update(sid) { $0.presentation.viewMode = mode }
     }
@@ -123,8 +126,11 @@ struct CallStageCommands {
 
     private func react(_ emoji: String) {
         // For the call the stage was drawn for, while it is still that call.
-        guard calls.state.sid == sid else { return }
-        Task { await calls.sendReaction(emoji) }
+        guard isThisCall else { return }
+        Task {
+            guard isThisCall else { return }
+            await calls.sendReaction(emoji)
+        }
     }
 
     private func toggleChat() {
@@ -150,6 +156,8 @@ struct CallStageCommands {
         prompts.startChecking(kind)
         Task {
             defer { prompts.finishChecking(kind) }
+            // The call can end, and another begin, before this runs.
+            guard isThisCall, calls.state.isEstablished else { return }
             switch kind {
             case .microphone: await media.setMicrophone(true)
             case .camera: await media.setCamera(true)
@@ -171,8 +179,10 @@ struct CallStageCommands {
     }
 
     private func toggleScreenShare() {
-        guard let media else { return }
+        guard let media, isThisCall else { return }
         Task {
+            // A share that is on by the time this runs may be the next call's.
+            guard isThisCall else { return }
             if media.isSharingOrStartingScreen {
                 await media.stopScreenShare()
             } else {

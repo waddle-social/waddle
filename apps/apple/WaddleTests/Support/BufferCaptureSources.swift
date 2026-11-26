@@ -21,11 +21,24 @@ final class BufferCaptureSources: CallCaptureSources {
     /// How long a screen takes to start being captured, as a real one does.
     var screenStartDelay: Duration = .zero
 
+    /// A camera made while this is off gets no frame, as one whose blur gives no picture.
+    var feedsCameras = true
+    /// The person has not answered the prompt yet; `answerPrompts` is their answer.
+    var holdsAnswers = false
+    private var waitingForAnAnswer: [CheckedContinuation<Void, Never>] = []
+
     private var feeds: [Task<Void, Never>] = []
 
     func requestAccess(for kind: AVMediaType) async -> Bool {
         asked.append(kind)
+        if holdsAnswers { await withCheckedContinuation { waitingForAnAnswer.append($0) } }
         return allows[kind] ?? false
+    }
+
+    func answerPrompts() {
+        holdsAnswers = false
+        waitingForAnAnswer.forEach { $0.resume() }
+        waitingForAnAnswer = []
     }
 
     func makeCamera(options: CameraCaptureOptions?, processor: any VideoProcessor) async -> LocalVideoTrack {
@@ -57,13 +70,14 @@ final class BufferCaptureSources: CallCaptureSources {
 
     /// Ends the feeds; the tracks are the controller's to stop.
     func stop() {
+        answerPrompts()
         feeds.forEach { $0.cancel() }
         feeds = []
     }
 
     private func fedTrack(source: Track.Source) async -> LocalVideoTrack {
         let track = await LocalVideoTrack.createBufferTrack(name: Track.cameraName, source: source)
-        feed(track)
+        if feedsCameras { feed(track) }
         return track
     }
 

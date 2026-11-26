@@ -81,7 +81,8 @@ final class CallMicrophoneProcessing {
             }
         }
         // The latest choice may have moved on while this one was written; its own write follows.
-        if accepted, wanted == audioProcessing {
+        // And the call may have ended: what was written was written to its tracks.
+        if accepted, wanted == audioProcessing, roomAccess.holds(room) {
             appliedAudioProcessing = wanted
             audioProcessingPublications = publicationIDs
         }
