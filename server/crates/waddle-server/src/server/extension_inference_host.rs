@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,7 +7,8 @@ use jid::BareJid;
 use kameo::actor::ActorRef;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{mpsc, OnceCell, RwLock};
+use tracing::info;
 use uuid::Uuid;
 use waddle_broker::admission::invocation::{
     InvocationPrincipal, PayerSelection, SignedInferenceInvocation,
@@ -29,9 +31,12 @@ use waddle_broker::egress::profile::EgressProfileRegistry;
 use waddle_broker::idp_proof::{AuthProvenance, DeviceKeyRegistry};
 use waddle_broker::key_hierarchy::KeyHierarchyService;
 use waddle_broker::kms::local::LocalKmsProvider;
+use waddle_broker::kms::scaleway::ScalewayKmsProvider;
+use waddle_broker::kms::vault::VaultTransitKmsProvider;
 use waddle_broker::kms::KmsProvider;
 use waddle_broker::ledger::postgres::SqliteCompatLedgerStore;
-use waddle_broker::ledger::DestructionLedgerStore;
+use waddle_broker::ledger::turso::TursoLedgerStore;
+use waddle_broker::ledger::{DestructionLedgerStore, DestructionTargetKind, StoredEnvelopeRecord};
 use waddle_broker_core::admission::{
     AdmissionLedgerStore, AttemptId, AttemptOutcome, BudgetLimits, RoomScopeKey, RunId, StepId,
 };
@@ -40,6 +45,7 @@ use waddle_broker_core::holder_pop::{
     verify_channel_bound_holder, HolderKeypair, TLS_EXPORTER_CHANNEL_BINDING_LEN,
 };
 use waddle_broker_core::identity::{AccountId, HolderInstance, SpiffeId, TenantId};
+use waddle_broker_core::permission::PermissionBackend;
 use waddle_extensions::host_tools::{InvocationContext, InvocationKind};
 use waddle_extensions::runtime::{
     ExtensionInferenceHost, HostInferenceChunk, HostInferenceError, HostInferenceErrorCode,
@@ -48,6 +54,7 @@ use waddle_extensions::runtime::{
     DEFAULT_STREAM_CHANNEL_CAPACITY,
 };
 
+use crate::config::{BrokerKmsProviderConfig, BrokerRuntimeConfig};
 use crate::db::actor::{DbActor, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 use crate::server::routes::websocket::WebSocketState;
@@ -709,8 +716,99 @@ where
     }
 }
 
-struct ServerBrokerCredentialResolver {
+/// Production [`BrokerCredentialResolver`] resolving canonical requester
+/// accounts from the database and active tenant/member credentials from
+/// [`BrokerCustodyService`].
+pub struct ServerBrokerCredentialResolver {
     db_actor: ActorRef<DbActor>,
+    custody: Arc<BrokerCustodyService>,
+    member_invocations: RwLock<HashMap<(TenantId, AccountId, String), SignedInferenceInvocation>>,
+}
+
+impl ServerBrokerCredentialResolver {
+    /// Construct a resolver backed by `db_actor` and `custody`.
+    pub fn new(db_actor: ActorRef<DbActor>, custody: Arc<BrokerCustodyService>) -> Self {
+        Self {
+            db_actor,
+            custody,
+            member_invocations: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Registers a single-use device-signed member invocation for
+    /// `(tenant_id, account_id, provider)` so the next member-funded request
+    /// consumes it for admission verification.
+    pub async fn register_member_invocation(
+        &self,
+        tenant_id: TenantId,
+        account_id: AccountId,
+        provider: impl Into<String>,
+        invocation: SignedInferenceInvocation,
+    ) {
+        let key = (tenant_id, account_id, provider.into().to_ascii_lowercase());
+        self.member_invocations
+            .write()
+            .await
+            .insert(key, invocation);
+    }
+
+    async fn find_active_envelopes(
+        &self,
+        tenant_id: &TenantId,
+        provider: &str,
+        expected_account: Option<AccountId>,
+    ) -> Result<Vec<StoredEnvelopeRecord>, HostInferenceError> {
+        let ledger = self.custody.ledger();
+        if ledger
+            .is_destroyed(DestructionTargetKind::Tenant, tenant_id, tenant_id.as_str())
+            .await
+            .map_err(|_| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::TemporaryFailure,
+                    "failed to verify tenant custody state",
+                )
+            })?
+        {
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "tenant credential custody is destroyed",
+            ));
+        }
+
+        let envelopes = ledger
+            .list_envelopes_for_tenant(tenant_id)
+            .await
+            .map_err(|_| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::TemporaryFailure,
+                    "failed to query enrolled broker credentials",
+                )
+            })?;
+
+        let mut active = Vec::new();
+        for env in envelopes {
+            if env.account_id != expected_account || !env.provider.eq_ignore_ascii_case(provider) {
+                continue;
+            }
+            let destroyed = ledger
+                .is_destroyed(
+                    DestructionTargetKind::Credential,
+                    tenant_id,
+                    &env.credential_id.to_string(),
+                )
+                .await
+                .map_err(|_| {
+                    HostInferenceError::new(
+                        HostInferenceErrorCode::TemporaryFailure,
+                        "failed to check credential destruction state",
+                    )
+                })?;
+            if !destroyed {
+                active.push(env);
+            }
+        }
+        Ok(active)
+    }
 }
 
 #[async_trait]
@@ -764,40 +862,144 @@ impl BrokerCredentialResolver for ServerBrokerCredentialResolver {
 
     async fn resolve_tenant_credential(
         &self,
-        _tenant_id: &TenantId,
-        _provider: &str,
-        _credential_name: &str,
+        tenant_id: &TenantId,
+        provider: &str,
+        credential_name: &str,
     ) -> Result<Uuid, HostInferenceError> {
-        Err(HostInferenceError::new(
-            HostInferenceErrorCode::Denied,
-            "no enrolled tenant broker credential configured for provider",
-        ))
+        let active = self
+            .find_active_envelopes(tenant_id, provider, None)
+            .await?;
+        if let Ok(requested_id) = Uuid::parse_str(credential_name.trim()) {
+            if let Some(found) = active.iter().find(|env| env.credential_id == requested_id) {
+                return Ok(found.credential_id);
+            }
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "requested tenant broker credential is not enrolled for provider",
+            ));
+        }
+        active
+            .into_iter()
+            .max_by_key(|env| (env.created_at_ms, env.version, env.credential_id))
+            .map(|env| env.credential_id)
+            .ok_or_else(|| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::Denied,
+                    "no enrolled tenant broker credential configured for provider",
+                )
+            })
     }
 
     async fn resolve_member_invocation(
         &self,
-        _tenant_id: &TenantId,
-        _context: &InvocationContext,
-        _provider: &str,
+        tenant_id: &TenantId,
+        context: &InvocationContext,
+        provider: &str,
     ) -> Result<(AccountId, Uuid, SignedInferenceInvocation), HostInferenceError> {
-        Err(HostInferenceError::new(
-            HostInferenceErrorCode::Denied,
-            "no enrolled member broker credential configured for provider",
-        ))
+        let Some(requester) = context.requester.as_ref() else {
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "member broker credential requires an authenticated requester",
+            ));
+        };
+        let (account_id, _provenance) =
+            self.resolve_requester_account(tenant_id, requester).await?;
+        let retired = self
+            .custody
+            .ledger()
+            .is_account_retired(tenant_id, account_id)
+            .await
+            .map_err(|_| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::TemporaryFailure,
+                    "failed to check member account retirement state",
+                )
+            })?;
+        if retired {
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "requester account is retired",
+            ));
+        }
+
+        let active = self
+            .find_active_envelopes(tenant_id, provider, Some(account_id))
+            .await?;
+        let cred = active
+            .into_iter()
+            .max_by_key(|env| (env.created_at_ms, env.version, env.credential_id))
+            .ok_or_else(|| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::Denied,
+                    "no enrolled member broker credential configured for provider",
+                )
+            })?;
+
+        let key = (tenant_id.clone(), account_id, provider.to_ascii_lowercase());
+        let signed = self
+            .member_invocations
+            .write()
+            .await
+            .remove(&key)
+            .ok_or_else(|| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::Denied,
+                    "device-signed invocation is required for enrolled member credential",
+                )
+            })?;
+        Ok((account_id, cred.credential_id, signed))
     }
 }
 
-/// Build and arm the startup [`BrokerExtensionInferenceHost`] bound to the
-/// cell's ephemeral SPIFFE/tls-exporter holder identity and admission ledger.
-pub(crate) async fn build_startup_extension_inference_host(
-    websocket_state: &Arc<WebSocketState>,
+/// Handles produced when wiring the startup broker inference host.
+pub struct StartupBrokerHandles {
+    pub inference_host: Arc<dyn ExtensionInferenceHost>,
+    pub custody: Arc<BrokerCustodyService>,
+    pub resolver: Arc<ServerBrokerCredentialResolver>,
+    pub permission_backend: Arc<dyn PermissionBackend>,
+}
+
+/// Construct a broker [`KmsProvider`] from [`BrokerKmsProviderConfig`].
+pub fn build_kms_provider(
+    config: &BrokerKmsProviderConfig,
+) -> anyhow::Result<Arc<dyn KmsProvider>> {
+    match config {
+        BrokerKmsProviderConfig::Local => Ok(Arc::new(LocalKmsProvider::new())),
+        BrokerKmsProviderConfig::Scaleway(scw) => {
+            let provider = ScalewayKmsProvider::new(scw.clone())
+                .map_err(|err| anyhow::anyhow!("failed to initialize Scaleway KMS: {err}"))?;
+            Ok(Arc::new(provider))
+        }
+        BrokerKmsProviderConfig::Vault(vault) => {
+            let provider = VaultTransitKmsProvider::new(vault.clone())
+                .map_err(|err| anyhow::anyhow!("failed to initialize Vault Transit KMS: {err}"))?;
+            Ok(Arc::new(provider))
+        }
+    }
+}
+
+/// Build and arm a config-driven [`StartupBrokerHandles`] using the configured
+/// KMS provider (`scaleway` | `vault` | `local`), persistent Turso custody /
+/// destruction / admission ledgers when `WADDLE_BROKER_DATA_DIR` (or
+/// `WADDLE_BROKER_ADMISSION_DB`) is configured, and the shared OpenFGA /
+/// permission backend.
+pub async fn build_broker_runtime_from_config(
+    db_actor: ActorRef<DbActor>,
     xmpp_domain: &str,
-) -> anyhow::Result<Arc<dyn ExtensionInferenceHost>> {
+    broker_config: &BrokerRuntimeConfig,
+    shared_permission_backend: Option<Arc<dyn PermissionBackend>>,
+    disclosure_emitter: Arc<dyn RoomDisclosureEmitter>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<StartupBrokerHandles>> {
+    if !broker_config.enabled {
+        info!("Broker inference host disabled via WADDLE_BROKER_ENABLED=false");
+        return Ok(None);
+    }
+
     let trust_domain = xmpp_domain.to_ascii_lowercase();
-    let spiffe_raw = std::env::var("WADDLE_CELL_SPIFFE_ID")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+    let spiffe_raw = broker_config
+        .cell_spiffe_id
+        .clone()
         .unwrap_or_else(|| format!("spiffe://{trust_domain}/ns/cells/sa/shared-pool"));
     let spiffe_id = SpiffeId::parse(&spiffe_raw)
         .map_err(|err| anyhow::anyhow!("invalid cell SPIFFE ID {spiffe_raw:?}: {err}"))?;
@@ -807,22 +1009,37 @@ pub(crate) async fn build_startup_extension_inference_host(
     let holder = keypair.sign_channel_binding(&spiffe_id, &channel_binding);
 
     let custody_ledger: Arc<dyn DestructionLedgerStore> =
-        Arc::new(SqliteCompatLedgerStore::connect_in_memory().await?);
-    let kms: Arc<dyn KmsProvider> = Arc::new(LocalKmsProvider::new());
+        if let Some((custody_path, destruction_path)) =
+            broker_config.resolved_custody_ledger_paths()
+        {
+            info!(
+                custody_db = %custody_path.display(),
+                destruction_ledger_db = %destruction_path.display(),
+                "Opening persistent Turso broker custody and destruction ledgers"
+            );
+            Arc::new(TursoLedgerStore::open_split(&custody_path, &destruction_path).await?)
+        } else {
+            Arc::new(SqliteCompatLedgerStore::connect_in_memory().await?)
+        };
+
+    let kms = build_kms_provider(&broker_config.kms)?;
+    info!(
+        kms_provider = broker_config.kms.provider_name(),
+        "Configured broker KMS provider"
+    );
     let hierarchy = Arc::new(KeyHierarchyService::new(trust_domain.clone(), kms));
     let custody = Arc::new(BrokerCustodyService::new(hierarchy, custody_ledger).await?);
     let egress = Arc::new(BrokerEgressClient::new(
         EgressProfileRegistry::new(),
-        custody,
+        Arc::clone(&custody),
     ));
-    let resolver: Arc<dyn BrokerCredentialResolver> = Arc::new(ServerBrokerCredentialResolver {
-        db_actor: websocket_state
-            .deps
-            .app_state
-            .db_pool
-            .global_actor()
-            .clone(),
-    });
+    let resolver = Arc::new(ServerBrokerCredentialResolver::new(
+        db_actor,
+        Arc::clone(&custody),
+    ));
+    let permission_backend: Arc<dyn PermissionBackend> = shared_permission_backend
+        .unwrap_or_else(|| Arc::new(LocalPermissionBackend::new(AuthzCallerRole::Broker)));
+
     let config = BrokerExtensionInferenceHostConfig {
         trust_domain,
         holder,
@@ -837,34 +1054,77 @@ pub(crate) async fn build_startup_extension_inference_host(
         default_deployment: "default".to_owned(),
         default_reserved_spend_microcents: 0,
     };
-    let shutdown = websocket_state.deps.shutdown.stop_token();
-    let disclosure_emitter: Arc<dyn RoomDisclosureEmitter> = Arc::new(
-        ServerRoomDisclosureEmitter::new(Arc::clone(websocket_state)),
-    );
 
-    if let Some(admission_path) = std::env::var_os("WADDLE_BROKER_ADMISSION_DB") {
+    let inference_host = if let Some(admission_path) = broker_config.resolved_admission_db_path() {
+        info!(
+            admission_db = %admission_path.display(),
+            "Opening persistent Turso broker admission ledger"
+        );
         let ledger = Arc::new(TursoAdmissionLedgerStore::open(admission_path).await?);
         build_host_with_ledger(
             config,
             ledger,
             egress,
-            resolver,
+            Arc::clone(&resolver) as Arc<dyn BrokerCredentialResolver>,
+            Arc::clone(&permission_backend),
             disclosure_emitter,
             shutdown,
         )
-        .await
+        .await?
     } else {
         let ledger = Arc::new(SqliteCompatAdmissionLedgerStore::in_memory().await?);
         build_host_with_ledger(
             config,
             ledger,
             egress,
-            resolver,
+            Arc::clone(&resolver) as Arc<dyn BrokerCredentialResolver>,
+            Arc::clone(&permission_backend),
             disclosure_emitter,
             shutdown,
         )
-        .await
-    }
+        .await?
+    };
+
+    Ok(Some(StartupBrokerHandles {
+        inference_host,
+        custody,
+        resolver,
+        permission_backend,
+    }))
+}
+
+/// Build and arm the startup [`BrokerExtensionInferenceHost`] bound to the
+/// cell's ephemeral SPIFFE/tls-exporter holder identity and configured broker
+/// ledgers, KMS, and permission backend.
+pub(crate) async fn build_startup_extension_inference_host(
+    websocket_state: &Arc<WebSocketState>,
+    xmpp_domain: &str,
+    broker_config: &BrokerRuntimeConfig,
+) -> anyhow::Result<Option<StartupBrokerHandles>> {
+    let db_actor = websocket_state
+        .deps
+        .app_state
+        .db_pool
+        .global_actor()
+        .clone();
+    let shared_permission_backend = websocket_state
+        .deps
+        .app_state
+        .broker_permission_backend
+        .clone();
+    let disclosure_emitter: Arc<dyn RoomDisclosureEmitter> = Arc::new(
+        ServerRoomDisclosureEmitter::new(Arc::clone(websocket_state)),
+    );
+    let shutdown = websocket_state.deps.shutdown.stop_token();
+    build_broker_runtime_from_config(
+        db_actor,
+        xmpp_domain,
+        broker_config,
+        shared_permission_backend,
+        disclosure_emitter,
+        shutdown,
+    )
+    .await
 }
 
 async fn build_host_with_ledger<L>(
@@ -872,6 +1132,7 @@ async fn build_host_with_ledger<L>(
     ledger: Arc<L>,
     egress: Arc<BrokerEgressClient>,
     resolver: Arc<dyn BrokerCredentialResolver>,
+    permission_backend: Arc<dyn PermissionBackend>,
     disclosure_emitter: Arc<dyn RoomDisclosureEmitter>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<Arc<dyn ExtensionInferenceHost>>
@@ -906,7 +1167,7 @@ where
     let admission = Arc::new(BrokerAdmissionService::new(
         "broker-cell-inference",
         ledger,
-        Arc::new(LocalPermissionBackend::new(AuthzCallerRole::Broker)),
+        permission_backend,
         Arc::new(DeviceKeyRegistry::new()),
         replica_fence,
         TraceRecorder::new(),

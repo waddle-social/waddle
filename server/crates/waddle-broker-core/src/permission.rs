@@ -141,6 +141,22 @@ pub trait PermissionBackend: Send + Sync {
         relation: Option<&AuthzRelation>,
     ) -> Result<Vec<AuthzTuple>, PermissionBackendError>;
 
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError>;
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError>;
+
     async fn replace_exclusive_relation(
         &self,
         tenant: &TenantId,

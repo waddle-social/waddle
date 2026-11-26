@@ -114,6 +114,9 @@ pub enum PermissionError {
     )]
     SpiceDbConfigMissing,
 
+    #[error("OpenFGA configuration is required; set WADDLE_OPENFGA_ENDPOINT")]
+    OpenFgaConfigMissing,
+
     #[error("Unsupported operation for '{0}' permission backend")]
     UnsupportedOperation(&'static str),
 

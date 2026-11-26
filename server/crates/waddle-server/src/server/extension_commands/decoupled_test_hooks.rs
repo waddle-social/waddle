@@ -29,8 +29,9 @@ use crate::call_teardown_outbox::{CallTeardownOutboxStore, CallTeardownPersisten
 use crate::channel_space_links::{ChannelSpaceLinkStore, DatabaseChannelSpaceLinkStore};
 use crate::clustering::{ClusteringHandles, NodeAdmissionPermit, NodeLifecycle};
 use crate::config::{
-    AuthConfig, ClusteringConfig, IngressConfig, LineageConfig, LinkPreviewConfig,
-    MaxWebSocketConnections, ServerConfig, ServerMode,
+    AuthConfig, AuthzBackendSelection, BrokerRuntimeConfig, ClusteringConfig, IngressConfig,
+    LineageConfig, LinkPreviewConfig, MaxWebSocketConnections, MultiTenantConfig, ServerConfig,
+    ServerMode,
 };
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::destination::FederationDisabled;
@@ -97,6 +98,11 @@ fn build_fixture_server_config() -> ServerConfig {
         ws_keepalive: KeepaliveConfig::default(),
         max_websocket_connections: MaxWebSocketConnections::default(),
         spicedb: None,
+        openfga: None,
+        authz_backend: AuthzBackendSelection::Auto,
+        broker: BrokerRuntimeConfig::default(),
+        turso: None,
+        tenancy: MultiTenantConfig::default(),
         occupant_id_secret,
         ingress: IngressConfig::default(),
         clustering: ClusteringConfig::default(),

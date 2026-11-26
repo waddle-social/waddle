@@ -12,8 +12,9 @@ use waddle_broker::{
 };
 use waddle_broker_core::identity::{AccountId, TenantId};
 use waddle_broker_core::permission::{
-    AuthzModule, AuthzObject, AuthzRelation, AuthzSubject, AuthzTuple, CheckDecision, CheckRequest,
-    PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
+    AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject, AuthzSubjectType,
+    AuthzTuple, CheckDecision, CheckRequest, PermissionBackend, PermissionBackendError,
+    TenantAuthzStoreRef,
 };
 use waddle_broker_core::store::TenantStore;
 use waddle_tenancy::{TursoPoolConfig, TursoTenantStore};
@@ -70,6 +71,26 @@ impl PermissionBackend for RecordingPermissionBackend {
         _object: &AuthzObject,
         _relation: Option<&AuthzRelation>,
     ) -> Result<Vec<AuthzTuple>, PermissionBackendError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_objects(
+        &self,
+        _tenant: &TenantId,
+        _subject: &AuthzSubject,
+        _relation: &AuthzRelation,
+        _object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        _object: &AuthzObject,
+        _relation: &AuthzRelation,
+        _subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
         Ok(Vec::new())
     }
 

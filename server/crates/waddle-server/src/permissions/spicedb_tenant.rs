@@ -18,7 +18,7 @@ use prescience::{
 };
 use waddle_broker::authz::{
     enforce_module_write, enforce_object_module_write, evaluate_permission_in_memory,
-    AuthzCallerRole,
+    list_objects_in_memory, list_users_in_memory, AuthzCallerRole,
 };
 use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{
@@ -178,6 +178,24 @@ trait SpiceDbTransport: Send + Sync {
         resource: ObjectReference,
     ) -> Result<Vec<AuthzTuple>, PermissionBackendError>;
 
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        encoded_subject: SubjectReference,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError>;
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        encoded_resource: ObjectReference,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError>;
+
     async fn delete_tenant_relationships(
         &self,
         tenant: &TenantId,
@@ -296,6 +314,106 @@ impl SpiceDbTransport for LiveSpiceDbTransport {
         Ok(out)
     }
 
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        _subject: &AuthzSubject,
+        encoded_subject: SubjectReference,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        self.rpcs.fetch_add(1, Ordering::Relaxed);
+        let mut stream = self
+            .client
+            .lookup_resources(
+                object_type_name(object_type),
+                relation.as_str(),
+                &encoded_subject,
+            )
+            .consistency(Consistency::FullyConsistent)
+            .send()
+            .await
+            .map_err(|err| {
+                PermissionBackendError::Backend(format!("SpiceDB lookup_resources failed: {err}"))
+            })?;
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            let resp = item.map_err(|err| {
+                PermissionBackendError::Backend(format!(
+                    "SpiceDB lookup_resources stream error: {err}"
+                ))
+            })?;
+            if matches!(resp.permission, PermissionResult::Allowed) {
+                let (decoded_tenant, raw_id) =
+                    decode_tenant_scoped_id(&resp.resource_id).map_err(map_id_err)?;
+                if decoded_tenant == tenant.as_str() {
+                    out.push(AuthzObject {
+                        object_type,
+                        id: raw_id,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        _object: &AuthzObject,
+        encoded_resource: ObjectReference,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
+        self.rpcs.fetch_add(1, Ordering::Relaxed);
+        let mut stream = self
+            .client
+            .lookup_subjects(
+                &encoded_resource,
+                relation.as_str(),
+                subject_type_name(subject_type),
+            )
+            .consistency(Consistency::FullyConsistent)
+            .send()
+            .await
+            .map_err(|err| {
+                PermissionBackendError::Backend(format!("SpiceDB lookup_subjects failed: {err}"))
+            })?;
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            let resp = item.map_err(|err| {
+                PermissionBackendError::Backend(format!(
+                    "SpiceDB lookup_subjects stream error: {err}"
+                ))
+            })?;
+            if matches!(resp.permission, PermissionResult::Allowed) {
+                let id = match subject_type {
+                    AuthzSubjectType::Space
+                    | AuthzSubjectType::Channel
+                    | AuthzSubjectType::Role => {
+                        let (decoded_tenant, raw_id) =
+                            decode_tenant_scoped_id(&resp.subject_id).map_err(map_id_err)?;
+                        if decoded_tenant != tenant.as_str() {
+                            continue;
+                        }
+                        raw_id
+                    }
+                    AuthzSubjectType::Account | AuthzSubjectType::Extension => {
+                        AuthzOpaqueId::from_wire(&resp.subject_id)
+                            .map_err(map_id_err)?
+                            .into_string()
+                    }
+                };
+                out.push(AuthzSubject {
+                    subject_type,
+                    id,
+                    relation: None,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     async fn delete_tenant_relationships(
         &self,
         _tenant: &TenantId,
@@ -407,6 +525,54 @@ impl SpiceDbTransport for InMemorySpiceDbTransport {
             })
             .cloned()
             .collect())
+    }
+
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        _encoded_subject: SubjectReference,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        self.rpcs.fetch_add(1, Ordering::Relaxed);
+        let guard = self.state.read().map_err(|_| {
+            PermissionBackendError::Backend("in-memory SpiceDB lock poisoned".to_owned())
+        })?;
+        let Some(set) = guard.tuples_by_tenant.get(tenant) else {
+            return Ok(Vec::new());
+        };
+        Ok(list_objects_in_memory(
+            set,
+            tenant,
+            subject,
+            relation,
+            object_type,
+        ))
+    }
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        _encoded_resource: ObjectReference,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
+        self.rpcs.fetch_add(1, Ordering::Relaxed);
+        let guard = self.state.read().map_err(|_| {
+            PermissionBackendError::Backend("in-memory SpiceDB lock poisoned".to_owned())
+        })?;
+        let Some(set) = guard.tuples_by_tenant.get(tenant) else {
+            return Ok(Vec::new());
+        };
+        Ok(list_users_in_memory(
+            set,
+            tenant,
+            object,
+            relation,
+            subject_type,
+        ))
     }
 
     async fn delete_tenant_relationships(
@@ -563,6 +729,34 @@ impl PermissionBackend for TenantSpiceDbPermissionBackend {
         let resource = encode_scoped_object(tenant, object)?;
         self.transport
             .read_relationships(tenant, object, relation, resource)
+            .await
+    }
+
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        self.ensure_provisioned(tenant)?;
+        let encoded_subject = encode_scoped_subject(tenant, subject)?;
+        self.transport
+            .list_objects(tenant, subject, encoded_subject, relation, object_type)
+            .await
+    }
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
+        self.ensure_provisioned(tenant)?;
+        let encoded_resource = encode_scoped_object(tenant, object)?;
+        self.transport
+            .list_users(tenant, object, encoded_resource, relation, subject_type)
             .await
     }
 

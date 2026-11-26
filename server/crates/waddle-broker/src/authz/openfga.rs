@@ -14,18 +14,20 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{
-    AuthzConsistency, AuthzModule, AuthzObject, AuthzRelation, AuthzSubject, AuthzTuple,
-    CheckDecision, CheckRequest, PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
+    AuthzConsistency, AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject,
+    AuthzSubjectType, AuthzTuple, CheckDecision, CheckRequest, PermissionBackend,
+    PermissionBackendError, TenantAuthzStoreRef,
 };
 
 use crate::authz::openfga_model::{
     decode_openfga_object, decode_openfga_subject, encode_openfga_object, encode_openfga_subject,
-    openfga_authorization_model_json, openfga_module_grant_object, openfga_store_grant_object,
-    OPENFGA_SCHEMA_VERSION,
+    object_type_wire_name, openfga_authorization_model_json, openfga_module_grant_object,
+    openfga_store_grant_object, parse_object_type_wire_name, parse_subject_type_wire_name,
+    subject_type_wire_name, OPENFGA_SCHEMA_VERSION,
 };
 use crate::authz::{
     enforce_module_write, enforce_object_module_write, evaluate_permission_in_memory,
-    object_type_module, AuthzCallerRole,
+    list_objects_in_memory, list_users_in_memory, object_type_module, AuthzCallerRole,
 };
 
 /// OpenFGA wire consistency enum. Only `HIGHER_CONSISTENCY` is representable;
@@ -111,6 +113,65 @@ struct OpenFgaReadTupleEntry {
 #[derive(Debug, Clone, Deserialize)]
 struct OpenFgaReadWireResponse {
     tuples: Vec<OpenFgaReadTupleEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaStoreListItem {
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaListStoresResponse {
+    #[serde(default)]
+    stores: Vec<OpenFgaStoreListItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaAuthorizationModelItem {
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaListModelsResponse {
+    #[serde(default)]
+    authorization_models: Vec<OpenFgaAuthorizationModelItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaListObjectsWireResponse {
+    #[serde(default)]
+    objects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenFgaObjectRef {
+    #[serde(rename = "type")]
+    object_type: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenFgaUsersetRef {
+    #[serde(rename = "type")]
+    object_type: String,
+    id: String,
+    relation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenFgaUserEntry {
+    #[serde(default)]
+    object: Option<OpenFgaObjectRef>,
+    #[serde(default)]
+    userset: Option<OpenFgaUsersetRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenFgaListUsersWireResponse {
+    #[serde(default)]
+    users: Vec<OpenFgaUserEntry>,
 }
 
 /// OpenFGA-backed `PermissionBackend` using one `store_id` per tenant,
@@ -430,6 +491,80 @@ impl PermissionBackend for OpenFgaPermissionBackend {
             .collect()
     }
 
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        let store_ref = self.require_store_ref(tenant)?;
+        let payload = json!({
+            "authorization_model_id": store_ref.model_version,
+            "type": object_type_wire_name(object_type),
+            "relation": relation.as_str(),
+            "user": encode_openfga_subject(subject),
+            "consistency": OpenFgaConsistency::HigherConsistency
+        });
+        let resp: OpenFgaListObjectsWireResponse = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("/stores/{}/list-objects", store_ref.store_id),
+                Some(&payload),
+            )
+            .await?;
+        resp.objects
+            .iter()
+            .map(|raw| decode_openfga_object(raw))
+            .collect()
+    }
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
+        let store_ref = self.require_store_ref(tenant)?;
+        let payload = json!({
+            "authorization_model_id": store_ref.model_version,
+            "object": {
+                "type": object_type_wire_name(object.object_type),
+                "id": object.id,
+            },
+            "relation": relation.as_str(),
+            "user_filters": [
+                { "type": subject_type_wire_name(subject_type) }
+            ],
+            "consistency": OpenFgaConsistency::HigherConsistency
+        });
+        let resp: OpenFgaListUsersWireResponse = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("/stores/{}/list-users", store_ref.store_id),
+                Some(&payload),
+            )
+            .await?;
+        let mut subjects = Vec::with_capacity(resp.users.len());
+        for entry in resp.users {
+            if let Some(obj) = entry.object {
+                subjects.push(AuthzSubject {
+                    subject_type: parse_subject_type_wire_name(&obj.object_type)?,
+                    id: obj.id,
+                    relation: None,
+                });
+            } else if let Some(us) = entry.userset {
+                subjects.push(AuthzSubject {
+                    subject_type: parse_subject_type_wire_name(&us.object_type)?,
+                    id: us.id,
+                    relation: Some(us.relation),
+                });
+            }
+        }
+        Ok(subjects)
+    }
+
     async fn replace_exclusive_relation(
         &self,
         tenant: &TenantId,
@@ -496,30 +631,67 @@ impl PermissionBackend for OpenFgaPermissionBackend {
         if let Some(existing) = self.store_ref(tenant) {
             return Ok(existing);
         }
-        let create_payload = json!({
-            "name": format!("waddle-tenant-{}", tenant.as_str())
-        });
-        let created: OpenFgaCreateStoreResponse = self
-            .send_json(reqwest::Method::POST, "/stores", Some(&create_payload))
-            .await?;
+        let store_name = format!("waddle-tenant-{}", tenant.as_str());
+        let existing_store_id = match self
+            .send_json::<serde_json::Value, OpenFgaListStoresResponse>(
+                reqwest::Method::GET,
+                "/stores",
+                None,
+            )
+            .await
+        {
+            Ok(listed) => listed
+                .stores
+                .into_iter()
+                .find(|s| s.name == store_name)
+                .map(|s| s.id),
+            Err(_) => None,
+        };
+
+        let store_id = match existing_store_id {
+            Some(id) => id,
+            None => {
+                let create_payload = json!({ "name": store_name });
+                let created: OpenFgaCreateStoreResponse = self
+                    .send_json(reqwest::Method::POST, "/stores", Some(&create_payload))
+                    .await?;
+                created.id
+            }
+        };
 
         let model_version = if let Some(pinned) = &self.pinned_model_version {
             pinned.clone()
         } else {
-            let model_payload = openfga_authorization_model_json();
-            let model_resp: OpenFgaWriteModelResponse = self
-                .send_json(
-                    reqwest::Method::POST,
-                    &format!("/stores/{}/authorization-models", created.id),
-                    Some(&model_payload),
+            let existing_model = match self
+                .send_json::<serde_json::Value, OpenFgaListModelsResponse>(
+                    reqwest::Method::GET,
+                    &format!("/stores/{store_id}/authorization-models"),
+                    None,
                 )
-                .await?;
-            model_resp.authorization_model_id
+                .await
+            {
+                Ok(models) => models.authorization_models.into_iter().next().map(|m| m.id),
+                Err(_) => None,
+            };
+            match existing_model {
+                Some(id) => id,
+                None => {
+                    let model_payload = openfga_authorization_model_json();
+                    let model_resp: OpenFgaWriteModelResponse = self
+                        .send_json(
+                            reqwest::Method::POST,
+                            &format!("/stores/{store_id}/authorization-models"),
+                            Some(&model_payload),
+                        )
+                        .await?;
+                    model_resp.authorization_model_id
+                }
+            }
         };
 
         let store_ref = TenantAuthzStoreRef {
             tenant_id: tenant.clone(),
-            store_id: created.id,
+            store_id,
             model_version,
         };
         self.register_store_ref(store_ref.clone())?;
@@ -557,7 +729,8 @@ pub struct RecordedOpenFgaRequest {
 
 #[derive(Debug, Default)]
 struct MockOpenFgaStore {
-    model_ids: HashSet<String>,
+    name: String,
+    model_ids: Vec<String>,
     tuples: HashSet<AuthzTuple>,
 }
 
@@ -732,12 +905,44 @@ fn bad_request(message: &str) -> MockHttpResponse {
     json_err(400, "Bad Request", message)
 }
 
-fn handle_create_store(guard: &mut MockOpenFgaState) -> MockHttpResponse {
+fn handle_create_store(
+    guard: &mut MockOpenFgaState,
+    body: Option<serde_json::Value>,
+) -> MockHttpResponse {
     let store_id = format!("01FGA{}", Uuid::new_v4().simple());
-    guard
-        .stores
-        .insert(store_id.clone(), MockOpenFgaStore::default());
+    let name = body
+        .as_ref()
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    guard.stores.insert(
+        store_id.clone(),
+        MockOpenFgaStore {
+            name,
+            ..MockOpenFgaStore::default()
+        },
+    );
     (201, "Created", Some(json!({ "id": store_id })))
+}
+
+fn handle_list_stores(guard: &MockOpenFgaState) -> MockHttpResponse {
+    let stores: Vec<serde_json::Value> = guard
+        .stores
+        .iter()
+        .map(|(id, store)| json!({ "id": id, "name": store.name }))
+        .collect();
+    (200, "OK", Some(json!({ "stores": stores })))
+}
+
+fn handle_list_models(store: &MockOpenFgaStore) -> MockHttpResponse {
+    let models: Vec<serde_json::Value> = store
+        .model_ids
+        .iter()
+        .rev()
+        .map(|id| json!({ "id": id }))
+        .collect();
+    (200, "OK", Some(json!({ "authorization_models": models })))
 }
 
 fn handle_delete_store(guard: &mut MockOpenFgaState, store_id: &str) -> MockHttpResponse {
@@ -766,7 +971,7 @@ fn handle_write_model(
         return bad_request("schema_version must be 1.2");
     }
     let model_id = format!("01MOD{}", Uuid::new_v4().simple());
-    store.model_ids.insert(model_id.clone());
+    store.model_ids.push(model_id.clone());
     (
         201,
         "Created",
@@ -774,26 +979,36 @@ fn handle_write_model(
     )
 }
 
-fn handle_check(store: &MockOpenFgaStore, body: Option<serde_json::Value>) -> MockHttpResponse {
-    let Some(val) = body else {
-        return bad_request("missing body");
-    };
+fn validate_consistency_and_model(
+    store: &MockOpenFgaStore,
+    val: &serde_json::Value,
+) -> Result<(), MockHttpResponse> {
     if val.get("contextual_tuples").is_some() {
-        return bad_request("contextual_tuples prohibited");
+        return Err(bad_request("contextual_tuples prohibited"));
     }
     let consistency = val
         .get("consistency")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if consistency != "HIGHER_CONSISTENCY" {
-        return bad_request("HIGHER_CONSISTENCY required");
+        return Err(bad_request("HIGHER_CONSISTENCY required"));
     }
     let model_id = val
         .get("authorization_model_id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !store.model_ids.is_empty() && !store.model_ids.contains(model_id) {
-        return bad_request("unknown authorization_model_id");
+    if !store.model_ids.is_empty() && !store.model_ids.iter().any(|id| id == model_id) {
+        return Err(bad_request("unknown authorization_model_id"));
+    }
+    Ok(())
+}
+
+fn handle_check(store: &MockOpenFgaStore, body: Option<serde_json::Value>) -> MockHttpResponse {
+    let Some(val) = body else {
+        return bad_request("missing body");
+    };
+    if let Err(resp) = validate_consistency_and_model(store, &val) {
+        return resp;
     }
     let Ok(tk) = serde_json::from_value::<OpenFgaTupleKey>(
         val.get("tuple_key")
@@ -921,6 +1136,114 @@ fn handle_read(store: &MockOpenFgaStore, body: Option<serde_json::Value>) -> Moc
     (200, "OK", Some(json!({ "tuples": matched })))
 }
 
+fn handle_list_objects(
+    store: &MockOpenFgaStore,
+    body: Option<serde_json::Value>,
+) -> MockHttpResponse {
+    let Some(val) = body else {
+        return bad_request("missing body");
+    };
+    if let Err(resp) = validate_consistency_and_model(store, &val) {
+        return resp;
+    }
+    let Some(type_raw) = val.get("type").and_then(|v| v.as_str()) else {
+        return bad_request("missing type");
+    };
+    let Ok(object_type) = parse_object_type_wire_name(type_raw) else {
+        return bad_request("invalid type");
+    };
+    let Some(relation_raw) = val.get("relation").and_then(|v| v.as_str()) else {
+        return bad_request("missing relation");
+    };
+    let Some(user_raw) = val.get("user").and_then(|v| v.as_str()) else {
+        return bad_request("missing user");
+    };
+    let Ok(subject) = decode_openfga_subject(user_raw) else {
+        return bad_request("invalid user");
+    };
+    let Ok(dummy_tenant) = TenantId::parse("mock.openfga") else {
+        return (500, "Internal Server Error", None);
+    };
+    let objects: Vec<String> = list_objects_in_memory(
+        &store.tuples,
+        &dummy_tenant,
+        &subject,
+        &AuthzRelation::new(relation_raw),
+        object_type,
+    )
+    .iter()
+    .map(encode_openfga_object)
+    .collect();
+    (200, "OK", Some(json!({ "objects": objects })))
+}
+
+fn handle_list_users(
+    store: &MockOpenFgaStore,
+    body: Option<serde_json::Value>,
+) -> MockHttpResponse {
+    let Some(val) = body else {
+        return bad_request("missing body");
+    };
+    if let Err(resp) = validate_consistency_and_model(store, &val) {
+        return resp;
+    }
+    let Some(obj_val) = val.get("object") else {
+        return bad_request("missing object");
+    };
+    let Some(obj_type_raw) = obj_val.get("type").and_then(|v| v.as_str()) else {
+        return bad_request("missing object.type");
+    };
+    let Ok(object_type) = parse_object_type_wire_name(obj_type_raw) else {
+        return bad_request("invalid object.type");
+    };
+    let Some(obj_id) = obj_val.get("id").and_then(|v| v.as_str()) else {
+        return bad_request("missing object.id");
+    };
+    let Some(relation_raw) = val.get("relation").and_then(|v| v.as_str()) else {
+        return bad_request("missing relation");
+    };
+    let Some(filter_type_raw) = val
+        .get("user_filters")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|f| f.get("type"))
+        .and_then(|v| v.as_str())
+    else {
+        return bad_request("missing user_filters[0].type");
+    };
+    let Ok(subject_type) = parse_subject_type_wire_name(filter_type_raw) else {
+        return bad_request("invalid user_filters[0].type");
+    };
+    let Ok(dummy_tenant) = TenantId::parse("mock.openfga") else {
+        return (500, "Internal Server Error", None);
+    };
+    let object = AuthzObject {
+        object_type,
+        id: obj_id.to_owned(),
+    };
+    let users: Vec<serde_json::Value> = list_users_in_memory(
+        &store.tuples,
+        &dummy_tenant,
+        &object,
+        &AuthzRelation::new(relation_raw),
+        subject_type,
+    )
+    .into_iter()
+    .map(|subj| {
+        let ty = subject_type_wire_name(subj.subject_type);
+        match subj.relation {
+            Some(rel) => json!({
+                "userset": { "type": ty, "id": subj.id, "relation": rel }
+            }),
+            None => json!({
+                "object": { "type": ty, "id": subj.id }
+            }),
+        }
+    })
+    .collect();
+    (200, "OK", Some(json!({ "users": users })))
+}
+
 fn route_openfga_request(
     state: &Arc<RwLock<MockOpenFgaState>>,
     method: &str,
@@ -938,13 +1261,27 @@ fn route_openfga_request(
         body: body.clone(),
     });
 
+    if method == "GET" && path == "/stores" {
+        return handle_list_stores(&guard);
+    }
+
     if method == "POST" && path == "/stores" {
-        return handle_create_store(&mut guard);
+        return handle_create_store(&mut guard, body);
     }
 
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if segments.len() == 2 && segments[0] == "stores" && method == "DELETE" {
         return handle_delete_store(&mut guard, segments[1]);
+    }
+
+    if segments.len() == 3 && segments[0] == "stores" && method == "GET" {
+        let Some(store) = guard.stores.get(segments[1]) else {
+            return json_err(404, "Not Found", "store not found");
+        };
+        return match segments[2] {
+            "authorization-models" => handle_list_models(store),
+            _ => json_err(404, "Not Found", "unknown route"),
+        };
     }
 
     if segments.len() == 3 && segments[0] == "stores" && method == "POST" {
@@ -956,6 +1293,8 @@ fn route_openfga_request(
             "check" => handle_check(store, body),
             "write" => handle_write(store, caller_role.as_deref(), body),
             "read" => handle_read(store, body),
+            "list-objects" => handle_list_objects(store, body),
+            "list-users" => handle_list_users(store, body),
             _ => json_err(404, "Not Found", "unknown route"),
         };
     }

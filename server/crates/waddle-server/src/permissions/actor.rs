@@ -4,14 +4,20 @@ use async_trait::async_trait;
 use kameo::actor::Spawn;
 use kameo::message::Context;
 use kameo::Actor;
+use tracing::warn;
+use waddle_broker::authz::local::LocalPermissionBackend;
+use waddle_broker::authz::openfga::{
+    OpenFgaConfig as BrokerOpenFgaConfig, OpenFgaPermissionBackend,
+};
+use waddle_broker::authz::AuthzCallerRole;
 use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{
     AuthzConsistency, AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject,
     AuthzSubjectType, AuthzTuple, CheckDecision, CheckRequest as CoreCheckRequest,
-    PermissionBackend, PermissionBackendError,
+    PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
 };
 
-use crate::config::ServerConfig;
+use crate::config::{AuthzBackendKind, OpenFgaConsistencySetting, ServerConfig};
 use crate::db::actor::DbActor;
 use crate::db::Database;
 
@@ -298,34 +304,65 @@ impl ActorPermissionBackend for LocalActorBackend {
 }
 
 struct TenantPermissionBackendAdapter {
+    backend_name: &'static str,
     tenant_id: TenantId,
     backend: Arc<dyn PermissionBackend>,
 }
 
-fn to_authz_object(object: &Object) -> AuthzObject {
-    let object_type = match object.object_type {
+fn to_authz_object_type(object_type: ObjectType) -> AuthzObjectType {
+    match object_type {
         ObjectType::Server => AuthzObjectType::Server,
         ObjectType::Space => AuthzObjectType::Space,
         ObjectType::Channel => AuthzObjectType::Channel,
         ObjectType::Message => AuthzObjectType::Message,
         ObjectType::Dm => AuthzObjectType::DirectMessage,
         ObjectType::Role => AuthzObjectType::Role,
-    };
+    }
+}
+
+fn to_authz_object(object: &Object) -> AuthzObject {
     AuthzObject {
-        object_type,
+        object_type: to_authz_object_type(object.object_type),
         id: object.id.clone(),
     }
 }
 
-fn to_authz_subject(subject: &Subject) -> AuthzSubject {
-    let subject_type = match subject.subject_type {
+fn from_authz_object(object: AuthzObject) -> Result<Object, PermissionError> {
+    let object_type = match object.object_type {
+        AuthzObjectType::Server => ObjectType::Server,
+        AuthzObjectType::Space => ObjectType::Space,
+        AuthzObjectType::Channel => ObjectType::Channel,
+        AuthzObjectType::Message => ObjectType::Message,
+        AuthzObjectType::DirectMessage => ObjectType::Dm,
+        AuthzObjectType::Role => ObjectType::Role,
+        AuthzObjectType::TenantCredential
+        | AuthzObjectType::UserCredential
+        | AuthzObjectType::InstalledExtension
+        | AuthzObjectType::RoomInferencePolicy => {
+            return Err(PermissionError::InvalidObject(format!(
+                "inference object type {:?} cannot be represented in chat Object",
+                object.object_type
+            )));
+        }
+    };
+    Ok(Object {
+        object_type,
+        id: object.id,
+    })
+}
+
+fn to_authz_subject_type(subject_type: SubjectType) -> AuthzSubjectType {
+    match subject_type {
         SubjectType::User => AuthzSubjectType::Account,
         SubjectType::Space => AuthzSubjectType::Space,
         SubjectType::Channel => AuthzSubjectType::Channel,
         SubjectType::Role => AuthzSubjectType::Role,
-    };
+    }
+}
+
+fn to_authz_subject(subject: &Subject) -> AuthzSubject {
     AuthzSubject {
-        subject_type,
+        subject_type: to_authz_subject_type(subject.subject_type),
         id: subject.id.clone(),
         relation: subject.relation.clone(),
     }
@@ -365,7 +402,7 @@ fn map_backend_error(err: PermissionBackendError) -> PermissionError {
 #[async_trait]
 impl ActorPermissionBackend for TenantPermissionBackendAdapter {
     fn backend_name(&self) -> &'static str {
-        "permission_backend"
+        self.backend_name
     }
 
     fn permission_backend(&self) -> Option<&Arc<dyn PermissionBackend>> {
@@ -528,20 +565,40 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
 
     async fn lookup_resources(
         &self,
-        _subject: &Subject,
-        _permission: &str,
-        _object_type: ObjectType,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
     ) -> Result<Vec<Object>, PermissionError> {
-        Err(PermissionError::UnsupportedOperation("permission_backend"))
+        let objects = self
+            .backend
+            .list_objects(
+                &self.tenant_id,
+                &to_authz_subject(subject),
+                &AuthzRelation::new(permission),
+                to_authz_object_type(object_type),
+            )
+            .await
+            .map_err(map_backend_error)?;
+        objects.into_iter().map(from_authz_object).collect()
     }
 
     async fn lookup_subjects(
         &self,
-        _object: &Object,
-        _permission: &str,
-        _subject_type: SubjectType,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
     ) -> Result<Vec<Subject>, PermissionError> {
-        Err(PermissionError::UnsupportedOperation("permission_backend"))
+        let subjects = self
+            .backend
+            .list_users(
+                &self.tenant_id,
+                &to_authz_object(object),
+                &AuthzRelation::new(permission),
+                to_authz_subject_type(subject_type),
+            )
+            .await
+            .map_err(map_backend_error)?;
+        subjects.into_iter().map(from_authz_subject).collect()
     }
 }
 
@@ -676,8 +733,22 @@ impl PermissionActor {
         tenant_id: TenantId,
         backend: Arc<dyn PermissionBackend>,
     ) -> Self {
+        Self::from_permission_backend_named("permission_backend", tenant_id, backend)
+    }
+
+    /// Construct a `PermissionActor` backed by a `PermissionBackend` with an
+    /// explicit backend label (`"openfga"`, `"local"`, `"permission_backend"`).
+    pub fn from_permission_backend_named(
+        backend_name: &'static str,
+        tenant_id: TenantId,
+        backend: Arc<dyn PermissionBackend>,
+    ) -> Self {
         Self {
-            backend: Arc::new(TenantPermissionBackendAdapter { tenant_id, backend }),
+            backend: Arc::new(TenantPermissionBackendAdapter {
+                backend_name,
+                tenant_id,
+                backend,
+            }),
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
@@ -716,11 +787,104 @@ impl PermissionActor {
     }
 
     pub async fn from_server_config(config: &ServerConfig) -> Result<Self, PermissionError> {
-        let spicedb = config
-            .spicedb
-            .as_ref()
-            .ok_or(PermissionError::SpiceDbConfigMissing)?;
-        Self::connect(spicedb).await
+        let fallback_domain = std::env::var("WADDLE_XMPP_DOMAIN")
+            .ok()
+            .unwrap_or_else(|| "waddle.social".to_owned());
+        let (actor, _broker_backend) =
+            Self::from_server_config_with_broker_backend(config, &fallback_domain, &[]).await?;
+        Ok(actor)
+    }
+
+    /// Build a `PermissionActor` from `config` together with an optional
+    /// broker-role [`PermissionBackend`] sharing the same underlying OpenFGA /
+    /// Local tenant store map so `PermissionActor` and `BrokerAdmissionService`
+    /// operate against the exact same provisioned stores.
+    pub async fn from_server_config_with_broker_backend(
+        config: &ServerConfig,
+        fallback_domain: &str,
+        extra_openfga_stores: &[TenantAuthzStoreRef],
+    ) -> Result<(Self, Option<Arc<dyn PermissionBackend>>), PermissionError> {
+        match config.resolved_authz_backend() {
+            Some(AuthzBackendKind::OpenFga) => {
+                let openfga_cfg = config
+                    .openfga
+                    .as_ref()
+                    .ok_or(PermissionError::OpenFgaConfigMissing)?;
+                if openfga_cfg.consistency == OpenFgaConsistencySetting::MinimizeLatency {
+                    warn!(
+                        "WADDLE_OPENFGA_CONSISTENCY=minimize_latency requested; broker admission \
+                         and strong permission checks continue enforcing HIGHER_CONSISTENCY"
+                    );
+                }
+                let default_tenant = config
+                    .tenancy
+                    .resolved_default_tenant_id(fallback_domain)
+                    .map_err(PermissionError::SpiceDbError)?;
+                let broker_backend = OpenFgaPermissionBackend::new(BrokerOpenFgaConfig {
+                    endpoint: openfga_cfg.endpoint.clone(),
+                    bearer_token: openfga_cfg
+                        .api_token
+                        .as_ref()
+                        .map(|t| t.as_str().to_owned()),
+                    caller_role: AuthzCallerRole::Broker,
+                    pinned_model_version: None,
+                })
+                .map_err(map_backend_error)?;
+
+                for (tenant_id, entry) in &openfga_cfg.store_map {
+                    broker_backend
+                        .register_store_ref(TenantAuthzStoreRef {
+                            tenant_id: tenant_id.clone(),
+                            store_id: entry.store_id.clone(),
+                            model_version: entry.model_id.clone(),
+                        })
+                        .map_err(map_backend_error)?;
+                }
+                for store_ref in extra_openfga_stores {
+                    broker_backend
+                        .register_store_ref(store_ref.clone())
+                        .map_err(map_backend_error)?;
+                }
+                let _ = broker_backend
+                    .provision_tenant_store(&default_tenant)
+                    .await
+                    .map_err(map_backend_error)?;
+
+                let cell_backend: Arc<dyn PermissionBackend> =
+                    Arc::new(broker_backend.with_caller_role(AuthzCallerRole::Cell));
+                let broker_arc: Arc<dyn PermissionBackend> = Arc::new(broker_backend);
+                Ok((
+                    Self::from_permission_backend_named("openfga", default_tenant, cell_backend),
+                    Some(broker_arc),
+                ))
+            }
+            Some(AuthzBackendKind::Local) => {
+                let default_tenant = config
+                    .tenancy
+                    .resolved_default_tenant_id(fallback_domain)
+                    .map_err(PermissionError::SpiceDbError)?;
+                let broker_backend = LocalPermissionBackend::new(AuthzCallerRole::Broker);
+                let _ = broker_backend
+                    .provision_tenant_store(&default_tenant)
+                    .await
+                    .map_err(map_backend_error)?;
+                let cell_backend: Arc<dyn PermissionBackend> =
+                    Arc::new(broker_backend.with_caller_role(AuthzCallerRole::Cell));
+                let broker_arc: Arc<dyn PermissionBackend> = Arc::new(broker_backend);
+                Ok((
+                    Self::from_permission_backend_named("local", default_tenant, cell_backend),
+                    Some(broker_arc),
+                ))
+            }
+            Some(AuthzBackendKind::SpiceDb) => {
+                let spicedb = config
+                    .spicedb
+                    .as_ref()
+                    .ok_or(PermissionError::SpiceDbConfigMissing)?;
+                Ok((Self::connect(spicedb).await?, None))
+            }
+            None => Err(PermissionError::SpiceDbConfigMissing),
+        }
     }
 
     /// An actor on the SpiceDB `config` names, without the server's startup

@@ -8,13 +8,14 @@ use async_trait::async_trait;
 use uuid::Uuid;
 use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{
-    AuthzModule, AuthzObject, AuthzRelation, AuthzSubject, AuthzTuple, CheckDecision, CheckRequest,
-    PermissionBackend, PermissionBackendError, TenantAuthzStoreRef,
+    AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject, AuthzSubjectType,
+    AuthzTuple, CheckDecision, CheckRequest, PermissionBackend, PermissionBackendError,
+    TenantAuthzStoreRef,
 };
 
 use crate::authz::{
     enforce_module_write, enforce_object_module_write, evaluate_permission_in_memory,
-    AuthzCallerRole,
+    list_objects_in_memory, list_users_in_memory, AuthzCallerRole,
 };
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,52 @@ impl PermissionBackend for LocalPermissionBackend {
             })
             .cloned()
             .collect())
+    }
+
+    async fn list_objects(
+        &self,
+        tenant: &TenantId,
+        subject: &AuthzSubject,
+        relation: &AuthzRelation,
+        object_type: AuthzObjectType,
+    ) -> Result<Vec<AuthzObject>, PermissionBackendError> {
+        let stores = self
+            .stores
+            .read()
+            .map_err(|_| PermissionBackendError::Backend("local authz lock poisoned".to_owned()))?;
+        let store = stores
+            .get(tenant)
+            .ok_or_else(|| PermissionBackendError::StoreNotProvisioned(tenant.clone()))?;
+        Ok(list_objects_in_memory(
+            &store.tuples,
+            tenant,
+            subject,
+            relation,
+            object_type,
+        ))
+    }
+
+    async fn list_users(
+        &self,
+        tenant: &TenantId,
+        object: &AuthzObject,
+        relation: &AuthzRelation,
+        subject_type: AuthzSubjectType,
+    ) -> Result<Vec<AuthzSubject>, PermissionBackendError> {
+        let stores = self
+            .stores
+            .read()
+            .map_err(|_| PermissionBackendError::Backend("local authz lock poisoned".to_owned()))?;
+        let store = stores
+            .get(tenant)
+            .ok_or_else(|| PermissionBackendError::StoreNotProvisioned(tenant.clone()))?;
+        Ok(list_users_in_memory(
+            &store.tuples,
+            tenant,
+            object,
+            relation,
+            subject_type,
+        ))
     }
 
     async fn replace_exclusive_relation(

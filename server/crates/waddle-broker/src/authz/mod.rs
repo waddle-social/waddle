@@ -6,9 +6,10 @@ pub mod openfga_model;
 
 use std::collections::HashSet;
 
+use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{
-    AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject, AuthzSubjectType,
-    AuthzTuple, CheckDecision, CheckRequest, PermissionBackendError,
+    AuthzConsistency, AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject,
+    AuthzSubjectType, AuthzTuple, CheckDecision, CheckRequest, PermissionBackendError,
 };
 
 /// Workload caller identity determining which Modular Models an authorization
@@ -138,6 +139,110 @@ fn related_objects(
         .collect()
 }
 
+fn channel_spaces(tuples: &HashSet<AuthzTuple>, object: &AuthzObject) -> Vec<AuthzObject> {
+    let mut spaces = related_objects(
+        tuples,
+        object,
+        "space",
+        AuthzSubjectType::Space,
+        AuthzObjectType::Space,
+    );
+    spaces.extend(related_objects(
+        tuples,
+        object,
+        "parent",
+        AuthzSubjectType::Space,
+        AuthzObjectType::Space,
+    ));
+    spaces
+}
+
+/// Evaluates `list_objects` over an in-memory tuple set using
+/// [`evaluate_permission_in_memory`] so `LocalPermissionBackend`,
+/// `InProcessOpenFgaServer`, and `InMemorySpiceDbTransport` share identical
+/// computed-permission semantics.
+pub fn list_objects_in_memory(
+    tuples: &HashSet<AuthzTuple>,
+    tenant_id: &TenantId,
+    subject: &AuthzSubject,
+    relation: &AuthzRelation,
+    object_type: AuthzObjectType,
+) -> Vec<AuthzObject> {
+    let mut candidates: HashSet<AuthzObject> = HashSet::new();
+    for tuple in tuples {
+        if tuple.object.object_type == object_type {
+            candidates.insert(tuple.object.clone());
+        }
+        let subject_as_object = match tuple.subject.subject_type {
+            AuthzSubjectType::Space if object_type == AuthzObjectType::Space => Some(AuthzObject {
+                object_type: AuthzObjectType::Space,
+                id: tuple.subject.id.clone(),
+            }),
+            AuthzSubjectType::Channel if object_type == AuthzObjectType::Channel => {
+                Some(AuthzObject {
+                    object_type: AuthzObjectType::Channel,
+                    id: tuple.subject.id.clone(),
+                })
+            }
+            AuthzSubjectType::Role if object_type == AuthzObjectType::Role => Some(AuthzObject {
+                object_type: AuthzObjectType::Role,
+                id: tuple.subject.id.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(obj) = subject_as_object {
+            candidates.insert(obj);
+        }
+    }
+    let mut allowed: Vec<AuthzObject> = candidates
+        .into_iter()
+        .filter(|obj| {
+            let req = CheckRequest {
+                tenant_id: tenant_id.clone(),
+                object: obj.clone(),
+                permission: relation.clone(),
+                subject: subject.clone(),
+                consistency: AuthzConsistency::Strong,
+            };
+            evaluate_permission_in_memory(tuples, &req) == CheckDecision::Allowed
+        })
+        .collect();
+    allowed.sort_by(|a, b| a.id.cmp(&b.id));
+    allowed
+}
+
+/// Evaluates `list_users` over an in-memory tuple set using
+/// [`evaluate_permission_in_memory`].
+pub fn list_users_in_memory(
+    tuples: &HashSet<AuthzTuple>,
+    tenant_id: &TenantId,
+    object: &AuthzObject,
+    relation: &AuthzRelation,
+    subject_type: AuthzSubjectType,
+) -> Vec<AuthzSubject> {
+    let mut candidates: HashSet<AuthzSubject> = HashSet::new();
+    for tuple in tuples {
+        if tuple.subject.subject_type == subject_type {
+            candidates.insert(tuple.subject.clone());
+        }
+    }
+    let mut allowed: Vec<AuthzSubject> = candidates
+        .into_iter()
+        .filter(|subj| {
+            let req = CheckRequest {
+                tenant_id: tenant_id.clone(),
+                object: object.clone(),
+                permission: relation.clone(),
+                subject: subj.clone(),
+                consistency: AuthzConsistency::Strong,
+            };
+            evaluate_permission_in_memory(tuples, &req) == CheckDecision::Allowed
+        })
+        .collect();
+    allowed.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.relation.cmp(&b.relation)));
+    allowed
+}
+
 fn check_recursive(
     tuples: &HashSet<AuthzTuple>,
     object: &AuthzObject,
@@ -155,6 +260,16 @@ fn check_recursive(
     }
 
     match (object.object_type, permission) {
+        (AuthzObjectType::Server, "admin") => {
+            check_recursive(tuples, object, "owner", subject, visited)
+        }
+        (AuthzObjectType::Server, "member") => {
+            check_recursive(tuples, object, "admin", subject, visited)
+        }
+        (AuthzObjectType::Server, "create_space") | (AuthzObjectType::Server, "create_muc") => {
+            check_recursive(tuples, object, "owner", subject, visited)
+        }
+
         (AuthzObjectType::Space, "admin") => {
             check_recursive(tuples, object, "owner", subject, visited)
         }
@@ -164,11 +279,20 @@ fn check_recursive(
         (AuthzObjectType::Space, "member") => {
             check_recursive(tuples, object, "moderator", subject, visited)
         }
-        (AuthzObjectType::Space, "read") => {
+        (AuthzObjectType::Space, "read") | (AuthzObjectType::Space, "view") => {
             check_recursive(tuples, object, "member", subject, visited)
         }
-        (AuthzObjectType::Space, "manage") => {
+        (AuthzObjectType::Space, "manage")
+        | (AuthzObjectType::Space, "manage_settings")
+        | (AuthzObjectType::Space, "manage_roles")
+        | (AuthzObjectType::Space, "update") => {
             check_recursive(tuples, object, "admin", subject, visited)
+        }
+        (AuthzObjectType::Space, "manage_members") => {
+            check_recursive(tuples, object, "moderator", subject, visited)
+        }
+        (AuthzObjectType::Space, "delete") | (AuthzObjectType::Space, "create_channel") => {
+            check_recursive(tuples, object, "owner", subject, visited)
         }
 
         (AuthzObjectType::Channel, "outcast") => {
@@ -178,77 +302,134 @@ fn check_recursive(
             if check_recursive(tuples, object, "outcast", subject, visited) {
                 return false;
             }
-            related_objects(
-                tuples,
-                object,
-                "space",
-                AuthzSubjectType::Space,
-                AuthzObjectType::Space,
-            )
-            .into_iter()
-            .any(|space| check_recursive(tuples, &space, "owner", subject, visited))
+            channel_spaces(tuples, object)
+                .into_iter()
+                .any(|space| check_recursive(tuples, &space, "owner", subject, visited))
         }
         (AuthzObjectType::Channel, "admin") => {
             if check_recursive(tuples, object, "outcast", subject, visited) {
                 return false;
             }
             check_recursive(tuples, object, "owner", subject, visited)
-                || related_objects(
-                    tuples,
-                    object,
-                    "space",
-                    AuthzSubjectType::Space,
-                    AuthzObjectType::Space,
-                )
-                .into_iter()
-                .any(|space| check_recursive(tuples, &space, "admin", subject, visited))
+                || channel_spaces(tuples, object)
+                    .into_iter()
+                    .any(|space| check_recursive(tuples, &space, "admin", subject, visited))
         }
         (AuthzObjectType::Channel, "member") => {
             if check_recursive(tuples, object, "outcast", subject, visited) {
                 return false;
             }
             check_recursive(tuples, object, "admin", subject, visited)
-                || related_objects(
-                    tuples,
-                    object,
-                    "space",
-                    AuthzSubjectType::Space,
-                    AuthzObjectType::Space,
-                )
-                .into_iter()
-                .any(|space| check_recursive(tuples, &space, "member", subject, visited))
+                || channel_spaces(tuples, object)
+                    .into_iter()
+                    .any(|space| check_recursive(tuples, &space, "member", subject, visited))
         }
-        (AuthzObjectType::Channel, "read") | (AuthzObjectType::Channel, "send_message") => {
+        (AuthzObjectType::Channel, "delete") => {
             if check_recursive(tuples, object, "outcast", subject, visited) {
                 return false;
             }
-            check_recursive(tuples, object, "member", subject, visited)
-        }
-
-        (AuthzObjectType::Message, "read") => related_objects(
-            tuples,
-            object,
-            "channel",
-            AuthzSubjectType::Channel,
-            AuthzObjectType::Channel,
-        )
-        .into_iter()
-        .any(|ch| check_recursive(tuples, &ch, "read", subject, visited)),
-        (AuthzObjectType::Message, "delete") => {
-            has_direct_tuple(tuples, object, "author", subject)
-                || related_objects(
-                    tuples,
-                    object,
-                    "channel",
-                    AuthzSubjectType::Channel,
-                    AuthzObjectType::Channel,
-                )
+            channel_spaces(tuples, object)
                 .into_iter()
-                .any(|ch| check_recursive(tuples, &ch, "admin", subject, visited))
+                .any(|space| check_recursive(tuples, &space, "admin", subject, visited))
+        }
+        (AuthzObjectType::Channel, "manage") => {
+            if check_recursive(tuples, object, "outcast", subject, visited) {
+                return false;
+            }
+            has_direct_tuple(tuples, object, "manager", subject)
+                || check_recursive(tuples, object, "admin", subject, visited)
+        }
+        (AuthzObjectType::Channel, "moderate") => {
+            if check_recursive(tuples, object, "outcast", subject, visited) {
+                return false;
+            }
+            has_direct_tuple(tuples, object, "moderator", subject)
+                || has_direct_tuple(tuples, object, "manager", subject)
+                || check_recursive(tuples, object, "admin", subject, visited)
+                || channel_spaces(tuples, object)
+                    .into_iter()
+                    .any(|space| check_recursive(tuples, &space, "moderator", subject, visited))
+        }
+        (AuthzObjectType::Channel, "send_message") => {
+            if check_recursive(tuples, object, "outcast", subject, visited) {
+                return false;
+            }
+            has_direct_tuple(tuples, object, "writer", subject)
+                || has_direct_tuple(tuples, object, "moderator", subject)
+                || has_direct_tuple(tuples, object, "manager", subject)
+                || check_recursive(tuples, object, "member", subject, visited)
+        }
+        (AuthzObjectType::Channel, "read") | (AuthzObjectType::Channel, "view") => {
+            if check_recursive(tuples, object, "outcast", subject, visited) {
+                return false;
+            }
+            has_direct_tuple(tuples, object, "viewer", subject)
+                || check_recursive(tuples, object, "send_message", subject, visited)
         }
 
-        (AuthzObjectType::DirectMessage, "read") => {
+        (AuthzObjectType::Message, "read") | (AuthzObjectType::Message, "react") => {
+            related_objects(
+                tuples,
+                object,
+                "channel",
+                AuthzSubjectType::Channel,
+                AuthzObjectType::Channel,
+            )
+            .into_iter()
+            .any(|ch| check_recursive(tuples, &ch, "read", subject, visited))
+        }
+        (AuthzObjectType::Message, "edit") => {
+            let channels = related_objects(
+                tuples,
+                object,
+                "channel",
+                AuthzSubjectType::Channel,
+                AuthzObjectType::Channel,
+            );
+            has_direct_tuple(tuples, object, "author", subject)
+                && !channels
+                    .iter()
+                    .any(|ch| check_recursive(tuples, ch, "outcast", subject, visited))
+        }
+        (AuthzObjectType::Message, "delete") => {
+            let channels = related_objects(
+                tuples,
+                object,
+                "channel",
+                AuthzSubjectType::Channel,
+                AuthzObjectType::Channel,
+            );
+            let author_allowed = has_direct_tuple(tuples, object, "author", subject)
+                && !channels
+                    .iter()
+                    .any(|ch| check_recursive(tuples, ch, "outcast", subject, visited));
+            author_allowed
+                || channels
+                    .into_iter()
+                    .any(|ch| check_recursive(tuples, &ch, "moderate", subject, visited))
+        }
+
+        (AuthzObjectType::DirectMessage, "read")
+        | (AuthzObjectType::DirectMessage, "send")
+        | (AuthzObjectType::DirectMessage, "leave") => {
             has_direct_tuple(tuples, object, "participant", subject)
+        }
+        (AuthzObjectType::DirectMessage, "manage") => {
+            has_direct_tuple(tuples, object, "owner", subject)
+        }
+        (AuthzObjectType::DirectMessage, "add_participant") => {
+            has_direct_tuple(tuples, object, "owner", subject)
+                || has_direct_tuple(tuples, object, "participant", subject)
+        }
+
+        (AuthzObjectType::Role, "assign")
+        | (AuthzObjectType::Role, "manage")
+        | (AuthzObjectType::Role, "delete")
+        | (AuthzObjectType::Role, "edit") => {
+            has_direct_tuple(tuples, object, "manager", subject)
+                || channel_spaces(tuples, object)
+                    .into_iter()
+                    .any(|space| check_recursive(tuples, &space, "admin", subject, visited))
         }
 
         (AuthzObjectType::TenantCredential, "use") => {

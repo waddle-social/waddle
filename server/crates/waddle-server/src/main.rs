@@ -177,6 +177,16 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
                     .await
                     .map(|(pool, matched, outbox)| (pool, matched, Some(outbox)))?
                 } else {
+                    if let Some(ref turso_cfg) = db_runtime.turso {
+                        tokio::fs::create_dir_all(&turso_cfg.data_dir)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed to create Turso data directory {}",
+                                    turso_cfg.data_dir.display()
+                                )
+                            })?;
+                    }
                     let pool = db::DatabasePool::try_new(db_config, db::PoolConfig).await?;
                     let matched = db::bootstrap::bootstrap_global_owner(
                         pool.global(),

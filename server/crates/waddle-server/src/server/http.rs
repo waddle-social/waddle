@@ -2003,13 +2003,17 @@ async fn create_websocket_state(
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
-    let inference_host =
+    if let Some(broker_handles) =
         crate::server::extension_inference_host::build_startup_extension_inference_host(
             &websocket_state,
             &xmpp_domain,
+            &server_config.broker,
         )
-        .await?;
-    deferred_extension_inference_host.set(inference_host);
+        .await?
+    {
+        state.set_broker_custody(broker_handles.custody);
+        deferred_extension_inference_host.set(broker_handles.inference_host);
+    }
     // Start the SFU ghost-reconciliation backstop: periodically ask
     // LiveKit who is actually connected and sweep registry entries (and
     // their MUC Muji presence) left behind by a lost

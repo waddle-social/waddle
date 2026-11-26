@@ -112,24 +112,293 @@ pub fn openfga_store_grant_object(store_id: &str) -> String {
     format!("store:{store_id}")
 }
 
+fn direct_type(ty: &str) -> serde_json::Value {
+    json!({ "type": ty })
+}
+
+fn direct_meta(types: &[&str]) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = types.iter().map(|t| direct_type(t)).collect();
+    json!({ "directly_related_user_types": entries })
+}
+
+fn computed(rel: &str) -> serde_json::Value {
+    json!({ "computedUserset": { "relation": rel } })
+}
+
+fn ttu(tupleset: &str, computed_rel: &str) -> serde_json::Value {
+    json!({
+        "tupleToUserset": {
+            "tupleset": { "relation": tupleset },
+            "computedUserset": { "relation": computed_rel }
+        }
+    })
+}
+
+fn union(children: Vec<serde_json::Value>) -> serde_json::Value {
+    json!({ "union": { "child": children } })
+}
+
+fn diff(base: serde_json::Value, subtract: serde_json::Value) -> serde_json::Value {
+    json!({ "difference": { "base": base, "subtract": subtract } })
+}
+
 /// Canonical OpenFGA `schema 1.2` JSON authorization model submitted during
 /// `POST /stores/{store_id}/authorization-models`.
 pub fn openfga_authorization_model_json() -> serde_json::Value {
+    let this = || json!({ "this": {} });
     json!({
         "schema_version": OPENFGA_SCHEMA_VERSION,
         "type_definitions": [
             { "type": "user", "metadata": { "module": "chat" } },
-            { "type": "server", "metadata": { "module": "chat" }, "relations": { "admin": { "this": {} } } },
-            { "type": "space", "metadata": { "module": "chat" }, "relations": { "owner": { "this": {} }, "admin": { "this": {} }, "moderator": { "this": {} }, "member": { "this": {} } } },
-            { "type": "channel", "metadata": { "module": "chat" }, "relations": { "space": { "this": {} }, "outcast": { "this": {} }, "owner": { "this": {} }, "admin": { "this": {} }, "member": { "this": {} } } },
-            { "type": "message", "metadata": { "module": "chat" }, "relations": { "channel": { "this": {} }, "author": { "this": {} } } },
-            { "type": "direct_message", "metadata": { "module": "chat" }, "relations": { "participant": { "this": {} } } },
-            { "type": "role", "metadata": { "module": "chat" }, "relations": { "space": { "this": {} }, "assignee": { "this": {} } } },
+            {
+                "type": "server",
+                "relations": {
+                    "owner": this(),
+                    "admin": union(vec![this(), computed("owner")]),
+                    "member": union(vec![this(), computed("admin")]),
+                    "create_space": computed("owner"),
+                    "create_muc": computed("owner")
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "owner": direct_meta(&["user"]),
+                        "admin": direct_meta(&["user"]),
+                        "member": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "space",
+                "relations": {
+                    "owner": this(),
+                    "admin": union(vec![this(), computed("owner")]),
+                    "moderator": union(vec![this(), computed("admin")]),
+                    "member": union(vec![this(), computed("moderator")]),
+                    "read": computed("member"),
+                    "view": computed("member"),
+                    "manage": computed("admin"),
+                    "delete": computed("owner"),
+                    "manage_settings": computed("admin"),
+                    "manage_roles": computed("admin"),
+                    "manage_members": computed("moderator"),
+                    "create_channel": computed("owner"),
+                    "update": computed("admin")
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "owner": direct_meta(&["user"]),
+                        "admin": direct_meta(&["user"]),
+                        "moderator": direct_meta(&["user"]),
+                        "member": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "channel",
+                "relations": {
+                    "space": this(),
+                    "parent": this(),
+                    "outcast": this(),
+                    "manager": this(),
+                    "moderator": this(),
+                    "writer": this(),
+                    "viewer": this(),
+                    "owner": diff(
+                        union(vec![this(), ttu("space", "owner"), ttu("parent", "owner")]),
+                        computed("outcast")
+                    ),
+                    "admin": diff(
+                        union(vec![this(), computed("owner"), ttu("space", "admin"), ttu("parent", "admin")]),
+                        computed("outcast")
+                    ),
+                    "member": diff(
+                        union(vec![this(), computed("admin"), ttu("space", "member"), ttu("parent", "member")]),
+                        computed("outcast")
+                    ),
+                    "delete": diff(
+                        union(vec![ttu("space", "admin"), ttu("parent", "admin")]),
+                        computed("outcast")
+                    ),
+                    "manage": diff(
+                        union(vec![computed("owner"), computed("admin"), computed("manager"), ttu("space", "admin"), ttu("parent", "admin")]),
+                        computed("outcast")
+                    ),
+                    "moderate": diff(
+                        union(vec![computed("owner"), computed("admin"), computed("moderator"), computed("manager"), ttu("space", "moderator"), ttu("parent", "moderator")]),
+                        computed("outcast")
+                    ),
+                    "send_message": diff(
+                        union(vec![computed("member"), computed("writer"), computed("moderator"), computed("manager")]),
+                        computed("outcast")
+                    ),
+                    "read": diff(
+                        union(vec![computed("member"), computed("viewer"), computed("writer"), computed("moderator"), computed("manager")]),
+                        computed("outcast")
+                    ),
+                    "view": computed("read")
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "space": direct_meta(&["space"]),
+                        "parent": direct_meta(&["space"]),
+                        "outcast": direct_meta(&["user"]),
+                        "manager": direct_meta(&["user"]),
+                        "moderator": direct_meta(&["user"]),
+                        "writer": direct_meta(&["user"]),
+                        "viewer": direct_meta(&["user"]),
+                        "owner": direct_meta(&["user"]),
+                        "admin": direct_meta(&["user"]),
+                        "member": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "message",
+                "relations": {
+                    "channel": this(),
+                    "author": this(),
+                    "read": ttu("channel", "read"),
+                    "react": ttu("channel", "read"),
+                    "edit": diff(computed("author"), ttu("channel", "outcast")),
+                    "delete": union(vec![
+                        diff(computed("author"), ttu("channel", "outcast")),
+                        ttu("channel", "moderate")
+                    ])
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "channel": direct_meta(&["channel"]),
+                        "author": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "direct_message",
+                "relations": {
+                    "participant": this(),
+                    "owner": this(),
+                    "read": computed("participant"),
+                    "send": computed("participant"),
+                    "leave": computed("participant"),
+                    "manage": computed("owner"),
+                    "add_participant": union(vec![computed("owner"), computed("participant")])
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "participant": direct_meta(&["user"]),
+                        "owner": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "role",
+                "relations": {
+                    "space": this(),
+                    "parent": this(),
+                    "assignee": this(),
+                    "member": this(),
+                    "manager": this(),
+                    "assign": union(vec![computed("manager"), ttu("space", "admin"), ttu("parent", "admin")]),
+                    "manage": union(vec![computed("manager"), ttu("space", "admin"), ttu("parent", "admin")]),
+                    "delete": union(vec![computed("manager"), ttu("space", "admin"), ttu("parent", "admin")]),
+                    "edit": union(vec![computed("manager"), ttu("space", "admin"), ttu("parent", "admin")])
+                },
+                "metadata": {
+                    "module": "chat",
+                    "relations": {
+                        "space": direct_meta(&["space"]),
+                        "parent": direct_meta(&["space"]),
+                        "assignee": direct_meta(&["user"]),
+                        "member": direct_meta(&["user"]),
+                        "manager": direct_meta(&["user"])
+                    }
+                }
+            },
             { "type": "extension", "metadata": { "module": "inference" } },
-            { "type": "tenant_credential", "metadata": { "module": "inference" }, "relations": { "tenant_admin": { "this": {} }, "allowed_extension": { "this": {} }, "revoked": { "this": {} } } },
-            { "type": "user_credential", "metadata": { "module": "inference" }, "relations": { "owner": { "this": {} }, "consented_extension": { "this": {} } } },
-            { "type": "installed_extension", "metadata": { "module": "inference" }, "relations": { "space": { "this": {} }, "installer": { "this": {} } } },
-            { "type": "room_inference_policy", "metadata": { "module": "inference" }, "relations": { "channel": { "this": {} }, "tenant_funded_allowed": { "this": {} }, "member_funded_allowed": { "this": {} }, "disabled": { "this": {} } } }
+            {
+                "type": "tenant_credential",
+                "relations": {
+                    "tenant_admin": this(),
+                    "allowed_extension": this(),
+                    "revoked": this(),
+                    "use": diff(
+                        union(vec![computed("allowed_extension"), computed("tenant_admin")]),
+                        computed("revoked")
+                    ),
+                    "manage": computed("tenant_admin")
+                },
+                "metadata": {
+                    "module": "inference",
+                    "relations": {
+                        "tenant_admin": direct_meta(&["user"]),
+                        "allowed_extension": direct_meta(&["extension"]),
+                        "revoked": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "user_credential",
+                "relations": {
+                    "owner": this(),
+                    "consented_extension": this(),
+                    "use": computed("owner"),
+                    "invoke_with_consent": union(vec![computed("owner"), computed("consented_extension")]),
+                    "manage": computed("owner")
+                },
+                "metadata": {
+                    "module": "inference",
+                    "relations": {
+                        "owner": direct_meta(&["user"]),
+                        "consented_extension": direct_meta(&["extension"])
+                    }
+                }
+            },
+            {
+                "type": "installed_extension",
+                "relations": {
+                    "space": this(),
+                    "installer": this(),
+                    "invoke": union(vec![computed("installer"), ttu("space", "member")])
+                },
+                "metadata": {
+                    "module": "inference",
+                    "relations": {
+                        "space": direct_meta(&["space"]),
+                        "installer": direct_meta(&["user"])
+                    }
+                }
+            },
+            {
+                "type": "room_inference_policy",
+                "relations": {
+                    "channel": this(),
+                    "tenant_funded_allowed": this(),
+                    "member_funded_allowed": this(),
+                    "disabled": this(),
+                    "allow_tenant_funded": diff(
+                        union(vec![computed("tenant_funded_allowed"), ttu("channel", "read")]),
+                        union(vec![computed("disabled"), ttu("channel", "outcast")])
+                    ),
+                    "allow_member_funded": diff(
+                        union(vec![computed("member_funded_allowed"), ttu("channel", "send_message")]),
+                        union(vec![computed("disabled"), ttu("channel", "outcast")])
+                    )
+                },
+                "metadata": {
+                    "module": "inference",
+                    "relations": {
+                        "channel": direct_meta(&["channel"]),
+                        "tenant_funded_allowed": direct_meta(&["user"]),
+                        "member_funded_allowed": direct_meta(&["user"]),
+                        "disabled": direct_meta(&["user"])
+                    }
+                }
+            }
         ]
     })
 }

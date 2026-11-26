@@ -176,7 +176,9 @@ fn kms_external_provider_configs_validate_and_redact_tokens() {
     let scw_cfg = ScalewayKmsConfig {
         base_url: "https://api.scaleway.com".to_owned(),
         region: "fr-par".to_owned(),
+        project_id: "11111111-2222-3333-4444-555555555555".to_owned(),
         auth_token: Zeroizing::new("scw-secret-token-xyz".to_owned()),
+        root_key_id: None,
         timeout: Duration::from_secs(5),
     };
     assert!(!format!("{scw_cfg:?}").contains("scw-secret-token-xyz"));
@@ -308,7 +310,9 @@ async fn kms_provider_key_ref_resolution_matches_provider_format() {
     let scw = ScalewayKmsProvider::new(ScalewayKmsConfig {
         base_url: "https://api.scaleway.com".to_owned(),
         region: "fr-par".to_owned(),
+        project_id: "11111111-2222-3333-4444-555555555555".to_owned(),
         auth_token: Zeroizing::new("scw-token".to_owned()),
+        root_key_id: None,
         timeout: Duration::from_secs(5),
     })
     .expect("scw");
