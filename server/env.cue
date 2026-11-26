@@ -1138,7 +1138,6 @@ schema.#Project & {
 					cue vet .
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/runtime-external-secret.yaml -d '#RuntimeExternalSecret'
 					cue vet deployment.cue ../infrastructure/waddle.cloud/gitops/waddle-server/apns-external-secret.yaml -d '#ApnsExternalSecret'
-					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/openrouter-external-secret.yaml -d '#OpenRouterExternalSecret'
 					cue vet . ../infrastructure/waddle.cloud/gitops/waddle-server/spicedb-config-external-secret.yaml -d '#SpiceDbExternalSecret'
 					for manifest in ../infrastructure/waddle.cloud/gitops/waddle-server/*external-secret.yaml; do
 					  cue vet . "${manifest}" -d '#ExternalSecretNoDefaultPassword'
@@ -1451,13 +1450,13 @@ schema.#Project & {
 
 					yq -e 'select(.kind == "ConfigMap") | .data.WADDLE_EXTENSIONS_JSON | from_json |
 					  .modules[] | select(.name == "jev-judgments") |
-					  (.config.endpoint == "https://openrouter.ai/api/alpha/decisions" and
+					  (.config.provider == "openrouter" and
+					  .config.deployment == "default" and
 					  .config.model == "typesafe/jev-1.13" and
-					  .configSecretFiles.api_key == "/var/run/secrets/waddle-ai/api_key" and
-					  (.capabilityGrants | sort | join(",")) == "message.observe,outbound.http.request,room.result.publish" and
-					  (.allowedHttpOrigins | join(",")) == "https://openrouter.ai" and
-					  .roomObservation.generation == 2 and
-					  .roomObservation.scope.kind == "all-hosted-rooms" and
+					  .config.credential_name == "default" and
+					  (.capabilityGrants | sort | join(",")) == "message.observe,room.result.publish" and
+					  .roomObservation.generation == 3 and
+					  .roomObservation.scope.kind == "rooms" and
 					  .roomObservation.max_concurrent == 8 and
 					  .runtimeLimits.invocation_timeout_ms == 10000 and
 					  .runtimeLimits.http_timeout_ms == 4000 and
