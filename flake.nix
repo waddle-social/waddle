@@ -1265,7 +1265,14 @@
           # Linux desktop client (apps/linux): its own shell so GTK never
           # enters the server's CI closure.
           linux = pkgs.mkShell {
-            shellHook = builtins.readFile ./ci/cache/nix-shell-hook.sh;
+            shellHook =
+              builtins.readFile ./ci/cache/nix-shell-hook.sh
+              # `cargo run` is not wrapped by wrapGAppsHook4 like
+              # `nix run .#linux`, so GTK finds no icon theme or GSettings
+              # schemas unless they are on XDG_DATA_DIRS.
+              + ''
+                export XDG_DATA_DIRS="${pkgs.adwaita-icon-theme}/share:${pkgs.hicolor-icon-theme}/share:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+              '';
             packages = [
               rustToolchain
               pkgs.pkg-config

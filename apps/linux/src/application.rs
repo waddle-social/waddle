@@ -71,10 +71,12 @@ mod imp {
                     gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
                 );
                 // Icons the user's icon theme lacks fall back to the copies
-                // under data/icons (installed into hicolor in the Flatpak).
+                // under data/icons: found through the source tree when run from a
+                // checkout (`cargo run`, debug or release), and installed into
+                // hicolor in the Flatpak, where this path does not exist.
                 let icons = gtk::IconTheme::for_display(&display);
                 let dev_icons = concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons");
-                if cfg!(debug_assertions) && std::path::Path::new(dev_icons).is_dir() {
+                if std::path::Path::new(dev_icons).is_dir() {
                     icons.add_search_path(dev_icons);
                 }
             }
