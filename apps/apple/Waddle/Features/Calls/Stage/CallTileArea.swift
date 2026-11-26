@@ -9,6 +9,8 @@ struct CallTileArea: View {
     let presentation: CallStagePresentation
     var promoted: String?
     let source: CallTileSource
+    /// How closely the gallery's tiles may stand: closer over a phone's screen.
+    var density = CallGrid.Density.window
     /// Opens or closes the list of everyone, for the people the gallery has no cell for.
     var toggleParticipants: @MainActor () -> Void = { /* a stage with no panel */ }
 
@@ -21,7 +23,8 @@ struct CallTileArea: View {
     var body: some View {
         GeometryReader { area in
             switch CallStageLayout.make(
-                tiles: tiles, presentation: presentation, promoted: promoted, size: area.size, maxTiles: Self.maxTiles
+                tiles: tiles, presentation: presentation, promoted: promoted, size: area.size, maxTiles: Self.maxTiles,
+                density: density
             ) {
             case let .grid(columns, rows, tiles, hiddenCount):
                 gallery(tiles, hiddenCount: hiddenCount, columns: columns, rows: rows, in: area.size)

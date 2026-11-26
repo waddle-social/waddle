@@ -130,6 +130,8 @@ struct CallStageView: View {
                 } else if participants == nil || !participantsCoverTiles {
                     CallTileArea(
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
+                        // A stage that covers a phone's screen has less room for each tile.
+                        density: controls.minimises ? .phone : .window,
                         toggleParticipants: { perform(.toggleParticipants) }
                     )
                     .overlay {

@@ -43,7 +43,8 @@ final class CallStageModel {
     ) -> CallSurface {
         CallSurface.placement(
             of: state, open: selection, platform: platform, pane: layout?.pane,
-            size: state.sid.map { stage(of: $0).size } ?? .defaultSize, isSidebarShown: layout?.isSidebarShown ?? true
+            size: state.sid.map { stage(of: $0).size } ?? .defaultSize,
+            isOpened: state.sid.map { stage(of: $0).isOpened } ?? false, isSidebarShown: layout?.isSidebarShown ?? true
         )
     }
 

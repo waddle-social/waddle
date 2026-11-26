@@ -108,7 +108,7 @@ public enum CallStageLayout: Equatable, Sendable {
     /// The cell cap applies to the gallery; the spotlight strip scrolls.
     public static func make(
         tiles: [CallStageTile], presentation: CallStagePresentation,
-        promoted: String? = nil, size: CGSize, maxTiles: Int = .max
+        promoted: String? = nil, size: CGSize, maxTiles: Int = .max, density: CallGrid.Density = .window
     ) -> Self {
         let selfView = tiles.filter { $0.isSelfCamera && presentation.shows($0) }
         let ordered = selfView + tiles.filter { !$0.isSelfCamera }
@@ -119,7 +119,7 @@ public enum CallStageLayout: Equatable, Sendable {
         if let main {
             return .spotlight(main: main, strip: ordered.filter { $0.id != main.id })
         }
-        return gallery(ordered, size: size, maxTiles: maxTiles)
+        return gallery(ordered, size: size, maxTiles: maxTiles, density: density)
     }
 
     private static func speakerTile(in tiles: [CallStageTile], promoted: String?) -> CallStageTile? {
@@ -127,9 +127,9 @@ public enum CallStageLayout: Equatable, Sendable {
         return cameras.first { $0.identity == promoted } ?? cameras.first { !$0.isSelf } ?? cameras.first
     }
 
-    private static func gallery(_ tiles: [CallStageTile], size: CGSize, maxTiles: Int) -> Self {
+    private static func gallery(_ tiles: [CallStageTile], size: CGSize, maxTiles: Int, density: CallGrid.Density) -> Self {
         let limit = max(1, maxTiles)
-        let grid = CallGrid.make(tileCount: min(tiles.count, limit), size: size)
+        let grid = CallGrid.make(tileCount: min(tiles.count, limit), size: size, density: density)
         let capacity = min(limit, grid.capacity)
         var visible = tiles.prefix(capacity)
         var hiddenCount = 0

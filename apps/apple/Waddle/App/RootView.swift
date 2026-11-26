@@ -67,6 +67,7 @@ private struct SignedInRoot: View {
             shell
         }
         .background(Theme.Colors.bg)
+        .callCover(session: session.coordinator, stage: session.callStage, navigation: session.navigation, media: session.callMedia)
         .environment(session.coordinator)
         .environment(session.navigation)
         .environment(session.callStage)

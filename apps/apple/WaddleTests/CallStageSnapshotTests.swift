@@ -40,7 +40,7 @@ final class CallStageSnapshotTests: XCTestCase {
         status: CallSessionStatus, presentation: CallStagePresentation,
         participants: [CallParticipantRow]? = nil, isMicrophoneOn: Bool = true, isCameraOn: Bool = false,
         isHandRaised: Bool? = false, size: CallSurface.Size = .split, isSharingScreen: Bool? = nil,
-        isFloating: Bool? = nil
+        isFloating: Bool? = nil, minimises: Bool = false
     ) -> CallControls {
         CallControls(
             devices: .init(
@@ -48,21 +48,22 @@ final class CallStageSnapshotTests: XCTestCase {
                 hasMedia: status.hasMedia, isSharingScreen: isSharingScreen
             ),
             isHandRaised: isHandRaised, viewMode: presentation.viewMode, isSelfViewHidden: presentation.isSelfViewHidden,
-            size: size, showsParticipants: participants != nil, canReact: status.hasMedia, isFloating: isFloating
+            size: size, showsParticipants: participants != nil, canReact: status.hasMedia, isFloating: isFloating,
+            minimises: minimises
         )
     }
 
     private func assertStage(
         title: String = "#design", subtitle: String = "2 others in call", status: CallSessionStatus = .connected,
         tiles: [CallStageTile], presentation: CallStagePresentation = CallStagePresentation(), promotedSpeaker: String? = nil,
-        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, isFloating: Bool? = nil,
+        isMicrophoneOn: Bool = true, isCameraOn: Bool = false, isHandRaised: Bool? = false, isFloating: Bool? = nil, minimises: Bool = false,
         issues: [CallMediaIssue] = [],
         checkingIssues: Set<CallMediaIssue.Kind> = [], isChromeHidden: Bool = false,
         stageSize: CallSurface.Size = .split, size: CGSize = panel, testName: String = #function, line: UInt = #line
     ) {
         let controls = Self.stageControls(
             status: status, presentation: presentation, isMicrophoneOn: isMicrophoneOn, isCameraOn: isCameraOn,
-            isHandRaised: isHandRaised, size: stageSize, isFloating: isFloating
+            isHandRaised: isHandRaised, size: stageSize, isFloating: isFloating, minimises: minimises
         )
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
@@ -181,6 +182,34 @@ final class CallStageSnapshotTests: XCTestCase {
             subtitle: "4 others in call",
             tiles: [Self.you, Self.tile("linus", hasVideo: true), Self.grace, Self.ken, Self.mika],
             isChromeHidden: true, stageSize: .immersive, size: CGSize(width: 1000, height: 640)
+        )
+    }
+
+    // MARK: - Over a phone's screen
+
+    private static let phoneRoom = [you, tile("linus", isSpeaking: true, hasVideo: true), tile("grace", isMuted: true), ken]
+
+    /// An iPhone held upright: the stage as it is on a Mac, with one way back to the dock.
+    func testRoomOverAPhonesScreen() {
+        assertStage(
+            subtitle: "3 others in call", tiles: Self.phoneRoom, minimises: true, stageSize: .expanded,
+            size: CGSize(width: 393, height: 760)
+        )
+    }
+
+    /// And on its side: the tiles in one row between the header and the controls.
+    func testRoomOverAPhonesScreenOnItsSide() {
+        assertStage(
+            subtitle: "3 others in call", tiles: Self.phoneRoom, minimises: true, stageSize: .expanded,
+            size: CGSize(width: 760, height: 372)
+        )
+    }
+
+    func testDirectOverAPhonesScreen() {
+        assertStage(
+            title: "Mika Lindqvist", subtitle: "Video call",
+            tiles: [Self.you, Self.tile("Mika Lindqvist", hasVideo: true)], isCameraOn: true, isHandRaised: nil,
+            minimises: true, stageSize: .expanded, size: CGSize(width: 393, height: 760)
         )
     }
 

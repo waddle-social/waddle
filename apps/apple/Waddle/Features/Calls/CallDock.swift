@@ -71,6 +71,13 @@ struct CallDock: View {
         _ stage: CallStage, group: GroupCallStage?, elapsed: Duration?, video: CallDockVideo, in session: SessionCoordinator
     ) -> some View {
         let commands = CallCommands(calls: session.calls, media: media)
+        // On a phone the stage covers the screen once opened; a sheet's dock is over whatever would show it.
+        let open: (@MainActor () -> Void)? = if platform == .phone, !isInSheet, let stageModel,
+            let sid = session.calls.state.sid, session.calls.state.sessionConversation != nil {
+            { stageModel.update(sid) { $0.open() } }
+        } else {
+            nil
+        }
         if let group {
             GroupCallDockView(
                 stage: group,
@@ -86,7 +93,7 @@ struct CallDock: View {
                 announcesChanges: !isInSheet,
                 actions: GroupCallDockActions(
                     leave: commands.hangUp, toggleMicrophone: commands.toggleMicrophone,
-                    toggleCamera: commands.toggleCamera, toggleHand: commands.toggleHand
+                    toggleCamera: commands.toggleCamera, toggleHand: commands.toggleHand, open: open
                 )
             )
         } else {
@@ -103,7 +110,7 @@ struct CallDock: View {
                 actions: CallDockActions(
                     accept: commands.accept, decline: commands.decline, hangUp: commands.hangUp,
                     toggleMicrophone: commands.toggleMicrophone, toggleCamera: commands.toggleCamera,
-                    dismiss: commands.dismiss
+                    dismiss: commands.dismiss, open: open
                 )
             )
         }

@@ -13,6 +13,10 @@ struct CallStageHost: View {
     @State private var speaking = SpeakingHold()
     @State private var prompts = CallStagePrompts()
     @State private var chrome = CallChromeFader()
+    /// The stage covers a phone's screen (`CallSurface.cover`): it has one
+    /// size, a way back to the dock in place of the steps, and its
+    /// participants list is a sheet.
+    var coversScreen = false
 
     var body: some View {
         @Bindable var prompts = prompts
@@ -47,9 +51,14 @@ struct CallStageHost: View {
         let cast = call.cast(media: media, session: session, speaking: speaking.shown)
         let tiles = cast.tiles
         let memory = model.stage(of: call.sid)
+        // Over a phone's screen the stage is as large as it gets, with its header and controls in place.
+        let size = coversScreen ? .expanded : memory.size
         // A full-screen call hides the pane the chat opens in: whatever the
-        // inspector is set to, nobody is looking at it.
-        let chat = CallStageChat(isRoom: call.isRoom, session: session, navigation: navigation, isHidden: memory.size == .immersive)
+        // inspector is set to, nobody is looking at it. A phone has no pane
+        // beside the stage for the chat at all.
+        let chat = coversScreen ? nil : CallStageChat(
+            isRoom: call.isRoom, session: session, navigation: navigation, isHidden: size == .immersive
+        )
         let commands = CallStageCommands(
             sid: call.sid, session: session, media: media, stage: model,
             navigation: navigation, prompts: prompts, chat: chat
@@ -65,14 +74,15 @@ struct CallStageHost: View {
             isHandRaised: call.isRoom ? session.calls.isHandRaised : nil,
             viewMode: memory.presentation.viewMode,
             isSelfViewHidden: memory.presentation.isSelfViewHidden,
-            size: memory.size,
+            size: size,
             // An open inspector has a composer whose Escape cancels a reply or an edit.
-            escapeStepsDown: memory.size == .immersive || navigation.inspector == nil,
+            escapeStepsDown: !coversScreen && (size == .immersive || navigation.inspector == nil),
             showsParticipants: rows != nil,
             chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
             showsChat: chat?.isOpen ?? false,
             canReact: call.status.hasMedia,
-            isFloating: isFloating(memory, tiles: tiles)
+            isFloating: isFloating(memory, tiles: tiles),
+            minimises: coversScreen
         )
         return CallStageView(
             title: call.title,
@@ -84,7 +94,8 @@ struct CallStageHost: View {
             presentation: memory.presentation,
             promotedSpeaker: memory.promotedSpeaker,
             controls: controls,
-            participants: rows,
+            // A phone has no room for the list beside the tiles: it is a sheet over them.
+            participants: coversScreen ? nil : rows,
             canResetVolumes: media?.hasChangedVolumes ?? false,
             participantsCoverTiles: (layout?.pane?.width ?? .infinity) < Self.widthForTilesAndPanel,
             issues: media.map { CallMediaIssues.shown(for: $0.mediaReport, dismissed: memory.dismissedMediaIssues) } ?? [],
@@ -95,7 +106,7 @@ struct CallStageHost: View {
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
-            isChromeHidden: memory.size == .immersive && !chrome.isShown,
+            isChromeHidden: size == .immersive && !chrome.isShown,
             tileSource: model.tileSource,
             // Using the call, by a key too, is a sign of life as much as a move of the pointer.
             perform: { [chrome] action in
@@ -104,16 +115,22 @@ struct CallStageHost: View {
             }
         )
         .callChromeFade(
-            chrome, isOn: memory.size == .immersive,
+            chrome, isOn: size == .immersive,
             isHeld: rows != nil || prompts.showsSettings || prompts.screenPicker != nil
         )
+        .sheet(isPresented: Binding(
+            get: { coversScreen && rows != nil },
+            set: { shows in if !shows { model.update(call.sid) { if $0.showsParticipants { $0.toggleParticipants() } } } }
+        )) {
+            CallParticipantsSheet(rows: rows ?? [], canResetVolumes: media?.hasChangedVolumes ?? false, perform: commands.perform)
+        }
         // What is in front of the person while the chat is open has been seen.
         .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
             model.update(call.sid) { $0.sawChat(upTo: newest) }
         }
         .callPushToTalk(
             hasMedia: call.status.hasMedia, isMicrophoneOn: media?.isMicrophoneOn ?? false,
-            coversConversation: memory.size != .split,
+            coversConversation: size != .split,
             setMicrophone: CallCommands(calls: session.calls, media: media).setMicrophone
         )
         // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.

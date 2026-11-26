@@ -9,6 +9,8 @@ struct CallDockActions {
     let toggleMicrophone: @MainActor () -> Void
     let toggleCamera: @MainActor () -> Void
     let dismiss: @MainActor () -> Void
+    /// Opens the call's stage over the screen, on a phone; `nil` where there is no such stage.
+    var open: (@MainActor () -> Void)?
 }
 
 /// The call surface, from the first ring to the reason the call ended.
@@ -163,6 +165,7 @@ struct CallDockView: View {
                         HStack(spacing: Theme.Spacing.s) {
                             microphoneToggle(stretched: true)
                             cameraToggle(stretched: true)
+                            CallOpenButton(stretched: true, action: actions.open)
                         }
                         endButton(stretched: true)
                     } else {
@@ -187,6 +190,7 @@ struct CallDockView: View {
         case .connecting, .inCall, .reconnecting:
             microphoneToggle(stretched: false)
             cameraToggle(stretched: false)
+            CallOpenButton(action: actions.open)
             endButton(stretched: stretched)
         case .ended:
             Button("Dismiss", action: actions.dismiss)
