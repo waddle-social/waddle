@@ -139,4 +139,9 @@ struct CallShortcutRepeatsTests {
         let camera = repeats.isFreshPress(of: .camera, at: 0.1)
         #expect(camera)
     }
+
+    @Test func aStageThatCoversAPhoneHasNoStepUp() {
+        let keys = CallShortcut.available(for: CallControls(size: .expanded, minimises: true))
+        #expect(!keys.contains(.stepUp))
+    }
 }

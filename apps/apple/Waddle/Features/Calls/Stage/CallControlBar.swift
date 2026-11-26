@@ -120,8 +120,19 @@ struct CallControlBar: View {
     /// One step at a time, as on the web: split and expanded swap, and full
     /// screen is offered from expanded and offers only its way back. Escape
     /// takes the step down unless something else on screen wants it.
+    ///
+    /// A stage that covers a phone's screen has one size, and one way back to the dock.
     @ViewBuilder
     private var sizeSteps: some View {
+        if controls.minimises {
+            CallControlButton(title: "Minimise call", symbol: "chevron.down") { perform(.minimise) }
+        } else {
+            resizeSteps
+        }
+    }
+
+    @ViewBuilder
+    private var resizeSteps: some View {
         if size != .immersive {
             let isExpanded = size == .expanded
             CallControlButton(

@@ -37,6 +37,8 @@ struct CallStageView: View {
     var ownNick: String?
     /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
     var ownScreen: CallStageTile?
+    /// How closely the gallery's tiles may stand: closer over a phone's screen.
+    var density = CallGrid.Density.window
     /// The pointer has rested on a full-screen call: its header and controls are faded out.
     var isChromeHidden = false
     /// Where the tiles get their pictures and send a pin.
@@ -130,6 +132,7 @@ struct CallStageView: View {
                 } else if participants == nil || !participantsCoverTiles {
                     CallTileArea(
                         tiles: tiles, presentation: presentation, promoted: promotedSpeaker, source: tileSource,
+                        density: density,
                         toggleParticipants: { perform(.toggleParticipants) }
                     )
                     .overlay {

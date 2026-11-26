@@ -27,15 +27,17 @@ final class CallDockSnapshotTests: XCTestCase {
     private func assertDock(
         _ stage: CallStage, elapsed: Duration? = nil, isMicrophoneOn: Bool = true, isCameraOn: Bool = false,
         remoteVideo: AnyView? = nil, localVideo: AnyView? = nil, notice: String? = nil, width: CGFloat = phone,
-        textSize: DynamicTypeSize = .large, testName: String = #function, line: UInt = #line
+        textSize: DynamicTypeSize = .large, opens: Bool = false, testName: String = #function, line: UInt = #line
     ) {
+        var actions = Self.actions
+        if opens { actions.open = Self.noAction }
         // SF Symbols in every control: allow for their redraws between OS releases.
         assertHuddleSnapshot(
             precision: 0.97,
             of: CallDockView(
                 stage: stage, peerName: "Mika Lindqvist", elapsed: elapsed, isMicrophoneOn: isMicrophoneOn,
                 isCameraOn: isCameraOn, video: CallDockVideo(remote: remoteVideo, preview: localVideo), notice: notice,
-                announcesChanges: false, actions: Self.actions
+                announcesChanges: false, actions: actions
             )
             .dynamicTypeSize(textSize),
             width: width,
@@ -79,6 +81,11 @@ final class CallDockSnapshotTests: XCTestCase {
 
     func testInCallMuted() {
         assertDock(.inCall(peer: Self.peer.bare, media: Self.audio), elapsed: .seconds(4 * 60 + 12), isMicrophoneOn: false)
+    }
+
+    /// On a phone the dock has the way to the call's stage.
+    func testInCallOnAPhoneWithTheWayToItsStage() {
+        assertDock(.inCall(peer: Self.peer.bare, media: Self.video), elapsed: .seconds(4 * 60 + 12), opens: true)
     }
 
     func testInCallMutedWide() {

@@ -15,6 +15,8 @@ public struct CallStageMemory: Equatable, Sendable {
     /// The call floats above the other windows (web Picture-in-Picture): its
     /// picture is there, and the stage says so in the tiles' place.
     public private(set) var isFloating = false
+    /// On a phone, the person opened the call from the dock: its stage covers the screen.
+    public private(set) var isOpened = false
     /// The last message of the call's chat the person has had in front of them.
     public private(set) var chatSeenID: String?
 
@@ -32,6 +34,17 @@ public struct CallStageMemory: Equatable, Sendable {
         if let id { chatSeenID = id }
     }
 
+    /// It opens with its tiles in front: a list left open on a wider screen is a sheet here, and nobody asked for one.
+    public mutating func open() {
+        isOpened = true
+        showsParticipants = false
+    }
+
+    /// Back to the dock.
+    public mutating func minimise() {
+        isOpened = false
+    }
+
     public mutating func toggleFloating() {
         isFloating.toggle()
     }
@@ -40,12 +53,13 @@ public struct CallStageMemory: Equatable, Sendable {
         presentation.pinnedTileID = presentation.pinnedTileID == tile ? nil : tile
     }
 
-    /// Opening the panel from a split stage expands it, as on the web.
+    /// Opening the panel from a split stage expands it, as on the web. Over
+    /// a phone's screen the list is a sheet, and the size the stage has in a pane is left alone.
     public mutating func toggleParticipants() {
         if showsParticipants {
             showsParticipants = false
         } else {
-            size = size == .split ? .expanded : size
+            size = size == .split && !isOpened ? .expanded : size
             showsParticipants = true
         }
     }

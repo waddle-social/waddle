@@ -1,6 +1,23 @@
 import SwiftUI
 import WaddleKit
 
+/// The panel as a sheet over a stage that covers a phone's screen: on the
+/// stage's own Night ground, half the screen to begin with.
+struct CallParticipantsSheet: View {
+    let rows: [CallParticipantRow]
+    var canResetVolumes = false
+    let perform: @MainActor (CallStageAction) -> Void
+
+    var body: some View {
+        CallParticipantsPanel(rows: rows, canResetVolumes: canResetVolumes, perform: perform)
+            .background(Theme.Colors.seaDeep.ignoresSafeArea())
+            .environment(\.huddleGround, Theme.Colors.seaDeep)
+            .environment(\.colorScheme, .dark)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+    }
+}
+
 /// Who is in the call (web `CallParticipantsPanel` in the call dock): a row
 /// per device with whether it is speaking, its hand, microphone and camera,
 /// and how loud we play it. Nobody has a volume for themselves.
