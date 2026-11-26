@@ -125,7 +125,7 @@ struct CallStageView: View {
                 if controls.isFloating == true {
                     // The picture is in the floating window: a track keeps one renderer.
                     if participants == nil || !participantsCoverTiles {
-                        CallFloatingNotice(returnsOnEscape: controls.escapeStepsDown) { perform(.togglePictureInPicture) }
+                        CallFloatingNotice { perform(.togglePictureInPicture) }
                     }
                 } else if participants == nil || !participantsCoverTiles {
                     CallTileArea(

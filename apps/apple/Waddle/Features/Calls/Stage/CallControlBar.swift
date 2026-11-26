@@ -9,8 +9,6 @@ struct CallControlBar: View {
     var controls = CallControls()
     let perform: @MainActor (CallStageAction) -> Void
 
-    private var isMicrophoneOn: Bool { controls.devices.isMicrophoneOn }
-    private var isCameraOn: Bool { controls.devices.isCameraOn }
     private var hasMedia: Bool { controls.devices.hasMedia }
     private var isHandRaised: Bool? { controls.isHandRaised }
     private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
@@ -64,16 +62,7 @@ struct CallControlBar: View {
 
     @ViewBuilder
     private func toggles(_ layout: CallControlBarLayout) -> some View {
-        CallControlButton(
-            title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
-            tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
-        )
-        .disabled(!hasMedia)
-        CallControlButton(
-            title: isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
-            tone: isCameraOn || !hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
-        )
-        .disabled(!hasMedia)
+        CallDeviceButtons(devices: controls.devices, perform: perform)
         if isInBar(.viewChoice, layout) { viewSwitch }
         if let isHandRaised, isInBar(.hand, layout) {
             CallControlButton(
@@ -118,6 +107,9 @@ struct CallControlBar: View {
                 tone: isFloating ? .chosen : .plain, action: { perform(.togglePictureInPicture) }
             )
             .accessibilityAddTraits(isFloating ? .isSelected : [])
+            // A floating call keeps this button at every width, so Escape always has it to press.
+            // Not on a split stage: the conversation beside it has a composer whose Escape cancels a reply or an edit.
+            .keyboardShortcut(isFloating && controls.escapeStepsDown && size != .split ? .cancelAction : nil)
         }
         sizeSteps
         more(layout)
@@ -265,6 +257,27 @@ struct CallControlBar: View {
     private enum Metrics {
         static let switchInset: CGFloat = 2
         static let switchGlyph: CGFloat = 16
+    }
+}
+
+/// The microphone and the camera, wherever a call has their buttons: the
+/// stage's bar and the window a call floats in.
+struct CallDeviceButtons: View {
+    let devices: CallControls.Devices
+    let perform: @MainActor (CallStageAction) -> Void
+
+    var body: some View {
+        CallControlButton(
+            title: devices.isMicrophoneOn ? "Mute" : "Unmute", symbol: devices.isMicrophoneOn ? "mic" : "mic.slash",
+            tone: devices.isMicrophoneOn || !devices.hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
+        )
+        .disabled(!devices.hasMedia)
+        CallControlButton(
+            title: devices.isCameraOn ? "Turn camera off" : "Turn camera on",
+            symbol: devices.isCameraOn ? "video" : "video.slash",
+            tone: devices.isCameraOn || !devices.hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
+        )
+        .disabled(!devices.hasMedia)
     }
 }
 

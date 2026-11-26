@@ -184,7 +184,6 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
-    /// Someone shares their screen: it takes the large tile, in gallery view too.
     /// The picture is in its floating window: the stage says where the call went.
     func testRoomWhileTheCallFloats() {
         assertStage(
@@ -193,6 +192,7 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    /// Someone shares their screen: it takes the large tile, in gallery view too.
     func testRoomWithASharedScreen() {
         let screen = CallStageTile(
             identity: Self.linus.identity, source: .screen, label: "linus's screen", hasVideo: true,

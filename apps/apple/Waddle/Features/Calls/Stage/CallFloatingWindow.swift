@@ -35,7 +35,14 @@ final class CallFloatingWindow: NSObject, NSWindowDelegate {
         let floats = withObservationTracking { floatingCall != nil } onChange: { [weak self] in
             Task { @MainActor in self?.follow() }
         }
-        if floats { show() } else { hide() }
+        if floats {
+            show()
+        } else {
+            // Brought back while the call goes on: its stage comes forward, from behind another application too.
+            let returned = panel != nil && session.calls.state.isEstablished
+            hide()
+            if returned { NSApp.activate(ignoringOtherApps: true) }
+        }
     }
 
     private func show() {
@@ -112,16 +119,13 @@ private struct CallFloatingHost: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(CallStageModel.self) private var model
     @Environment(\.callMediaControls) private var media
-    /// The window's own: its tile pins nothing.
-    @State private var source: CallTileSource?
-
     var body: some View {
         let call = CallOnStage(state: session.calls.state, phase: media?.phase ?? .idle, session: session)
         let commands = CallCommands(calls: session.calls, media: media)
         CallFloatingView(
             tile: call.flatMap(tile),
             devices: .init(of: media, status: call?.status ?? .connecting),
-            tileSource: source ?? model.tileSource
+            tileSource: model.tileSource
         ) { action in
             switch action {
             case .toggleMicrophone: commands.toggleMicrophone()
@@ -132,18 +136,17 @@ private struct CallFloatingHost: View {
             default: break
             }
         }
-        .onAppear {
-            source = CallTileSource(video: model.tileSource.video, togglePin: { _ in /* nothing to pin here */ })
+        // The stage may not be on screen to keep who spoke last.
+        .onChange(of: media?.activeSpeakersLoudestFirst ?? [], initial: true) { _, speakers in
+            if let sid = call?.sid { model.update(sid) { $0.speakersChanged(speakers) } }
         }
     }
 
     private func tile(of call: CallOnStage) -> CallStageTile? {
-        // Nobody's speaking ring is held here: who floats follows who speaks.
+        // Nobody's speaking ring is held here; who floats is the stage's own speaker.
         let cast = call.cast(media: media, session: session, speaking: [])
-        return CallPictureInPicture.tile(
-            in: cast.tiles, presentation: model.stage(of: call.sid).presentation,
-            activeSpeakers: media?.activeSpeakersLoudestFirst ?? []
-        )
+        let memory = model.stage(of: call.sid)
+        return CallPictureInPicture.tile(in: cast.tiles, presentation: memory.presentation, speaker: memory.promotedSpeaker)
     }
 }
 #endif

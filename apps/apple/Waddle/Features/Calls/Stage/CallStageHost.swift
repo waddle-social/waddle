@@ -136,9 +136,7 @@ struct CallStageHost: View {
     private func isFloating(_ memory: CallStageMemory, tiles: [CallStageTile]) -> Bool? {
         #if os(macOS)
         if memory.isFloating { return true }
-        let floats = CallPictureInPicture.tile(
-            in: tiles, presentation: memory.presentation, activeSpeakers: media?.activeSpeakersLoudestFirst ?? []
-        )
+        let floats = CallPictureInPicture.tile(in: tiles, presentation: memory.presentation, speaker: memory.promotedSpeaker)
         return floats == nil ? nil : false
         #else
         nil

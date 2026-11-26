@@ -66,11 +66,11 @@ struct CallTileView: View, Equatable {
     private var pinButton: some View {
         Button { source.togglePin(tile.id) } label: {
             Color.clear.contentShape(Metrics.shape)
-                }
-                .buttonStyle(.plain)
-                .onHover { isHovered = $0 }
-                .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
-                .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin")) { source.togglePin(tile.id) }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(Text(tile.spokenLabel(isPinned: isPinned)))
+        .accessibilityAction(named: Text(isPinned ? "Unpin" : "Pin")) { source.togglePin(tile.id) }
     }
 
     /// Drawn around the tile, as the web's box shadows are, so a ring never covers the picture.

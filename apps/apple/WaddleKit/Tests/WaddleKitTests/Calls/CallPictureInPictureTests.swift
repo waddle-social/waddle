@@ -16,9 +16,9 @@ struct CallPictureInPictureTests {
     )
 
     private func tile(
-        _ tiles: [CallStageTile], _ presentation: CallStagePresentation = .init(), speakers: [String] = []
+        _ tiles: [CallStageTile], _ presentation: CallStagePresentation = .init(), speaker: String? = nil
     ) -> CallStageTile? {
-        CallPictureInPicture.tile(in: tiles, presentation: presentation, activeSpeakers: speakers)
+        CallPictureInPicture.tile(in: tiles, presentation: presentation, speaker: speaker)
     }
 
     @Test func nobodyWithAPictureLeavesNothingToFloat() {
@@ -30,18 +30,18 @@ struct CallPictureInPictureTests {
         #expect(tile([Self.own]) == Self.own)
     }
 
-    @Test func whoeverIsSpeakingComesBeforeTheFirstInTheList() {
-        #expect(tile([Self.own, Self.linus, Self.grace], speakers: [Self.grace.identity]) == Self.grace)
+    @Test func theSpeakerComesBeforeTheFirstInTheList() {
+        #expect(tile([Self.own, Self.linus, Self.grace], speaker: Self.grace.identity) == Self.grace)
     }
 
     @Test func aSpeakerWithNoPictureIsPassedOver() {
         let silentPicture = Self.camera("grace", hasVideo: false)
-        #expect(tile([Self.own, Self.linus, silentPicture], speakers: [silentPicture.identity]) == Self.linus)
+        #expect(tile([Self.own, Self.linus, silentPicture], speaker: silentPicture.identity) == Self.linus)
     }
 
     @Test func aPinComesBeforeASpeaker() {
         let pinned = CallStagePresentation(pinnedTileID: Self.screen.id)
-        #expect(tile([Self.own, Self.linus, Self.screen, Self.grace], pinned, speakers: [Self.grace.identity]) == Self.screen)
+        #expect(tile([Self.own, Self.linus, Self.screen, Self.grace], pinned, speaker: Self.grace.identity) == Self.screen)
     }
 
     @Test func aScreenFloatsOnlyWhenNoCameraHasAPicture() {

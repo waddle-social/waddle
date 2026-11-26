@@ -4,8 +4,6 @@ import WaddleKit
 /// What a stage shows in its tiles' place while the call floats (web
 /// `CallExpandedSurface`, `pipClass`): where the call went, and the way back.
 struct CallFloatingNotice: View {
-    /// Escape brings the call back, unless something else on screen wants the key.
-    var returnsOnEscape = true
     let returnToCall: @MainActor () -> Void
 
     var body: some View {
@@ -23,7 +21,6 @@ struct CallFloatingNotice: View {
                 .multilineTextAlignment(.center)
             Button("Return to call", action: returnToCall)
                 .buttonStyle(.huddle(size: .small))
-                .keyboardShortcut(returnsOnEscape ? .cancelAction : nil)
                 .padding(.top, Theme.Spacing.xs)
         }
         .padding(Theme.Spacing.l)
@@ -65,23 +62,13 @@ struct CallFloatingView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(
                             CallTileView.Metrics.shape
-                                .strokeBorder(Theme.Colors.border, style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                .strokeBorder(Theme.Colors.border, style: StrokeStyle(lineWidth: WaddleTokens.BorderWidth.hair, dash: Metrics.dash))
                         )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack(spacing: Theme.Spacing.s) {
-                CallControlButton(
-                    title: devices.isMicrophoneOn ? "Mute" : "Unmute", symbol: devices.isMicrophoneOn ? "mic" : "mic.slash",
-                    tone: devices.isMicrophoneOn || !devices.hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
-                )
-                .disabled(!devices.hasMedia)
-                CallControlButton(
-                    title: devices.isCameraOn ? "Turn camera off" : "Turn camera on",
-                    symbol: devices.isCameraOn ? "video" : "video.slash",
-                    tone: devices.isCameraOn || !devices.hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
-                )
-                .disabled(!devices.hasMedia)
+                CallDeviceButtons(devices: devices, perform: perform)
                 CallControlButton(title: "Return to call", symbol: "pip.exit") { perform(.togglePictureInPicture) }
                 CallControlButton(title: "Hang up", symbol: "phone.down", tone: .end) { perform(.hangUp) }
             }
@@ -92,5 +79,10 @@ struct CallFloatingView: View {
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Call Picture-in-Picture"))
+    }
+
+    private enum Metrics {
+        /// The web's dashed border around the empty tile.
+        static let dash: [CGFloat] = [4, 4]
     }
 }
