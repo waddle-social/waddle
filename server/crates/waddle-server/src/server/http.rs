@@ -2002,6 +2002,13 @@ async fn create_websocket_state(
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
+    let inference_host =
+        crate::server::extension_inference_host::build_startup_extension_inference_host(
+            &websocket_state,
+            &xmpp_domain,
+        )
+        .await?;
+    deferred_extension_inference_host.set(inference_host);
     // Start the SFU ghost-reconciliation backstop: periodically ask
     // LiveKit who is actually connected and sweep registry entries (and
     // their MUC Muji presence) left behind by a lost

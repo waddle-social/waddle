@@ -55,10 +55,10 @@ pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
 pub(crate) mod routes;
 
+pub use extension_commands::decoupled_test_hooks::run_extension_command_decoupled_for_test;
 pub use routes::interpret::effects;
 /// Interpreter-only ingress planning seam, consumed by the authority cutover.
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
-pub use extension_commands::decoupled_test_hooks::run_extension_command_decoupled_for_test;
 pub use routes::websocket::{spawn_decoupled_streaming_inference, StreamingInferenceSession};
 pub mod xmpp_state;
 

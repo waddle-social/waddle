@@ -75,8 +75,7 @@ use waddle_broker::ledger::postgres::SqliteCompatLedgerStore;
 use waddle_broker::ledger::turso::TursoLedgerStore;
 use waddle_broker::ledger::DestructionLedgerStore;
 use waddle_broker::sealed_enrollment::{
-    seal_credential_for_broker, BrokerSubkeyRing, ClientSealContext, RootBkskPinSet,
-    RootBkskSigner,
+    seal_credential_for_broker, BrokerSubkeyRing, ClientSealContext, RootBkskPinSet, RootBkskSigner,
 };
 use waddle_broker::secret::SecretBytes;
 use waddle_broker_core::admission::{
@@ -219,8 +218,14 @@ async fn enroll_and_sign_invocation(
     let jkt = p256_jwk_thumbprint(&pk).expect("jkt");
     let dev_id = Uuid::new_v4();
     let exp = now_ms + 120_000;
-    let pop_transcript =
-        build_device_enroll_pop_transcript("trust.example", tenant, account, dev_id, "f19-pop", exp);
+    let pop_transcript = build_device_enroll_pop_transcript(
+        "trust.example",
+        tenant,
+        account,
+        dev_id,
+        "f19-pop",
+        exp,
+    );
     let pop: Signature = sk.sign(&pop_transcript);
     let intent = VerifiedIdpIntent {
         account_id: account,
@@ -598,22 +603,27 @@ where
     let lease_gen_a = lease_a.generation;
     let trace_c = trace.clone();
     let ticket_gen = broker_a
-        .restrict_fence(&placement_key, &[Arc::clone(&fence_b)], false, || async move {
-            let new_lease = leases_ref
-                .transfer(&acme_c, &cell_a_c, &cell_b_c, lease_gen_a, 30_000)
-                .await
-                .map_err(|e| PermissionBackendError::Backend(e.to_string()))?;
-            trace_c.emit(
-                "cell-b",
-                &acme_c,
-                TraceEvent::LeaseTransfer {
-                    from_key: "cell-a".to_owned(),
-                    to_key: "cell-b".to_owned(),
-                    new_gen: new_lease.generation.get(),
-                },
-            );
-            Ok(())
-        })
+        .restrict_fence(
+            &placement_key,
+            &[Arc::clone(&fence_b)],
+            false,
+            || async move {
+                let new_lease = leases_ref
+                    .transfer(&acme_c, &cell_a_c, &cell_b_c, lease_gen_a, 30_000)
+                    .await
+                    .map_err(|e| PermissionBackendError::Backend(e.to_string()))?;
+                trace_c.emit(
+                    "cell-b",
+                    &acme_c,
+                    TraceEvent::LeaseTransfer {
+                        from_key: "cell-a".to_owned(),
+                        to_key: "cell-b".to_owned(),
+                        new_gen: new_lease.generation.get(),
+                    },
+                );
+                Ok(())
+            },
+        )
         .await
         .expect("restrict placement fence");
 
@@ -745,7 +755,9 @@ where
         }),
     };
     let cred_gen_2 = broker_b
-        .restrict_fence(&cred_key, &[Arc::clone(&fence_a)], true, || async { Ok(()) })
+        .restrict_fence(&cred_key, &[Arc::clone(&fence_a)], true, || async {
+            Ok(())
+        })
         .await
         .expect("advance credential fence to gen 2");
     assert!(cred_gen_2 >= ticket_gen);
@@ -875,7 +887,7 @@ async fn f19_02_postgres_spicedb_two_cell_two_broker_stack() {
             .expect("pg compat leases"),
     );
     let store = SqliteCompatPostgresStore::new_in_memory(Some(
-        Arc::clone(&leases) as Arc<dyn PlacementLeaseStore>,
+        Arc::clone(&leases) as Arc<dyn PlacementLeaseStore>
     ))
     .await
     .expect("pg compat store");
@@ -1386,7 +1398,11 @@ async fn f19_04_sealed_enrollment_workload_rotation_and_lease_transfer_denial() 
         .expect("subkey 1");
 
     let jwt_sk = SigningKey::random(&mut OsRng);
-    let jwt_pk = jwt_sk.verifying_key().to_encoded_point(false).to_bytes().to_vec();
+    let jwt_pk = jwt_sk
+        .verifying_key()
+        .to_encoded_point(false)
+        .to_bytes()
+        .to_vec();
     let jkt = p256_jwk_thumbprint(&jwt_pk).expect("jkt");
     let point = jwt_sk.verifying_key().to_encoded_point(false);
     let jwk = Jwk {

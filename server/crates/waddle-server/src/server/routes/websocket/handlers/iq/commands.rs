@@ -117,7 +117,10 @@ fn command_result_to_stanza(
         }
     };
 
-    Stanza::Iq(Box::new(build_command_result(request_iq, &response_command)))
+    Stanza::Iq(Box::new(build_command_result(
+        request_iq,
+        &response_command,
+    )))
 }
 
 pub(super) async fn handle_command_iq(

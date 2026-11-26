@@ -2,29 +2,55 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use jid::BareJid;
+use kameo::actor::ActorRef;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, OnceCell};
 use uuid::Uuid;
 use waddle_broker::admission::invocation::{
     InvocationPrincipal, PayerSelection, SignedInferenceInvocation,
 };
-use waddle_broker::admission::service::{AdmitInvocationInput, BrokerAdmissionService};
+use waddle_broker::admission::postgres::SqliteCompatAdmissionLedgerStore;
+use waddle_broker::admission::replica_fence::{BrokerReplicaFence, BROKER_FENCE_TICK};
+use waddle_broker::admission::service::{
+    AdmitInvocationInput, BrokerAdmissionService, TraceRecorder,
+};
+use waddle_broker::admission::turso::TursoAdmissionLedgerStore;
+use waddle_broker::admission::ReplicaFenceStore;
+use waddle_broker::authz::local::LocalPermissionBackend;
+use waddle_broker::authz::AuthzCallerRole;
+use waddle_broker::custody::BrokerCustodyService;
 use waddle_broker::egress::client::{
     BrokerEgressClient, EgressError, EgressInferenceRequest, ExpectedEgressBinding,
     ProviderOperationWire,
 };
-use waddle_broker::idp_proof::AuthProvenance;
+use waddle_broker::egress::profile::EgressProfileRegistry;
+use waddle_broker::idp_proof::{AuthProvenance, DeviceKeyRegistry};
+use waddle_broker::key_hierarchy::KeyHierarchyService;
+use waddle_broker::kms::local::LocalKmsProvider;
+use waddle_broker::kms::KmsProvider;
+use waddle_broker::ledger::postgres::SqliteCompatLedgerStore;
+use waddle_broker::ledger::DestructionLedgerStore;
 use waddle_broker_core::admission::{
-    AdmissionLedgerStore, AttemptId, BudgetLimits, RoomScopeKey, RunId, StepId,
+    AdmissionLedgerStore, AttemptId, AttemptOutcome, BudgetLimits, RoomScopeKey, RunId, StepId,
 };
-use waddle_broker_core::identity::{AccountId, HolderInstance, TenantId};
+use waddle_broker_core::boot_clock::SystemBootClock;
+use waddle_broker_core::holder_pop::{
+    verify_channel_bound_holder, HolderKeypair, TLS_EXPORTER_CHANNEL_BINDING_LEN,
+};
+use waddle_broker_core::identity::{AccountId, HolderInstance, SpiffeId, TenantId};
 use waddle_extensions::host_tools::{InvocationContext, InvocationKind};
 use waddle_extensions::runtime::{
     ExtensionInferenceHost, HostInferenceChunk, HostInferenceError, HostInferenceErrorCode,
-    HostInferenceRequest, InferenceCredentialRef, OpenedInferenceStream, StreamCancelHandle,
-    StreamItem, VerifiedInferenceUsage, DEFAULT_MAX_STREAM_CHUNK_BYTES,
+    HostInferenceMessage, HostInferenceRequest, InferenceCredentialRef, OpenedInferenceStream,
+    StreamCancelHandle, StreamItem, VerifiedInferenceUsage, DEFAULT_MAX_STREAM_CHUNK_BYTES,
     DEFAULT_STREAM_CHANNEL_CAPACITY,
 };
+
+use crate::db::actor::{DbActor, DbQueryOne};
+use crate::db::{row_value, ValueExt};
+use crate::server::routes::websocket::WebSocketState;
 
 #[derive(Default)]
 pub(crate) struct DeferredExtensionInferenceHost {
@@ -32,7 +58,6 @@ pub(crate) struct DeferredExtensionInferenceHost {
 }
 
 impl DeferredExtensionInferenceHost {
-    #[expect(dead_code, reason = "populated once startup broker admission/egress wiring lands")]
     pub(crate) fn set(&self, host: Arc<dyn ExtensionInferenceHost>) {
         let _ = self.inner.set(host);
     }
@@ -58,11 +83,17 @@ impl ExtensionInferenceHost for DeferredExtensionInferenceHost {
     }
 }
 
-/// Resolves the enrolled broker credential ID and optional signed invocation
-/// for a given `(tenant_id, context, request)` without exposing raw secrets to
-/// cells or guests.
+/// Resolves canonical requester accounts, enrolled broker credential IDs, and
+/// signed member invocations for a given `(tenant_id, context, request)`
+/// without exposing raw secrets to cells or guests.
 #[async_trait]
 pub trait BrokerCredentialResolver: Send + Sync {
+    async fn resolve_requester_account(
+        &self,
+        tenant_id: &TenantId,
+        requester: &BareJid,
+    ) -> Result<(AccountId, AuthProvenance), HostInferenceError>;
+
     async fn resolve_tenant_credential(
         &self,
         tenant_id: &TenantId,
@@ -78,6 +109,18 @@ pub trait BrokerCredentialResolver: Send + Sync {
     ) -> Result<(AccountId, Uuid, SignedInferenceInvocation), HostInferenceError>;
 }
 
+/// Configuration for [`BrokerExtensionInferenceHost`].
+#[derive(Debug, Clone)]
+pub struct BrokerExtensionInferenceHostConfig {
+    pub trust_domain: String,
+    pub holder: HolderInstance,
+    pub peer_spiffe_id: SpiffeId,
+    pub channel_binding: [u8; TLS_EXPORTER_CHANNEL_BINDING_LEN],
+    pub default_budget: BudgetLimits,
+    pub default_deployment: String,
+    pub default_reserved_spend_microcents: u64,
+}
+
 /// Production [`ExtensionInferenceHost`] bridging `waddle-extensions` Wasm
 /// components to [`BrokerAdmissionService`] and [`BrokerEgressClient`].
 pub struct BrokerExtensionInferenceHost<L> {
@@ -85,6 +128,8 @@ pub struct BrokerExtensionInferenceHost<L> {
     admission: Arc<BrokerAdmissionService<L>>,
     egress: Arc<BrokerEgressClient>,
     holder: HolderInstance,
+    peer_spiffe_id: SpiffeId,
+    channel_binding: [u8; TLS_EXPORTER_CHANNEL_BINDING_LEN],
     credential_resolver: Arc<dyn BrokerCredentialResolver>,
     default_budget: BudgetLimits,
     default_deployment: String,
@@ -95,26 +140,24 @@ impl<L> BrokerExtensionInferenceHost<L>
 where
     L: AdmissionLedgerStore + Send + Sync + 'static,
 {
-    #[allow(clippy::too_many_arguments)]
+    /// Construct a brokered inference host backed by `admission` and `egress`.
     pub fn new(
-        trust_domain: impl Into<String>,
+        config: BrokerExtensionInferenceHostConfig,
         admission: Arc<BrokerAdmissionService<L>>,
         egress: Arc<BrokerEgressClient>,
-        holder: HolderInstance,
         credential_resolver: Arc<dyn BrokerCredentialResolver>,
-        default_budget: BudgetLimits,
-        default_deployment: impl Into<String>,
-        default_reserved_spend_microcents: u64,
     ) -> Self {
         Self {
-            trust_domain: trust_domain.into(),
+            trust_domain: config.trust_domain,
             admission,
             egress,
-            holder,
+            holder: config.holder,
+            peer_spiffe_id: config.peer_spiffe_id,
+            channel_binding: config.channel_binding,
             credential_resolver,
-            default_budget,
-            default_deployment: default_deployment.into(),
-            default_reserved_spend_microcents,
+            default_budget: config.default_budget,
+            default_deployment: config.default_deployment,
+            default_reserved_spend_microcents: config.default_reserved_spend_microcents,
         }
     }
 }
@@ -129,6 +172,15 @@ where
         context: &InvocationContext,
         request: HostInferenceRequest,
     ) -> Result<OpenedInferenceStream, HostInferenceError> {
+        let verified_holder =
+            verify_channel_bound_holder(&self.peer_spiffe_id, &self.channel_binding, &self.holder)
+                .map_err(|_| {
+                    HostInferenceError::new(
+                        HostInferenceErrorCode::Denied,
+                        "cell holder SPIFFE/tls-exporter authentication failed",
+                    )
+                })?;
+
         let tenant_id = context.tenant_id.clone().ok_or_else(|| {
             HostInferenceError::new(
                 HostInferenceErrorCode::Denied,
@@ -168,9 +220,19 @@ where
                         InvocationKind::ProviderWebhook => InvocationPrincipal::Webhook,
                         InvocationKind::MessageHook => InvocationPrincipal::Schedule,
                         InvocationKind::Command | InvocationKind::Launch => {
+                            let Some(requester) = context.requester.as_ref() else {
+                                return Err(HostInferenceError::new(
+                                    HostInferenceErrorCode::Denied,
+                                    "interactive command or launch requires an authenticated requester",
+                                ));
+                            };
+                            let (account_id, provenance) = self
+                                .credential_resolver
+                                .resolve_requester_account(&tenant_id, requester)
+                                .await?;
                             InvocationPrincipal::LocalMember {
-                                account_id: AccountId::new_v4(),
-                                provenance: AuthProvenance::ExternalIdp,
+                                account_id,
+                                provenance,
                             }
                         }
                         _ => {
@@ -234,6 +296,7 @@ where
         let reserved_spend = self
             .default_reserved_spend_microcents
             .min(budget.max_spend_microcents);
+        let estimated_input_tokens = estimate_input_tokens(&request.messages);
 
         let admit_input = AdmitInvocationInput {
             attempt_id: AttemptId::new_v4(),
@@ -247,7 +310,7 @@ where
             provider: request.provider.clone(),
             payer,
             room_or_space: room_scope.clone(),
-            holder: self.holder.clone(),
+            holder: verified_holder.into_inner(),
             command_digest_sha256: command_digest,
             invocation_nonce,
             expires_at_ms,
@@ -280,6 +343,13 @@ where
         if let Some(max_out) = request.max_output_tokens {
             let capped = u64::from(max_out).min(admitted.dispatch_context.budget.max_output_tokens);
             if capped == 0 {
+                let _ = self
+                    .admission
+                    .reconcile_attempt(
+                        admitted.receipt.attempt_id,
+                        AttemptOutcome::FailedBeforeSend,
+                    )
+                    .await;
                 return Err(HostInferenceError::new(
                     HostInferenceErrorCode::InvalidRequest,
                     "max_output_tokens must be greater than zero",
@@ -309,24 +379,49 @@ where
             operation: ProviderOperationWire::ChatCompletions,
         };
 
-        let mut egress_stream = self
+        let mut egress_stream = match self
             .egress
             .execute_streaming_checked(&admitted, &egress_req, expected)
             .await
-            .map_err(map_egress_err)?;
+        {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = self
+                    .admission
+                    .reconcile_attempt(
+                        admitted.receipt.attempt_id,
+                        pre_stream_error_outcome(&err, reserved_spend),
+                    )
+                    .await;
+                return Err(map_egress_err(err));
+            }
+        };
 
         let (cancel, mut host_cancel_rx) = StreamCancelHandle::new();
         let (item_tx, item_rx) = mpsc::channel(DEFAULT_STREAM_CHANNEL_CAPACITY);
         let mut admit_cancel_rx = admitted.cancel_rx.clone();
+        let admission = Arc::clone(&self.admission);
+        let attempt_id = admitted.receipt.attempt_id;
+        let admitted_budget = admitted.dispatch_context.budget;
         let provider_id = request.provider;
         let model_id = request.model;
 
         tokio::spawn(async move {
             let mut seq = 0u64;
             let mut total_output_bytes = 0u64;
+            let mut sse_buf = Vec::new();
+            let mut parsed_usage = StreamUsageAccumulator::default();
             loop {
                 if *admit_cancel_rx.borrow() {
                     egress_stream.cancel_sync();
+                    let _ = admission
+                        .reconcile_attempt(
+                            attempt_id,
+                            AttemptOutcome::Canceled {
+                                actual_spend_microcents: reserved_spend,
+                            },
+                        )
+                        .await;
                     let _ = item_tx.try_send(StreamItem::Error(HostInferenceError::new(
                         HostInferenceErrorCode::Canceled,
                         "inference stream canceled by broker replica fence",
@@ -335,6 +430,14 @@ where
                 }
                 if *host_cancel_rx.borrow() {
                     egress_stream.cancel_sync();
+                    let _ = admission
+                        .reconcile_attempt(
+                            attempt_id,
+                            AttemptOutcome::Canceled {
+                                actual_spend_microcents: reserved_spend,
+                            },
+                        )
+                        .await;
                     break;
                 }
                 tokio::select! {
@@ -342,6 +445,14 @@ where
                     changed = admit_cancel_rx.changed() => {
                         if changed.is_err() || *admit_cancel_rx.borrow() {
                             egress_stream.cancel_sync();
+                            let _ = admission
+                                .reconcile_attempt(
+                                    attempt_id,
+                                    AttemptOutcome::Canceled {
+                                        actual_spend_microcents: reserved_spend,
+                                    },
+                                )
+                                .await;
                             let _ = item_tx.try_send(StreamItem::Error(HostInferenceError::new(
                                 HostInferenceErrorCode::Canceled,
                                 "inference stream canceled by broker replica fence",
@@ -352,6 +463,14 @@ where
                     changed = host_cancel_rx.changed() => {
                         if changed.is_err() || *host_cancel_rx.borrow() {
                             egress_stream.cancel_sync();
+                            let _ = admission
+                                .reconcile_attempt(
+                                    attempt_id,
+                                    AttemptOutcome::Canceled {
+                                        actual_spend_microcents: reserved_spend,
+                                    },
+                                )
+                                .await;
                             break;
                         }
                     }
@@ -359,6 +478,7 @@ where
                         match chunk_res {
                             Ok(Some(chunk)) => {
                                 total_output_bytes = total_output_bytes.saturating_add(chunk.data.len() as u64);
+                                parsed_usage.ingest(&mut sse_buf, &chunk.data);
                                 let item = StreamItem::Chunk(HostInferenceChunk {
                                     delta: chunk.data,
                                     sequence: seq,
@@ -367,12 +487,8 @@ where
                                 seq = seq.saturating_add(1);
                                 let send_ok = tokio::select! {
                                     biased;
-                                    _ = host_cancel_rx.changed() => {
-                                        egress_stream.cancel_sync();
-                                        false
-                                    }
+                                    _ = host_cancel_rx.changed() => false,
                                     _ = admit_cancel_rx.changed() => {
-                                        egress_stream.cancel_sync();
                                         let _ = item_tx.try_send(StreamItem::Error(HostInferenceError::new(
                                             HostInferenceErrorCode::Canceled,
                                             "inference stream canceled by broker replica fence",
@@ -383,16 +499,49 @@ where
                                 };
                                 if !send_ok {
                                     egress_stream.cancel_sync();
+                                    let _ = admission
+                                        .reconcile_attempt(
+                                            attempt_id,
+                                            AttemptOutcome::Canceled {
+                                                actual_spend_microcents: reserved_spend,
+                                            },
+                                        )
+                                        .await;
                                     break;
                                 }
                             }
                             Ok(None) => {
+                                parsed_usage.finish(&mut sse_buf);
+                                let final_input_tokens = parsed_usage
+                                    .input_tokens
+                                    .unwrap_or(estimated_input_tokens)
+                                    .min(admitted_budget.max_input_tokens);
+                                let final_output_tokens = parsed_usage
+                                    .output_tokens
+                                    .unwrap_or_else(|| {
+                                        if total_output_bytes == 0 {
+                                            0
+                                        } else {
+                                            total_output_bytes.div_ceil(4)
+                                        }
+                                    })
+                                    .min(admitted_budget.max_output_tokens);
+                                let _ = admission
+                                    .reconcile_attempt(
+                                        attempt_id,
+                                        AttemptOutcome::Completed {
+                                            input_tokens: final_input_tokens,
+                                            output_tokens: final_output_tokens,
+                                            actual_spend_microcents: reserved_spend,
+                                        },
+                                    )
+                                    .await;
                                 let _ = item_tx
                                     .send(StreamItem::EndOfStream(VerifiedInferenceUsage {
                                         provider: provider_id,
                                         model: model_id,
-                                        input_tokens: 0,
-                                        output_tokens: total_output_bytes,
+                                        input_tokens: final_input_tokens,
+                                        output_tokens: final_output_tokens,
                                         cost_microcents: reserved_spend,
                                     }))
                                     .await;
@@ -400,6 +549,14 @@ where
                             }
                             Err(err) => {
                                 egress_stream.cancel_sync();
+                                let outcome = if matches!(err, EgressError::Canceled) {
+                                    AttemptOutcome::Canceled {
+                                        actual_spend_microcents: reserved_spend,
+                                    }
+                                } else {
+                                    AttemptOutcome::UnknownAfterSend
+                                };
+                                let _ = admission.reconcile_attempt(attempt_id, outcome).await;
                                 let _ = item_tx.try_send(StreamItem::Error(map_egress_err(err)));
                                 break;
                             }
@@ -417,6 +574,293 @@ where
     }
 }
 
+struct ServerBrokerCredentialResolver {
+    db_actor: ActorRef<DbActor>,
+}
+
+#[async_trait]
+impl BrokerCredentialResolver for ServerBrokerCredentialResolver {
+    async fn resolve_requester_account(
+        &self,
+        _tenant_id: &TenantId,
+        requester: &BareJid,
+    ) -> Result<(AccountId, AuthProvenance), HostInferenceError> {
+        let row = self
+            .db_actor
+            .ask(DbQueryOne {
+                sql: "SELECT account_id FROM users WHERE jid = ? LIMIT 1".to_owned(),
+                params: vec![crate::db::Value::from(requester.to_string())],
+            })
+            .await
+            .map_err(|_| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::TemporaryFailure,
+                    "failed to resolve canonical account_id for requester",
+                )
+            })?;
+        let Some(row) = row else {
+            return Err(HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "requester account record not found",
+            ));
+        };
+        let raw_account = row_value(&row, 0)
+            .and_then(ValueExt::as_optional_string)
+            .map_err(|_| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::Denied,
+                    "invalid requester account_id column",
+                )
+            })?
+            .ok_or_else(|| {
+                HostInferenceError::new(
+                    HostInferenceErrorCode::Denied,
+                    "requester account_id is not populated",
+                )
+            })?;
+        let uuid = Uuid::parse_str(raw_account.trim()).map_err(|_| {
+            HostInferenceError::new(
+                HostInferenceErrorCode::Denied,
+                "requester account_id is not a valid UUID",
+            )
+        })?;
+        Ok((AccountId::from_uuid(uuid), AuthProvenance::ExternalIdp))
+    }
+
+    async fn resolve_tenant_credential(
+        &self,
+        _tenant_id: &TenantId,
+        _provider: &str,
+        _credential_name: &str,
+    ) -> Result<Uuid, HostInferenceError> {
+        Err(HostInferenceError::new(
+            HostInferenceErrorCode::Denied,
+            "no enrolled tenant broker credential configured for provider",
+        ))
+    }
+
+    async fn resolve_member_invocation(
+        &self,
+        _tenant_id: &TenantId,
+        _context: &InvocationContext,
+        _provider: &str,
+    ) -> Result<(AccountId, Uuid, SignedInferenceInvocation), HostInferenceError> {
+        Err(HostInferenceError::new(
+            HostInferenceErrorCode::Denied,
+            "no enrolled member broker credential configured for provider",
+        ))
+    }
+}
+
+/// Build and arm the startup [`BrokerExtensionInferenceHost`] bound to the
+/// cell's ephemeral SPIFFE/tls-exporter holder identity and admission ledger.
+pub(crate) async fn build_startup_extension_inference_host(
+    websocket_state: &Arc<WebSocketState>,
+    xmpp_domain: &str,
+) -> anyhow::Result<Arc<dyn ExtensionInferenceHost>> {
+    let trust_domain = xmpp_domain.to_ascii_lowercase();
+    let spiffe_raw = std::env::var("WADDLE_CELL_SPIFFE_ID")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("spiffe://{trust_domain}/ns/cells/sa/shared-pool"));
+    let spiffe_id = SpiffeId::parse(&spiffe_raw)
+        .map_err(|err| anyhow::anyhow!("invalid cell SPIFFE ID {spiffe_raw:?}: {err}"))?;
+    let keypair = HolderKeypair::generate()
+        .map_err(|err| anyhow::anyhow!("failed to generate cell holder keypair: {err}"))?;
+    let channel_binding: [u8; TLS_EXPORTER_CHANNEL_BINDING_LEN] = rand::random();
+    let holder = keypair.sign_channel_binding(&spiffe_id, &channel_binding);
+
+    let custody_ledger: Arc<dyn DestructionLedgerStore> =
+        Arc::new(SqliteCompatLedgerStore::connect_in_memory().await?);
+    let kms: Arc<dyn KmsProvider> = Arc::new(LocalKmsProvider::new());
+    let hierarchy = Arc::new(KeyHierarchyService::new(trust_domain.clone(), kms));
+    let custody = Arc::new(BrokerCustodyService::new(hierarchy, custody_ledger).await?);
+    let egress = Arc::new(BrokerEgressClient::new(
+        EgressProfileRegistry::new(),
+        custody,
+    ));
+    let resolver: Arc<dyn BrokerCredentialResolver> = Arc::new(ServerBrokerCredentialResolver {
+        db_actor: websocket_state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .clone(),
+    });
+    let config = BrokerExtensionInferenceHostConfig {
+        trust_domain,
+        holder,
+        peer_spiffe_id: spiffe_id,
+        channel_binding,
+        default_budget: BudgetLimits {
+            max_input_tokens: 16_384,
+            max_output_tokens: 4_096,
+            max_spend_microcents: 100_000,
+            max_steps: 8,
+        },
+        default_deployment: "default".to_owned(),
+        default_reserved_spend_microcents: 0,
+    };
+    let shutdown = websocket_state.deps.shutdown.stop_token();
+
+    if let Some(admission_path) = std::env::var_os("WADDLE_BROKER_ADMISSION_DB") {
+        let ledger = Arc::new(TursoAdmissionLedgerStore::open(admission_path).await?);
+        build_host_with_ledger(config, ledger, egress, resolver, shutdown).await
+    } else {
+        let ledger = Arc::new(SqliteCompatAdmissionLedgerStore::in_memory().await?);
+        build_host_with_ledger(config, ledger, egress, resolver, shutdown).await
+    }
+}
+
+async fn build_host_with_ledger<L>(
+    config: BrokerExtensionInferenceHostConfig,
+    ledger: Arc<L>,
+    egress: Arc<BrokerEgressClient>,
+    resolver: Arc<dyn BrokerCredentialResolver>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Arc<dyn ExtensionInferenceHost>>
+where
+    L: AdmissionLedgerStore + ReplicaFenceStore + Send + Sync + 'static,
+{
+    let replica_fence = Arc::new(BrokerReplicaFence::new(
+        Uuid::new_v4(),
+        Arc::clone(&ledger) as Arc<dyn ReplicaFenceStore>,
+        Arc::new(SystemBootClock),
+    ));
+    replica_fence.tick_once().await?;
+    let fence_loop = Arc::clone(&replica_fence);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(BROKER_FENCE_TICK);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    let _ = fence_loop.release().await;
+                    break;
+                }
+                _ = interval.tick() => {
+                    if fence_loop.tick_once().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let admission = Arc::new(BrokerAdmissionService::new(
+        "broker-cell-inference",
+        ledger,
+        Arc::new(LocalPermissionBackend::new(AuthzCallerRole::Broker)),
+        Arc::new(DeviceKeyRegistry::new()),
+        replica_fence,
+        TraceRecorder::new(),
+    ));
+    Ok(Arc::new(BrokerExtensionInferenceHost::new(
+        config, admission, egress, resolver,
+    )))
+}
+
+#[derive(Default)]
+struct StreamUsageAccumulator {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl StreamUsageAccumulator {
+    fn ingest(&mut self, buf: &mut Vec<u8>, bytes: &[u8]) {
+        const MAX_LINE_BUF: usize = 64 * 1024;
+        buf.extend_from_slice(bytes);
+        if buf.len() > MAX_LINE_BUF {
+            let drain_to = buf.len() - MAX_LINE_BUF;
+            buf.drain(..drain_to);
+        }
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            self.parse_sse_line(&line);
+        }
+    }
+
+    fn finish(&mut self, buf: &mut Vec<u8>) {
+        if !buf.is_empty() {
+            let tail = std::mem::take(buf);
+            self.parse_sse_line(&tail);
+        }
+    }
+
+    fn parse_sse_line(&mut self, raw: &[u8]) {
+        let Ok(text) = std::str::from_utf8(raw) else {
+            return;
+        };
+        let Some(data) = text.trim().strip_prefix("data:") else {
+            return;
+        };
+        let payload = data.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            return;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(payload) else {
+            return;
+        };
+        let Some(usage) = val.get("usage").and_then(Value::as_object) else {
+            return;
+        };
+        if let Some(input) = usage
+            .get("prompt_tokens")
+            .or_else(|| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.input_tokens = Some(input);
+        }
+        if let Some(output) = usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.output_tokens = Some(output);
+        }
+    }
+}
+
+fn estimate_input_tokens(messages: &[HostInferenceMessage]) -> u64 {
+    let chars: usize = messages
+        .iter()
+        .map(|m| {
+            m.role
+                .chars()
+                .count()
+                .saturating_add(m.content.chars().count())
+        })
+        .sum();
+    if chars == 0 {
+        0
+    } else {
+        u64::try_from(chars.div_ceil(4).max(1)).unwrap_or(u64::MAX)
+    }
+}
+
+fn pre_stream_error_outcome(err: &EgressError, reserved_spend: u64) -> AttemptOutcome {
+    match err {
+        EgressError::Profile(_)
+        | EgressError::BindingMismatch(_)
+        | EgressError::RequestTooLarge { .. }
+        | EgressError::Ssrf(_)
+        | EgressError::Custody(_)
+        | EgressError::SpendCapExceeded { .. }
+        | EgressError::ConcurrencyExhausted
+        | EgressError::RedirectBlocked { .. } => AttemptOutcome::FailedBeforeSend,
+        EgressError::Canceled => AttemptOutcome::Canceled {
+            actual_spend_microcents: reserved_spend,
+        },
+        EgressError::Timeout
+        | EgressError::ResponseTooLarge { .. }
+        | EgressError::ChunkTooLarge { .. }
+        | EgressError::UpstreamStatus { .. }
+        | EgressError::MalformedUpstreamResponse
+        | EgressError::TransportFailed => AttemptOutcome::UnknownAfterSend,
+    }
+}
+
 fn random_nonce32() -> [u8; 32] {
     let mut out = [0u8; 32];
     out[..16].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -425,7 +869,6 @@ fn random_nonce32() -> [u8; 32] {
 }
 
 fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
     let out = Sha256::digest(bytes);
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&out);
@@ -434,7 +877,9 @@ fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
 
 fn map_egress_err(err: EgressError) -> HostInferenceError {
     match err {
-        EgressError::Profile(_) | EgressError::BindingMismatch(_) | EgressError::RequestTooLarge { .. } => {
+        EgressError::Profile(_)
+        | EgressError::BindingMismatch(_)
+        | EgressError::RequestTooLarge { .. } => {
             HostInferenceError::new(HostInferenceErrorCode::InvalidRequest, err.to_string())
         }
         EgressError::Ssrf(_) | EgressError::Custody(_) | EgressError::SpendCapExceeded { .. } => {
