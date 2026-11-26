@@ -1,192 +1,32 @@
-use std::sync::Arc;
+#[path = "broker_test_support/cred_iq.rs"]
+mod cred_iq;
 
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use base64::Engine;
+use cred_iq::CredIqTestHarness;
 use jid::{DomainPart, FullJid, Jid};
-use jsonwebtoken::jwk::{
-    AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk, JwkSet,
-    KeyAlgorithm, PublicKeyUse,
-};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
-use p256::pkcs8::EncodePrivateKey;
-use p256::SecretKey;
-use uuid::Uuid;
-use waddle_broker::{
-    seal_credential_for_broker, AuthProvenance, BrokerCustodyService, BrokerSubkeyRing,
-    CellAssertedAdminFlags, ClientSealContext, ColonyBrokerClaims, ColonyJwtVerifier,
-    DeviceKeyRegistry, Key256, KeyHierarchyService, LocalKmsProvider, RootBkskPinSet,
-    RootBkskSigner, SecretBytes, SqliteCompatLedgerStore,
-};
-use waddle_broker_core::identity::{AccountId, TenantId};
-use waddle_server::credential_iq::stanza_to_xml;
 use waddle_server::credential_iq::{
     bounce_iq_error_xml_with_payload, bounce_outgoing_block_frames, bounce_undeliverable_iq_reply,
-    bounce_unroutable_iq_reply, CredentialIqContext, CredentialIqHandler,
+    bounce_unroutable_iq_reply, stanza_to_xml,
 };
 use waddle_server::destination::UnroutableReason;
 use waddle_xmpp::stream_management::StreamManagementState;
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
-use waddle_xmpp::waddle_credential::{
-    CredentialProtocolVersion, CredentialPurpose, CredentialRequest, EnrollCredentialRequest,
-    IdpProofXml, SealAlg, SealedPayloadXml, NS_WADDLE_CREDENTIAL,
-};
+use waddle_xmpp::waddle_credential::NS_WADDLE_CREDENTIAL;
 use waddle_xmpp::Stanza;
-use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 const PAIRWISE_SENTINEL: &str = "sk-waddle-pairwise-sealed-sentinel-f0e1d2c3";
 
-fn gen_p256() -> SecretKey {
-    loop {
-        let key = Key256::generate().expect("rng");
-        if let Ok(sk) = SecretKey::from_slice(key.as_bytes()) {
-            return sk;
-        }
-    }
-}
-
-fn make_jwk(kid: &str) -> (Jwk, EncodingKey) {
-    let sk = gen_p256();
-    let pt = sk.public_key().to_encoded_point(false);
-    let jwk = Jwk {
-        common: CommonParameters {
-            public_key_use: Some(PublicKeyUse::Signature),
-            key_operations: None,
-            key_algorithm: Some(KeyAlgorithm::ES256),
-            key_id: Some(kid.to_owned()),
-            x509_url: None,
-            x509_chain: None,
-            x509_sha1_fingerprint: None,
-            x509_sha256_fingerprint: None,
-        },
-        algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
-            key_type: jsonwebtoken::jwk::EllipticCurveKeyType::EC,
-            curve: EllipticCurve::P256,
-            x: URL_SAFE_NO_PAD.encode(pt.x().expect("x")),
-            y: URL_SAFE_NO_PAD.encode(pt.y().expect("y")),
-        }),
-    };
-    let pem = sk.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).expect("pem");
-    (jwk, EncodingKey::from_ec_pem(pem.as_bytes()).expect("enc"))
-}
-
 #[tokio::test]
 async fn pairwise_sealed_enroll_and_all_four_bounce_strip_paths() {
-    let now_s = 1_760_000_000u64;
-    let now_ms = (now_s * 1000) as i64;
-    let (jwk, enc) = make_jwk("pw-k1");
-    let root = RootBkskSigner::generate().expect("root");
-    let pins = RootBkskPinSet::new(&[root.public_key_sec1()]).expect("pins");
-
-    let kms = Arc::new(LocalKmsProvider::new());
-    let hierarchy = Arc::new(KeyHierarchyService::new("example.com", kms));
-    let ledger = Arc::new(
-        SqliteCompatLedgerStore::connect_in_memory()
-            .await
-            .expect("ledger"),
-    );
-    let custody = Arc::new(
-        BrokerCustodyService::new(hierarchy, ledger)
-            .await
-            .expect("custody"),
-    );
-    let ring = Arc::new(BrokerSubkeyRing::new("example.com"));
-    let bundle = ring
-        .rotate_subkey(&root, 1, now_ms - 1_000, now_ms + 86_400_000)
-        .expect("subkey");
-    let verifier = Arc::new(ColonyJwtVerifier::new(
-        "https://colony.example.com",
-        "urn:waddle:broker:example.com",
-        JwkSet { keys: vec![jwk] },
-    ));
-    let handler = CredentialIqHandler::new(
-        custody.clone(),
-        ring,
-        verifier,
-        Arc::new(DeviceKeyRegistry::new()),
-    );
-
-    let acct = AccountId::new_v4();
-    let tenant_id = TenantId::parse("example.com").expect("tenant");
-    let seal_ctx = ClientSealContext {
-        trust_domain: "example.com".to_owned(),
-        tenant_id: tenant_id.clone(),
-        account_id: Some(acct),
-        provider: "openrouter".to_owned(),
-        purpose: "member-inference".to_owned(),
-        nonce: "pw-nonce-1".to_owned(),
-        expires_at_ms: now_ms + 60_000,
-        version: 1,
-    };
-    let blob = seal_credential_for_broker(
-        &pins,
-        &bundle,
-        &seal_ctx,
-        &SecretBytes::from_slice(PAIRWISE_SENTINEL.as_bytes()).expect("secret"),
-        now_ms,
-    )
-    .expect("seal");
-    let ct_b64 = STANDARD.encode(&blob.ciphertext);
-
-    let mut header = Header::new(Algorithm::ES256);
-    header.kid = Some("pw-k1".to_owned());
-    let jwt = encode(
-        &header,
-        &ColonyBrokerClaims {
-            iss: "https://colony.example.com".to_owned(),
-            sub: acct.to_string(),
-            aud: "urn:waddle:broker:example.com".to_owned(),
-            exp: now_s + 120,
-            nbf: now_s - 5,
-            iat: now_s,
-            jti: Uuid::now_v7().to_string(),
-            tenant_id: "example.com".to_owned(),
-            challenge: "pw-chal".to_owned(),
-            cnf: None,
-            waddle_roles: vec![],
-        },
-        &enc,
-    )
-    .expect("jwt");
-
-    let enroll_payload = CredentialRequest::EnrollCredential(EnrollCredentialRequest {
-        version: CredentialProtocolVersion::V1,
-        tenant_id: "example.com".to_owned(),
-        account_id: Some(acct.to_string()),
-        provider: "openrouter".to_owned(),
-        purpose: CredentialPurpose::MemberInference,
-        nonce: "pw-nonce-1".to_owned(),
-        expires_at_ms: now_ms + 60_000,
-        sealed_payload: SealedPayloadXml {
-            subkey_id: blob.subkey_id.to_string(),
-            alg: SealAlg::P256EcdhHkdfSha256Aes256Gcm,
-            ephemeral_key_b64: STANDARD.encode(&blob.ephemeral_public_sec1),
-            ciphertext_b64: ct_b64.clone(),
-        },
-        idp_proof: IdpProofXml::ColonyJwt { token: jwt },
-        device_signature: None,
-    })
-    .build_element();
-
-    let iq = Iq::Set {
-        from: Some("alice@example.com/web".parse::<Jid>().expect("from")),
-        to: Some("example.com".parse::<Jid>().expect("to")),
-        id: "pw-enr-1".to_owned(),
-        payload: enroll_payload.clone(),
-    };
+    let (harness, _ledger) = CredIqTestHarness::new("pw-k1").await;
+    let sealed_payload = harness.seal_member_payload("pw-nonce-1", PAIRWISE_SENTINEL.as_bytes());
+    let ct_b64 = sealed_payload.ciphertext_b64.clone();
+    let enroll_payload = harness.build_enroll_element("pw-nonce-1", sealed_payload, "pw-chal");
+    let iq = harness.build_enroll_iq("pw-enr-1", enroll_payload.clone());
 
     // 1. Happy-path enrollment succeeds and returns opaque receipt.
-    let ctx = CredentialIqContext {
-        trust_domain: "example.com".to_owned(),
-        caller_tenant_id: tenant_id,
-        caller_account_id: acct,
-        provenance: AuthProvenance::ExternalIdp,
-        cell_admin_flags: CellAssertedAdminFlags::default(),
-        expected_challenge: "pw-chal".to_owned(),
-        now_ms,
-    };
-    let reply = handler.handle_iq(&iq, &ctx).await;
+    let ctx = harness.context("pw-chal");
+    let reply = harness.handler.handle_iq(&iq, &ctx).await;
     let reply_xml = stanza_to_xml(&Stanza::Iq(Box::new(reply)));
     assert!(!reply_xml.contains(PAIRWISE_SENTINEL));
     assert!(!reply_xml.contains(&ct_b64));

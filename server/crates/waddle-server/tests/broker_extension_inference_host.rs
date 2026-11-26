@@ -3,51 +3,34 @@
 //! holder SPIFFE/tls-exporter verification, canonical account resolution, and
 //! `ExtensionManager::from_config_for_tenant_with_hosts`.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[path = "broker_test_support/admission_db.rs"]
+mod admission_db;
+#[path = "broker_test_support/broker_host.rs"]
+mod broker_host;
+#[path = "broker_test_support/tls_provider.rs"]
+mod tls_provider;
+
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use admission_db::load_attempt_ids;
 use async_trait::async_trait;
-use chrono::Utc;
+use broker_host::{build_broker_test_env, BrokerTestConfig};
 use jid::BareJid;
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use sha2::{Digest, Sha256};
-use sqlx::Row;
 use tempfile::TempDir;
+use tls_provider::{read_http_request, LoopbackTlsServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
-use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
-use waddle_broker::admission::replica_fence::BrokerReplicaFence;
-use waddle_broker::admission::service::{BrokerAdmissionService, TraceRecorder};
+use waddle_broker::admission::service::TraceRecorder;
 use waddle_broker::admission::turso::TursoAdmissionLedgerStore;
-use waddle_broker::admission::{AdmissionQueryStore, AttemptStatus, ReplicaFenceStore};
-use waddle_broker::authz::local::LocalPermissionBackend;
-use waddle_broker::authz::AuthzCallerRole;
-use waddle_broker::custody::{BrokerCustodyService, EnrollCredentialInput};
-use waddle_broker::egress::client::BrokerEgressClient;
-use waddle_broker::egress::profile::{
-    EgressBindingPolicy, EgressCaps, EgressProfileRegistry, ProviderOperation, ProviderProfile,
-};
-use waddle_broker::egress::ssrf::{DnsResolver, SsrfError};
+use waddle_broker::admission::{AdmissionQueryStore, AttemptStatus};
 use waddle_broker::idp_proof::{AuthProvenance, DeviceKeyRegistry};
-use waddle_broker::key_hierarchy::KeyHierarchyService;
-use waddle_broker::kms::local::LocalKmsProvider;
-use waddle_broker::kms::KmsProvider;
-use waddle_broker::ledger::turso::TursoLedgerStore;
-use waddle_broker::secret::SecretBytes;
-use waddle_broker_core::admission::{AttemptId, BudgetLimits};
-use waddle_broker_core::boot_clock::SystemBootClock;
-use waddle_broker_core::holder_pop::HolderKeypair;
 use waddle_broker_core::identity::{AccountId, SpiffeId, TenantId};
-use waddle_broker_core::permission::{
-    AuthzModule, AuthzObject, AuthzObjectType, AuthzRelation, AuthzSubject, AuthzSubjectType,
-    AuthzTuple, PermissionBackend,
-};
+use waddle_broker_core::permission::{AuthzObjectType, AuthzSubject, AuthzSubjectType};
 use waddle_broker_core::quotas::{TenantResourceController, TenantResourceQuotas};
 use waddle_extensions::config::{ExtensionConfig, ExtensionModuleConfig, RuntimeLimits};
 use waddle_extensions::host_tools::{DenyingExtensionHostTools, InvocationContext, InvocationKind};
@@ -57,86 +40,8 @@ use waddle_extensions::runtime::{
 };
 use waddle_extensions::{ExtensionCapability, ExtensionManager, PluginId, WaddleId};
 use waddle_server::server::extension_inference_host::{
-    BrokerCredentialResolver, BrokerExtensionInferenceHost, BrokerExtensionInferenceHostConfig,
+    BrokerCredentialResolver, BrokerExtensionInferenceHost,
 };
-
-struct MockDnsResolver {
-    addrs: Vec<SocketAddr>,
-}
-
-#[async_trait]
-impl DnsResolver for MockDnsResolver {
-    async fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<SocketAddr>, SsrfError> {
-        Ok(self.addrs.clone())
-    }
-}
-
-struct TestTlsCertMaterial {
-    ca_pem: Vec<u8>,
-    server_config: Arc<rustls::ServerConfig>,
-}
-
-fn generate_test_tls_material(domain: &str) -> TestTlsCertMaterial {
-    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca_key = KeyPair::generate().expect("ca key");
-    let ca_cert = ca_params.self_signed(&ca_key).expect("ca self signed");
-    let ca_pem = ca_cert.pem().into_bytes();
-
-    let leaf_params = CertificateParams::new(vec![domain.to_owned()]).expect("leaf params");
-    let leaf_key = KeyPair::generate().expect("leaf key");
-    let leaf_cert = leaf_params
-        .signed_by(&leaf_key, &ca_cert, &ca_key)
-        .expect("leaf signed");
-
-    let cert_der: CertificateDer<'static> = leaf_cert.der().clone();
-    let ca_der: CertificateDer<'static> = ca_cert.der().clone();
-    let key_der = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let server_config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("tls versions")
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der, ca_der], key_der)
-        .expect("server config");
-
-    TestTlsCertMaterial {
-        ca_pem,
-        server_config: Arc::new(server_config),
-    }
-}
-
-async fn read_http_request(
-    stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) -> String {
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 2048];
-    loop {
-        let n = stream.read(&mut tmp).await.expect("read tls request");
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if let Some(headers_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let header_text = String::from_utf8_lossy(&buf[..headers_end]);
-            let content_len = header_text
-                .lines()
-                .find_map(|line| {
-                    let (name, val) = line.split_once(':')?;
-                    if name.eq_ignore_ascii_case("content-length") {
-                        val.trim().parse::<usize>().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            if buf.len() >= headers_end + 4 + content_len {
-                break;
-            }
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
 
 struct StubCredentialResolver {
     expected_requester: BareJid,
@@ -196,7 +101,7 @@ impl BrokerCredentialResolver for StubCredentialResolver {
 }
 
 struct TestHostEnv {
-    _dir: TempDir,
+    dir: TempDir,
     tenant_id: TenantId,
     account_id: AccountId,
     requester: BareJid,
@@ -215,176 +120,84 @@ async fn setup_test_host(
     peer_spiffe_override: Option<SpiffeId>,
 ) -> TestHostEnv {
     let dir = TempDir::new().expect("tempdir");
-    let tenant_id = TenantId::parse("acme.example").expect("tenant");
     let account_id = AccountId::new_v4();
     let requester: BareJid = "alice@acme.example".parse().expect("requester");
-    let spiffe_id =
-        SpiffeId::parse("spiffe://acme.example/ns/cells/sa/shared-pool").expect("spiffe");
-    let keypair = HolderKeypair::generate().expect("keypair");
-    let channel_binding = [0x42u8; 32];
-    let holder = keypair.sign_channel_binding(&spiffe_id, &channel_binding);
-
-    let ledger = Arc::new(
-        TursoAdmissionLedgerStore::open(dir.path().join("admission.db"))
-            .await
-            .expect("admission db"),
-    );
-    let replica_fence = Arc::new(BrokerReplicaFence::new(
-        Uuid::new_v4(),
-        Arc::clone(&ledger) as Arc<dyn ReplicaFenceStore>,
-        Arc::new(SystemBootClock),
-    ));
-    replica_fence.tick_once().await.expect("tick_once");
-
-    let custody_ledger = Arc::new(
-        TursoLedgerStore::open_in_dir(&dir.path().join("custody"))
-            .await
-            .expect("custody db"),
-    );
-    let kms: Arc<dyn KmsProvider> = Arc::new(LocalKmsProvider::new());
-    let hierarchy = Arc::new(KeyHierarchyService::new("acme.example", kms));
-    let custody = Arc::new(
-        BrokerCustodyService::new(hierarchy, custody_ledger)
-            .await
-            .expect("custody service"),
-    );
-    let cred_receipt = custody
-        .enroll(EnrollCredentialInput {
-            tenant_id: tenant_id.clone(),
-            account_id: None,
-            provider: "openai".to_owned(),
-            nonce: format!("nonce-{}", Uuid::new_v4()),
-            payload_digest_sha256: [7u8; 32],
-            expires_at_ms: Utc::now().timestamp_millis() + 60_000,
-            plaintext: SecretBytes::new(b"sk-test-broker-secret".to_vec()).expect("secret"),
-        })
-        .await
-        .expect("enroll cred");
-
-    let perms = Arc::new(LocalPermissionBackend::new(AuthzCallerRole::Broker));
-    perms
-        .provision_tenant_store(&tenant_id)
-        .await
-        .expect("provision store");
-    perms
-        .write_tuples(
-            &tenant_id,
-            AuthzModule::Inference,
-            &[AuthzTuple {
-                object: AuthzObject {
-                    object_type: AuthzObjectType::TenantCredential,
-                    id: cred_receipt.credential_id.to_string(),
-                },
-                relation: AuthzRelation::new("use"),
-                subject: AuthzSubject {
-                    subject_type: AuthzSubjectType::Account,
-                    id: account_id.to_string(),
-                    relation: None,
-                },
-            }],
-        )
-        .await
-        .expect("write inference tuple");
-
-    let plugin_id = PluginId::try_new("ai-chatbot").expect("plugin id");
-    let mut profile_registry = EgressProfileRegistry::new();
-    let mut ext_digest = [0u8; 32];
-    ext_digest.copy_from_slice(&Sha256::digest(plugin_id.as_str().as_bytes()));
-    profile_registry
-        .register_with_policy(
-            ProviderProfile {
-                provider: "openai".to_owned(),
-                deployment: "prod".to_owned(),
-                model: "gpt-4o-mini".to_owned(),
-                operation: ProviderOperation::ChatCompletions,
-                base_origin: "https://provider.acme.test".to_owned(),
-                operation_path: "/v1/chat/completions".to_owned(),
-                caps: EgressCaps {
-                    max_request_bytes: 64 * 1024,
-                    max_response_bytes: 1024 * 1024,
-                    max_chunk_bytes: 64 * 1024,
-                    request_timeout_ms: 5_000,
-                    max_concurrent_requests: 4,
-                    max_spend_microcents: 50_000,
-                },
-                pinned_ca_pem: Some(ca_pem),
+    let (env, ledger, _fence) = build_broker_test_env(BrokerTestConfig {
+        data_dir: dir.path(),
+        trust_domain: "acme.example",
+        broker_id: "broker-test",
+        spiffe_id: "spiffe://acme.example/ns/cells/sa/shared-pool",
+        channel_binding: [0x42u8; 32],
+        provider: "openai",
+        deployment: "prod",
+        model: "gpt-4o-mini",
+        base_origin: "https://provider.acme.test",
+        operation_path: "/v1/chat/completions",
+        plugin_id: "ai-chatbot",
+        credential_secret: b"sk-test-broker-secret",
+        credential_account_id: None,
+        permission_grant: Some((
+            AuthzObjectType::TenantCredential,
+            AuthzSubject {
+                subject_type: AuthzSubjectType::Account,
+                id: account_id.to_string(),
+                relation: None,
             },
-            EgressBindingPolicy {
-                expected_trust_domain: Some("acme.example".to_owned()),
-                allowed_extension_ids: vec!["ai-chatbot".to_owned()],
-                allowed_extension_digests: vec![ext_digest],
-            },
-        )
-        .expect("register profile");
-
-    let egress = Arc::new(BrokerEgressClient::with_loopback_tls_test_override(
-        profile_registry,
-        custody,
-        Arc::new(MockDnsResolver {
-            addrs: vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-                443,
-            )],
-        }),
+        )),
+        device_keys: Arc::new(DeviceKeyRegistry::new()),
+        trace: TraceRecorder::new(),
         server_addr,
-    ));
-
-    let admission = Arc::new(BrokerAdmissionService::new(
-        "broker-test",
-        Arc::clone(&ledger),
-        perms,
-        Arc::new(DeviceKeyRegistry::new()),
-        replica_fence,
-        TraceRecorder::new(),
-    ));
+        ca_pem,
+    })
+    .await;
 
     let resolver = Arc::new(StubCredentialResolver {
         expected_requester: requester.clone(),
         account_id,
-        credential_id: cred_receipt.credential_id,
+        credential_id: env.credential_id,
         resolved_requesters: Mutex::new(Vec::new()),
     });
 
-    let host = BrokerExtensionInferenceHost::new(
-        BrokerExtensionInferenceHostConfig {
-            trust_domain: "acme.example".to_owned(),
-            holder,
-            peer_spiffe_id: peer_spiffe_override.unwrap_or_else(|| spiffe_id.clone()),
-            channel_binding: binding_override.unwrap_or(channel_binding),
-            default_budget: BudgetLimits {
-                max_input_tokens: 4_096,
-                max_output_tokens: 1_024,
-                max_spend_microcents: 50_000,
-                max_steps: 4,
-            },
-            default_deployment: "prod".to_owned(),
-            default_reserved_spend_microcents: 250,
-        },
-        admission,
-        egress,
-        Arc::clone(&resolver) as Arc<dyn BrokerCredentialResolver>,
-    );
+    let host = if binding_override.is_some() || peer_spiffe_override.is_some() {
+        let mut host_cfg = env.build_host_config(250);
+        if let Some(binding) = binding_override {
+            host_cfg.channel_binding = binding;
+        }
+        if let Some(peer_spiffe) = peer_spiffe_override {
+            host_cfg.peer_spiffe_id = peer_spiffe;
+        }
+        BrokerExtensionInferenceHost::new(
+            host_cfg,
+            Arc::clone(&env.admission),
+            Arc::clone(&env.egress),
+            Arc::clone(&resolver) as Arc<dyn BrokerCredentialResolver>,
+        )
+    } else {
+        env.build_host(
+            Arc::clone(&resolver) as Arc<dyn BrokerCredentialResolver>,
+            250,
+        )
+    };
 
     TestHostEnv {
-        _dir: dir,
-        tenant_id,
+        dir,
+        tenant_id: env.tenant_id,
         account_id,
         requester,
-        spiffe_id,
-        channel_binding,
+        spiffe_id: env.spiffe_id,
+        channel_binding: env.channel_binding,
         ledger,
         resolver,
         host,
-        plugin_id,
+        plugin_id: env.plugin_id,
     }
 }
 
 #[tokio::test]
 async fn broker_extension_inference_host_streams_resolves_account_and_reconciles_usage() {
-    let tls = generate_test_tls_material("provider.acme.test");
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let acceptor = TlsAcceptor::from(tls.server_config);
+    let tls = LoopbackTlsServer::bind("provider.acme.test").await;
+    let listener = tls.listener;
+    let acceptor = tls.acceptor;
 
     let srv = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.expect("accept");
@@ -405,7 +218,7 @@ async fn broker_extension_inference_host_streams_resolves_account_and_reconciles
         tls_stream.shutdown().await.expect("shutdown");
     });
 
-    let env = setup_test_host(addr, tls.ca_pem, None, None).await;
+    let env = setup_test_host(tls.addr, tls.ca_pem, None, None).await;
     let context = InvocationContext {
         tenant_id: Some(env.tenant_id.clone()),
         waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
@@ -454,22 +267,7 @@ async fn broker_extension_inference_host_streams_resolves_account_and_reconciles
     assert_eq!(resolved.as_slice(), &[env.requester]);
 
     // Verify the admission ledger reconciled the attempt with real usage (Completed).
-    let attempt_id_str: String = {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect(&format!(
-                "sqlite://{}",
-                env._dir.path().join("admission.db").display()
-            ))
-            .await
-            .expect("open admission sqlite");
-        let row = sqlx::query("SELECT attempt_id FROM admission_attempts LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("query attempt_id");
-        row.get(0)
-    };
-    let attempt_id = AttemptId::from_uuid(Uuid::parse_str(&attempt_id_str).expect("uuid"));
+    let attempt_id = load_attempt_ids(env.dir.path()).await[0];
     let record = env
         .ledger
         .get_attempt(attempt_id)
@@ -487,12 +285,11 @@ async fn broker_extension_inference_host_streams_resolves_account_and_reconciles
 
 #[tokio::test]
 async fn broker_extension_inference_host_rejects_unauthenticated_holder_and_missing_requester() {
-    let tls = generate_test_tls_material("provider.acme.test");
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
+    let tls = LoopbackTlsServer::bind("provider.acme.test").await;
 
     // 1. Channel binding mismatch -> HolderInstance verification fails closed.
-    let bad_binding_env = setup_test_host(addr, tls.ca_pem.clone(), Some([0x99u8; 32]), None).await;
+    let bad_binding_env =
+        setup_test_host(tls.addr, tls.ca_pem.clone(), Some([0x99u8; 32]), None).await;
     let context = InvocationContext {
         tenant_id: Some(bad_binding_env.tenant_id.clone()),
         waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
@@ -532,7 +329,8 @@ async fn broker_extension_inference_host_rejects_unauthenticated_holder_and_miss
     // 2. Peer SPIFFE ID mismatch -> HolderInstance verification fails closed.
     let wrong_spiffe =
         SpiffeId::parse("spiffe://acme.example/ns/cells/sa/dedicated-other").expect("spiffe");
-    let bad_spiffe_env = setup_test_host(addr, tls.ca_pem.clone(), None, Some(wrong_spiffe)).await;
+    let bad_spiffe_env =
+        setup_test_host(tls.addr, tls.ca_pem.clone(), None, Some(wrong_spiffe)).await;
     assert_ne!(bad_spiffe_env.spiffe_id.as_str(), "");
     assert_eq!(bad_spiffe_env.channel_binding, [0x42u8; 32]);
     let err2 = match bad_spiffe_env
@@ -546,7 +344,7 @@ async fn broker_extension_inference_host_rejects_unauthenticated_holder_and_miss
     assert_eq!(err2.code, HostInferenceErrorCode::Denied);
 
     // 3. Missing requester on interactive command -> denied without fabricating AccountId.
-    let valid_env = setup_test_host(addr, tls.ca_pem, None, None).await;
+    let valid_env = setup_test_host(tls.addr, tls.ca_pem, None, None).await;
     let missing_req_ctx = InvocationContext {
         requester: None,
         ..context
@@ -560,10 +358,9 @@ async fn broker_extension_inference_host_rejects_unauthenticated_holder_and_miss
 
 #[tokio::test]
 async fn broker_extension_inference_host_reconciles_canceled_on_stream_cancel() {
-    let tls = generate_test_tls_material("provider.acme.test");
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let acceptor = TlsAcceptor::from(tls.server_config);
+    let tls = LoopbackTlsServer::bind("provider.acme.test").await;
+    let listener = tls.listener;
+    let acceptor = tls.acceptor;
     let disconnected = Arc::new(Notify::new());
     let disconnected_srv = Arc::clone(&disconnected);
     let requests_served = Arc::new(AtomicUsize::new(0));
@@ -586,7 +383,7 @@ async fn broker_extension_inference_host_reconciles_canceled_on_stream_cancel() 
         disconnected_srv.notify_one();
     });
 
-    let env = setup_test_host(addr, tls.ca_pem, None, None).await;
+    let env = setup_test_host(tls.addr, tls.ca_pem, None, None).await;
     let context = InvocationContext {
         tenant_id: Some(env.tenant_id.clone()),
         waddle_id: WaddleId::try_new("acme.example").expect("waddle"),
@@ -625,22 +422,7 @@ async fn broker_extension_inference_host_reconciles_canceled_on_stream_cancel() 
 
     // Pump task reconciles the attempt as Canceled in TursoAdmissionLedgerStore.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let attempt_id_str: String = {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect(&format!(
-                "sqlite://{}",
-                env._dir.path().join("admission.db").display()
-            ))
-            .await
-            .expect("open admission sqlite");
-        let row = sqlx::query("SELECT attempt_id FROM admission_attempts LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("query attempt_id");
-        row.get(0)
-    };
-    let attempt_id = AttemptId::from_uuid(Uuid::parse_str(&attempt_id_str).expect("uuid"));
+    let attempt_id = load_attempt_ids(env.dir.path()).await[0];
     let record = env
         .ledger
         .get_attempt(attempt_id)
