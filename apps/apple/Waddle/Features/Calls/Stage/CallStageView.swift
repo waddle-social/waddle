@@ -37,6 +37,8 @@ struct CallStageView: View {
     var ownNick: String?
     /// Our own shared screen while we share one, for the strip that shows us what everyone sees.
     var ownScreen: CallStageTile?
+    /// The pointer has rested on a full-screen call: its header and controls are faded out.
+    var isChromeHidden = false
     /// Where the tiles get their pictures and send a pin.
     let tileSource: CallTileSource
     /// Off in a snapshot, which has nobody to speak to.
@@ -48,22 +50,76 @@ struct CallStageView: View {
         CallShortcut.available(for: controls)
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            CallStageHeader(
-                title: title, subtitle: subtitle, status: status, connectedSince: connectedSince, connection: connectionChip
+    /// In full screen the header and controls lie over the tiles, so the
+    /// picture has the whole window once they fade (web `chromeOverlayClass`).
+    private var overlaysChrome: Bool {
+        controls.size == .immersive
+    }
+
+    /// How tall the header, what lies at the top in all (the header and
+    /// any notice under it) and the control bar are while they lie over the tiles.
+    @State private var chromeHeights = ChromeHeights()
+
+    private struct ChromeHeights: Equatable {
+        var header: CGFloat = 0
+        var top: CGFloat = 0
+        var bar: CGFloat = 0
+    }
+
+    /// Around the tiles. In full screen they reach under the header and
+    /// controls; an open participants panel holds those on screen, so
+    /// tiles and panel then stand between them, below any notice (web
+    /// `dockImmersiveClass`).
+    private var tileInsets: EdgeInsets {
+        guard overlaysChrome else {
+            return EdgeInsets(
+                top: WaddleTokens.Spacing.s1Half, leading: Theme.Spacing.l, bottom: Theme.Spacing.m, trailing: Theme.Spacing.l
             )
-            if !issues.isEmpty {
-                CallMediaNotice(
-                    issues: issues, checking: checkingIssues, perform: perform
-                )
+        }
+        let edge = Theme.Spacing.s
+        guard participants != nil else { return EdgeInsets(top: edge, leading: edge, bottom: edge, trailing: edge) }
+        return EdgeInsets(top: chromeHeights.top, leading: edge, bottom: chromeHeights.bar, trailing: edge)
+    }
+
+    private var header: some View {
+        CallStageHeader(
+            title: title, subtitle: subtitle, status: status, connectedSince: connectedSince, connection: connectionChip
+        )
+    }
+
+    /// What the call could not use, and our own shared screen: never faded.
+    @ViewBuilder
+    private var notices: some View {
+        if !issues.isEmpty {
+            CallMediaNotice(
+                issues: issues, checking: checkingIssues, perform: perform
+            )
+            .padding(.horizontal, Theme.Spacing.l)
+            .padding(.bottom, Theme.Spacing.s)
+        }
+        if let ownScreen {
+            CallSelfShareNotice(screen: ownScreen, source: tileSource)
                 .padding(.horizontal, Theme.Spacing.l)
                 .padding(.bottom, Theme.Spacing.s)
-            }
-            if let ownScreen {
-                CallSelfShareNotice(screen: ownScreen, source: tileSource)
-                    .padding(.horizontal, Theme.Spacing.l)
-                    .padding(.bottom, Theme.Spacing.s)
+        }
+    }
+
+    private var controlBar: some View {
+        CallControlBar(controls: controls, perform: perform)
+            .padding(.horizontal, Theme.Spacing.l)
+            .padding(.top, Theme.Spacing.m)
+            .padding(.bottom, Theme.Spacing.l)
+            .focusedValue(\.callChromeHasKeyboard, true)
+    }
+
+    var body: some View {
+        // The tiles keep one place in the tree whichever way the header
+        // and controls are laid out: a step into full screen must not
+        // rebuild a video view.
+        VStack(spacing: 0) {
+            if !overlaysChrome {
+                header
+                notices
             }
             HStack(spacing: Theme.Spacing.m) {
                 if participants == nil || !participantsCoverTiles {
@@ -84,13 +140,29 @@ struct CallStageView: View {
                 }
             }
             .huddleAnimation(.settle, value: participants == nil)
-            .padding(.horizontal, Theme.Spacing.l)
-            .padding(.top, WaddleTokens.Spacing.s1Half)
-            .padding(.bottom, Theme.Spacing.m)
-            CallControlBar(controls: controls, perform: perform)
-            .padding(.horizontal, Theme.Spacing.l)
-            .padding(.top, Theme.Spacing.m)
-            .padding(.bottom, Theme.Spacing.l)
+            .padding(tileInsets)
+            if !overlaysChrome { controlBar }
+        }
+        .overlay(alignment: .top) {
+            if overlaysChrome {
+                VStack(spacing: 0) {
+                    header
+                        .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.header = $0 }
+                        .callChrome(isHidden: isChromeHidden, edge: .top)
+                    // A notice stays, and takes the header's place once that has gone.
+                    notices
+                        .offset(y: isChromeHidden ? -chromeHeights.header + Theme.Spacing.s : 0)
+                        .callChromeMotion(value: isChromeHidden)
+                }
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.top = $0 }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if overlaysChrome {
+                controlBar
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { chromeHeights.bar = $0 }
+                    .callChrome(isHidden: isChromeHidden, edge: .bottom)
+            }
         }
         .background(Theme.Colors.seaDeep)
         .background(CallShortcutKeys(shortcuts: shortcuts) { perform($0.action(size: controls.size)) })

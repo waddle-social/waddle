@@ -12,6 +12,7 @@ struct CallStageHost: View {
     @Environment(\.callMediaControls) private var media
     @State private var speaking = SpeakingHold()
     @State private var prompts = CallStagePrompts()
+    @State private var chrome = CallChromeFader()
 
     var body: some View {
         @Bindable var prompts = prompts
@@ -113,8 +114,17 @@ struct CallStageHost: View {
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
+            isChromeHidden: memory.size == .immersive && !chrome.isShown,
             tileSource: model.tileSource,
-            perform: commands.perform
+            // Using the call, by a key too, is a sign of life as much as a move of the pointer.
+            perform: { [chrome] action in
+                chrome.stir()
+                commands.perform(action)
+            }
+        )
+        .callChromeFade(
+            chrome, isOn: memory.size == .immersive,
+            isHeld: rows != nil || prompts.showsSettings || prompts.screenPicker != nil
         )
         // What is in front of the person while the chat is open has been seen.
         .onChange(of: chat.flatMap { $0.isOpen ? $0.replies.last?.id : nil }, initial: true) { _, newest in
