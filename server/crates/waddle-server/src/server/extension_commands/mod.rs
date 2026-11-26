@@ -193,8 +193,12 @@ pub(crate) async fn register_extension_commands(
                         fields,
                         form: submitted_form.and_then(extension_data_form),
                     };
-                    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-                    let effects = manager.invoke_command_decoupled(request, cancel_rx).await;
+                    let cancel_rx = ctx
+                        .cancel_rx
+                        .unwrap_or_else(|| tokio::sync::watch::channel(false).1);
+                    let effects = manager
+                        .invoke_command_decoupled_with_chunks(request, cancel_rx, ctx.chunk_tx)
+                        .await;
                     extension_command_result(
                         effects,
                         Some(ExtensionPubSubContext {

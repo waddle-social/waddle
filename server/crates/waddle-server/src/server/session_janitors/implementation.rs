@@ -5317,6 +5317,24 @@ pub(crate) async fn run_graceful_shutdown_drain(
     }
     dispatch_tracker.wait().await;
     info!("Graceful shutdown: provider webhook dispatch drain complete");
+
+    let inference_tracker = websocket_state.deps.inference_stream_tasks.clone();
+    inference_tracker.close();
+    if !inference_tracker.is_empty() {
+        info!(
+            in_flight = inference_tracker.len(),
+            "Graceful shutdown: awaiting in-flight decoupled inference tasks"
+        );
+    }
+    let drain_timeout = waddle_tenancy::quiesce::drain_timeout_from_env();
+    match tokio::time::timeout(drain_timeout, inference_tracker.wait()).await {
+        Ok(()) => info!("Graceful shutdown: decoupled inference drain complete"),
+        Err(_) => tracing::warn!(
+            timeout_secs = drain_timeout.as_secs(),
+            remaining = inference_tracker.len(),
+            "Graceful shutdown: decoupled inference drain timed out"
+        ),
+    }
 }
 
 /// Sweep expired entries from the durable auth handshake tables

@@ -83,6 +83,10 @@ pub struct CommandContext {
     pub tenant_id: Option<TenantId>,
     /// Active placement lease generation fencing this command execution.
     pub placement_generation: Option<u64>,
+    /// Cancellation signal propagated to decoupled long-running handlers.
+    pub cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Progressive chunk stream channel for decoupled inference handlers.
+    pub chunk_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 /// A command handler function.
@@ -863,6 +867,8 @@ mod tests {
                 command: Command::new("test:command").with_action(Action::Execute),
                 tenant_id: None,
                 placement_generation: None,
+                cancel_rx: None,
+                chunk_tx: None,
             })
             .await;
 
@@ -1053,6 +1059,8 @@ mod tests {
             command,
             tenant_id: None,
             placement_generation: None,
+            cancel_rx: None,
+            chunk_tx: None,
         }
     }
 }

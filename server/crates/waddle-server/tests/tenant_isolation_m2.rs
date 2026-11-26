@@ -216,6 +216,8 @@ async fn end_to_end_tenant_registry_boot_clock_and_command_registry_fencing() {
             command: Command::new("acme:wizard").with_action(Action::Execute),
             tenant_id: Some(tenant.clone()),
             placement_generation: Some(lease.generation.get()),
+            cancel_rx: None,
+            chunk_tx: None,
         })
         .await
     {
@@ -244,6 +246,8 @@ async fn end_to_end_tenant_registry_boot_clock_and_command_registry_fencing() {
                 .with_session_id(session_id),
             tenant_id: Some(tenant),
             placement_generation: Some(lease.generation.get()),
+            cancel_rx: None,
+            chunk_tx: None,
         })
         .await;
     assert!(matches!(

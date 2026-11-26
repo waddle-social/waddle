@@ -378,7 +378,6 @@ impl ResponseBatch {
         batch
     }
 
-    #[cfg(test)]
     pub(crate) fn into_serialized_frames(self) -> Vec<String> {
         self.frames
             .into_iter()
@@ -626,7 +625,7 @@ pub(super) async fn handle_xmpp_frame(
     .into_serialized_frames()
 }
 
-pub(super) async fn handle_xmpp_frame_with_admission(
+pub(crate) async fn handle_xmpp_frame_with_admission(
     frame: &str,
     domain: &str,
     state: &WebSocketState,

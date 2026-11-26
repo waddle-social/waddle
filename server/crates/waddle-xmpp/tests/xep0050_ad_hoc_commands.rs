@@ -287,6 +287,8 @@ mod session_flow {
             command,
             tenant_id: None,
             placement_generation: None,
+            cancel_rx: None,
+            chunk_tx: None,
         }
     }
 

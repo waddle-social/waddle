@@ -1923,6 +1923,7 @@ async fn create_websocket_state(
             ws_keepalive: server_config.ws_keepalive,
             provider_ingress,
             provider_dispatch_tasks,
+            inference_stream_tasks: tokio_util::task::TaskTracker::new(),
             shutdown: shutdown_handle,
         },
     });

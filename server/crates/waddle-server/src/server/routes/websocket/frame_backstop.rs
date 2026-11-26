@@ -392,24 +392,55 @@ where
         + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let tracker = tokio_util::task::TaskTracker::new();
+    let result = spawn_tracked_decoupled_streaming_inference(
+        stream_id,
+        buffer_capacity,
+        shutdown,
+        &tracker,
+        worker,
+    );
+    tracker.close();
+    result
+}
+
+/// Launches and tracks a decoupled streaming inference task in `tracker` so
+/// shutdown drain can signal cancellation and wait for the worker to drop its
+/// Wasmtime store cleanly before runtime teardown.
+pub fn spawn_tracked_decoupled_streaming_inference<F, Fut>(
+    stream_id: impl Into<String>,
+    buffer_capacity: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+    tracker: &tokio_util::task::TaskTracker,
+    worker: F,
+) -> (StreamingInferenceSession, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<Vec<u8>>, tokio::sync::watch::Receiver<bool>) -> Fut
+        + Send
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let stream_id = stream_id.into();
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(buffer_capacity.max(1));
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let session = StreamingInferenceSession {
         stream_id,
         chunk_rx,
         cancel_tx: cancel_tx.clone(),
     };
-    let worker_cancel_rx = cancel_rx.clone();
-    let handle = tokio::spawn(async move {
-        let fut = worker(chunk_tx, worker_cancel_rx);
-        tokio::select! {
-            biased;
-            () = shutdown.cancelled() => {
-                let _ = cancel_tx.send(true);
+    let handle = tracker.spawn(async move {
+        let fut = worker(chunk_tx, cancel_rx);
+        tokio::pin!(fut);
+        let mut shutdown_forwarded = false;
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled(), if !shutdown_forwarded => {
+                    shutdown_forwarded = true;
+                    let _ = cancel_tx.send(true);
+                }
+                () = &mut fut => break,
             }
-            _ = cancel_rx.changed() => {}
-            () = fut => {}
         }
     });
     (session, handle)

@@ -514,6 +514,7 @@ where
                 ),
                 provider_dispatch_tasks:
                     ProviderDispatchTracker::new(),
+                inference_stream_tasks: tokio_util::task::TaskTracker::new(),
             },
         });
     // As `http.rs` does: the revocation fence drives the sweep of the rooms

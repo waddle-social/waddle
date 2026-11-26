@@ -9,7 +9,7 @@ use super::{
 };
 use crate::server::routes::interpret::{deliver_direct_to_full, FullJidDeliveryOutcome};
 use crate::server::routes::websocket::frame_backstop::{
-    spawn_decoupled_streaming_inference, StreamingInferenceSession,
+    spawn_tracked_decoupled_streaming_inference, StreamingInferenceSession,
 };
 use crate::server::routes::websocket::ResolvedPrincipal;
 use std::sync::Arc;
@@ -200,6 +200,8 @@ pub(super) async fn handle_command_iq(
         command,
         tenant_id: state.deps.protocol.command_registry.tenant_id().cloned(),
         placement_generation: None,
+        cancel_rx: None,
+        chunk_tx: None,
     };
 
     if boundary == CommandBoundary::Extensions {
@@ -210,20 +212,27 @@ pub(super) async fn handle_command_iq(
         let req_iq = request_iq.clone();
         let node_for_task = node.clone();
         let stream_id = format!("ext-cmd:{}:{}", req_iq.id(), node);
-        let (session, _handle) = spawn_decoupled_streaming_inference(
+        let (session, _handle) = spawn_tracked_decoupled_streaming_inference(
             stream_id,
             16,
             shutdown,
-            move |_chunk_tx, mut cancel_rx| async move {
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel_rx.changed() => CommandResult::Canceled {
-                        session_id: session_id.clone(),
-                        notes: vec![waddle_xmpp::commands::Note::info(
-                            "Extension command canceled".to_owned(),
-                        )],
-                    },
-                    res = registry.dispatch(ctx) => res,
+            &state.deps.inference_stream_tasks,
+            move |chunk_tx, cancel_rx| async move {
+                let mut dispatch_ctx = ctx;
+                dispatch_ctx.cancel_rx = Some(cancel_rx.clone());
+                dispatch_ctx.chunk_tx = Some(chunk_tx);
+                let result = match registry.dispatch(dispatch_ctx).await {
+                    res if *cancel_rx.borrow()
+                        && !matches!(res, CommandResult::Canceled { .. }) =>
+                    {
+                        CommandResult::Canceled {
+                            session_id: session_id.clone(),
+                            notes: vec![waddle_xmpp::commands::Note::info(
+                                "Extension command canceled".to_owned(),
+                            )],
+                        }
+                    }
+                    res => res,
                 };
                 let reply_stanza =
                     command_result_to_stanza(&req_iq, &node_for_task, session_id, result);
