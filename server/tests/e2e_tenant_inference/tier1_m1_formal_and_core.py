@@ -319,11 +319,11 @@ def _t1_f05_05_turso_multipod_topology_adr(ctx: RunContext) -> None:
 # ---------------------------------------------------------------------------
 
 def _t1_f22_01_test_infra_doc_complete(ctx: RunContext) -> None:
-    doc = ctx.read_text("TEST_INFRA.md")
+    doc = ctx.read_text("server/tests/e2e_tenant_inference/README.md")
     for f_num in range(1, 23):
-        assert_in(f"F{f_num}", doc, f"TEST_INFRA.md missing feature F{f_num}")
+        assert_in(f"F{f_num}", doc, f"server/tests/e2e_tenant_inference/README.md missing feature F{f_num}")
     for gate in ("Gate 1", "Gate 2", "Gate 3", "Gate 4", "Gate 5"):
-        assert_in(gate, doc, f"TEST_INFRA.md missing Release Evidence {gate}")
+        assert_in(gate, doc, f"server/tests/e2e_tenant_inference/README.md missing Release Evidence {gate}")
 
 
 def _t1_f22_02_unique_test_ids_and_metadata(ctx: RunContext) -> None:
@@ -397,7 +397,7 @@ def get_tests() -> list[TestCase]:
         TestCase("T1-F05-04", 1, "M1", ("F5",), ("Gate1",), "Turso baseline spike verifies unixepoch('subsec') * 1000 monotonicity", _t1_f05_04_turso_unixepoch_subsec),
         TestCase("T1-F05-05", 1, "M1", ("F5",), ("Gate1", "Gate5"), "ADR-0021 records Option (a) Turso mTLS storage-host topology", _t1_f05_05_turso_multipod_topology_adr),
         # F22 (E2E meta)
-        TestCase("T1-F22-01", 1, "E2E", ("F22",), ("Gate1", "Gate2", "Gate3", "Gate4", "Gate5"), "TEST_INFRA.md maps all 22 features and all 5 Release Evidence gates", _t1_f22_01_test_infra_doc_complete),
+        TestCase("T1-F22-01", 1, "E2E", ("F22",), ("Gate1", "Gate2", "Gate3", "Gate4", "Gate5"), "E2E suite README maps all 22 features and all 5 Release Evidence gates", _t1_f22_01_test_infra_doc_complete),
         TestCase("T1-F22-02", 1, "E2E", ("F22",), ("Gate1",), "All registered E2E tests have unique IDs and valid tier/feature metadata", _t1_f22_02_unique_test_ids_and_metadata),
         TestCase("T1-F22-03", 1, "E2E", ("F22",), ("Gate1",), "Tier 1 covers all 22 features (F1-F22) with zero omissions", _t1_f22_03_all_22_features_covered_in_tier1),
         TestCase("T1-F22-04", 1, "E2E", ("F22",), ("Gate1", "Gate2", "Gate3", "Gate4", "Gate5"), "Tier 4 scenarios cover all 5 Release Evidence gates", _t1_f22_04_all_5_gates_covered_in_tier4),
