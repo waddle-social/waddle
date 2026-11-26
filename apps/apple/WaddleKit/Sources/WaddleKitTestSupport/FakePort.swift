@@ -12,6 +12,17 @@ final class FakePort: XmppPort {
     var holdExternalServicesFetch = false
     var heldExternalServicesFetches: [CheckedContinuation<Void, Never>] = []
 
+    var blockListFetchCount = 0
+    var blockListResult: Result<[JID], PortError> = .success([])
+    let blockListFetches = HeldCalls()
+    var blockRequests: [[JID]] = []
+    var unblockRequests: [[JID]] = []
+    var unblockAllCount = 0
+    var blockResult: Result<Void, PortError> = .success(())
+    var unblockResult: Result<Void, PortError> = .success(())
+    var unblockAllResult: Result<Void, PortError> = .success(())
+    let blockingWrites = HeldCalls()
+
     var callLifecycleReports: [CallLifecycleReport] = []
     var callLifecycleReportResult: CallLifecycleReportResult = .accepted
     var holdCallLifecycleReports = false

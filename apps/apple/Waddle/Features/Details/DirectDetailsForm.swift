@@ -33,6 +33,7 @@ struct DirectDetailsForm: View {
                     navigation.sheet = .search(.direct(peer))
                 }
             }
+            PeerBlockSection(peer: peer, name: session.directory.title(for: .direct(peer)))
         }
         .huddleForm()
         .peerDetails(of: peer, session: session, into: $details)
@@ -160,6 +161,9 @@ struct PeerProfileSheet: View {
                 )
                 if let details {
                     PeerDetailsSection(details: details)
+                }
+                if let peer = messageablePeer {
+                    PeerBlockSection(peer: peer, name: profile.name)
                 }
             }
             .huddleForm()
