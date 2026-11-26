@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{timeout, Instant};
 use waddle_xmpp::push::envelope::NotificationClass;
 use waddle_xmpp::push::names::PushNames;
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -13,7 +13,9 @@ use waddle_xmpp_core::xep0359::StanzaId;
 use super::{NotificationOutboxJob, NotificationOutboxStore};
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_millis(250);
-const PASS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Time a pass may spend inside lookups. The rest of a pass, storage and
+/// publishing, is not charged, so a large batch keeps its names.
+const PASS_LOOKUP_BUDGET: Duration = Duration::from_secs(5);
 
 /// Names are resolved for an opted-in recipient and the job's latest message.
 pub struct PushDisplayNameRequest<'a> {
@@ -42,7 +44,7 @@ enum LookupCutoff {
 
 /// Bounds optional name lookups while a claimed batch is being published.
 pub(super) struct PushDisplayNameLookupBudget {
-    deadline: Instant,
+    remaining: Duration,
     cutoff: Option<LookupCutoff>,
     affected_jobs: usize,
 }
@@ -50,7 +52,7 @@ pub(super) struct PushDisplayNameLookupBudget {
 impl Default for PushDisplayNameLookupBudget {
     fn default() -> Self {
         Self {
-            deadline: Instant::now() + PASS_TIMEOUT,
+            remaining: PASS_LOOKUP_BUDGET,
             cutoff: None,
             affected_jobs: 0,
         }
@@ -88,28 +90,24 @@ impl NotificationOutboxStore {
         let sender = job.rich_summary().sender.as_ref()?;
         let resolver = self.push_display_names.0.get()?;
         if budget.cutoff.is_none() {
-            let now = Instant::now();
-            let lookup_deadline = now + LOOKUP_TIMEOUT;
-            let deadline = lookup_deadline.min(budget.deadline);
-            if now < deadline {
-                let names = timeout_at(
-                    deadline,
-                    resolver.resolve(PushDisplayNameRequest {
-                        recipient: job.recipient_bare_jid(),
-                        conversation: job.conversation_jid(),
-                        sender,
-                        class,
-                        archive_stanza_id: job.room_archive_stanza_id.clone(),
-                    }),
-                )
-                .await;
-                // Tokio can return the result if the lookup and its timer
-                // both become ready before the next poll.
-                if let Some(names) = names.ok().filter(|_| Instant::now() < deadline) {
-                    return Some(names);
-                }
+            let allowed = LOOKUP_TIMEOUT.min(budget.remaining);
+            let started = Instant::now();
+            let names = timeout(
+                allowed,
+                resolver.resolve(PushDisplayNameRequest {
+                    recipient: job.recipient_bare_jid(),
+                    conversation: job.conversation_jid(),
+                    sender,
+                    class,
+                    archive_stanza_id: job.room_archive_stanza_id.clone(),
+                }),
+            )
+            .await;
+            budget.remaining = budget.remaining.saturating_sub(started.elapsed());
+            if let Ok(names) = names {
+                return Some(names);
             }
-            budget.cutoff = Some(if budget.deadline <= lookup_deadline {
+            budget.cutoff = Some(if allowed < LOOKUP_TIMEOUT {
                 LookupCutoff::PassCeiling
             } else {
                 LookupCutoff::LookupTimeout
