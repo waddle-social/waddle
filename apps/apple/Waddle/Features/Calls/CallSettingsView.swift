@@ -11,6 +11,8 @@ struct CallSettingsView: View {
     var kinds: [CallDeviceKind] = CallDeviceKind.allCases
     var audioProcessing = CallAudioProcessing()
     var setAudioProcessing: @MainActor (CallAudioProcessing) -> Void = { _ in /* a sheet without it */ }
+    var microphoneMode: CallMicrophoneMode?
+    var showMicrophoneModes: @MainActor () -> Void = { /* drawn only */ }
     var background = CallBackground.off
     var setBackground: @MainActor (CallBackground) -> Void = { _ in /* a sheet without it */ }
     /// The call's video streams as measured; `nil` where nothing measures, which hides the section.
@@ -27,18 +29,10 @@ struct CallSettingsView: View {
                 .foregroundStyle(Theme.Colors.fg)
                 .accessibilityAddTraits(.isHeader)
                 .padding(Theme.Spacing.l)
-            VStack(alignment: .leading, spacing: Theme.Spacing.l) {
-                ForEach(kinds, id: \.self) { kind in
-                    section(kind, devices[kind])
-                    // The web lists it under the microphone; where the microphone cannot be chosen it stands alone.
-                    if kind == .microphone { processing }
-                    if kind == .camera { backgroundChoice }
-                }
-                if !kinds.contains(.microphone) { processing }
-                if let videoStats { video(videoStats) }
+            ViewThatFits(in: .vertical) {
+                sections
+                ScrollView { sections }
             }
-            .padding(.horizontal, Theme.Spacing.l)
-            .padding(.bottom, Theme.Spacing.l)
             Theme.Colors.borderSoft.frame(height: WaddleTokens.BorderWidth.hair)
             HStack {
                 Spacer()
@@ -56,6 +50,21 @@ struct CallSettingsView: View {
         .frame(maxWidth: Self.width)
         #endif
         .background(Theme.Colors.bg)
+    }
+
+    private var sections: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.l) {
+            ForEach(kinds, id: \.self) { kind in
+                section(kind, devices[kind])
+                // The web lists it under the microphone; where the microphone cannot be chosen it stands alone.
+                if kind == .microphone { processing }
+                if kind == .camera { backgroundChoice }
+            }
+            if !kinds.contains(.microphone) { processing }
+            if let videoStats { video(videoStats) }
+        }
+        .padding(.horizontal, Theme.Spacing.l)
+        .padding(.bottom, Theme.Spacing.l)
     }
 
     private func section(_ kind: CallDeviceKind, _ list: CallDeviceList) -> some View {
@@ -163,6 +172,24 @@ struct CallSettingsView: View {
             toggle("Noise suppression", \.noiseSuppression)
             toggle("Echo cancellation", \.echoCancellation)
             toggle("Automatic gain control", \.autoGainControl)
+            voiceIsolation
+        }
+    }
+
+    private var voiceIsolation: some View {
+        let mode = microphoneMode?.title ?? "Microphone off"
+        return VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            FormValueRow(title: "Microphone mode", value: mode)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Microphone mode")
+                .accessibilityValue(mode)
+            FormSectionFooter(microphoneMode == nil
+                ? "Voice Isolation removes more background noise than Noise suppression. Turn your microphone on to choose it."
+                : "Voice Isolation removes more background noise than Noise suppression. It is a system setting, chosen in the system's picker.")
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Choose microphone mode", action: showMicrophoneModes)
+                .buttonStyle(.huddle(.secondary, size: .small))
+                .disabled(microphoneMode == nil)
         }
     }
 
@@ -238,11 +265,14 @@ private struct CallSettingsContent: View {
     let done: @MainActor () -> Void
     @State private var tracker = CallVideoStatsTracker()
     @State private var videoStats: [CallVideoStat] = []
+    @State private var microphoneMode = SystemMicrophoneMode.active
 
     var body: some View {
         CallSettingsView(
             devices: media.devices, kinds: media.choosableDeviceKinds, audioProcessing: media.audioProcessing,
             setAudioProcessing: { processing in Task { await media.setAudioProcessing(processing) } },
+            microphoneMode: media.isMicrophoneOn ? microphoneMode : nil,
+            showMicrophoneModes: SystemMicrophoneMode.showPicker,
             background: media.background, setBackground: { media.setBackground($0) },
             videoStats: videoStats,
             choose: { kind, id in Task { await media.chooseDevice(kind, id: id) } },
@@ -250,6 +280,7 @@ private struct CallSettingsContent: View {
         )
         // What is plugged in may have changed since the call began.
         .task { await media.refreshDevices() }
+        .task { await SystemMicrophoneMode.observe { microphoneMode = $0 } }
         // Measured only while someone is looking, once a second as the web does.
         .task {
             tracker = CallVideoStatsTracker()
