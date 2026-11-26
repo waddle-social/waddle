@@ -80,11 +80,18 @@ final class CallStageRedrawTests: XCTestCase {
             roster.tiles[index] = Self.tile(name)
             try await settle()
         }
-        // The stage's first update still evaluates a picture once more;
-        // from then on they are compared. A call is past that at once.
-        try await speak(1, "linus")
-        try await speak(2, "grace")
-        let drawn = cameras.asked
+        // SwiftUI works out how to compare a kind of view in the background,
+        // and until it has, every update of one counts as a change: `==` is
+        // not asked. That is one update on an idle machine and many on a
+        // busy one (#2701). It is done once for the life of the app, so the
+        // rounds go on until one fetches nothing, and from there it must hold.
+        var drawn = cameras.asked
+        for _ in 0..<Self.mostWarmUpRounds {
+            try await speak(1, "linus")
+            try await speak(2, "grace")
+            if cameras.asked == drawn { break }
+            drawn = cameras.asked
+        }
         for _ in 0..<3 {
             try await speak(1, "linus")
             try await speak(2, "grace")
@@ -136,6 +143,9 @@ final class CallStageRedrawTests: XCTestCase {
         wait(for: [pinned], timeout: 0)
         XCTAssertEqual(model.stage(of: "c1").presentation.pinnedTileID, linus.id)
     }
+
+    /// About a minute of speaking changes: far more than a busy machine has needed.
+    private static let mostWarmUpRounds = 50
 
     // MARK: - Hosting
 
