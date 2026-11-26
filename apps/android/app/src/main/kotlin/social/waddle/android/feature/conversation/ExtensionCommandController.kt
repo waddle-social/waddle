@@ -54,8 +54,8 @@ data class ExtensionOutcomeNotice(val commandName: String, val phase: CommandPha
  *   single-stage `executing` form whose advertised actions include
  *   `complete`; otherwise the palette opens with the value prefilled.
  * - the AI chatbot (`urn:waddle:extension:1:ai-chatbot`) forces its
- *   `output` field to `channel` inside rooms and posts the prompt as
- *   a normal public channel message BEFORE submitting.
+ *   `output` field to `channel` inside rooms; room disclosure is emitted
+ *   server-side strictly after broker admission.
  * - a failed dispatch returns `false` so the composer keeps the slash
  *   draft armed.
  */
@@ -114,7 +114,6 @@ class ExtensionCommandController(
     suspend fun dispatch(
         invocation: SlashInvocation,
         roomJid: String?,
-        sendPublicMessage: suspend (String) -> Unit,
     ): Boolean {
         val command = invocation.command
         val node = command.node
@@ -148,7 +147,7 @@ class ExtensionCommandController(
                 true
             }
             is SlashInvocation.InlineSubmit ->
-                dispatchInlineSubmit(invocation, stage, sendPublicMessage)
+                dispatchInlineSubmit(invocation, stage)
         }
     }
 
@@ -164,7 +163,6 @@ class ExtensionCommandController(
     private suspend fun dispatchInlineSubmit(
         invocation: SlashInvocation.InlineSubmit,
         stage: InvokeStage,
-        sendPublicMessage: suspend (String) -> Unit,
     ): Boolean {
         // Inline-submit stays inline only when the server returned a
         // single-stage form whose advertised XEP-0050 actions include
@@ -181,7 +179,7 @@ class ExtensionCommandController(
                 missingRequiredExtensionFields(session.fields).isEmpty()
             if (safeToSubmit) {
                 _formSession.value = session
-                return submitSession(session, ExtensionCommandAction.COMPLETE, sendPublicMessage, stage.epoch)
+                return submitSession(session, ExtensionCommandAction.COMPLETE, stage.epoch)
             }
             finishStage(stage.command, stage.result, session)
             return true
@@ -194,16 +192,14 @@ class ExtensionCommandController(
     /** Submit the open form with [action] (palette buttons). */
     suspend fun submitForm(
         action: ExtensionCommandAction,
-        sendPublicMessage: suspend (String) -> Unit,
     ): Boolean {
         val session = _formSession.value ?: return false
-        return submitSession(session, action, sendPublicMessage, beginCall())
+        return submitSession(session, action, beginCall())
     }
 
     private suspend fun submitSession(
         session: ExtensionFormSession,
         action: ExtensionCommandAction,
-        sendPublicMessage: suspend (String) -> Unit,
         epoch: Int,
     ): Boolean {
         val command = session.command
@@ -221,7 +217,6 @@ class ExtensionCommandController(
             }
         }
         setPhase(command.node, CommandPhase(CommandPhaseState.LOADING))
-        sendPublicPromptIfRequested(command, session, action, sendPublicMessage)
         if (epoch != callEpoch) return false
         val call = submit(
             ExtensionCommandSubmission(
@@ -348,21 +343,6 @@ class ExtensionCommandController(
         } else {
             session
         }
-    }
-
-    private suspend fun sendPublicPromptIfRequested(
-        command: ExtensionCommand,
-        session: ExtensionFormSession,
-        action: ExtensionCommandAction,
-        sendPublicMessage: suspend (String) -> Unit,
-    ) {
-        if (command.node != AI_CHATBOT_COMMAND_NODE) return
-        if (action == ExtensionCommandAction.CANCEL || action == ExtensionCommandAction.PREV) return
-        if (fieldValue(session.fields, "output") != "channel") return
-        if (session.roomJid == null) return
-        val prompt = fieldValue(session.fields, "prompt")?.trim().orEmpty()
-        if (prompt.isEmpty()) return
-        sendPublicMessage(prompt)
     }
 
     private fun fieldValue(fields: List<ExtensionCommandField>, name: String): String? {

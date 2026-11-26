@@ -43,17 +43,6 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
     await messaging.sendMessage(body, markup, references, files, replyTo, forumTitle, linkPreview);
   }
 
-  async function sendPublicChannelMessage(body: string) {
-    if (activeTarget.value !== messaging || ui.sidebarMode.value !== "channels" || !xmppClient.value || !waddles.activeChannelId.value) {
-      throw new Error("Public AI prompts require an active channel.");
-    }
-    ui.clearActionError();
-    await messaging.sendMessage(body);
-    if (ui.actionError.value) {
-      throw new Error(ui.actionError.value);
-    }
-  }
-
   async function sendThreadMessage(
     body: string,
     markup: MarkupSpan[],
@@ -169,7 +158,6 @@ export function useSendOrchestration(deps: SendOrchestrationDeps) {
 
   return {
     sendActiveMessage,
-    sendPublicChannelMessage,
     sendThreadMessage,
     sendCallChatMessage,
     sendGif,

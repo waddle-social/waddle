@@ -426,6 +426,14 @@ export class WaddleClient {
      */
     list_roster_contacts(): Promise<any>;
     /**
+     * Resolve to the account's roster contacts using XEP-0237 roster versioning.
+     *
+     * Pass `ver` from a previously cached roster fetch (or `None` / `""` to opt in
+     * without a cached version). When the server replies with an empty IQ result
+     * (`unchanged: true`), callers should keep their cached contacts and version.
+     */
+    list_roster_contacts_versioned(ver?: string | null): Promise<any>;
+    /**
      * Mark a conversation, or its selected thread, read through the server inbox command.
      */
     mark_inbox_read(partner_jid: string, thread_id?: string | null): Promise<any>;
@@ -582,11 +590,11 @@ export class WaddleClient {
      */
     send_call_retract_tie_break(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
-     * Send a JMI `<ringing/>` to the caller's bare JID (XEP-0353
-     * §3.2). The bare JID lets the initiator's server fan out the
-     * responder's device-ring state to every caller resource.
+     * Send a JMI `<ringing/>` to the proposer's full JID (XEP-0353
+     * §3.2: the responder's device "indicates so by sending a message to
+     * the full JID of the initiator"), taken from the propose's `from`.
      */
-    send_call_ringing(peer_bare_jid: string, sid_str: string): Promise<any>;
+    send_call_ringing(peer_full_jid: string, sid_str: string): Promise<any>;
     /**
      * Send a Jingle `session-accept` IQ in response to a received
      * session-initiate. `responder` is validated as a full JID at
@@ -822,6 +830,12 @@ export class WaddleClient {
      */
     set_on_pubsub_event(cb: Function): void;
     /**
+     * RFC 6121 §2.1.6 verified roster push handler. Invoked with a
+     * `WaddleRosterPush`-shaped JS value carrying the optional new `ver`
+     * token and updated/removed `WaddleRosterContact` items.
+     */
+    set_on_roster_push(cb: Function): void;
+    /**
      * Replace the callback receiving `fresh` for a new session or `resumed` after stream
      * resumption.
      */
@@ -840,7 +854,8 @@ export class WaddleClient {
      * Set the per-chat XEP-0492 notification mode for one room by
      * merging into the user's XEP-0402 bookmark for that room. If no
      * bookmark exists yet for `room_jid`, one is created with
-     * `autojoin=false` so this call doesn't change join behavior.
+     * `autojoin=true`: an own bookmark with `autojoin` off and
+     * notifications off means the user left the room.
      *
      * Semantics:
      * * Fetch existing PEP bookmarks (XEP-0402 §2). A missing PEP

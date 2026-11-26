@@ -330,13 +330,14 @@ export function createLocalStorageResumePersistence(
       if (envelope.ownerId !== owner.ownerId) return null;
       if (envelope.claimId) return null;
       const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = envelope;
+      const safeOutboundEntries = filterSensitiveSmResumeEntries(unhandledOutboundEntries);
       return {
         previd,
         ...(resumable !== undefined ? { resumable } : {}),
         inboundH,
         outboundH,
         ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
-        ...(unhandledOutboundEntries?.length ? { unhandledOutboundEntries: unhandledOutboundEntries.map((entry) => ({ ...entry })) } : {}),
+        ...(safeOutboundEntries?.length ? { unhandledOutboundEntries: safeOutboundEntries } : {}),
         ...(resource ? { resource } : {}),
         ...(boundJid ? { boundJid } : {}),
       };
@@ -353,8 +354,11 @@ export function createLocalStorageResumePersistence(
         reportStorageOwnerSlotLimit("sm-resume");
         return;
       }
+      const safeOutboundEntries = filterSensitiveSmResumeEntries(state.unhandledOutboundEntries);
+      const { unhandledOutboundEntries: _discarded, ...restState } = state;
       const envelope: PersistedSmEnvelope = {
-        ...state,
+        ...restState,
+        ...(safeOutboundEntries?.length ? { unhandledOutboundEntries: safeOutboundEntries } : {}),
         savedAt: Date.now(),
         ownerId: owner.ownerId,
         ownerInstanceId: owner.instanceId,
@@ -530,6 +534,22 @@ function readMissingRemoteRooms(key: string): string[] {
   return [...new Set(stored.map(normalizeRoomJid).filter(Boolean))];
 }
 
+const SENSITIVE_SM_RESUME_NS_PATTERN = /urn:waddle:(?:credential|inference)/i;
+
+type PersistedSmUnhandledEntry = NonNullable<
+  PersistedSmResumeState["unhandledOutboundEntries"]
+>[number];
+
+function filterSensitiveSmResumeEntries(
+  entries?: ReadonlyArray<PersistedSmUnhandledEntry>,
+): PersistedSmUnhandledEntry[] | undefined {
+  if (!entries?.length) return undefined;
+  const filtered = entries
+    .filter((entry) => !SENSITIVE_SM_RESUME_NS_PATTERN.test(entry.xml))
+    .map((entry) => ({ ...entry }));
+  return filtered.length ? filtered : undefined;
+}
+
 function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeState | null {
   const s = storage();
   if (!s) return null;
@@ -572,13 +592,14 @@ function consumeSmEnvelope(key: string, owner: ResumeOwner): PersistedSmResumeSt
     }));
     s.removeItem(key);
     const { previd, resumable, inboundH, outboundH, maxResumeSeconds, resource, boundJid, unhandledOutboundEntries } = claimed;
+    const safeOutboundEntries = filterSensitiveSmResumeEntries(unhandledOutboundEntries);
     return {
       previd,
       ...(resumable !== undefined ? { resumable } : {}),
       inboundH,
       outboundH,
       ...(maxResumeSeconds ? { maxResumeSeconds } : {}),
-      ...(unhandledOutboundEntries?.length ? { unhandledOutboundEntries: unhandledOutboundEntries.map((entry) => ({ ...entry })) } : {}),
+      ...(safeOutboundEntries?.length ? { unhandledOutboundEntries: safeOutboundEntries } : {}),
       ...(resource ? { resource } : {}),
       ...(boundJid ? { boundJid } : {}),
     };

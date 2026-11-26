@@ -2478,3 +2478,44 @@ describe("missing rooms on other servers", () => {
     expect(other.loadMissingRemoteRooms?.()).toEqual(["ops@chat.remote.test"]);
   });
 });
+
+describe("SM resume sensitive stanza redaction", () => {
+  test("strips urn:waddle:credential and urn:waddle:inference stanzas from PersistedSmResumeState", () => {
+    const persistence = createLocalStorageResumePersistence("alice@example.com", "redact-tab");
+    persistence.saveSm({
+      previd: "sm-redact-1",
+      resumable: true,
+      inboundH: 3,
+      outboundH: 5,
+      unhandledOutboundEntries: [
+        {
+          xml: "<iq type='set' id='cred-1'><enroll xmlns='urn:waddle:credential:1'><secret>sk-live-secret</secret></enroll></iq>",
+          sentAt: "2026-11-26T00:00:00.000Z",
+          rejected: false,
+        },
+        {
+          xml: "<iq type='set' id='inf-1'><infer xmlns='urn:waddle:inference:1'/></iq>",
+          sentAt: "2026-11-26T00:00:01.000Z",
+          rejected: false,
+        },
+        {
+          xml: "<message type='groupchat' to='general@muc.example.com'><body>hello room</body></message>",
+          sentAt: "2026-11-26T00:00:02.000Z",
+          rejected: false,
+        },
+      ],
+    });
+
+    const loaded = persistence.loadSm();
+    expect(loaded?.unhandledOutboundEntries).toEqual([
+      {
+        xml: "<message type='groupchat' to='general@muc.example.com'><body>hello room</body></message>",
+        sentAt: "2026-11-26T00:00:02.000Z",
+        rejected: false,
+      },
+    ]);
+    const consumed = persistence.consumeSm();
+    expect(consumed?.unhandledOutboundEntries).toHaveLength(1);
+    expect(consumed?.unhandledOutboundEntries?.[0]?.xml).toContain("hello room");
+  });
+});
