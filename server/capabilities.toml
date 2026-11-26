@@ -166,3 +166,17 @@ topologies = { local = "experimental", federated = "unsupported" }
 XEP-0060 = ["crates/waddle-server/tests/xep0060_pubsub_ws.rs"]
 XEP-0472 = ["crates/waddle-server/tests/xep0472_social_feed_ws.rs"]
 XEP-0501 = ["crates/waddle-server/tests/xep0501_stories_ws.rs"]
+
+[[capability]]
+id = "brokered-inference"
+server_maturity = "experimental"
+protocols = ["XEP-0050"]
+advertised_features = ["http://jabber.org/protocol/commands"]
+server_evidence = [
+  "crates/waddle-server/tests/broker_extension_inference_host.rs",
+  "crates/waddle-server/tests/ai_room_disclosure_ordering.rs",
+  "crates/waddle-server/tests/ai_private_output_rejection.rs",
+]
+topologies = { local = "experimental", federated = "unsupported" }
+[capability.protocol_evidence]
+XEP-0050 = ["crates/waddle-server/tests/broker_extension_inference_host.rs"]

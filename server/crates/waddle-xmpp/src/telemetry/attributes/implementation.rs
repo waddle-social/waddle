@@ -2195,3 +2195,89 @@ impl MetricAttribute for IngressReachabilityBlockReason {
         }
     }
 }
+
+/// `outcome` — closed outcome class for a brokered inference invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerInferenceOutcome {
+    Admitted,
+    Denied,
+    Completed,
+    Canceled,
+    Quarantined,
+    RateLimited,
+    FailedBeforeSend,
+}
+
+impl sealed::Sealed for BrokerInferenceOutcome {}
+
+impl MetricAttribute for BrokerInferenceOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Denied => "denied",
+            Self::Completed => "completed",
+            Self::Canceled => "canceled",
+            Self::Quarantined => "quarantined",
+            Self::RateLimited => "rate_limited",
+            Self::FailedBeforeSend => "failed_before_send",
+        }
+    }
+}
+
+/// `operation` — closed operation class for broker credential custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerCredentialOp {
+    Create,
+    Rotate,
+    Revoke,
+    List,
+    Resolve,
+}
+
+impl sealed::Sealed for BrokerCredentialOp {}
+
+impl MetricAttribute for BrokerCredentialOp {
+    fn key(&self) -> &'static str {
+        "operation"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Rotate => "rotate",
+            Self::Revoke => "revoke",
+            Self::List => "list",
+            Self::Resolve => "resolve",
+        }
+    }
+}
+
+/// `fence` — closed fence kind checked during broker admission or placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerFenceKind {
+    Authorization,
+    Budget,
+    PlacementLease,
+    ReplicaHeartbeat,
+}
+
+impl sealed::Sealed for BrokerFenceKind {}
+
+impl MetricAttribute for BrokerFenceKind {
+    fn key(&self) -> &'static str {
+        "fence"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Authorization => "authorization",
+            Self::Budget => "budget",
+            Self::PlacementLease => "placement_lease",
+            Self::ReplicaHeartbeat => "replica_heartbeat",
+        }
+    }
+}

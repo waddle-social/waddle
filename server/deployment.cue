@@ -33,23 +33,19 @@ package cuenv
 		digest:    #AiChatbotDigest
 		namespace: "urn:waddle:ai-chatbot:1"
 		config: {
-			endpoint: "https://openrouter.ai/api/v1/chat/completions"
-			model:    "openrouter/free"
+			provider:   "openrouter"
+			deployment: "default"
+			model:      "openrouter/free"
 		}
-		configSecretFiles: api_key: "/var/run/secrets/waddle-ai/api_key"
 		capabilityGrants: [
 			"message.enrich",
 			"host.mam.read",
 			"host.members.read",
-			"host.presence.read",
-			"host.roster.read",
 			"host.channels.read",
 			"host.spaces.read",
 			"host.message.send",
-			"outbound.http.request",
 			"commands",
 		]
-		allowedHttpOrigins: ["https://openrouter.ai"]
 	},
 	{
 		name:      "decision-polls"
@@ -86,15 +82,18 @@ package cuenv
 		digest:    #JevJudgmentsDigest
 		namespace: "urn:waddle:safety-scores:1"
 		config: {
-			endpoint: "https://openrouter.ai/api/alpha/decisions"
-			model:    "typesafe/jev-1.13"
+			provider:        "openrouter"
+			deployment:      "default"
+			model:           "typesafe/jev-1.13"
+			credential_name: "default"
 		}
-		configSecretFiles: api_key: "/var/run/secrets/waddle-ai/api_key"
-		capabilityGrants: ["message.observe", "room.result.publish", "outbound.http.request"]
-		allowedHttpOrigins: ["https://openrouter.ai"]
+		capabilityGrants: ["message.observe", "room.result.publish"]
 		roomObservation: {
-			generation: 2
-			scope: kind: "all-hosted-rooms"
+			generation: 3
+			scope: {
+				kind:  "rooms"
+				rooms: []
+			}
 			max_concurrent: 8
 		}
 		runtimeLimits: {
@@ -186,22 +185,6 @@ package cuenv
 		}
 		data: [
 			{secretKey: "WADDLE_APNS_KEY_PEM", remoteRef: {key: "app-apple", property: "file/notifications.p8"}},
-		]
-		...
-	}
-	...
-}
-
-#OpenRouterExternalSecret: {
-	apiVersion: "external-secrets.io/v1beta1"
-	kind:       "ExternalSecret"
-	metadata: {
-		name: "waddle-openrouter"
-		...
-	}
-	spec: {
-		data: [
-			{secretKey: "apiKey", remoteRef: {key: "server-runtime-production", property: "openrouter-api-key"}},
 		]
 		...
 	}
