@@ -81,6 +81,10 @@ modules:
         /app/share/metainfo/social.waddle.Waddle.metainfo.xml
       - install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
         /app/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
+      # Symbolic icons for themes that lack them (hicolor is the fallback).
+      - mkdir -p /app/share/icons/hicolor/symbolic/actions
+      - install -m644 apps/linux/data/icons/hicolor/symbolic/actions/*.svg
+        /app/share/icons/hicolor/symbolic/actions/
     sources:
       # The Linux crate links the shared client crates in server/ by path,
       # so the source is the repository, not apps/linux alone.

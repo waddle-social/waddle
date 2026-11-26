@@ -1,0 +1,43 @@
+/* Polar Huddle Night: replaces the Daylight tokens of style.css while
+ * libadwaita is dark. GTK 4.18 has no `prefers-color-scheme` media query, so
+ * src/application.rs loads this sheet at a higher priority only when
+ * AdwStyleManager reports dark, and unloads it otherwise. */
+:root {
+  --wd-bg: #060f19;
+  --wd-bg-rail: #0a131e;
+  --wd-surface: #111a25;
+  --wd-surface-2: #1a242f;
+  --wd-surface-3: #232e39;
+  --wd-surface-code: #020912;
+  --wd-border-soft: #28333f;
+  --wd-border: #3b4653;
+  --wd-border-strong: #9aa2ad;
+  --wd-fg: #edf0f4;
+  --wd-fg-muted: #c1c8d0;
+  --wd-fg-soft: #9aa2ad;
+  --wd-action: #ffc139;
+  --wd-action-hover: #ffd27d;
+  --wd-action-fg: #060f19;
+  --wd-action-text: #ffd27d;
+  --wd-action-subtle: #2b1c00;
+  --wd-live: #4ed7df;
+  --wd-live-hover: #85e5ea;
+  --wd-live-fg: #060f19;
+  --wd-live-text: #85e5ea;
+  --wd-live-subtle: #002021;
+  --wd-danger-text: #ffafac;
+  --wd-danger-subtle: #360307;
+  --wd-warning: #fc924b;
+  --wd-warning-text: #ffb486;
+  --wd-success: #67c986;
+  --wd-success-text: #92dba6;
+  --wd-info: #78b5f9;
+  --wd-info-text: #9eccff;
+  --wd-focus: #9eccff;
+  --wd-presence-available: #67c986;
+  --wd-presence-away: #ffc139;
+  --wd-presence-dnd: #ff8987;
+  --wd-presence-offline: #9aa2ad;
+  --wd-gold-text: #ffd27d;
+  --wd-gold-subtle: #2b1c00;
+}
