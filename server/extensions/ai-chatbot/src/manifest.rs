@@ -17,12 +17,9 @@ pub(crate) fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::MessageEnrich,
             types::ExtensionCapability::HostMamRead,
             types::ExtensionCapability::HostMembersRead,
-            types::ExtensionCapability::HostPresenceRead,
-            types::ExtensionCapability::HostRosterRead,
             types::ExtensionCapability::HostChannelsRead,
             types::ExtensionCapability::HostSpacesRead,
             types::ExtensionCapability::HostMessageSend,
-            types::ExtensionCapability::OutboundHttpRequest,
             types::ExtensionCapability::Commands,
         ],
         commands: vec![command_descriptor(

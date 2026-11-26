@@ -1073,7 +1073,7 @@ async fn an_extension_archive_read_before_a_revoke_is_not_returned_after_it() {
         waddle_id: WaddleId::try_new("revocation").expect("waddle"),
         plugin_id: PluginId::try_new("board").expect("plugin"),
         requester: Some(bare(PEER)),
-        source_room: None,
+        source_room: Some(room.clone()),
         kind: InvocationKind::Command,
         provider_room_grants: Vec::new(),
     };

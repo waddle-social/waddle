@@ -56,7 +56,8 @@ pub(crate) mod managed_channel_policy;
 pub(crate) mod routes;
 
 pub use extension_commands::decoupled_test_hooks::{
-    run_extension_command_decoupled_for_test, DecoupledCommandDispatchHandle,
+    build_websocket_state_for_test, run_extension_command_decoupled_for_test,
+    DecoupledCommandDispatchHandle,
 };
 pub use routes::interpret::effects;
 /// Interpreter-only ingress planning seam, consumed by the authority cutover.

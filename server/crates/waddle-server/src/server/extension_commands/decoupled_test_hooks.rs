@@ -106,17 +106,15 @@ fn build_fixture_server_config() -> ServerConfig {
     }
 }
 
-/// Exercises the live XEP-0050 decoupled extension command path through
-/// `handle_xmpp_frame_with_admission` -> `handle_iq` -> `handle_command_iq` ->
-/// `register_extension_commands` -> `ExtensionManager::invoke_command_decoupled_with_chunks`.
+/// Constructs a real `WebSocketState` + `GracefulShutdown` with registered extension
+/// commands for integration tests that run without `--features test-support`.
 #[doc(hidden)]
-pub async fn run_extension_command_decoupled_for_test(
+pub async fn build_websocket_state_for_test(
     extension_manager: Arc<ExtensionManager>,
-    node: String,
-    requester: jid::FullJid,
+    domain: &str,
     drain_timeout_secs: u64,
-) -> DecoupledCommandDispatchHandle {
-    let domain = requester.domain().as_str().to_owned();
+) -> (Arc<WebSocketState>, GracefulShutdown) {
+    let domain = domain.to_owned();
     let db_pool = Arc::new(
         DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
@@ -408,6 +406,26 @@ pub async fn run_extension_command_decoupled_for_test(
             shutdown: shutdown.handle(),
         },
     });
+
+    (websocket_state, shutdown)
+}
+
+/// Exercises the live XEP-0050 decoupled extension command path through
+/// `handle_xmpp_frame_with_admission` -> `handle_iq` -> `handle_command_iq` ->
+/// `register_extension_commands` -> `ExtensionManager::invoke_command_decoupled_with_chunks`.
+#[doc(hidden)]
+pub async fn run_extension_command_decoupled_for_test(
+    extension_manager: Arc<ExtensionManager>,
+    node: String,
+    requester: jid::FullJid,
+    drain_timeout_secs: u64,
+) -> DecoupledCommandDispatchHandle {
+    let domain = requester.domain().as_str().to_owned();
+    let (websocket_state, shutdown) =
+        build_websocket_state_for_test(extension_manager, &domain, drain_timeout_secs).await;
+    let connection_registry = Arc::clone(&websocket_state.deps.protocol.connection_registry);
+    let user_registry = websocket_state.deps.protocol.user_registry.clone();
+    let inference_stream_tasks = websocket_state.deps.inference_stream_tasks.clone();
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(16);
     let owner = connection_registry.register(requester.clone(), outbound_tx);

@@ -45,7 +45,7 @@ fn context() -> InvocationContext {
 }
 
 #[tokio::test]
-async fn jev_fresh_instance_reads_its_config_before_http() {
+async fn jev_fresh_instance_reads_its_config_before_broker_inference() {
     let Some(path) = std::env::var_os("WADDLE_JEV_GUEST_WASM") else {
         // Plain cargo test does not build guest WASM. The extension build gate
         // supplies this path and executes this test against the actual artifact.
@@ -53,13 +53,15 @@ async fn jev_fresh_instance_reads_its_config_before_http() {
     };
     let runtime = WasmRuntime::try_new().expect("runtime");
     let extension = LoadedExtension::load(&runtime, Path::new(&path)).expect("guest component");
-    let valid_config = r#"{"api_key":"fake-test-key"}"#;
+    let valid_config =
+        r#"{"provider":"openrouter","deployment":"zdr","model":"typesafe/jev-1.13"}"#;
     extension.call_init(valid_config).await.expect("guest init");
-    let grants = HashSet::from([ExtensionCapability::OutboundHttpRequest]);
+    let grants = HashSet::from([
+        ExtensionCapability::MessageObserve,
+        ExtensionCapability::RoomResultPublish,
+    ]);
 
-    // No allowed origins: the host rejects the request before any network I/O.
-    // TemporaryFailure proves handle_event parsed the config in its own fresh
-    // instance and reached the HTTP import rather than failing uninitialized.
+    // Default DenyingExtensionInferenceHost rejects the brokered inference import cleanly.
     let valid = extension
         .call_handle_event_typed(
             observation(),
@@ -70,14 +72,14 @@ async fn jev_fresh_instance_reads_its_config_before_http() {
             Vec::new(),
         )
         .await;
-    assert!(matches!(valid, Err(ObservationFailure::TemporaryFailure)));
+    assert!(matches!(valid, Err(ObservationFailure::Denied)));
 
     let invalid = extension
         .call_handle_event_typed(
             observation(),
             Arc::new(DenyingExtensionHostTools),
             context(),
-            r#"{"api_key":""}"#.into(),
+            r#"{"api_key":"forbidden"}"#.into(),
             grants,
             Vec::new(),
         )
