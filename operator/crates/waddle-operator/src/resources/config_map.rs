@@ -207,6 +207,13 @@ fn insert_storage_env(
             data.insert("WADDLE_DB_DRIVER".to_owned(), "turso".to_owned());
             data.insert("WADDLE_TURSO_DATA_DIR".to_owned(), data_dir.clone());
             data.insert(
+                "WADDLE_DATABASE_URL".to_owned(),
+                format!(
+                    "sqlite://{}/control.db?mode=rwc",
+                    data_dir.trim_end_matches('/')
+                ),
+            );
+            data.insert(
                 "WADDLE_TURSO_RESERVED_FDS".to_owned(),
                 reserved_fds.to_string(),
             );

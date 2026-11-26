@@ -577,6 +577,10 @@ fn turso_openfga_broker_extensions_builder_emits_exact_server_contract() {
         Some("/var/lib/waddle/tenants")
     );
     assert_eq!(
+        data.get("WADDLE_DATABASE_URL").map(String::as_str),
+        Some("sqlite:///var/lib/waddle/tenants/control.db?mode=rwc")
+    );
+    assert_eq!(
         data.get("WADDLE_TURSO_RESERVED_FDS").map(String::as_str),
         Some("256")
     );
@@ -671,7 +675,7 @@ fn turso_openfga_broker_extensions_builder_emits_exact_server_contract() {
 
     assert!(
         !env_map.contains_key("WADDLE_DATABASE_URL"),
-        "Turso mode must not emit WADDLE_DATABASE_URL"
+        "Turso mode emits WADDLE_DATABASE_URL via ConfigMap, not Deployment env"
     );
     assert!(
         !env_map.contains_key("WADDLE_SPICEDB_PRESHARED_KEY"),
