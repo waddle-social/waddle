@@ -4,6 +4,7 @@ use jid::BareJid;
 use minidom::Element;
 
 use crate::avatar::AvatarChanged;
+use crate::blocking::BlockingPush;
 use crate::bootstrap::{
     AuthenticationRequest, ResourceBindingRequest, SaslFailure, StreamFeatures,
 };
@@ -34,6 +35,8 @@ pub enum ClientEvent {
     Transport(TransportEvent),
     /// Typed inbound message or presence event.
     Messaging(MessagingEvent),
+    /// A trusted XEP-0191 block-list push.
+    BlockListChanged(BlockingPush),
     /// Typed inbound A/V call control event.
     Call(Box<InboundCallEvent>),
     /// Typed MAM archived message from an active history query.

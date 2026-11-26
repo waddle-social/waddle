@@ -1578,6 +1578,10 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
+    override suspend fun fetchBlockList(): List<String> = unused()
+    override suspend fun blockJids(jids: List<String>): Unit = unused()
+    override suspend fun unblockJids(jids: List<String>): Unit = unused()
+    override suspend fun unblockAll(): Unit = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean =
         push.disable(RecordedPushDisable(pushServiceJid, node, deviceId))
 

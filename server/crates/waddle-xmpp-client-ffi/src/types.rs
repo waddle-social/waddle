@@ -1416,6 +1416,17 @@ pub struct WaddleExtensionFormField {
 
 // ── Callback interface ───────────────────────────────────────────────────────
 
+/// Changes announced in XEP-0191 block-list pushes.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum WaddleBlockListChange {
+    /// The listed JIDs were blocked.
+    Blocked { jids: Vec<Jid> },
+    /// The listed JIDs were unblocked.
+    Unblocked { jids: Vec<Jid> },
+    /// Every JID was unblocked.
+    UnblockedAll,
+}
+
 /// Single typed event stream surfaced to the app. New event kinds are
 /// added as enum variants, which keeps the callback protocol itself
 /// stable across FFI releases.
@@ -1470,6 +1481,8 @@ pub enum WaddleClientEvent {
         jid: BareJid,
         activity: Option<WaddleActivity>,
     },
+    /// XEP-0191 block-list push received by this session.
+    BlockListChanged { change: WaddleBlockListChange },
 }
 
 #[uniffi::export(callback_interface)]
