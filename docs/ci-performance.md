@@ -723,3 +723,43 @@ failing later.
 The new dependency artifact compiles once on its first run and after any
 `Cargo.lock` or toolchain change. Layer derivations are uploaded with the other
 outputs; their restore and compression cost has not yet been measured in CI.
+
+### Sandboxed builds are required
+
+Cargo's identity for a workspace crate includes its absolute path. Inside the
+Nix sandbox every derivation builds in `/build/source`, so a layer and its lane
+agree. On an unprivileged Namespace runner Nix logs "auto-disabling sandboxing"
+and builds each derivation in a random directory instead; every member is then
+recompiled in every layer and in the lane. `mainDoctest` on `main` ran that way
+before this change. The server default pipeline's profile runner and the
+`namespaceRustChecks` job now request
+`namespace-profile-linux-x86;container.privileged=true`; the builder already
+ran privileged.
+
+### Namespace Nix volume measurements (2026-11-26)
+
+`waddle-ci-cache-benchmark.yml` with `scope=namespace-volume` builds the Clippy
+lane on a tagged Namespace Nix volume with `cache.nixos.org` as the only
+substituter (no FlakeHub, no Hestia), then probes it from later jobs after a
+one-line `waddle-server` edit. Each probe lands on whichever 8x16 machine
+Namespace allocates.
+
+| Run | Job | Sandbox | Volume at start | Derivations rebuilt | Lane compiled | Build |
+| --- | --- | --- | --- | --- | --- | ---: |
+| [Trial 1](https://github.com/waddle-social/waddle/actions/runs/45729048907) | seed | no | empty | all | 16 members | 22.8 min |
+| | probe, right after | no | empty | all | 16 members | 19.4 min |
+| | probe, +10 min | no | 7.7 GB, deps and layers | lane only | 16 members | 11.1 min |
+| [Trial 2](https://github.com/waddle-social/waddle/actions/runs/45738046103) | seed | yes | empty | all | waddle-server | 17.1 min |
+| | probe, right after | yes | empty | all | waddle-server | 17.1 min |
+| | probe, +10 min | yes | 7.6 GB, deps and layers | lane only | waddle-server | 9.2 min |
+
+A job that starts right after a new volume generation is committed lands on a
+machine without it, as Namespace's onboarding documentation describes; ten
+minutes later both trials found the full volume on a different machine. These
+are two samples, not a hit rate. In the Clippy lane `waddle-server` alone takes
+about 10 minutes at one Cargo job, so reusing the other members saves about a
+minute there; the larger saving is the dependency artifact and layers, about
+five minutes on this runner, which a warm volume supplies. Lanes that build
+test targets reuse more, because the other members' test binaries are a larger
+share of their work.
+

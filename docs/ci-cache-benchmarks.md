@@ -164,6 +164,15 @@ Namespace's missing warm population does not justify migration. Any future
 provider change needs a controlled changed-code CI trial; this diagnostic
 workflow now runs only by explicit manual dispatch.
 
+## Namespace-only volume trials: 2026-11-26
+
+The `namespace-volume` scope builds real Rust layers instead of restoring a
+pinned archive, so it needs no FlakeHub. Results and interpretation are in
+[ci-performance.md](ci-performance.md#namespace-nix-volume-measurements-2026-11-26).
+In both trials the job right after the seed missed the volume, and the job ten
+minutes later found it complete. Trial 1 also showed that unprivileged runners
+build without the Nix sandbox, which defeats Cargo reuse between derivations.
+
 ## Qualification workflow
 
 `ci/cache-benchmark/workflow.cue` generates
