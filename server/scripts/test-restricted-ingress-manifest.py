@@ -16,7 +16,7 @@ DB = SERVER / "crates/waddle-server/src/db"
 SOURCES = {
     "candidate": DB / "migrations/owner/ingress_definer_api_candidate.sql",
     "relation": DB / "migrations/owner/ingress_epoch_relation_guard_candidate.sql",
-    "baseline": SERVER / "crates/waddle-server/sql/baseline/postgres.sql",
+    "baseline": SERVER / "crates/waddle-server/sql/v1/postgres.sql",
     "structure_query": DB / "physical_attestation/restricted_ingress/structure.sql",
 }
 MANIFEST = DB / "physical_attestation/restricted_ingress_manifest_v3.json"

@@ -7,7 +7,7 @@ use sqlx::postgres::types::Oid;
 use sqlx::PgConnection;
 use thiserror::Error;
 
-use super::{MigrationRunner, MIGRATION_LEDGER_ADVISORY_LOCK_KEY};
+use super::{MigrationRunner, INITIAL_SCHEMA_VERSION, MIGRATION_LEDGER_ADVISORY_LOCK_KEY};
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 use crate::db::{DatabaseError, Transaction};
 
@@ -106,8 +106,16 @@ pub async fn acquire_dark_shared_migration_ledger_v1023<'a, 'connection>(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<SharedMigrationLedger<'a, 'connection>, DarkLedgerPreflightError> {
-    acquire_dark_shared_migration_ledger(tx, schema, pins, restore_search_path, 1023, true, false)
-        .await
+    acquire_dark_shared_migration_ledger(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        INITIAL_SCHEMA_VERSION,
+        true,
+        false,
+    )
+    .await
 }
 
 /// Acquire a shared-ledger proof for the complete registered V1030 prefix in
@@ -129,8 +137,16 @@ pub async fn acquire_dark_shared_migration_ledger_v1030_write<'a, 'connection>(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<SharedMigrationLedger<'a, 'connection>, DarkLedgerPreflightError> {
-    acquire_dark_shared_migration_ledger(tx, schema, pins, restore_search_path, 1030, false, true)
-        .await
+    acquire_dark_shared_migration_ledger(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        INITIAL_SCHEMA_VERSION,
+        false,
+        true,
+    )
+    .await
 }
 
 /// Acquire a shared-ledger proof for the complete registered V1030 prefix in
@@ -152,8 +168,16 @@ pub async fn acquire_dark_shared_migration_ledger_v1030_read<'a, 'connection>(
     pins: DarkMigrationLedgerPins,
     restore_search_path: &str,
 ) -> Result<SharedMigrationLedger<'a, 'connection>, DarkLedgerPreflightError> {
-    acquire_dark_shared_migration_ledger(tx, schema, pins, restore_search_path, 1030, true, true)
-        .await
+    acquire_dark_shared_migration_ledger(
+        tx,
+        schema,
+        pins,
+        restore_search_path,
+        INITIAL_SCHEMA_VERSION,
+        true,
+        true,
+    )
+    .await
 }
 
 /// Verify the complete pinned ledger on a caller-owned READ COMMITTED READ ONLY
@@ -251,7 +275,7 @@ async fn verify_dark_shared_migration_ledger_v1030_sqlx(
         connection,
         schema,
         pins,
-        1030,
+        INITIAL_SCHEMA_VERSION,
         require_read_only,
         false,
         partial_profile,

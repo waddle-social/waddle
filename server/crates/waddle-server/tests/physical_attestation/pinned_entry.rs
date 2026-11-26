@@ -434,7 +434,7 @@ async fn dark_pinned_entry_rejects_missing_registered_ledger_row() {
     let fixture = Fixture::new(url).await;
     let pool = pinned_pool(&fixture, None).await;
     let deleted = sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version = 2000",
+        "DELETE FROM {}._migrations WHERE version = 1",
         fixture.target
     ))
     .execute(&fixture.admin)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the schema baseline from a catalog document, and check it.
+"""Generate the initial v1 schema SQL from a catalog document, and check it.
 
-`generate` turns a `schema_catalog.py` document of a database the migration
-history built into the files under `crates/waddle-server/sql/baseline/`.
+`generate` turns a `schema_catalog.py` document into the initial schema files
+under `crates/waddle-server/sql/v1/`.
 
 For PostgreSQL:
 
@@ -13,23 +13,11 @@ For PostgreSQL:
                                server creates before it applies migrations
   postgres.privileges.sql      the source's roles, owners and privileges,
                                for the round-trip check
-  postgres.fingerprint.sql     the query the server and the tooling run to
-                               fingerprint a schema's structure
-  postgres.fingerprint.json    the source's fingerprint (`--fingerprint`)
-  postgres.one-login.fingerprint.json
-                               the fingerprint of the same history built by a
-                               server that owns its schema
-                               (`--one-login-fingerprint`)
-  postgres.retired-ledger.json the source's applied migrations
-                               (`--retired-ledger`)
 
-For SQLite: `sqlite.sql`, `sqlite.bootstrap.sql`, `sqlite.fingerprint.json`
-and `sqlite.retired-ledger.json`.
+For SQLite: `sqlite.sql` and `sqlite.bootstrap.sql`.
 
-The server reads `postgres.sql`, `sqlite.sql`, the fingerprints and the
-retired ledgers: the baseline is the first entry of its migration catalog,
-and the fingerprints and retired ledgers recognise a database the retired
-migration history built, which the server stamps.
+The server embeds `postgres.sql` and `sqlite.sql` as version 1 (`initial schema
+v1`), the initial entry of its migration catalog.
 
 `round-trip` applies the generated SQL to an empty database, dumps it and
 compares the dump, and the rows of the static tables, with the document the
@@ -43,9 +31,6 @@ The generator refuses a document that holds an object kind or property it
 cannot reproduce, naming each one, so nothing is left out silently. The
 tables it leaves to an owner preparation are listed in
 `OWNER_PREPARED_TABLES`. The output depends only on the document.
-
-The design and the cut procedure are in
-`docs/planning/2046-schema-baseline.md`.
 """
 
 from __future__ import annotations
@@ -836,7 +821,6 @@ def generate_postgres(document: dict[str, Any], schema: str) -> dict[str, Any]:
             "postgres.sql": structure,
             "postgres.bootstrap.sql": bootstrap,
             "postgres.privileges.sql": privileges,
-            "postgres.fingerprint.sql": schema_catalog.fingerprint_sql(),
         },
         "outside": outside,
         "names": templated,
@@ -923,9 +907,8 @@ def header(name: str, commit: str, source: str) -> str:
         f"-- Source commit: {commit}\n"
         f"-- Source catalog: {source}\n"
         "--\n"
-        "-- Part of the schema baseline (docs/planning/2046-schema-baseline.md). The\n"
-        "-- baseline is migration 2000, the first entry of the server's migration\n"
-        "-- catalog; later schema changes are migrations numbered from 2001.\n"
+        "-- Initial schema v1 (version 1), the first entry of the server's migration\n"
+        "-- catalog; later schema changes are migrations numbered from 2.\n"
         "--\n"
         f"-- {_HEADERS[name]}\n\n"
     )
@@ -1155,18 +1138,6 @@ def _parser() -> argparse.ArgumentParser:
                                   help="commit the source database was built from")
     generate_command.add_argument("--schema", default="public",
                                   help="PostgreSQL application schema (default: public)")
-    generate_command.add_argument(
-        "--fingerprint", metavar="FILE",
-        help="fingerprint of the source database, stored as <engine>.fingerprint.json")
-    generate_command.add_argument(
-        "--one-login-fingerprint", metavar="FILE",
-        help="PostgreSQL only: fingerprint of the same history built by a server that owns "
-             "its schema (the harness's `legacy` path), stored as "
-             "postgres.one-login.fingerprint.json")
-    generate_command.add_argument(
-        "--retired-ledger", metavar="FILE",
-        help="applied migration rows of the source database, stored as "
-             "<engine>.retired-ledger.json")
     check = commands.add_parser("round-trip", help="apply the candidate and compare")
     check.add_argument("source", help="catalog document the candidate was generated from")
     check.add_argument("--directory", required=True, help="directory that holds the candidate")
@@ -1209,19 +1180,6 @@ def main(argv: list[str] | None = None) -> int:
                           Path(arguments.source).name)
         out = Path(arguments.out)
         out.mkdir(parents=True, exist_ok=True)
-        engine = "postgres" if document["engine"] == "postgresql" else "sqlite"
-        if arguments.one_login_fingerprint and engine != "postgres":
-            raise CatalogError("--one-login-fingerprint applies to PostgreSQL only")
-        for option, suffix in ((arguments.fingerprint, "fingerprint"),
-                               (arguments.one_login_fingerprint, "one-login.fingerprint"),
-                               (arguments.retired_ledger, "retired-ledger")):
-            if option:
-                try:
-                    data = json.loads(Path(option).read_text(encoding="utf-8"))
-                except (OSError, ValueError) as error:
-                    raise CatalogError(f"could not read {option}: {error}") from error
-                result["files"][f"{engine}.{suffix}.json"] = json.dumps(
-                    data, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
         for name, text in result["files"].items():
             (out / name).write_text(text, encoding="utf-8")
             print(f"wrote {out / name}")

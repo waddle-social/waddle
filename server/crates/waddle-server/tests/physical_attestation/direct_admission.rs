@@ -139,7 +139,7 @@ async fn pg_production_start(
 
 /// Restore the epoch guard as the schema baseline installs it.
 async fn installed_v1009(fixture: &Fixture) {
-    let source = include_str!("../../sql/baseline/postgres.sql");
+    let source = include_str!("../../sql/v1/postgres.sql");
     let (_, guard) = source
         .split_once("\nCREATE FUNCTION waddle_ingress_epoch_guard()")
         .expect("baseline epoch guard");

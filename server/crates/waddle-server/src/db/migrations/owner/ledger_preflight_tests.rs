@@ -98,7 +98,7 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
     tx.rollback().await.expect("rollback rejected boundary");
 
     sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version>=2000",
+        "DELETE FROM {}._migrations WHERE version>={BASELINE_VERSION}",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -121,7 +121,7 @@ async fn postgres17_ledger_preflight_v1030_read_only_requires_complete_prefix_an
         .await,
         Err(DarkLedgerPreflightError::Database(
             DatabaseError::MigrationLedger(MigrationLedgerError::PendingMigration {
-                version: 2000
+                version: BASELINE_VERSION
             })
         ))
     ));
@@ -645,7 +645,7 @@ async fn postgres17_ledger_preflight_v1030_read_write_and_catalog_fail_closed() 
     blocker.rollback().await.expect("release lineage blocker");
 
     sqlx::query(&format!(
-        "UPDATE {}._migrations SET checksum='bad' WHERE version=2000",
+        "UPDATE {}._migrations SET checksum='bad' WHERE version={BASELINE_VERSION}",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -1053,7 +1053,7 @@ async fn postgres17_ledger_preflight_bounds_rows_and_text_before_decode() {
     let fixture = Fixture::new(&url).await;
     for column in ["description", "checksum"] {
         sqlx::query(&format!(
-            "UPDATE {}._migrations SET {column} = $1 WHERE version = 2000",
+            "UPDATE {}._migrations SET {column} = $1 WHERE version = {BASELINE_VERSION}",
             fixture.schema
         ))
         .bind("x".repeat(1_000_000))
@@ -1067,7 +1067,7 @@ async fn postgres17_ledger_preflight_bounds_rows_and_text_before_decode() {
         .expect("bounded fixture catalog");
     sqlx::query(&format!(
         "INSERT INTO {}._migrations (version, description, checksum) \
-         SELECT 2000 + value, 'excess', '0000' FROM pg_catalog.generate_series(1, $1) AS series(value)",
+         SELECT {BASELINE_VERSION} + value, 'excess', '0000' FROM pg_catalog.generate_series(1, $1) AS series(value)",
         fixture.schema
     ))
     .bind(extra)
@@ -1151,7 +1151,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     assert!(exclusive, "rollback must release the shared lock");
     other.rollback().await.expect("end owner");
 
-    for (predicate, missing) in [("version = 2000", 2000)] {
+    for (predicate, missing) in [(format!("version = {BASELINE_VERSION}"), BASELINE_VERSION)] {
         sqlx::query(&format!(
             "DELETE FROM {}._migrations WHERE {predicate}",
             fixture.schema
@@ -1180,7 +1180,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
 
     // A valid relation with a damaged prefix cannot be repaired by this path.
     sqlx::query(&format!(
-        "UPDATE {}._migrations SET checksum='bad' WHERE version=2000",
+        "UPDATE {}._migrations SET checksum='bad' WHERE version={BASELINE_VERSION}",
         fixture.schema
     ))
     .execute(&fixture.admin)
@@ -1200,7 +1200,7 @@ async fn postgres17_ledger_preflight_catalog_hostility_and_locks() {
     ));
     tx.rollback().await.expect("checksum rollback");
     let checksum: String = sqlx::query_scalar(&format!(
-        "SELECT checksum FROM {}._migrations WHERE version=2000",
+        "SELECT checksum FROM {}._migrations WHERE version={BASELINE_VERSION}",
         fixture.schema
     ))
     .fetch_one(&fixture.admin)

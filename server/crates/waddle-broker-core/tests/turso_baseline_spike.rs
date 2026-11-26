@@ -1,5 +1,5 @@
-//! Turso 0.8.4 WAL-mode baseline compatibility spike for Waddle's
-//! `server/crates/waddle-server/sql/baseline/sqlite.sql` schema, 8 triggers,
+//! Turso 0.8.4 WAL-mode v1 schema compatibility spike for Waddle's
+//! `server/crates/waddle-server/sql/v1/sqlite.sql` schema, 10 triggers,
 //! MAM full-text search (`GLOB` vs SQLite `FTS5` vs Turso native `USING fts`),
 //! `CAST(unixepoch('subsec') * 1000 AS INTEGER)` monotonicity, and WAL
 //! checkpoint / cacheflush behavior.
@@ -9,7 +9,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use turso::{Builder, Connection, Database, Value};
 
-const BASELINE_SQL: &str = include_str!("../../waddle-server/sql/baseline/sqlite.sql");
+const BASELINE_SQL: &str = include_str!("../../waddle-server/sql/v1/sqlite.sql");
 
 async fn open_wal_db(enable_index_method: bool) -> (TempDir, Database, Connection) {
     let dir = TempDir::new().expect("create tempdir");
@@ -47,7 +47,7 @@ async fn open_wal_db(enable_index_method: bool) -> (TempDir, Database, Connectio
 async fn apply_baseline_schema(conn: &Connection) {
     conn.execute_batch(BASELINE_SQL)
         .await
-        .expect("apply server/crates/waddle-server/sql/baseline/sqlite.sql in Turso WAL mode");
+        .expect("apply server/crates/waddle-server/sql/v1/sqlite.sql in Turso WAL mode");
 }
 
 async fn query_i64(conn: &Connection, sql: &str) -> i64 {
@@ -74,8 +74,8 @@ async fn test_wal_mode_baseline_schema_and_checkpoint_probe() {
     )
     .await;
     assert_eq!(
-        trigger_count, 8,
-        "all 8 baseline triggers must be registered in sqlite_master"
+        trigger_count, 10,
+        "all 10 v1 triggers must be registered in sqlite_master"
     );
 
     let epoch = query_i64(

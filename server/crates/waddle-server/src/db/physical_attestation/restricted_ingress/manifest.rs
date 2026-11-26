@@ -16,7 +16,7 @@ use crate::db::physical_attestation::quote_identifier;
 const CANDIDATE: &str = include_str!("../../migrations/owner/ingress_definer_api_candidate.sql");
 const RELATION: &str =
     include_str!("../../migrations/owner/ingress_epoch_relation_guard_candidate.sql");
-const BASELINE: &str = include_str!("../../../../sql/baseline/postgres.sql");
+const BASELINE: &str = include_str!("../../../../sql/v1/postgres.sql");
 const STRUCTURE_SQL: &str = include_str!("structure.sql");
 const MANIFEST: &str = include_str!("../restricted_ingress_manifest_v3.json");
 

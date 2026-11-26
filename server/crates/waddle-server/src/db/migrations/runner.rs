@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use tracing::{debug, info, instrument};
 
-use super::baseline::{self, BaselineAction};
+use super::baseline;
 use super::postgres_ledger::{self, PreparedLedger};
 use super::sql::migrations_table_sql;
-use super::{after_baseline, migration_checksum, Migration, MigrationLedgerError};
+use super::{migration_checksum, Migration, MigrationLedgerError};
 use crate::db::physical_attestation::CATALOG_MUTATION_ADVISORY_LOCK_KEY;
 #[cfg(test)]
 use crate::db::ConnectionGuard;
@@ -30,9 +30,9 @@ pub(super) const SENTINEL_TABLE: &str = "users";
 /// Migration runner for applying migrations to a database.
 pub struct MigrationRunner {
     pub(super) migrations: Vec<Migration>,
-    /// Set on the deployment catalog, whose first entry is the schema
-    /// baseline: what to do with a database the retired history built.
-    baseline: Option<BaselineAction>,
+    /// True on the deployment catalog, whose v1 PostgreSQL SQL is a schema
+    /// template rendered with the active schema name on application.
+    renders_postgres_template: bool,
 }
 
 impl MigrationRunner {
@@ -43,7 +43,7 @@ impl MigrationRunner {
         sorted.sort_by_key(|migration| migration.version);
         Self {
             migrations: sorted,
-            baseline: None,
+            renders_postgres_template: false,
         }
     }
 
@@ -53,14 +53,14 @@ impl MigrationRunner {
         Self::single()
     }
 
-    /// The deployment catalog: the schema baseline (version 2000) followed by
-    /// every later migration. Every ledger reader in a process builds its
-    /// runner with this, so the runner that applies, the owner preparations
-    /// that verify and the runtime preflight that pins agree. A database the
-    /// retired history built is stamped or refused as the process's
-    /// [`BaselineAction`] says; see [`baseline`].
+    /// The deployment catalog: the single initial schema (`version: 1`). Every
+    /// ledger reader in a process builds its runner with this, so the runner
+    /// that applies, the owner preparations that verify and the runtime
+    /// preflight that pins agree.
     pub fn single() -> Self {
-        Self::deployment(baseline::selected())
+        let mut runner = Self::new(vec![baseline::migration()]);
+        runner.renders_postgres_template = true;
+        runner
     }
 
     /// The highest version in this runner's catalog: the version a database
@@ -70,15 +70,6 @@ impl MigrationRunner {
             .iter()
             .map(|migration| migration.version)
             .max()
-    }
-
-    /// The deployment catalog under an explicit [`BaselineAction`].
-    pub(super) fn deployment(action: BaselineAction) -> Self {
-        let mut migrations = vec![baseline::migration()];
-        migrations.extend(after_baseline::all());
-        let mut runner = Self::new(migrations);
-        runner.baseline = Some(action);
-        runner
     }
 
     /// Run all pending migrations on one transaction. PostgreSQL acquires the
@@ -169,9 +160,6 @@ impl MigrationRunner {
         checksum_column_added: bool,
         prepared: Option<&PreparedLedger>,
     ) -> Result<Vec<i64>, DatabaseError> {
-        if let Some(action) = self.baseline {
-            baseline::prepare_ledger(tx, driver, ledger_table, action).await?;
-        }
         let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
@@ -210,24 +198,13 @@ impl MigrationRunner {
                 // A previous migration body may have changed its local path.
                 ledger.set_search_path(tx).await?;
             }
-            if driver == DatabaseDriver::Postgres
-                && migration.version == after_baseline::HOST_GRANT_SPACES_VERSION
-                && self.baseline.is_some()
+            let apply_result = if self.renders_postgres_template
+                && migration.version == baseline::INITIAL_SCHEMA_VERSION
             {
-                crate::pubsub::runtime_attach::verify_space_binding_baseline(tx)
-                    .await
-                    .map_err(|source| DatabaseError::MigrationApply {
-                        version: migration.version,
-                        description: migration.description.clone(),
-                        source: Box::new(source),
-                    })?;
-            }
-            let apply_result =
-                if self.baseline.is_some() && migration.version == baseline::BASELINE_VERSION {
-                    baseline::apply(tx, driver, migration).await
-                } else {
-                    tx.execute_batch(migration.sql_for(driver)).await
-                };
+                baseline::apply(tx, driver, migration).await
+            } else {
+                tx.execute_batch(migration.sql_for(driver)).await
+            };
             apply_result.map_err(|source| DatabaseError::MigrationApply {
                 version: migration.version,
                 description: migration.description.clone(),
@@ -525,13 +502,6 @@ impl MigrationRunner {
         driver: DatabaseDriver,
         required_version: i64,
     ) -> Result<(), DatabaseError> {
-        // Callers name the retired version that created what they attach to.
-        // The baseline stands for every retired version.
-        let required_version = if self.baseline.is_some() {
-            required_version.max(baseline::BASELINE_VERSION)
-        } else {
-            required_version
-        };
         self.validate_ledger(applied_rows, driver, false)?;
         let mut seen = HashSet::new();
         for row in applied_rows {

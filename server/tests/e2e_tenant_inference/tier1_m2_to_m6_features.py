@@ -71,30 +71,28 @@ def _t1_f06_02(ctx: RunContext) -> None:
 
 
 def _t1_f06_03(ctx: RunContext) -> None:
-    _find_migration_gte(ctx, "migrations", 2001, "account_id")
-    sqlite_mig = ctx.read_text(
-        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.sqlite.sql"
+    sqlite_v1 = ctx.read_text(
+        "server/crates/waddle-server/sql/v1/sqlite.sql"
     )
-    assert_in("account_id", sqlite_mig, "M2: sqlite migration 2026 must add account_id")
+    assert_in("account_id", sqlite_v1, "M2: sqlite v1 schema must include account_id")
     assert_in(
         "trg_users_account_id_immutable",
-        sqlite_mig,
-        "M2: sqlite migration 2026 must enforce immutable users.account_id",
+        sqlite_v1,
+        "M2: sqlite v1 schema must enforce immutable users.account_id",
     )
 
 
 def _t1_f06_04(ctx: RunContext) -> None:
-    _find_migration_gte(ctx, "migrations", 2001, "account_id")
-    pg_mig = ctx.read_text(
-        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    pg_v1 = ctx.read_text(
+        "server/crates/waddle-server/sql/v1/postgres.sql"
     )
-    assert_in("account_id", pg_mig, "M2: postgres migration 2026 must include immutable account_id")
+    assert_in("account_id", pg_v1, "M2: postgres v1 schema must include immutable account_id")
     assert_in(
         "trg_users_account_id_immutable",
-        pg_mig,
-        "M2: postgres migration 2026 must enforce immutable users.account_id",
+        pg_v1,
+        "M2: postgres v1 schema must enforce immutable users.account_id",
     )
-    assert_in("tenant_id", pg_mig, "M2: postgres migration 2026 must scope tables by tenant_id")
+    assert_in("tenant_id", pg_v1, "M2: postgres v1 schema must scope tables by tenant_id")
 
 
 def _t1_f06_05(ctx: RunContext) -> None:
@@ -128,31 +126,28 @@ def _t1_f07_02(ctx: RunContext) -> None:
 
 
 def _t1_f07_03(ctx: RunContext) -> None:
-    pg_mig = ctx.read_text(
-        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    pg_v1 = ctx.read_text(
+        "server/crates/waddle-server/sql/v1/postgres.sql"
     )
     for tbl in ("users", "auth_identities", "spaces_metadata"):
         assert_contains_regex(
-            rf"ALTER TABLE\s+{tbl}\s+ADD COLUMN\s+(?:IF NOT EXISTS\s+)?tenant_id\b",
-            pg_mig,
-            f"M2: Postgres migration 2026 must add tenant_id column to {tbl}",
+            rf"CREATE TABLE\s+{tbl}\s*\([^;]*\btenant_id\b",
+            pg_v1,
+            f"M2: Postgres v1 schema must include tenant_id column on {tbl}",
         )
 
 
 def _t1_f07_04(ctx: RunContext) -> None:
     import sqlite3
 
-    pg_mig = ctx.read_text(
-        "server/crates/waddle-server/sql/migrations/2026_tenant_isolation_and_account_id.postgres.sql"
+    pg_v1 = ctx.read_text(
+        "server/crates/waddle-server/sql/v1/postgres.sql"
     )
-    assert_in("tenant_id", pg_mig, "M2: postgres migration 2026 must include tenant_id")
+    assert_in("tenant_id", pg_v1, "M2: postgres v1 schema must include tenant_id")
     with ctx.temp_dir(prefix="waddle_schema_catalog_") as tmp:
         db_path = tmp / "catalog.db"
         conn = sqlite3.connect(db_path)
-        conn.executescript(ctx.read_text("server/crates/waddle-server/sql/baseline/sqlite.sql"))
-        mig_dir = ctx.server_dir / "crates" / "waddle-server" / "sql" / "migrations"
-        for sql_file in sorted(mig_dir.glob("*.sqlite.sql")):
-            conn.executescript(sql_file.read_text(encoding="utf-8"))
+        conn.executescript(ctx.read_text("server/crates/waddle-server/sql/v1/sqlite.sql"))
         conn.close()
         res = ctx.run_cmd(
             ["python3", "server/scripts/schema_catalog.py", "dump", "--sqlite", str(db_path)],
@@ -931,8 +926,8 @@ def get_tests() -> list[TestCase]:
         # F6 (M2)
         TestCase("T1-F06-01", 1, "M2", ("F6",), ("Gate1", "Gate3"), "TenantId canonical domain-routing & registry contract passes", _t1_f06_01),
         TestCase("T1-F06-02", 1, "M2", ("F6",), ("Gate1",), "tenant_registry.rs exists as sole constructor of tenant handles", _t1_f06_02),
-        TestCase("T1-F06-03", 1, "M2", ("F6",), ("Gate1",), "SQLite/Turso migration >=2001 and baseline add immutable account_id", _t1_f06_03),
-        TestCase("T1-F06-04", 1, "M2", ("F6",), ("Gate1",), "Postgres baseline includes immutable account_id and tenant_id scope", _t1_f06_04),
+        TestCase("T1-F06-03", 1, "M2", ("F6",), ("Gate1",), "SQLite/Turso v1 schema includes immutable account_id", _t1_f06_03),
+        TestCase("T1-F06-04", 1, "M2", ("F6",), ("Gate1",), "Postgres v1 schema includes immutable account_id and tenant_id scope", _t1_f06_04),
         TestCase("T1-F06-05", 1, "M2", ("F6",), ("Gate1",), "Identical localparts across two tenants hold distinct account_id UUIDs", _t1_f06_05),
         # F7 (M2)
         TestCase("T1-F07-01", 1, "M2", ("F7",), ("Gate1",), "Turso per-tenant <tenant>.db TenantStore implementation exists", _t1_f07_01),

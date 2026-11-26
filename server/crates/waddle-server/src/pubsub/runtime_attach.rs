@@ -755,34 +755,6 @@ pub(super) async fn verify_marker_shape_and_data_tx(
 }
 
 /// Verify the baseline PubSub layout before Space bindings retain its nodes.
-pub(crate) async fn verify_space_binding_baseline(
-    tx: &mut Transaction<'_>,
-) -> Result<(), DatabaseError> {
-    let schema = {
-        let mut rows = tx.query("SELECT current_schema()::text", ()).await?;
-        let row = rows.next().await?.ok_or_else(|| {
-            DatabaseError::QueryFailed("no schema for the Space bindings migration".to_owned())
-        })?;
-        row.get::<String>(0)?
-    };
-    for table in TABLES
-        .iter()
-        .filter(|table| table.name != PUBSUB_SCHEMA_MARKER_TABLE)
-    {
-        async {
-            verify_table(tx, &schema, table).await?;
-            verify_columns(tx, &schema, table).await?;
-            verify_constraints(tx, &schema, table).await?;
-            verify_indexes(tx, &schema, table).await
-        }
-        .await
-        .map_err(|error| {
-            DatabaseError::QueryFailed(format!("Space bindings require PubSub v8: {error}"))
-        })?;
-    }
-    Ok(())
-}
-
 pub(super) async fn verify_owner_schema_shape_tx(
     tx: &mut Transaction<'_>,
     schema: &str,
@@ -1529,26 +1501,13 @@ async fn verify_space_write_guard(
     schema: &str,
     table: &'static str,
 ) -> Result<(), PubSubRuntimeAttachError> {
-    let (migration, name, events) = if table == "pubsub_items" {
-        (
-            include_str!(
-                "../../sql/migrations/2018_host_grant_space_bookmark_versions.postgres.sql"
-            ),
-            "guard_bound_space_item_write",
-            31_i32,
-        )
+    let (name, events) = if table == "pubsub_items" {
+        ("guard_bound_space_item_write", 31_i32)
     } else {
-        (
-            include_str!("../../sql/migrations/2021_host_grant_space_configuration.postgres.sql"),
-            "guard_bound_space_configuration_write",
-            19_i32,
-        )
+        ("guard_bound_space_configuration_write", 19_i32)
     };
     let invalid = || PubSubRuntimeAttachError::InvalidTable { table };
-    let source = migration
-        .split_once("AS $$")
-        .and_then(|(_, body)| body.split_once("$$").map(|(source, _)| source))
-        .ok_or_else(invalid)?;
+    let source = crate::db::postgres_function_body(name).ok_or_else(invalid)?;
     // Standalone PubSub bootstrap has no host-grant tables. A migrated
     // schema requires the installed invoker trigger and its exact body.
     let valid = query_boolean(
