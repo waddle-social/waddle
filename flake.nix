@@ -95,6 +95,9 @@
       # dependencies; it exposes test fixtures and in-server test seams, so
       # the public suites gated on it run here too (#1777).
       xmppServerNextestArgs = ''--cargo-profile "$CARGO_PROFILE" --locked --package waddle-server --features test-support --profile ci --lib --tests --config profile.ci-test.package.waddle-server.opt-level=0 --config profile.ci-test.package.waddle-xmpp.opt-level=0'';
+      # Compile-only layers have stubbed integration targets. The production
+      # CI profile's execution filters refer to the real test binaries.
+      layerNextest = "cargo nextest run --no-run --config-file ${builtins.toFile "layer-nextest.toml" "[profile.ci]\n"}";
       # Server-relative paths that member layers compile from real sources.
       # waddle-server changes most often (181 of 395 recent Rust commits
       # touched only it) and waddle-xmpp next, so each gets its own layer
@@ -1013,7 +1016,7 @@
             };
             buildPhaseCargoCommand = ''
               ${testLinkerSetup}
-              cargo nextest run ${xmppServerNextestArgs} --no-run
+              ${layerNextest} ${xmppServerNextestArgs}
             '';
           };
           # The default-feature suite main publishes behind (`mainTest`). It
@@ -1044,7 +1047,7 @@
             args = defaultTestArgs // {
               nativeBuildInputs = defaultTestArgs.nativeBuildInputs ++ [ pkgs.cargo-nextest ];
             };
-            buildPhaseCargoCommand = ''cargo nextest run --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs} --no-run'';
+            buildPhaseCargoCommand = ''${layerNextest} --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs}'';
           };
           # The production test archive's environment (packages
           # mkServerTestArchive): no PostgreSQL, no self RPATH, mold.
@@ -1061,7 +1064,7 @@
             };
             buildPhaseCargoCommand = ''
               ${testLinkerSetup}
-              cargo nextest run ${archiveNextestArgs} --no-run
+              ${layerNextest} ${archiveNextestArgs}
             '';
           };
         in
@@ -1135,8 +1138,16 @@
               pname = "waddle-server-default-test";
               doInstallCargoArtifacts = false;
               cargoArtifacts = defaultTestMemberArtifacts;
-              cargoExtraArgs = defaultTestCargoArgs;
-              cargoNextestExtraArgs = defaultTestNextestArgs;
+              checkPhase = ''
+                runHook preCheck
+                cargo nextest run --cargo-profile "$CARGO_PROFILE" ${defaultTestCargoArgs} ${defaultTestNextestArgs} \
+                  --cargo-message-format json-render-diagnostics > "$TMPDIR/compile-messages.jsonl"
+                mkdir -p "$out"
+                ${pkgs.python3}/bin/python3 ${./server/scripts/check_member_layer_reuse.py} \
+                  "$TMPDIR/compile-messages.jsonl" --root "$PWD" --report-only --output "$out/member-reuse.json"
+                cp "''${CARGO_TARGET_DIR:-target}/nextest/ci/junit.xml" "$out/junit.xml"
+                runHook postCheck
+              '';
             }
           );
           waddle-server-doctest = craneLib.cargoTest (

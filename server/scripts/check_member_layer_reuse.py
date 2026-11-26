@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tomllib
 from pathlib import Path, PurePosixPath
 
 
@@ -32,14 +33,14 @@ def classify(manifest: str, root: PurePosixPath) -> str | None:
     return str(relative)
 
 
-def check(lines, root: PurePosixPath, rebuild_allowed: set[str]) -> tuple[dict, list[str]]:
+def check(lines, root: PurePosixPath) -> tuple[dict, dict[str, bool]]:
     stats = {
         "member_units_built": 0,
         "member_units_fresh": 0,
         "dependency_units_built": 0,
         "dependency_units_fresh": 0,
     }
-    unexpected: set[str] = set()
+    member_compiled: dict[str, bool] = {}
     artifacts = 0
     for number, line in enumerate(lines, 1):
         line = line.strip()
@@ -56,11 +57,11 @@ def check(lines, root: PurePosixPath, rebuild_allowed: set[str]) -> tuple[dict, 
         fresh = bool(message["fresh"])
         kind = "member" if member is not None else "dependency"
         stats[f"{kind}_units_{'fresh' if fresh else 'built'}"] += 1
-        if member is not None and not fresh and member not in rebuild_allowed:
-            unexpected.add(member)
+        if member is not None:
+            member_compiled[member] = member_compiled.get(member, False) or not fresh
     if artifacts == 0:
         raise SystemExit("no compiler-artifact messages: was the build run with JSON output?")
-    return stats, sorted(unexpected)
+    return stats, member_compiled
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--lane", default="compile", help="metric label")
     parser.add_argument(
+        "--output", type=Path, help="write built and fresh workspace members to JSON"
+    )
+    parser.add_argument(
         "--report-only",
         action="store_true",
         help="print the metrics without failing (lanes built without member layers)",
@@ -83,9 +87,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     with args.messages.open(encoding="utf-8") as handle:
-        stats, unexpected = check(handle, PurePosixPath(args.root), set(args.rebuild_allowed))
+        stats, member_compiled = check(handle, PurePosixPath(args.root))
+    if args.output:
+        with (Path(args.root) / "Cargo.toml").open("rb") as manifest:
+            members = set(tomllib.load(manifest)["workspace"]["members"])
+        missing = members.difference(member_compiled)
+        if missing:
+            raise SystemExit(f"missing workspace member artifacts: {', '.join(sorted(missing))}")
+        report = {
+            "built": sorted(m for m in members if member_compiled[m]),
+            "fresh": sorted(m for m in members if not member_compiled[m]),
+        }
+        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        for state, paths in report.items():
+            print(f"Workspace members {state} ({len(paths)}): {', '.join(paths) or 'none'}")
     fields = " ".join(f"{key}={value}" for key, value in stats.items())
     print(f"WADDLE_CI_METRIC phase={args.lane} member_layer_reuse=1 {fields}")
+    unexpected = sorted(m for m, built in member_compiled.items() if built and m not in args.rebuild_allowed)
     if unexpected and not args.report_only:
         print(
             "Workspace members were recompiled although their member layer should have "

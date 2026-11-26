@@ -669,7 +669,7 @@ jobs:
       - name: Check Namespace Bazel Remote Cache
         run: "set -euo pipefail\nif [ -z \"${CUENV_REMOTE_CACHE:-}\" ]; then\n  echo \"Namespace Bazel remote cache not configured on this runner; using local cache only.\"\n  exit 0\nfi\ncuenv cache status || true"
       - name: nixDefaultTest
-        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-default-test"
+        run: "nix build --print-build-logs --print-out-paths --option sandbox true --option sandbox-fallback false ../#checks.x86_64-linux.waddle-server-default-test"
         working-directory: server
         env:
           GITHUB_ACTOR: "${{ github.actor }}"

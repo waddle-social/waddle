@@ -105,6 +105,25 @@ class MemberLayerReuseTest(unittest.TestCase):
             run([json.dumps({"reason": "build-finished", "success": True})])
         self.assertIn("no compiler-artifact messages", str(raised.exception))
 
+    def test_member_report_covers_the_workspace_and_counts_a_mixed_member_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["a", "b"]\n')
+            messages = root / "messages"
+            report = root / "report"
+            messages.write_text("\n".join(
+                artifact(f"{root}/{member}/Cargo.toml", fresh)
+                for member, fresh in [("a", False), ("a", True), ("b", True), ("fixture", False)]
+            ))
+            args = [str(messages), "--root", directory, "--output", str(report), "--report-only"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(reuse.main(args), 0)
+            self.assertEqual(json.loads(report.read_text()), {"built": ["a"], "fresh": ["b"]})
+
+            messages.write_text(artifact(f"{root}/a/Cargo.toml", True))
+            with self.assertRaisesRegex(SystemExit, "missing workspace member artifacts: b"):
+                reuse.main(args)
+
 
 if __name__ == "__main__":
     unittest.main()

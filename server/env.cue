@@ -950,7 +950,7 @@ schema.#Project & {
 		nixDefaultTest: schema.#Task & {
 			hermetic: false
 			command:  "nix"
-			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-default-test"]
+			args: ["build", "--print-build-logs", "--print-out-paths", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "../#checks.x86_64-linux.waddle-server-default-test"]
 			inputs: _namespaceRustTaskInputs
 		}
 
