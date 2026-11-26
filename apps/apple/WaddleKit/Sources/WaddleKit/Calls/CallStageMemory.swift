@@ -15,6 +15,8 @@ public struct CallStageMemory: Equatable, Sendable {
     /// The call floats above the other windows (web Picture-in-Picture): its
     /// picture is there, and the stage says so in the tiles' place.
     public private(set) var isFloating = false
+    /// On a phone, the person opened the call from the dock: its stage covers the screen.
+    public private(set) var isOpened = false
     /// The last message of the call's chat the person has had in front of them.
     public private(set) var chatSeenID: String?
 
@@ -30,6 +32,15 @@ public struct CallStageMemory: Equatable, Sendable {
     /// than nothing: an empty chat leaves what was seen as it was.
     public mutating func sawChat(upTo id: String?) {
         if let id { chatSeenID = id }
+    }
+
+    public mutating func open() {
+        isOpened = true
+    }
+
+    /// Back to the dock.
+    public mutating func minimise() {
+        isOpened = false
     }
 
     public mutating func toggleFloating() {

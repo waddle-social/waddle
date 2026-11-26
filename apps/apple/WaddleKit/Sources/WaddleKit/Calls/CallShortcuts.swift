@@ -44,7 +44,8 @@ public enum CallShortcut: CaseIterable, Equatable, Sendable {
             case .screenShare: controls.devices.hasMedia && controls.devices.isSharingScreen != nil
             case .hand: controls.isHandRaised != nil
             // Full screen is as big as a call gets.
-            case .stepUp: controls.size != .immersive
+            // Nor has a phone's stage, which covers the screen, a step to take.
+            case .stepUp: controls.size != .immersive && !controls.minimises
             }
         }
     }

@@ -2,6 +2,8 @@ import Foundation
 
 public enum CallSurface: Equatable, Sendable {
     case dock, sidebarCard, split, expanded, fullscreen
+    /// A phone's stage: over everything, once the person has opened it from the dock.
+    case cover
 
     public enum Size: String, Sendable {
         case split, expanded, immersive
@@ -22,11 +24,14 @@ public enum CallSurface: Equatable, Sendable {
         case phone, regularWidth
     }
 
-    /// An established call can take over only its own conversation.
+    /// An established call can take over only its own conversation. On a
+    /// phone it stays in the dock until the person opens it, and then
+    /// covers the screen whatever conversation is open.
     public static func placement(
-        isInSession: Bool, conversationIsOpen: Bool, platform: Platform, size: Size
+        isInSession: Bool, conversationIsOpen: Bool, platform: Platform, size: Size, isOpened: Bool = false
     ) -> Self {
-        guard platform == .regularWidth, isInSession else { return .dock }
+        guard isInSession else { return .dock }
+        guard platform == .regularWidth else { return isOpened ? .cover : .dock }
         guard conversationIsOpen else { return .sidebarCard }
         switch size {
         case .split: return .split
@@ -55,11 +60,11 @@ public extension CallSurface {
         case hidden
     }
 
-    /// The call has a stage of its own.
+    /// The call has a stage of its own in the pane of its conversation.
     var showsStage: Bool {
         switch self {
         case .split, .expanded, .fullscreen: true
-        case .dock, .sidebarCard: false
+        case .dock, .sidebarCard, .cover: false
         }
     }
 
@@ -121,8 +126,9 @@ public extension CallSurface {
 }
 
 public extension CallSurface.Platform {
-    /// A phone keeps every call in the dock however it is held: a large
-    /// one is regular width in landscape and still has no room for a stage.
+    /// A phone has no pane to share with a stage however it is held: a large
+    /// one is regular width in landscape and still has no room for one. Its
+    /// call is in the dock, or covers the screen (`cover`).
     /// Anything else squeezed to a compact size is treated as one.
     init(isPhone: Bool, isCompactWidth: Bool, isCompactHeight: Bool) {
         self = isPhone || isCompactWidth || isCompactHeight ? .phone : .regularWidth
@@ -138,12 +144,12 @@ public extension CallSurface {
     ///   of a call whose conversation is not open; otherwise the dock keeps it.
     static func placement(
         of state: CallState, open selection: ConversationID?, platform: Platform, pane: CGSize?,
-        size: Size = .defaultSize, isSidebarShown: Bool = true
+        size: Size = .defaultSize, isOpened: Bool = false, isSidebarShown: Bool = true
     ) -> Self {
         let conversation = state.sessionConversation
         let surface = placement(
             isInSession: conversation != nil, conversationIsOpen: conversation != nil && conversation == selection,
-            platform: platform, size: size
+            platform: platform, size: size, isOpened: isOpened
         )
         if surface.showsStage, let pane, stageArrangement(for: size, in: pane, splitPercent: nil) == nil { return .dock }
         if surface == .sidebarCard, !isSidebarShown { return .dock }

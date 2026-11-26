@@ -38,12 +38,14 @@ public struct CallControls: Equatable, Sendable {
     /// Whether the call floats above the other windows; `nil` where it cannot,
     /// or while nobody has a picture to float.
     public var isFloating: Bool?
+    /// The stage covers a phone's screen: in place of the steps in size it has one way back to the dock.
+    public var minimises: Bool
 
     public init(
         devices: Devices = Devices(), isHandRaised: Bool? = nil, viewMode: CallStagePresentation.ViewMode = .gallery,
         isSelfViewHidden: Bool = false, size: CallSurface.Size = .split, escapeStepsDown: Bool = true,
         showsParticipants: Bool = false, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false,
-        isFloating: Bool? = nil
+        isFloating: Bool? = nil, minimises: Bool = false
     ) {
         self.devices = devices
         self.isHandRaised = isHandRaised
@@ -56,5 +58,6 @@ public struct CallControls: Equatable, Sendable {
         self.showsChat = showsChat
         self.canReact = canReact
         self.isFloating = isFloating
+        self.minimises = minimises
     }
 }

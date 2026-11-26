@@ -28,7 +28,7 @@ import Testing
     ]
 
     @Test(arguments: [CallSurface.Size.split, .expanded, .immersive])
-    func phoneCallsAlwaysUseTheDock(size: CallSurface.Size) {
+    func phoneCallsStayInTheDockUntilTheyAreOpened(size: CallSurface.Size) {
         let sessions = (Self.dockStages + Self.sessionStages).map(\.isInSession)
             + (Self.dockRoomStages + Self.sessionRoomStages).map(\.isInSession)
         for isInSession in sessions {
@@ -36,8 +36,25 @@ import Testing
                 #expect(CallSurface.placement(
                     isInSession: isInSession, conversationIsOpen: isOpen, platform: .phone, size: size
                 ) == .dock)
+                // Opened, a call in session covers the screen whatever conversation is open.
+                #expect(CallSurface.placement(
+                    isInSession: isInSession, conversationIsOpen: isOpen, platform: .phone, size: size, isOpened: true
+                ) == (isInSession ? .cover : .dock))
             }
         }
+    }
+
+    @Test func aPhonesCoverIsNoStageInAPaneAndTheDockYieldsToIt() {
+        #expect(!CallSurface.cover.showsStage)
+        #expect(CallSurface.cover.dockContent(isInSession: true, isInSheet: false) == .hidden)
+        // A sheet over the cover, as its participants list, keeps the controls in reach.
+        #expect(CallSurface.cover.dockContent(isInSession: true, isInSheet: true) == .controls)
+    }
+
+    @Test func openingMeansNothingWhereACallHasAPaneToShare() {
+        #expect(CallSurface.placement(
+            isInSession: true, conversationIsOpen: true, platform: .regularWidth, size: .split, isOpened: true
+        ) == .split)
     }
 
     @Test(arguments: [CallSurface.Size.split, .expanded, .immersive])

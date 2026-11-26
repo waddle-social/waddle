@@ -38,6 +38,20 @@ import Testing
         #expect(!memory.isFloating)
     }
 
+    @Test func aCallOpenedOnAPhoneCanBeMinimisedAndTheNextStartsInTheDock() {
+        var memory = CallStageMemory()
+        memory.follow(call: "c1")
+        #expect(!memory.isOpened)
+        memory.open()
+        #expect(memory.isOpened)
+        memory.minimise()
+        #expect(!memory.isOpened)
+
+        memory.open()
+        memory.follow(call: "c2")
+        #expect(!memory.isOpened)
+    }
+
     @Test func pinningThePinnedTileUnpinsIt() {
         var memory = CallStageMemory()
         memory.togglePin(Self.linus.id)
