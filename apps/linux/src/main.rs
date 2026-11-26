@@ -18,7 +18,6 @@ mod delivery;
 mod events;
 mod extension_commands;
 mod feed;
-mod fonts;
 mod gifs;
 mod inbox;
 mod judgments;
@@ -74,7 +73,5 @@ fn main() -> glib::ExitCode {
         )
         .init();
     install_crypto_provider();
-    // Before GTK starts, so fontconfig finds them on its first scan.
-    fonts::install();
     application::WaddleApplication::new().run()
 }

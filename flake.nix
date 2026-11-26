@@ -245,6 +245,13 @@
       # `packages.<system>.linux` so `nix build .#linux` and `nix run .#linux`
       # work. It is its own Cargo workspace and reaches the shared client
       # crates in server/ by path, so the source is those crates plus the app.
+      # fontconfig configuration that adds the Polar Huddle fonts
+      # (apps/linux/data/fonts) to the system's, for FONTCONFIG_FILE.
+      waddleFontsConf =
+        pkgs:
+        pkgs.makeFontsConf {
+          fontDirectories = [ ./apps/linux/data/fonts ];
+        };
       mkWaddleLinux =
         pkgs:
         let
@@ -338,8 +345,12 @@
           ]
           ++ runtimeLibs;
           env.LK_CUSTOM_WEBRTC = "${webrtc}";
+          # The Polar Huddle fonts (SIL OFL): GTK has no @font-face, so the
+          # wrapper points fontconfig at a config that adds them to the
+          # system's. `--set-default` leaves a user's own FONTCONFIG_FILE be.
           preFixup = ''
             gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs})
+            gappsWrapperArgs+=(--set-default FONTCONFIG_FILE ${waddleFontsConf pkgs})
           '';
           postInstall = ''
             install -Dm644 data/social.waddle.Waddle.desktop \
@@ -348,6 +359,9 @@
               "$out/share/metainfo/social.waddle.Waddle.metainfo.xml"
             install -Dm644 data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg \
               "$out/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg"
+            install -Dm644 -t "$out/share/icons/hicolor/symbolic/actions" \
+              data/icons/hicolor/symbolic/actions/*.svg
+            install -Dm644 -t "$out/share/fonts/truetype/waddle" data/fonts/*.ttf
           '';
           meta = {
             description = "Waddle for Linux: a GTK4 + libadwaita client";
@@ -1577,6 +1591,9 @@
               pkgs.gdk-pixbuf
             ];
             env.CXX = "${pkgs.clang_21}/bin/clang++";
+            # The Polar Huddle fonts, added to the system's. Outside nix,
+            # `cargo run` falls back to the system font.
+            env.FONTCONFIG_FILE = waddleFontsConf pkgs;
             # The toolchain's linker leaves no runtime path to the GTK
             # stack, so `cargo run` and tests that touch GTK need this to
             # find the libraries. libwebrtc opens PulseAudio and ALSA at

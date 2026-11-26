@@ -1,7 +1,9 @@
 # Bundled fonts
 
-Embedded into the binary by `src/fonts.rs` and installed to
-`$XDG_DATA_HOME/fonts/waddle/` at start-up.
+Installed by packaging, not by the app: the Flatpak copies them to
+`/app/share/fonts`, and `flake.nix` puts them on fontconfig's path with
+`FONTCONFIG_FILE` (`packages.linux`, `devShells.linux`). `style.css` names the
+families with system fallbacks.
 
 | File | Family | Licence |
 | --- | --- | --- |

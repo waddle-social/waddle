@@ -82,6 +82,8 @@ modules:
       - install -Dm644 apps/linux/data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
         /app/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg
       # Symbolic icons for themes that lack them (hicolor is the fallback).
+      # The Polar Huddle fonts; the Flatpak's fontconfig reads /app/share/fonts.
+      - install -Dm644 -t /app/share/fonts/waddle apps/linux/data/fonts/*.ttf
       - mkdir -p /app/share/icons/hicolor/symbolic/actions
       - install -m644 apps/linux/data/icons/hicolor/symbolic/actions/*.svg
         /app/share/icons/hicolor/symbolic/actions/
