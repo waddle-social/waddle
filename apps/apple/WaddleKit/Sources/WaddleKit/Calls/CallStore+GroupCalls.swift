@@ -3,12 +3,10 @@ extension CallStore {
     public func joinGroupCall(in room: BareJID, media: CallMedia, nick: String) async -> Bool {
         guard !state.isLive else { return false }
         guard groupControl.mixer != nil else {
-            reportError("muji session initiate failed: invalid mixer jid", epoch: generation)
-            return false
+            return refuseGroupJoin("muji session initiate failed: invalid mixer jid")
         }
         guard !nick.isEmpty else {
-            reportError("muc call needs a room jid and a nick", epoch: generation)
-            return false
+            return refuseGroupJoin("muc call needs a room jid and a nick")
         }
         let attempt = GroupCallAttempt(room: room, sid: nextGroupSid(), media: media, nick: nick)
         let epoch = generation
@@ -19,6 +17,15 @@ extension CallStore {
         let identity = ownJID()
         guard groupStillPending(attempt, epoch: epoch) else { return false }
         return await runGroupSetup(attempt, identity: identity, epoch: epoch)
+    }
+
+    /// A join that cannot start ends where one that failed part-way does,
+    /// so the person who asked is told: nothing was sent, and nothing is to undo.
+    private func refuseGroupJoin(_ message: String) -> Bool {
+        cancelTimers()
+        transition(.ended(sid: nextGroupSid(), reason: .error))
+        reportError(message, epoch: generation)
+        return false
     }
 
     /// Room presence is parsed at the bridge, including absence as a leave marker.
