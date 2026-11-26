@@ -17,7 +17,7 @@ public enum CallControlBarLayout: CaseIterable, Sendable {
     /// microphone, the camera, the size steps and More itself are always
     /// in the row; hiding our own view and the call's settings are always in More.
     public enum Control: CaseIterable, Sendable {
-        case viewChoice, hand, screenShare, chat, react, participants
+        case viewChoice, hand, screenShare, chat, react, participants, pictureInPicture
     }
 
     public enum Place: Equatable, Sendable {
@@ -31,10 +31,11 @@ public enum CallControlBarLayout: CaseIterable, Sendable {
 
     /// Where `control` is in this layout, for a call whose controls are `controls`.
     ///
-    /// Two things keep their button whatever the width, because they must
-    /// be one click away: a share in progress, to stop it, and a chat with
+    /// Three things keep their button whatever the width, because they must
+    /// be one click away: a share in progress, to stop it, a chat with
     /// something unread in it or open, since a count nobody can see is no
-    /// count and an open chat must be one click from closed.
+    /// count and an open chat must be one click from closed, and a floating
+    /// call, to bring it back.
     public func place(of control: Control, for controls: CallControls) -> Place {
         let extrasInMenu = self == .extrasInMenu
         switch control {
@@ -56,6 +57,9 @@ public enum CallControlBarLayout: CaseIterable, Sendable {
             return self == .reactionsInMenu || extrasInMenu ? .menu : .bar
         case .participants:
             return extrasInMenu ? .menu : .bar
+        case .pictureInPicture:
+            guard let isFloating = controls.isFloating else { return .absent }
+            return !extrasInMenu || isFloating ? .bar : .menu
         }
     }
 }

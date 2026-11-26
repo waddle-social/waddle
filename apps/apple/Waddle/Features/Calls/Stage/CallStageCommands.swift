@@ -80,6 +80,7 @@ struct CallStageCommands {
         case .toggleChat: toggleChat()
         case .toggleParticipants: toggleParticipants()
         case .toggleSelfView: toggleSelfView()
+        case .togglePictureInPicture: stage.update(sid) { $0.toggleFloating() }
         case .openSettings: openSettings()
         case .resetVolumes: resetVolumes()
         case .hangUp: commands.hangUp()

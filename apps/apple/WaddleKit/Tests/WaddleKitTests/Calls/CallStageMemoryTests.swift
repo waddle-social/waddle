@@ -24,6 +24,20 @@ import Testing
         #expect(memory.promotedSpeaker == nil)
     }
 
+    @Test func aCallFloatsUntilItIsBroughtBackAndTheNextStartsOnItsStage() {
+        var memory = CallStageMemory()
+        memory.follow(call: "c1")
+        #expect(!memory.isFloating)
+        memory.toggleFloating()
+        #expect(memory.isFloating)
+        memory.toggleFloating()
+        #expect(!memory.isFloating)
+
+        memory.toggleFloating()
+        memory.follow(call: "c2")
+        #expect(!memory.isFloating)
+    }
+
     @Test func pinningThePinnedTileUnpinsIt() {
         var memory = CallStageMemory()
         memory.togglePin(Self.linus.id)

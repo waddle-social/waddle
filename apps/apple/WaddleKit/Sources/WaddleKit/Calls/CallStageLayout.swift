@@ -87,7 +87,7 @@ public struct CallStagePresentation: Equatable, Sendable {
         }
     }
 
-    fileprivate func shows(_ tile: CallStageTile) -> Bool {
+    func shows(_ tile: CallStageTile) -> Bool {
         !isSelfViewHidden || !tile.isSelfCamera
     }
 

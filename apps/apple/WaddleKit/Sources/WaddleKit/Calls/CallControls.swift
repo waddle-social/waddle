@@ -35,11 +35,15 @@ public struct CallControls: Equatable, Sendable {
     /// Media has connected: there is a call to react in. Kept apart from `devices.hasMedia`:
     /// a caller may show a bar with one and not the other.
     public var canReact: Bool
+    /// Whether the call floats above the other windows; `nil` where it cannot,
+    /// or while nobody has a picture to float.
+    public var isFloating: Bool?
 
     public init(
         devices: Devices = Devices(), isHandRaised: Bool? = nil, viewMode: CallStagePresentation.ViewMode = .gallery,
         isSelfViewHidden: Bool = false, size: CallSurface.Size = .split, escapeStepsDown: Bool = true,
-        showsParticipants: Bool = false, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false
+        showsParticipants: Bool = false, chatUnread: Int? = nil, showsChat: Bool = false, canReact: Bool = false,
+        isFloating: Bool? = nil
     ) {
         self.devices = devices
         self.isHandRaised = isHandRaised
@@ -51,5 +55,6 @@ public struct CallControls: Equatable, Sendable {
         self.chatUnread = chatUnread
         self.showsChat = showsChat
         self.canReact = canReact
+        self.isFloating = isFloating
     }
 }

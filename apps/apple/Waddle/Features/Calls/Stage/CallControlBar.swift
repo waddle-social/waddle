@@ -9,19 +9,19 @@ struct CallControlBar: View {
     var controls = CallControls()
     let perform: @MainActor (CallStageAction) -> Void
 
-    private var isMicrophoneOn: Bool { controls.devices.isMicrophoneOn }
-    private var isCameraOn: Bool { controls.devices.isCameraOn }
     private var hasMedia: Bool { controls.devices.hasMedia }
     private var isHandRaised: Bool? { controls.isHandRaised }
     private var viewMode: CallStagePresentation.ViewMode { controls.viewMode }
     private var isSelfViewHidden: Bool { controls.isSelfViewHidden }
     private var size: CallSurface.Size { controls.size }
-    private var escapeStepsDown: Bool { controls.escapeStepsDown }
     private var showsParticipants: Bool { controls.showsParticipants }
     private var isSharingScreen: Bool? { controls.devices.isSharingScreen }
     private var chatUnread: Int? { controls.chatUnread }
     private var showsChat: Bool { controls.showsChat }
     private var canReact: Bool { controls.canReact }
+    private var isFloating: Bool? { controls.isFloating }
+    /// Escape brings a floating call back before it steps the stage down (web #1034).
+    private var escapeStepsDown: Bool { controls.escapeStepsDown && controls.isFloating != true }
 
     var body: some View {
         // Widest first; the bar takes the first that fits (`CallControlBarLayout`).
@@ -62,16 +62,7 @@ struct CallControlBar: View {
 
     @ViewBuilder
     private func toggles(_ layout: CallControlBarLayout) -> some View {
-        CallControlButton(
-            title: isMicrophoneOn ? "Mute" : "Unmute", symbol: isMicrophoneOn ? "mic" : "mic.slash",
-            tone: isMicrophoneOn || !hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
-        )
-        .disabled(!hasMedia)
-        CallControlButton(
-            title: isCameraOn ? "Turn camera off" : "Turn camera on", symbol: isCameraOn ? "video" : "video.slash",
-            tone: isCameraOn || !hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
-        )
-        .disabled(!hasMedia)
+        CallDeviceButtons(devices: controls.devices, perform: perform)
         if isInBar(.viewChoice, layout) { viewSwitch }
         if let isHandRaised, isInBar(.hand, layout) {
             CallControlButton(
@@ -109,6 +100,16 @@ struct CallControlBar: View {
                 tone: showsParticipants ? .chosen : .plain, action: { perform(.toggleParticipants) }
             )
             .accessibilityAddTraits(showsParticipants ? .isSelected : [])
+        }
+        if let isFloating, isInBar(.pictureInPicture, layout) {
+            CallControlButton(
+                title: isFloating ? "Return to call" : "Picture-in-Picture", symbol: isFloating ? "pip.exit" : "pip.enter",
+                tone: isFloating ? .chosen : .plain, action: { perform(.togglePictureInPicture) }
+            )
+            .accessibilityAddTraits(isFloating ? .isSelected : [])
+            // A floating call keeps this button at every width, so Escape always has it to press.
+            // Not on a split stage: the conversation beside it has a composer whose Escape cancels a reply or an edit.
+            .keyboardShortcut(isFloating && controls.escapeStepsDown && size != .split ? .cancelAction : nil)
         }
         sizeSteps
         more(layout)
@@ -213,6 +214,9 @@ struct CallControlBar: View {
             if isInMenu(.react, layout) {
                 Menu("React") { reactionChoices }
             }
+            if isInMenu(.pictureInPicture, layout) {
+                Button("Picture-in-Picture", action: { perform(.togglePictureInPicture) })
+            }
             if isInMenu(.viewChoice, layout) {
                 Picker("Stage view", selection: Binding(get: { viewMode }, set: { perform(.setViewMode($0)) })) {
                     Text("Gallery view").tag(CallStagePresentation.ViewMode.gallery)
@@ -256,6 +260,27 @@ struct CallControlBar: View {
     }
 }
 
+/// The microphone and the camera, wherever a call has their buttons: the
+/// stage's bar and the window a call floats in.
+struct CallDeviceButtons: View {
+    let devices: CallControls.Devices
+    let perform: @MainActor (CallStageAction) -> Void
+
+    var body: some View {
+        CallControlButton(
+            title: devices.isMicrophoneOn ? "Mute" : "Unmute", symbol: devices.isMicrophoneOn ? "mic" : "mic.slash",
+            tone: devices.isMicrophoneOn || !devices.hasMedia ? .plain : .off, action: { perform(.toggleMicrophone) }
+        )
+        .disabled(!devices.hasMedia)
+        CallControlButton(
+            title: devices.isCameraOn ? "Turn camera off" : "Turn camera on",
+            symbol: devices.isCameraOn ? "video" : "video.slash",
+            tone: devices.isCameraOn || !devices.hasMedia ? .plain : .chosen, action: { perform(.toggleCamera) }
+        )
+        .disabled(!devices.hasMedia)
+    }
+}
+
 /// A count on the corner of a round control: messages not yet seen.
 struct CallControlBadge: View {
     let text: String
@@ -288,6 +313,8 @@ struct CallControlButton: View {
         case off
         /// A choice that is in effect: the camera off, a hand up.
         case chosen
+        /// Ends our part of the call, where there is no room for the pill that says so.
+        case end
     }
 
     let title: String
@@ -318,6 +345,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.fg
         case .off: Theme.Colors.dangerText
         case .chosen: Theme.Colors.actionText
+        case .end: Theme.Colors.dangerFg
         }
     }
 
@@ -326,6 +354,7 @@ struct CallControlButton: View {
         case .plain: Theme.Colors.surface2
         case .off: Theme.Colors.danger.opacity(0.18)
         case .chosen: Theme.Colors.actionSubtle
+        case .end: Theme.Colors.danger
         }
     }
 }

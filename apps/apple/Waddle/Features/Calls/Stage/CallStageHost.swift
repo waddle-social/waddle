@@ -19,7 +19,7 @@ struct CallStageHost: View {
         let state = session.calls.state
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         Group {
-            if let call = Call(state: state, phase: media?.phase ?? .idle, session: session) {
+            if let call = CallOnStage(state: state, phase: media?.phase ?? .idle, session: session) {
                 stage(of: call)
             }
         }
@@ -43,29 +43,9 @@ struct CallStageHost: View {
         }
     }
 
-    private func stage(of call: Call) -> some View {
-        let live = (media?.participants ?? []).map {
-            CallStageParticipant(
-                identity: $0.identity, isSelf: $0.isLocal, hasCamera: $0.isCameraOn,
-                screenPublicationID: $0.screenPublicationID
-            )
-        }
-        // The microphone starts a moment after media connects; until then it is not a mute.
-        let isSelfMuted = call.status.hasMedia && media?.isMicrophoneOn == false
-        let tiles: [CallStageTile]
-        let subtitle: String
-        switch call.kind {
-        case .direct(let peer):
-            tiles = CallStageTiles.direct(
-                live: live, own: call.own, peer: peer, peerName: call.title, isSelfMuted: isSelfMuted,
-                speaking: speaking.shown
-            )
-            subtitle = CallStageSubtitle.direct(call.media)
-        case .room(let stage):
-            let rows = session.callRoster(of: stage, media: media, speaking: speaking.shown)
-            tiles = CallStageTiles.room(live: live, own: call.own, rows: rows, isSelfMuted: isSelfMuted)
-            subtitle = CallStageSubtitle.room(others: rows.count { !$0.isSelf })
-        }
+    private func stage(of call: CallOnStage) -> some View {
+        let cast = call.cast(media: media, session: session, speaking: speaking.shown)
+        let tiles = cast.tiles
         let memory = model.stage(of: call.sid)
         // A full-screen call hides the pane the chat opens in: whatever the
         // inspector is set to, nobody is looking at it.
@@ -91,11 +71,12 @@ struct CallStageHost: View {
             showsParticipants: rows != nil,
             chatUnread: chat.map { $0.isOpen ? 0 : CallChat.unread(in: $0.replies, after: memory.chatSeenID) },
             showsChat: chat?.isOpen ?? false,
-            canReact: call.status.hasMedia
+            canReact: call.status.hasMedia,
+            isFloating: isFloating(memory, tiles: tiles)
         )
         return CallStageView(
             title: call.title,
-            subtitle: subtitle,
+            subtitle: cast.subtitle,
             status: call.status,
             // The media session keeps when it connected, so the stage and a dock show one clock.
             connectedSince: media?.connectedSince,
@@ -138,7 +119,7 @@ struct CallStageHost: View {
         // Keyed on who has a tile, not on what the tiles show: a pin does not care who is speaking.
         .onChange(
             of: Roster(
-                tiles: tiles.map(\.id), screens: tiles.map(\.screenPublicationID), isAvailable: !live.isEmpty, isSelfViewHidden: memory.presentation.isSelfViewHidden
+                tiles: tiles.map(\.id), screens: tiles.map(\.screenPublicationID), isAvailable: cast.isRosterAvailable, isSelfViewHidden: memory.presentation.isSelfViewHidden
             ),
             initial: true
         ) { _, roster in
@@ -148,6 +129,18 @@ struct CallStageHost: View {
         .onChange(of: media?.activeSpeakersLoudestFirst ?? [], initial: true) { _, speakers in
             model.update(call.sid) { $0.speakersChanged(speakers) }
         }
+    }
+
+    /// Whether the call floats; `nil` while nobody has a picture to float,
+    /// and on iPad, where the system's picture-in-picture is yet to come (#2697).
+    private func isFloating(_ memory: CallStageMemory, tiles: [CallStageTile]) -> Bool? {
+        #if os(macOS)
+        if memory.isFloating { return true }
+        let floats = CallPictureInPicture.tile(in: tiles, presentation: memory.presentation, speaker: memory.promotedSpeaker)
+        return floats == nil ? nil : false
+        #else
+        nil
+        #endif
     }
 
     /// A stage narrower than this gives the panel the tiles' place.
@@ -165,42 +158,5 @@ struct CallStageHost: View {
         let screens: [String?]
         let isAvailable: Bool
         let isSelfViewHidden: Bool
-    }
-
-    /// The slot's call in session, as the stage reads it.
-    private struct Call {
-        enum Kind {
-            /// The peer's device the session was set up with.
-            case direct(peer: JID)
-            case room(GroupCallStage)
-        }
-
-        let sid: String
-        let kind: Kind
-        var isRoom: Bool { if case .room = kind { true } else { false } }
-        let title: String
-        let media: CallMedia
-        let status: CallSessionStatus
-        /// The identity we join the SFU as.
-        let own: JID
-
-        @MainActor
-        init?(state: CallState, phase: CallMediaPhase, session: SessionCoordinator) {
-            let join: CallJoin
-            switch state {
-            case .active(let call):
-                (sid, media, join, kind) = (call.sid, call.media, call.join, .direct(peer: call.peer))
-                title = ConversationHeaderText.make(for: .direct(call.peer.bare), session: session).name
-            case .inGroup(let call):
-                guard let stage = GroupCallStage(state: state, media: phase) else { return nil }
-                (sid, media, join, kind) = (call.sid, call.media, call.join, .room(stage))
-                title = ConversationHeaderText.make(for: .room(call.room), session: session).title
-            case .idle, .incoming, .outgoing, .joiningGroup, .ended:
-                return nil
-            }
-            guard let own = JID(parsing: join.identity) ?? session.account.fullJID else { return nil }
-            self.own = own
-            status = CallSessionStatus(phase)
-        }
     }
 }

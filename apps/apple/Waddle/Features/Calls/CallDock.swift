@@ -36,7 +36,9 @@ struct CallDock: View {
         let speakers = (media?.participants ?? []).lazy.filter(\.isSpeaking).map(\.identity)
         ZStack {
             if let shown, let session {
-                clocked(shown, group: group, showsVideo: content == .call, in: session)
+                // A floating call's picture is in its window: a track keeps one renderer.
+                let floats = state.sid.flatMap { stageModel?.stage(of: $0).isFloating } ?? false
+                clocked(shown, group: group, showsVideo: content == .call && !floats, in: session)
                     .frame(maxWidth: CallDockView.maxWidth)
                     .padding(.horizontal, Theme.Spacing.m)
                     .padding(.vertical, Theme.Spacing.s)
