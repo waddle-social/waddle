@@ -2,11 +2,15 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::ObjectMeta;
-use waddle_operator_crd::{ContentDigest, WaddleServer};
+use sha2::{Digest, Sha256};
+use waddle_operator_crd::{BrokerKmsProviderKind, ContentDigest, WaddleServer};
 
-use crate::bindings::ResolvedRuntimeBindings;
+use crate::bindings::{AuthzBinding, ResolvedRuntimeBindings, StorageBinding};
 use crate::error::OperatorError;
 use crate::resources::labels;
+
+/// Mount path inside `waddle-server` pods where reconciled tenant manifests live.
+pub const TENANTS_MOUNT_PATH: &str = "/etc/waddle/tenants";
 
 /// Builds the non-sensitive configuration `ConfigMap` (`<name>-config`) for `waddle-server`.
 ///
@@ -28,21 +32,20 @@ pub fn build_config_map(
         spec.mode.as_env_value().to_owned(),
     );
     data.insert("WADDLE_BASE_URL".to_owned(), spec.base_url.clone());
-    data.insert("WADDLE_DB_DRIVER".to_owned(), "postgres".to_owned());
+
+    insert_storage_env(&mut data, ws, &bindings.storage);
+    insert_authz_env(&mut data, &bindings.authz);
+    insert_broker_env(&mut data, ws);
+    insert_extensions_env(&mut data, ws);
+
     data.insert(
-        "WADDLE_DB_POOL_SIZE".to_owned(),
-        spec.postgres.pool_size.to_string(),
+        "WADDLE_DEFAULT_TENANT_ID".to_owned(),
+        spec.xmpp.domain.clone(),
     );
     data.insert(
-        "WADDLE_DB_CONTROL_PLANE_POOL_SIZE".to_owned(),
-        spec.postgres.control_plane_pool_size.to_string(),
+        "WADDLE_TENANTS_DIR".to_owned(),
+        TENANTS_MOUNT_PATH.to_owned(),
     );
-    if let Some(timeout) = spec.postgres.acquire_timeout_secs {
-        data.insert(
-            "WADDLE_DB_ACQUIRE_TIMEOUT_SECS".to_owned(),
-            timeout.to_string(),
-        );
-    }
 
     if let Some(uuid) = &bindings.deployment_uuid {
         data.insert("WADDLE_DEPLOYMENT_UUID".to_owned(), uuid.clone());
@@ -134,15 +137,6 @@ pub fn build_config_map(
         }
     }
 
-    data.insert(
-        "WADDLE_SPICEDB_ENDPOINT".to_owned(),
-        bindings.spicedb.endpoint.clone(),
-    );
-    data.insert(
-        "WADDLE_SPICEDB_INSECURE".to_owned(),
-        bindings.spicedb.insecure.to_string(),
-    );
-
     if let Some(s3) = &spec.s3 {
         data.insert("WADDLE_S3_ENDPOINT".to_owned(), s3.endpoint.clone());
         data.insert("WADDLE_S3_BUCKET".to_owned(), s3.bucket.clone());
@@ -172,6 +166,191 @@ pub fn build_config_map(
         data: Some(data),
         ..ConfigMap::default()
     })
+}
+
+/// Builds the initial empty aggregated tenants `ConfigMap` (`<name>-tenants`) owned by `ws`.
+///
+/// # Errors
+/// Returns [`OperatorError::MissingMetadata`] if `ws` lacks `name` or `uid`.
+pub fn build_tenants_config_map(ws: &WaddleServer) -> Result<ConfigMap, OperatorError> {
+    let cm_name = labels::tenants_config_map_name(ws)?;
+    let owner = labels::owner_reference(ws)?;
+    let mut obj_labels = labels::common_labels(ws)?;
+    obj_labels.insert(
+        labels::SERVER_LABEL.to_owned(),
+        labels::workload_name(ws)?.to_owned(),
+    );
+
+    Ok(ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(cm_name),
+            labels: Some(obj_labels),
+            owner_references: Some(vec![owner]),
+            ..ObjectMeta::default()
+        },
+        data: Some(BTreeMap::new()),
+        ..ConfigMap::default()
+    })
+}
+
+fn insert_storage_env(
+    data: &mut BTreeMap<String, String>,
+    ws: &WaddleServer,
+    storage: &StorageBinding,
+) {
+    match storage {
+        StorageBinding::Turso {
+            data_dir,
+            reserved_fds,
+            rlimit_nofile,
+        } => {
+            data.insert("WADDLE_DB_DRIVER".to_owned(), "turso".to_owned());
+            data.insert("WADDLE_TURSO_DATA_DIR".to_owned(), data_dir.clone());
+            data.insert(
+                "WADDLE_TURSO_RESERVED_FDS".to_owned(),
+                reserved_fds.to_string(),
+            );
+            if let Some(nofile) = rlimit_nofile {
+                data.insert("WADDLE_TURSO_RLIMIT_NOFILE".to_owned(), nofile.to_string());
+            }
+        }
+        StorageBinding::Postgres(_) => {
+            data.insert("WADDLE_DB_DRIVER".to_owned(), "postgres".to_owned());
+            if let Some(pg) = &ws.spec.storage.postgres {
+                data.insert("WADDLE_DB_POOL_SIZE".to_owned(), pg.pool_size.to_string());
+                data.insert(
+                    "WADDLE_DB_CONTROL_PLANE_POOL_SIZE".to_owned(),
+                    pg.control_plane_pool_size.to_string(),
+                );
+                if let Some(timeout) = pg.acquire_timeout_secs {
+                    data.insert(
+                        "WADDLE_DB_ACQUIRE_TIMEOUT_SECS".to_owned(),
+                        timeout.to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn insert_authz_env(data: &mut BTreeMap<String, String>, authz: &AuthzBinding) {
+    match authz {
+        AuthzBinding::OpenFga(fga) => {
+            data.insert("WADDLE_AUTHZ_BACKEND".to_owned(), "openfga".to_owned());
+            data.insert("WADDLE_OPENFGA_ENDPOINT".to_owned(), fga.endpoint.clone());
+            data.insert(
+                "WADDLE_OPENFGA_CONSISTENCY".to_owned(),
+                fga.consistency.clone(),
+            );
+        }
+        AuthzBinding::SpiceDb(sp) => {
+            data.insert("WADDLE_AUTHZ_BACKEND".to_owned(), "spicedb".to_owned());
+            data.insert("WADDLE_SPICEDB_ENDPOINT".to_owned(), sp.endpoint.clone());
+            data.insert(
+                "WADDLE_SPICEDB_INSECURE".to_owned(),
+                sp.insecure.to_string(),
+            );
+        }
+    }
+}
+
+fn insert_broker_env(data: &mut BTreeMap<String, String>, ws: &WaddleServer) {
+    let Some(broker) = &ws.spec.broker else {
+        return;
+    };
+    data.insert(
+        "WADDLE_BROKER_ENABLED".to_owned(),
+        broker.enabled.to_string(),
+    );
+    if !broker.enabled {
+        return;
+    }
+
+    data.insert("WADDLE_BROKER_DATA_DIR".to_owned(), broker.data_dir.clone());
+    let admission_db = broker
+        .admission_db
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || format!("{}/admission.db", broker.data_dir.trim_end_matches('/')),
+            str::to_owned,
+        );
+    data.insert("WADDLE_BROKER_ADMISSION_DB".to_owned(), admission_db);
+
+    if let Some(spiffe) = broker
+        .cell_spiffe_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        data.insert("WADDLE_CELL_SPIFFE_ID".to_owned(), spiffe.to_owned());
+    }
+
+    let Some(kms) = &broker.kms else {
+        return;
+    };
+    data.insert(
+        "WADDLE_BROKER_KMS_PROVIDER".to_owned(),
+        kms.provider.as_env_value().to_owned(),
+    );
+
+    match kms.provider {
+        BrokerKmsProviderKind::Scaleway => {
+            if let Some(scw) = &kms.scaleway {
+                data.insert("WADDLE_SCW_KMS_BASE_URL".to_owned(), scw.base_url.clone());
+                data.insert("WADDLE_SCW_KMS_REGION".to_owned(), scw.region.clone());
+                data.insert(
+                    "WADDLE_SCW_KMS_PROJECT_ID".to_owned(),
+                    scw.project_id.clone(),
+                );
+                if let Some(root_key_id) = scw
+                    .root_key_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    data.insert(
+                        "WADDLE_SCW_KMS_ROOT_KEY_ID".to_owned(),
+                        root_key_id.to_owned(),
+                    );
+                }
+            }
+        }
+        BrokerKmsProviderKind::Vault => {
+            if let Some(vault) = &kms.vault {
+                data.insert("WADDLE_VAULT_ADDR".to_owned(), vault.base_url.clone());
+                data.insert("WADDLE_VAULT_TRANSIT_MOUNT".to_owned(), vault.mount.clone());
+                if let Some(vault_ns) = vault
+                    .namespace
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    data.insert("WADDLE_VAULT_NAMESPACE".to_owned(), vault_ns.to_owned());
+                }
+            }
+        }
+        BrokerKmsProviderKind::Local => {}
+    }
+}
+
+fn insert_extensions_env(data: &mut BTreeMap<String, String>, ws: &WaddleServer) {
+    let Some(ext) = &ws.spec.extensions else {
+        return;
+    };
+    data.insert(
+        "WADDLE_EXTENSIONS_ENABLED".to_owned(),
+        ext.enabled.to_string(),
+    );
+    if let Some(dir) = ext
+        .plugins_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        data.insert("WADDLE_EXTENSIONS_PLUGINS_DIR".to_owned(), dir.to_owned());
+    }
 }
 
 fn insert_telemetry_env(
@@ -225,9 +404,7 @@ fn insert_telemetry_env(
 /// # Errors
 /// Returns [`OperatorError::Serialization`] only if digest construction fails unexpectedly.
 pub fn config_map_digest(cm: &ConfigMap) -> Result<ContentDigest, OperatorError> {
-    use sha2::Digest;
-
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = Sha256::new();
     if let Some(data) = &cm.data {
         for (key, value) in data {
             hasher.update((key.len() as u64).to_be_bytes());

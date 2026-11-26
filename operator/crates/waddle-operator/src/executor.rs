@@ -258,14 +258,13 @@ async fn apply_workload(
 
     let cm = resources::build_config_map(ws, bindings)?;
     let cm_name = resources::config_map_name(ws)?;
-    ssa_apply(
-        &Api::<ConfigMap>::namespaced(client.clone(), ns),
-        &cm_name,
-        &cm,
-        leadership,
-    )
-    .await?;
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    ssa_apply(&cm_api, &cm_name, &cm, leadership).await?;
     let cm_digest = resources::config_map_digest(&cm)?;
+
+    let tenants_cm = resources::build_tenants_config_map(ws)?;
+    let tenants_cm_name = resources::tenants_config_map_name(ws)?;
+    ensure_config_map_created(&cm_api, &tenants_cm_name, &tenants_cm, leadership).await?;
 
     let svc_api: Api<Service> = Api::namespaced(client.clone(), ns);
     let http_svc = resources::build_http_service(ws)?;
@@ -315,6 +314,35 @@ async fn apply_workload(
     .await?;
 
     Ok(())
+}
+
+async fn ensure_config_map_created(
+    api: &Api<ConfigMap>,
+    name: &str,
+    cm: &ConfigMap,
+    leadership: &LeadershipFence,
+) -> Result<(), OperatorError> {
+    if api
+        .get_opt(name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get tenants ConfigMap",
+            source,
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    leadership.ensure_valid()?;
+    match api.create(&PostParams::default(), cm).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 409 => Ok(()),
+        Err(source) => Err(OperatorError::Kube {
+            context: "create tenants ConfigMap",
+            source,
+        }),
+    }
 }
 
 async fn ensure_pvc_created(
@@ -437,8 +465,8 @@ fn build_status(
         secrets_mode: Some(ws.spec.secrets.mode),
         deployment_uuid: snapshot.resolved_deployment_uuid.clone(),
         dependencies: DependenciesStatus {
-            postgres: snapshot.world.postgres.to_status_summary(),
-            spicedb: snapshot.world.spicedb.to_status_summary(),
+            storage: snapshot.world.storage.to_status_summary(),
+            authz: snapshot.world.authz.to_status_summary(),
             secrets: snapshot.world.secrets.to_status_summary(),
         },
         conditions,

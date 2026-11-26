@@ -12,11 +12,29 @@ pub enum LogFormat {
     Pretty,
 }
 
+/// CRD kind emitted by `waddle-operator crd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum CrdKind {
+    /// Emit `WaddleServer` CustomResourceDefinition YAML.
+    #[default]
+    Server,
+    /// Emit `WaddleTenant` CustomResourceDefinition YAML.
+    Tenant,
+}
+
+/// Arguments for `waddle-operator crd`.
+#[derive(Debug, Clone, Copy, Args)]
+pub struct CrdArgs {
+    /// Which CustomResourceDefinition to render (`server` or `tenant`).
+    #[arg(long, value_enum, default_value_t = CrdKind::Server)]
+    pub kind: CrdKind,
+}
+
 /// Top-level CLI for `waddle-operator`.
 #[derive(Debug, Parser)]
 #[command(
     name = "waddle-operator",
-    about = "Kubernetes Operator for deploying Waddle XMPP servers"
+    about = "Kubernetes Operator for deploying Waddle XMPP servers and tenants"
 )]
 pub struct Cli {
     /// Operator subcommand to execute.
@@ -29,8 +47,8 @@ pub struct Cli {
 pub enum Command {
     /// Run the Kubernetes controller loop and health/metrics HTTP server.
     Run(RunArgs),
-    /// Print the WaddleServer CustomResourceDefinition YAML to stdout.
-    Crd,
+    /// Print CustomResourceDefinition YAML to stdout (`WaddleServer` by default).
+    Crd(CrdArgs),
 }
 
 /// Configuration flags for `waddle-operator run`.

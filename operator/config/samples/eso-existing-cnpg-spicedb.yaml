@@ -11,15 +11,19 @@ spec:
     domain: chat.example.com
     publicWebsocketUrl: wss://chat.example.com/xmpp-websocket
     tlsSecretName: waddle-xmpp-tls
-  postgres:
-    mode: CloudNativePg
-    cnpg:
-      clusterName: waddle-postgres
-  spicedb:
-    mode: SpiceDbOperator
-    operator:
-      clusterName: spicedb
-      port: 50051
+  storage:
+    backend: Postgres
+    postgres:
+      mode: CloudNativePg
+      cnpg:
+        clusterName: waddle-postgres
+  authz:
+    backend: SpiceDb
+    spicedb:
+      mode: SpiceDbOperator
+      operator:
+        clusterName: spicedb
+        port: 50051
   secrets:
     mode: ExternalSecrets
     externalSecrets:

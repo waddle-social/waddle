@@ -15,10 +15,12 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition as KubeCondition;
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::{Client, ResourceExt};
 use waddle_operator_crd::{
-    CloudNativePgSource, ContentDigest, EsoApiVersion, ExternalPostgresSource, ExternalSecretsSpec,
-    ExternalSpiceDbSource, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
-    SecretProviderMode, SecretStoreKind, SpiceDbOperatorSource, SpiceDbSourceMode,
-    UpdateStrategyKind, ValidatedSpec, WaddleServer, WaddleServerSpec,
+    AuthzBackendKind, BrokerKmsProviderKind, CloudNativePgSource, ContentDigest, EsoApiVersion,
+    ExternalPostgresSource, ExternalSecretsSpec, ExternalSpiceDbSource, OpenFgaDependencySpec,
+    PostgresDependencySpec, PostgresSourceMode, ResourceName, RestrictedRuntimeSpec,
+    SecretProviderMode, SecretStoreKind, SpiceDbDependencySpec, SpiceDbOperatorSource,
+    SpiceDbSourceMode, StorageBackendKind, UpdateStrategyKind, ValidatedSpec, WaddleServer,
+    WaddleServerSpec,
 };
 use waddle_operator_fsm::{
     ConditionKind, ConditionRecord, ConditionStatus, DependencyHealth, ObservedWorld,
@@ -26,7 +28,10 @@ use waddle_operator_fsm::{
     WorkloadObservation,
 };
 
-use crate::bindings::{PostgresBinding, ResolvedRuntimeBindings, SpiceDbBinding};
+use crate::bindings::{
+    AuthzBinding, OpenFgaBinding, PostgresBinding, ResolvedRuntimeBindings, SpiceDbBinding,
+    StorageBinding,
+};
 use crate::error::OperatorError;
 use crate::external_crds::{
     self, CnpgClusterView, DiscoveredCapabilities, DiscoveredEsoVersion, ExternalSecretView,
@@ -100,13 +105,13 @@ pub async fn observe_world(
                 spec_validation: SpecValidationState::Invalid {
                     summary: report.summary(),
                 },
-                postgres: DependencyHealth::NotReady {
+                storage: DependencyHealth::NotReady {
                     reason: "SpecInvalid".to_owned(),
-                    detail: "Specification invalid; PostgreSQL lookup skipped".to_owned(),
+                    detail: "Specification invalid; storage lookup skipped".to_owned(),
                 },
-                spicedb: DependencyHealth::NotReady {
+                authz: DependencyHealth::NotReady {
                     reason: "SpecInvalid".to_owned(),
-                    detail: "Specification invalid; SpiceDB lookup skipped".to_owned(),
+                    detail: "Specification invalid; authorization lookup skipped".to_owned(),
                 },
                 secrets: SecretsObservation {
                     source: spec_secret_source_kind(&ws.spec),
@@ -136,8 +141,8 @@ pub async fn observe_world(
         }
     };
 
-    let (postgres_health, postgres_binding, pg_digest) =
-        observe_postgres(client, ns, ws, policy.capabilities.has_cnpg).await?;
+    let (storage_health, storage_binding, storage_digest) =
+        observe_storage(client, ns, ws, policy.capabilities.has_cnpg).await?;
 
     let spicedb_key_in_runtime_secret = spicedb_expects_key_in_runtime_secret(ws);
 
@@ -151,7 +156,7 @@ pub async fn observe_world(
     )
     .await?;
 
-    let (spicedb_health, spicedb_binding, sp_digest) = observe_spicedb(
+    let (authz_health, authz_binding, authz_digest) = observe_authz(
         client,
         ws,
         ns,
@@ -161,18 +166,18 @@ pub async fn observe_world(
     .await?;
 
     let mut digest_parts = secret_obs.component_digests;
-    if let Some(digest) = pg_digest {
-        digest_parts.insert("postgres".to_owned(), digest);
+    if let Some(digest) = storage_digest {
+        digest_parts.insert("storage".to_owned(), digest);
     }
-    if let Some(digest) = sp_digest {
-        digest_parts.insert("spicedb".to_owned(), digest);
+    if let Some(digest) = authz_digest {
+        digest_parts.insert("authz".to_owned(), digest);
     }
     secret_obs.observation.checksum = yolo::combine_digests(&digest_parts);
 
-    let bindings = if let (Some(pg), Some(spicedb)) = (postgres_binding, spicedb_binding) {
+    let bindings = if let (Some(storage), Some(authz)) = (storage_binding, authz_binding) {
         Some(ResolvedRuntimeBindings {
-            postgres: pg,
-            spicedb,
+            storage,
+            authz,
             runtime_secret_name: secret_obs.target_secret_name,
             extra_secret_refs: collect_extra_secret_refs(ws),
             clustering_keypool_secret_name: ws
@@ -212,8 +217,8 @@ pub async fn observe_world(
         generation: ws.metadata.generation.unwrap_or(1),
         deleting: ws.metadata.deletion_timestamp.is_some(),
         spec_validation,
-        postgres: postgres_health,
-        spicedb: spicedb_health,
+        storage: storage_health,
+        authz: authz_health,
         secrets: secret_obs.observation,
         workload,
         existing_conditions,
@@ -228,19 +233,174 @@ pub async fn observe_world(
     })
 }
 
+type StorageObservation = (
+    DependencyHealth,
+    Option<StorageBinding>,
+    Option<ContentDigest>,
+);
+
 type PostgresObservation = (
     DependencyHealth,
     Option<PostgresBinding>,
     Option<ContentDigest>,
 );
 
-async fn observe_postgres(
+async fn observe_storage(
     client: &Client,
     ns: &str,
     ws: &WaddleServer,
     known_has_cnpg: bool,
+) -> Result<StorageObservation, OperatorError> {
+    match ws.spec.storage.backend {
+        StorageBackendKind::Turso => observe_turso_storage(client, ns, ws).await,
+        StorageBackendKind::Postgres => {
+            let Some(pg) = &ws.spec.storage.postgres else {
+                return Ok((
+                    DependencyHealth::NotReady {
+                        reason: "PostgresSpecMissing".to_owned(),
+                        detail: "storage.backend is Postgres without spec.storage.postgres"
+                            .to_owned(),
+                    },
+                    None,
+                    None,
+                ));
+            };
+            let (health, binding, digest) =
+                observe_postgres(client, ns, pg, known_has_cnpg).await?;
+            Ok((health, binding.map(StorageBinding::Postgres), digest))
+        }
+    }
+}
+
+async fn observe_turso_storage(
+    client: &Client,
+    ns: &str,
+    ws: &WaddleServer,
+) -> Result<StorageObservation, OperatorError> {
+    let data_dir = ws.spec.storage.turso.as_ref().map_or_else(
+        || "/var/lib/waddle/tenants".to_owned(),
+        |t| t.data_dir.clone(),
+    );
+    let reserved_fds = ws
+        .spec
+        .storage
+        .turso
+        .as_ref()
+        .and_then(|t| t.reserved_fds)
+        .unwrap_or(256);
+    let rlimit_nofile = ws.spec.storage.turso.as_ref().and_then(|t| t.rlimit_nofile);
+
+    let binding = StorageBinding::Turso {
+        data_dir: data_dir.clone(),
+        reserved_fds,
+        rlimit_nofile,
+    };
+
+    if !ws.spec.persistence.enabled {
+        return Ok((
+            DependencyHealth::Ready {
+                endpoint_hint: format!("turso:{data_dir} (emptyDir)"),
+            },
+            Some(binding),
+            None,
+        ));
+    }
+
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+    if let Some(existing_claim) = ws
+        .spec
+        .persistence
+        .existing_claim
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Some(pvc) =
+            pvc_api
+                .get_opt(existing_claim)
+                .await
+                .map_err(|source| OperatorError::Kube {
+                    context: "get existing Turso PersistentVolumeClaim",
+                    source,
+                })?
+        else {
+            return Ok((
+                DependencyHealth::Missing {
+                    reason: "TursoPvcMissing".to_owned(),
+                    detail: format!(
+                        "Existing PersistentVolumeClaim {existing_claim} not found in namespace {ns}"
+                    ),
+                },
+                None,
+                None,
+            ));
+        };
+        if pvc
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|phase| phase == "Lost")
+        {
+            return Ok((
+                DependencyHealth::NotReady {
+                    reason: "TursoPvcLost".to_owned(),
+                    detail: format!("PersistentVolumeClaim {existing_claim} is in Lost phase"),
+                },
+                None,
+                None,
+            ));
+        }
+        return Ok((
+            DependencyHealth::Ready {
+                endpoint_hint: format!("turso:{data_dir} (pvc/{existing_claim})"),
+            },
+            Some(binding),
+            None,
+        ));
+    }
+
+    let managed_pvc_name = resources::pvc_name(ws)?;
+    if let Some(pvc) =
+        pvc_api
+            .get_opt(&managed_pvc_name)
+            .await
+            .map_err(|source| OperatorError::Kube {
+                context: "get managed Turso PersistentVolumeClaim",
+                source,
+            })?
+    {
+        if pvc
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|phase| phase == "Lost")
+        {
+            return Ok((
+                DependencyHealth::NotReady {
+                    reason: "TursoPvcLost".to_owned(),
+                    detail: format!("PersistentVolumeClaim {managed_pvc_name} is in Lost phase"),
+                },
+                None,
+                None,
+            ));
+        }
+    }
+
+    Ok((
+        DependencyHealth::Ready {
+            endpoint_hint: format!("turso:{data_dir} (pvc/{managed_pvc_name})"),
+        },
+        Some(binding),
+        None,
+    ))
+}
+
+async fn observe_postgres(
+    client: &Client,
+    ns: &str,
+    pg: &PostgresDependencySpec,
+    known_has_cnpg: bool,
 ) -> Result<PostgresObservation, OperatorError> {
-    let pg = &ws.spec.postgres;
     let restricted = pg.restricted_runtime.as_ref().filter(|r| r.enabled);
 
     match pg.mode {
@@ -650,20 +810,110 @@ async fn observe_restricted_runtime(
     Ok((None, yolo::combine_digests(&parts)))
 }
 
+type AuthzObservation = (
+    DependencyHealth,
+    Option<AuthzBinding>,
+    Option<ContentDigest>,
+);
+
 type SpiceDbObservation = (
     DependencyHealth,
     Option<SpiceDbBinding>,
     Option<ContentDigest>,
 );
 
-async fn observe_spicedb(
+async fn observe_authz(
     client: &Client,
     ws: &WaddleServer,
     ns: &str,
     known_has_spicedb: bool,
     runtime_secret_name: &str,
+) -> Result<AuthzObservation, OperatorError> {
+    match ws.spec.authz.backend {
+        AuthzBackendKind::OpenFga => {
+            observe_openfga(client, ns, ws.spec.authz.openfga.as_ref()).await
+        }
+        AuthzBackendKind::SpiceDb => {
+            let Some(sp) = &ws.spec.authz.spicedb else {
+                return Ok((
+                    DependencyHealth::NotReady {
+                        reason: "SpiceDbSpecMissing".to_owned(),
+                        detail: "authz.backend is SpiceDb without spec.authz.spicedb".to_owned(),
+                    },
+                    None,
+                    None,
+                ));
+            };
+            let (health, binding, digest) =
+                observe_spicedb(client, ws, ns, sp, known_has_spicedb, runtime_secret_name).await?;
+            Ok((health, binding.map(AuthzBinding::SpiceDb), digest))
+        }
+    }
+}
+
+async fn observe_openfga(
+    client: &Client,
+    ns: &str,
+    openfga: Option<&OpenFgaDependencySpec>,
+) -> Result<AuthzObservation, OperatorError> {
+    let Some(openfga) = openfga else {
+        return Ok((
+            DependencyHealth::NotReady {
+                reason: "OpenFgaSpecMissing".to_owned(),
+                detail: "authz.backend is OpenFga without spec.authz.openfga".to_owned(),
+            },
+            None,
+            None,
+        ));
+    };
+
+    if let Some(blocker) =
+        check_service_endpoints(client, ns, &openfga.service_name, "OpenFGA").await?
+    {
+        return Ok((blocker, None, None));
+    }
+
+    let (auth_secret_ref, auth_digest) = if let Some(sec_ref) = &openfga.auth_secret_ref {
+        let (blocker, digest) =
+            verify_secret_key_present(client, ns, &sec_ref.name, &sec_ref.key, "OpenFGA").await?;
+        if let Some(b) = blocker {
+            return Ok((b, None, None));
+        }
+        (Some((sec_ref.name.clone(), sec_ref.key.clone())), digest)
+    } else {
+        (None, None)
+    };
+
+    let endpoint = format!(
+        "{}://{}:{}",
+        openfga.scheme, openfga.service_name, openfga.port
+    );
+    let consistency = openfga
+        .consistency
+        .clone()
+        .unwrap_or_else(|| "higher_consistency".to_owned());
+
+    Ok((
+        DependencyHealth::Ready {
+            endpoint_hint: endpoint.clone(),
+        },
+        Some(AuthzBinding::OpenFga(OpenFgaBinding {
+            endpoint,
+            consistency,
+            auth_secret_ref,
+        })),
+        auth_digest,
+    ))
+}
+
+async fn observe_spicedb(
+    client: &Client,
+    ws: &WaddleServer,
+    ns: &str,
+    sp: &SpiceDbDependencySpec,
+    known_has_spicedb: bool,
+    runtime_secret_name: &str,
 ) -> Result<SpiceDbObservation, OperatorError> {
-    let sp = &ws.spec.spicedb;
     match sp.mode {
         SpiceDbSourceMode::SpiceDbOperator => {
             observe_spicedb_operator(
@@ -938,6 +1188,7 @@ async fn observe_secrets(
             .component_digests
             .insert("runtime".to_owned(), runtime_digest);
     }
+    check_broker_kms_secret(client, ns, ws, &mut bundle.observation.missing_keys).await?;
     collect_companion_secret_digests(client, ns, ws, &mut bundle.component_digests).await?;
     bundle.observation.checksum = yolo::combine_digests(&bundle.component_digests);
     Ok(bundle)
@@ -1419,6 +1670,49 @@ async fn validate_eso_clustering_keypool(
     Ok(())
 }
 
+async fn check_broker_kms_secret(
+    client: &Client,
+    ns: &str,
+    ws: &WaddleServer,
+    missing_keys: &mut Vec<String>,
+) -> Result<(), OperatorError> {
+    let Some((secret_name, secret_key)) = broker_kms_secret_ref(ws) else {
+        return Ok(());
+    };
+    let sec = Api::<Secret>::namespaced(client.clone(), ns)
+        .get_opt(secret_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get broker KMS Secret",
+            source,
+        })?;
+    match sec.and_then(|s| s.data) {
+        Some(data) if has_nonempty_key(&data, secret_key) => {}
+        _ => missing_keys.push(format!("{secret_name}/{secret_key}")),
+    }
+    Ok(())
+}
+
+fn broker_kms_secret_ref(ws: &WaddleServer) -> Option<(&str, &str)> {
+    let broker = ws.spec.broker.as_ref().filter(|b| b.enabled)?;
+    let kms = broker.kms.as_ref()?;
+    match kms.provider {
+        BrokerKmsProviderKind::Scaleway => kms.scaleway.as_ref().map(|scw| {
+            (
+                scw.auth_secret_ref.name.as_str(),
+                scw.auth_secret_ref.key.as_str(),
+            )
+        }),
+        BrokerKmsProviderKind::Vault => kms.vault.as_ref().map(|v| {
+            (
+                v.auth_secret_ref.name.as_str(),
+                v.auth_secret_ref.key.as_str(),
+            )
+        }),
+        BrokerKmsProviderKind::Local => None,
+    }
+}
+
 async fn check_eso_apns_secret(
     client: &Client,
     ns: &str,
@@ -1687,6 +1981,17 @@ async fn collect_companion_secret_digests(
 ) -> Result<(), OperatorError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), ns);
     collect_xmpp_tls_digest(&secrets, ws, parts).await?;
+    if let Some((secret_name, secret_key)) = broker_kms_secret_ref(ws) {
+        insert_secret_keys_digest(
+            &secrets,
+            secret_name,
+            "get broker KMS Secret for checksum",
+            &[secret_key],
+            "broker_kms",
+            parts,
+        )
+        .await?;
+    }
     if let Some(eso) = &ws.spec.secrets.external_secrets {
         collect_eso_companion_digests(&secrets, ws, eso, parts).await?;
     }
@@ -1834,8 +2139,9 @@ async fn workload_has_drifted(
         return Ok(true);
     }
 
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
     let cm_name = resources::config_map_name(ws)?;
-    let Some(live_cm) = Api::<ConfigMap>::namespaced(client.clone(), ns)
+    let Some(live_cm) = cm_api
         .get_opt(&cm_name)
         .await
         .map_err(|source| OperatorError::Kube {
@@ -1846,6 +2152,19 @@ async fn workload_has_drifted(
         return Ok(true);
     };
     if config_map_drifted(&live_cm, &desired_cm) {
+        return Ok(true);
+    }
+
+    let tenants_cm_name = resources::tenants_config_map_name(ws)?;
+    let tenants_cm_exists = cm_api
+        .get_opt(&tenants_cm_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get tenants ConfigMap for drift detection",
+            source,
+        })?
+        .is_some();
+    if !tenants_cm_exists {
         return Ok(true);
     }
 
@@ -2629,20 +2948,22 @@ fn expected_runtime_secret_name(ws: &WaddleServer) -> Result<String, OperatorErr
 }
 
 fn spicedb_expects_key_in_runtime_secret(ws: &WaddleServer) -> bool {
-    match ws.spec.spicedb.mode {
+    if ws.spec.authz.backend != AuthzBackendKind::SpiceDb {
+        return false;
+    }
+    let Some(sp) = &ws.spec.authz.spicedb else {
+        return false;
+    };
+    match sp.mode {
         SpiceDbSourceMode::SpiceDbOperator => {
             if ws.spec.secrets.mode == SecretProviderMode::Yolo {
                 return false;
             }
-            ws.spec
-                .spicedb
-                .operator
+            sp.operator
                 .as_ref()
                 .is_none_or(|op| op.preshared_key_secret_ref.is_none())
         }
-        SpiceDbSourceMode::External => ws
-            .spec
-            .spicedb
+        SpiceDbSourceMode::External => sp
             .external
             .as_ref()
             .is_none_or(|ext| ext.preshared_key_secret_ref.is_none()),
@@ -2669,11 +2990,22 @@ fn collect_extra_secret_refs(ws: &WaddleServer) -> Vec<String> {
 }
 
 fn resolve_lineage_action(ws: &WaddleServer) -> Option<String> {
+    if ws.spec.storage.backend == StorageBackendKind::Turso {
+        return ws
+            .spec
+            .deployment
+            .lineage_action
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+    }
     if ws
         .spec
+        .storage
         .postgres
-        .restricted_runtime
         .as_ref()
+        .and_then(|pg| pg.restricted_runtime.as_ref())
         .is_some_and(|rr| rr.enabled)
     {
         return None;

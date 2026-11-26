@@ -1,0 +1,74 @@
+apiVersion: waddle.social/v1alpha1
+kind: WaddleServer
+metadata:
+  name: waddle
+  namespace: waddle-next
+spec:
+  replicas: 1
+  updateStrategy: Recreate
+  mode: HomeServer
+  baseUrl: https://next.apps.waddle.chat
+  xmpp:
+    domain: waddle.social
+    publicWebsocketUrl: wss://next.apps.waddle.chat/xmpp-websocket
+  storage:
+    backend: Turso
+    turso:
+      dataDir: /var/lib/waddle/tenants
+      reservedFds: 256
+  authz:
+    backend: OpenFga
+    openfga:
+      serviceName: openfga
+      port: 8080
+      scheme: http
+      authSecretRef:
+        name: openfga-preshared-key
+        key: preshared-key
+      consistency: higher_consistency
+  broker:
+    enabled: true
+    dataDir: /var/lib/waddle/broker
+    kms:
+      provider: Scaleway
+      scaleway:
+        baseUrl: https://api.scaleway.com
+        region: fr-par
+        projectId: 11111111-2222-3333-4444-555555555555
+        authSecretRef:
+          name: scaleway-kms-secret
+          key: auth-token
+  extensions:
+    enabled: true
+  secrets:
+    mode: ExternalSecrets
+    externalSecrets:
+      externalSecretName: waddle-runtime-secrets
+      apiVersion: Auto
+  persistence:
+    enabled: true
+    storageClassName: openebs-mayastor
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+---
+apiVersion: waddle.social/v1alpha1
+kind: WaddleTenant
+metadata:
+  name: waddle-social
+  namespace: waddle-next
+spec:
+  serverRef:
+    name: waddle
+  tenantId: waddle.social
+  placementMode: SharedPool
+  owners:
+    - rawkode
+    - icepuma
+    - randax
+  extensions:
+    enabledPlugins:
+      - ai
+    approvedProviders:
+      - openrouter
+    zdrRequired: true

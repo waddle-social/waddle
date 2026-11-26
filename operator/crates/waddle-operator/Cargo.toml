@@ -20,6 +20,10 @@ ed25519-dalek.workspace = true
 futures.workspace = true
 hex.workspace = true
 http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true, features = ["client", "derive", "ring", "runtime", "rustls-tls"] }
 rand.workspace = true

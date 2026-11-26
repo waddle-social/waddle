@@ -13,14 +13,17 @@ spec:
   xmpp:
     domain: waddle.local
     publicWebsocketUrl: wss://waddle.local/xmpp-websocket
-  postgres:
-    mode: CloudNativePg
-    cnpg:
-      clusterName: waddle-pg
-  spicedb:
-    mode: SpiceDbOperator
-    operator:
-      clusterName: spicedb
+  storage:
+    backend: Turso
+    turso:
+      dataDir: /var/lib/waddle/tenants
+      reservedFds: 256
+  authz:
+    backend: OpenFga
+    openfga:
+      serviceName: openfga
+      port: 8080
+      scheme: http
   secrets:
     mode: Yolo
     yolo:

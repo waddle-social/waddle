@@ -1,13 +1,19 @@
 # Waddle Kubernetes Operator (`waddle-operator`)
 
-Kubernetes operator and `WaddleServer` (`waddle.social/v1alpha1`) CustomResourceDefinition for deploying and reconciling Waddle XMPP servers cleanly on Kubernetes.
+Kubernetes operator and `WaddleServer` / `WaddleTenant` (`waddle.social/v1alpha1`) CustomResourceDefinitions for deploying and reconciling multi-tenant Waddle XMPP servers cleanly on Kubernetes.
 
 ## Design Boundaries
 
-- **External database operators only**: `waddle-operator` **observes** and **never creates or reconciles** PostgreSQL or SpiceDB instances. It supports:
-  - **PostgreSQL**: CloudNativePG (`postgresql.cnpg.io/v1` `Cluster`) or `External` `Secret` (+ optional `Service`), including Waddle's `restrictedRuntime` (`sslmode=verify-full` + `handoff.json`).
-  - **SpiceDB**: AuthZed SpiceDB Operator (`authzed.com/v1alpha1` `SpiceDBCluster`) with automatic `WADDLE_SPICEDB_INSECURE` detection from `tlsSecretName` and `EndpointSlice` readiness verification, or `External` endpoint.
-- **`Pending` gate**: Before creating any `Deployment`, `Service`, or `PVC`, `WaddleServer` enters and remains in `Pending` until required Postgres and SpiceDB operators/resources exist and satisfy health readiness (missing CRDs surface cleanly as `CrdNotInstalled` without failing the controller).
+- **Pluggable storage & authorization backends**:
+  - **Storage (`spec.storage`)**:
+    - **`Turso`**: Local per-tenant Turso/libSQL databases on PVC/emptyDir (`WADDLE_DB_DRIVER=turso`, single-writer `replicas <= 1` and `updateStrategy: Recreate` enforced by CEL; zero CNPG cluster required).
+    - **`Postgres`**: CloudNativePG (`postgresql.cnpg.io/v1` `Cluster`) or `External` `Secret` (+ optional `Service`), including Waddle's `restrictedRuntime` (`sslmode=verify-full` + `handoff.json`).
+  - **Authorization (`spec.authz`)**:
+    - **`OpenFga`**: Observes a same-namespace OpenFGA `Service` + `EndpointSlice` and optional `authSecretRef` (`WADDLE_AUTHZ_BACKEND=openfga`).
+    - **`SpiceDb`**: AuthZed SpiceDB Operator (`authzed.com/v1alpha1` `SpiceDBCluster`) with automatic `WADDLE_SPICEDB_INSECURE` detection from `tlsSecretName` and `EndpointSlice` readiness verification, or `External` endpoint.
+  - **Broker & Extensions (`spec.broker`, `spec.extensions`)**: Optional credential custody broker with Scaleway Key Manager / Vault / Local KMS and server extensions runtime.
+- **`WaddleTenant` multi-tenancy**: Watches `WaddleTenant` (`wt`) resources alongside `WaddleServer`, waits for the referenced `WaddleServer` to reach `Ready`, idempotently provisions the tenant's OpenFGA store (`waddle-tenant-<tenantId>`) and canonical Waddle authorization model, reconciles `waddle-tenant-<cr-name>` + `<server>-tenants` ConfigMaps mounted at `/etc/waddle/tenants`, and cleans up via `waddle.social/tenant-cleanup` finalizer on deletion.
+- **`Pending` gate**: Before creating any `Deployment`, `Service`, or `PVC`, `WaddleServer` enters and remains in `Pending` until required storage and authorization dependencies (and any required CRDs) exist and satisfy health readiness (missing CRDs surface cleanly as `CrdNotInstalled` without failing the controller).
 - **Non-regressing runtime safety**: Once a live `Deployment` exists (`Reconciling`, `Ready`, `Degraded`), dependency outages, post-admission invalid spec edits, or rollout stalls transition cleanly to `Degraded` — never deleting workloads or regressing back to `Pending` or `Failed`.
 - **Secrets management**:
   - **Production default (`ExternalSecrets`)**: Uses External Secrets Operator (`external-secrets.io/v1` preferred, falling back to `v1beta1`), consuming either a pre-existing `ExternalSecret` or an operator-managed `ExternalSecret` (with explicit `--allowed-cluster-secret-stores` policy allowlist).
@@ -65,8 +71,9 @@ stateDiagram-v2
 ## CLI & Flags
 
 ```sh
-# Emit CRD YAML
+# Emit CRD YAMLs
 waddle-operator crd > config/crd/waddleservers.waddle.social.yaml
+waddle-operator crd --kind tenant > config/crd/waddletenants.waddle.social.yaml
 
 # Run controller (production defaults: --enable-yolo-mode=false, --leader-election=true)
 waddle-operator run \

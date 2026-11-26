@@ -16,12 +16,15 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ObjectMeta;
+use sha2::{Digest, Sha256};
 use waddle_operator_crd::{
-    ContentDigest, SecretProviderMode, UpdateStrategyKind, ValidatedSpec, WaddleServer,
+    BrokerKmsProviderKind, ContentDigest, SecretProviderMode, UpdateStrategyKind, ValidatedSpec,
+    WaddleServer,
 };
 
-use crate::bindings::{PostgresBinding, ResolvedRuntimeBindings};
+use crate::bindings::{AuthzBinding, PostgresBinding, ResolvedRuntimeBindings, StorageBinding};
 use crate::error::OperatorError;
+use crate::resources::config_map::TENANTS_MOUNT_PATH;
 use crate::resources::labels;
 use crate::resources::secret;
 
@@ -32,7 +35,7 @@ pub const ANNOTATION_SESSION_KEY_FINGERPRINT: &str = "waddle.social/session-key-
 /// Annotation key storing the fingerprinted `WADDLE_OCCUPANT_ID_SECRET` digest.
 pub const ANNOTATION_OCCUPANT_ID_FINGERPRINT: &str = "waddle.social/occupant-id-fingerprint";
 
-/// Builds the Waddle server `Deployment` matching `waddle-server` Helm chart invariants.
+/// Builds the Waddle server `Deployment` matching `waddle-server` invariants.
 ///
 /// When `ws.spec.replicas` is `None`, `Deployment.spec.replicas` is left `None` so an external
 /// HPA can manage replica scaling without SSA conflicts.
@@ -305,11 +308,6 @@ fn build_env(
             &bindings.runtime_secret_name,
             secret::KEY_OCCUPANT_ID_SECRET,
         ),
-        secret_env_var(
-            secret::KEY_SPICEDB_PRESHARED_KEY,
-            &bindings.spicedb.preshared_key_secret_name,
-            &bindings.spicedb.preshared_key_secret_key,
-        ),
         EnvVar {
             name: "WADDLE_CLUSTERING_POD_TEMPLATE_HASH".to_owned(),
             value_from: Some(EnvVarSource {
@@ -331,6 +329,25 @@ fn build_env(
         },
     ];
 
+    match &bindings.authz {
+        AuthzBinding::SpiceDb(sp) => {
+            env.push(secret_env_var(
+                secret::KEY_SPICEDB_PRESHARED_KEY,
+                &sp.preshared_key_secret_name,
+                &sp.preshared_key_secret_key,
+            ));
+        }
+        AuthzBinding::OpenFga(fga) => {
+            if let Some((sec_name, sec_key)) = &fga.auth_secret_ref {
+                env.push(secret_env_var(
+                    "WADDLE_OPENFGA_API_TOKEN",
+                    sec_name,
+                    sec_key,
+                ));
+            }
+        }
+    }
+
     if ws.spec.secrets.mode == SecretProviderMode::Yolo && ws.spec.deployment.uuid.is_none() {
         env.push(secret_env_var(
             secret::KEY_DEPLOYMENT_UUID,
@@ -339,7 +356,11 @@ fn build_env(
         ));
     }
 
-    append_postgres_env(&mut env, &bindings.postgres);
+    if let StorageBinding::Postgres(pg) = &bindings.storage {
+        append_postgres_env(&mut env, pg);
+    }
+
+    append_broker_secret_env(&mut env, ws);
 
     if let Some(pool_secret) = &bindings.clustering_keypool_secret_name {
         env.push(secret_env_var(
@@ -373,6 +394,36 @@ fn build_env(
     }
 
     Ok(env)
+}
+
+fn append_broker_secret_env(env: &mut Vec<EnvVar>, ws: &WaddleServer) {
+    let Some(broker) = ws.spec.broker.as_ref().filter(|b| b.enabled) else {
+        return;
+    };
+    let Some(kms) = &broker.kms else {
+        return;
+    };
+    match kms.provider {
+        BrokerKmsProviderKind::Scaleway => {
+            if let Some(scw) = &kms.scaleway {
+                env.push(secret_env_var(
+                    "WADDLE_SCW_KMS_AUTH_TOKEN",
+                    &scw.auth_secret_ref.name,
+                    &scw.auth_secret_ref.key,
+                ));
+            }
+        }
+        BrokerKmsProviderKind::Vault => {
+            if let Some(vault) = &kms.vault {
+                env.push(secret_env_var(
+                    "WADDLE_VAULT_TOKEN",
+                    &vault.auth_secret_ref.name,
+                    &vault.auth_secret_ref.key,
+                ));
+            }
+        }
+        BrokerKmsProviderKind::Local => {}
+    }
 }
 
 fn append_postgres_env(env: &mut Vec<EnvVar>, binding: &PostgresBinding) {
@@ -471,12 +522,30 @@ fn build_storage_and_mounts(
         }
     };
 
-    let mut volumes = vec![data_volume];
-    let mut mounts = vec![VolumeMount {
-        name: "data".to_owned(),
-        mount_path: ws.spec.persistence.mount_path.clone(),
-        ..VolumeMount::default()
-    }];
+    let tenants_volume = Volume {
+        name: "tenants".to_owned(),
+        config_map: Some(ConfigMapVolumeSource {
+            name: labels::tenants_config_map_name(ws)?,
+            optional: Some(true),
+            ..ConfigMapVolumeSource::default()
+        }),
+        ..Volume::default()
+    };
+
+    let mut volumes = vec![data_volume, tenants_volume];
+    let mut mounts = vec![
+        VolumeMount {
+            name: "data".to_owned(),
+            mount_path: ws.spec.persistence.mount_path.clone(),
+            ..VolumeMount::default()
+        },
+        VolumeMount {
+            name: "tenants".to_owned(),
+            mount_path: TENANTS_MOUNT_PATH.to_owned(),
+            read_only: Some(true),
+            ..VolumeMount::default()
+        },
+    ];
 
     if ws.spec.xmpp.enabled {
         if let Some(tls_secret) = &ws.spec.xmpp.tls_secret_name {
@@ -497,7 +566,8 @@ fn build_storage_and_mounts(
         }
     }
 
-    if let PostgresBinding::RestrictedRuntime { spec } = &bindings.postgres {
+    if let StorageBinding::Postgres(PostgresBinding::RestrictedRuntime { spec }) = &bindings.storage
+    {
         volumes.push(Volume {
             name: "postgres-ca".to_owned(),
             secret: Some(SecretVolumeSource {
@@ -627,8 +697,6 @@ pub fn compute_workload_hash(
     ws: &WaddleServer,
     spec: &DeploymentSpec,
 ) -> Result<ContentDigest, OperatorError> {
-    use sha2::Digest;
-
     let payload = (
         spec,
         &ws.spec.service,
@@ -639,7 +707,7 @@ pub fn compute_workload_hash(
     );
     let bytes = serde_json::to_vec(&payload)
         .map_err(|err| OperatorError::Serialization(err.to_string()))?;
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let hex_digest = hex::encode(hasher.finalize());
     ContentDigest::try_new(&hex_digest).map_err(|err| OperatorError::Serialization(err.to_string()))
