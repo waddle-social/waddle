@@ -30,7 +30,17 @@ public final class BlockListStore {
             ?? whole.first { $0.bare.localpart == nil && $0.bare.domain == person.domain }
     }
 
+    /// Where the list stands, to tell later whether a change has arrived since.
     public func versionBeforeFetch() -> Int { version }
+
+    /// Takes a write the server has confirmed, unless a change arrived
+    /// while it was in flight. The server tells this session of every
+    /// change, this one included, so what arrived is newer than the write
+    /// or is the write itself, and stands as it is.
+    public func confirm(_ change: BlockListChange, sentAt: Int) {
+        guard version == sentAt else { return }
+        apply(change)
+    }
 
     /// Takes a snapshot, unless a change arrived while it was in flight:
     /// then it may be from before that change, and is not taken. False

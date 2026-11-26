@@ -167,6 +167,35 @@ struct BlockListTests {
         await coordinator.stop()
     }
 
+    /// Another device undoes the write before its result arrives: the newer change stands.
+    @Test func aWriteDoesNotUndoANewerChangeFromElsewhere() async throws {
+        let port = FakePort()
+        port.blockListResult = .success([domain])
+        let coordinator = await connected(port)
+        port.blockingWrites.isHolding = true
+
+        let block = Task { try await coordinator.block(person.bare) }
+        await eventually { port.blockingWrites.count == 1 }
+        port.emit(.blockListChanged(.blocked([person])))
+        await eventually { coordinator.blockList.blockedJIDs == [domain, person] }
+        port.emit(.blockListChanged(.unblocked([person])))
+        await eventually { coordinator.blockList.blockedJIDs == [domain] }
+        port.blockingWrites.release()
+        try await block.value
+        #expect(coordinator.blockList.blockedJIDs == [domain])
+
+        let unblock = Task { try await coordinator.unblock(domain) }
+        await eventually { port.blockingWrites.count == 1 }
+        port.emit(.blockListChanged(.unblocked([domain])))
+        await eventually { coordinator.blockList.blockedJIDs.isEmpty }
+        port.emit(.blockListChanged(.blocked([domain])))
+        await eventually { coordinator.blockList.blockedJIDs == [domain] }
+        port.blockingWrites.release()
+        try await unblock.value
+        #expect(coordinator.blockList.blockedJIDs == [domain])
+        await coordinator.stop()
+    }
+
     @Test func writeErrorsPropagateWithoutChangingTheList() async {
         let port = FakePort()
         port.blockListResult = .success([domain])

@@ -49,10 +49,10 @@ extension SessionCoordinator {
     public func block(_ person: BareJID) async throws {
         let jid = JID(bare: person, resource: nil)!
         let epoch = connectionEpoch
+        let version = blockList.versionBeforeFetch()
         try await port.block([jid])
-        // A matching push may already have applied this change.
-        guard !isStopped, epoch == connectionEpoch, !blockList.blockedJIDs.contains(jid) else { return }
-        blockList.apply(.blocked([jid]))
+        guard !isStopped, epoch == connectionEpoch else { return }
+        blockList.confirm(.blocked([jid]), sentAt: version)
     }
 
     /// What blocks `person`, as the app says it; nil when nothing does.
@@ -63,8 +63,9 @@ extension SessionCoordinator {
     /// Removes the exact entry from the account's block list.
     public func unblock(_ jid: JID) async throws {
         let epoch = connectionEpoch
+        let version = blockList.versionBeforeFetch()
         try await port.unblock([jid])
-        guard !isStopped, epoch == connectionEpoch, blockList.blockedJIDs.contains(jid) else { return }
-        blockList.apply(.unblocked([jid]))
+        guard !isStopped, epoch == connectionEpoch else { return }
+        blockList.confirm(.unblocked([jid]), sentAt: version)
     }
 }
