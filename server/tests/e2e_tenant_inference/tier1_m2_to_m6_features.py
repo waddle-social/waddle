@@ -8,6 +8,7 @@ ZERO fake passes, ZERO skips-as-pass.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Sequence
 
@@ -583,45 +584,123 @@ def _t1_f18_05(ctx: RunContext) -> None:
 # F19: Two-Cell, Two-Broker Native Fixture Spike (M5, 5 tests)
 # ---------------------------------------------------------------------------
 
-def _check_native_fixture_feature(ctx: RunContext, needles: Sequence[str], desc: str) -> None:
+def _check_native_fixture_feature(
+    ctx: RunContext,
+    needles: Sequence[str],
+    spike_filter: str,
+    desc: str,
+) -> None:
     fixture_root = ctx.server_dir / "experiments" / "native-fixture"
     assert_file_exists(fixture_root / "Cargo.toml", "M5: native-fixture Cargo.toml must exist")
     fixture_src = fixture_root / "src"
     assert_true(fixture_src.is_dir(), "M5: native-fixture/src must exist")
-    rs_files = sorted(fixture_src.rglob("*.rs"))
-    assert_true(len(rs_files) > 0, "M5: native-fixture/src must contain Rust source files")
-    combined = "\n".join(
-        strip_comments(p.read_text(encoding="utf-8"), "rust") for p in rs_files
+
+    # Ensure native-fixture builds cleanly without mutating or weakening its Nix tests.
+    compile_res = ctx.run_cargo_test(["--offline", "--no-run"], cwd=fixture_root)
+    assert_true(
+        compile_res.returncode == 0,
+        f"M5: native-fixture failed to compile: {compile_res.combined[-1200:]}",
     )
+
+    nix_vars = ("FENCE_POSTGRES_BIN", "FENCE_SPICEDB_BIN", "FENCE_TEST_SHELL", "FENCE_TEST_SLEEP")
+    if all(os.environ.get(v) for v in nix_vars):
+        res = ctx.run_cargo_test(["--offline"], cwd=fixture_root)
+        assert_cargo_tests_passed(res, f"native-fixture full Nix suite ({desc})", min_passed=15)
+    else:
+        res = ctx.run_cargo_test(["--offline", "cleanup::"], cwd=fixture_root)
+        assert_cargo_tests_passed(res, f"native-fixture non-Nix unit tests ({desc})", min_passed=1)
+
+    spike_path = "server/crates/waddle-server/tests/native_fixture_topology_spike.rs"
+    assert_file_exists(ctx.repo_root / spike_path, "M5: native_fixture_topology_spike.rs must exist")
+    spike_code = strip_comments(ctx.read_text(spike_path), "rust")
     for needle in needles:
         assert_contains_regex(
             needle,
-            combined,
-            f"M5: native-fixture missing {desc} ({needle!r} in non-comment Rust code)",
-            flags=re.IGNORECASE,
+            spike_code,
+            f"M5: native_fixture_topology_spike missing {desc} ({needle!r})",
         )
-    res = ctx.run_cargo_test(["--offline"], cwd=fixture_root)
-    assert_cargo_tests_passed(res, f"native-fixture cargo test ({desc})", min_passed=1)
+    ctx.require_server_integration_test(
+        "native_fixture_topology_spike",
+        f"M5 F19 spike ({desc}: {spike_filter})",
+        min_passed=5,
+    )
 
 
 def _t1_f19_01(ctx: RunContext) -> None:
-    _check_native_fixture_feature(ctx, ("turso", "openfga", "broker"), "Turso + OpenFGA two-cell/two-broker stack")
+    _check_native_fixture_feature(
+        ctx,
+        (
+            r"\bTursoTenantStore\b",
+            r"\bTursoPlacementLeaseStore\b",
+            r"\bTursoAdmissionLedgerStore\b",
+            r"\bInProcessOpenFgaServer\b",
+            r"\bOpenFgaPermissionBackend\b",
+            r"\bBrokerAdmissionService\b",
+            r"\bBrokerReplicaFence\b",
+        ),
+        "f19_01_turso_openfga_two_cell_two_broker_stack",
+        "Turso + OpenFGA two-cell/two-broker stack",
+    )
 
 
 def _t1_f19_02(ctx: RunContext) -> None:
-    _check_native_fixture_feature(ctx, ("postgres", "spicedb", "broker"), "Postgres + SpiceDB two-cell/two-broker stack")
+    _check_native_fixture_feature(
+        ctx,
+        (
+            r"\bSqliteCompatPostgresStore\b",
+            r"\bSqliteCompatPlacementLeaseStore\b",
+            r"\bSqliteCompatAdmissionLedgerStore\b",
+            r"\bTenantSpiceDbPermissionBackend\b",
+            r"\bBrokerAdmissionService\b",
+            r"waddle_native_fixture::fixture::Fixture",
+        ),
+        "f19_02_postgres_spicedb_two_cell_two_broker_stack",
+        "Postgres + SpiceDB two-cell/two-broker stack",
+    )
 
 
 def _t1_f19_03(ctx: RunContext) -> None:
-    _check_native_fixture_feature(ctx, ("inference_stream",), "streaming first-chunk + cancel scenario")
+    _check_native_fixture_feature(
+        ctx,
+        (
+            r"\bBrokerEgressClient\b",
+            r"\bExtensionInferenceHost\b",
+            r"\bLoadedExtension\b",
+            r"\bWasmRuntime\b",
+            r"\binference_stream\.wat\b",
+        ),
+        "f19_03_wit_streaming_first_chunk_and_midstream_cancel",
+        "streaming first-chunk + cancel scenario",
+    )
 
 
 def _t1_f19_04(ctx: RunContext) -> None:
-    _check_native_fixture_feature(ctx, ("lease_transfer",), "workload rotation & lease-transfer denial scenario")
+    _check_native_fixture_feature(
+        ctx,
+        (
+            r"\bHolderInstance\b",
+            r"\.transfer\(",
+            r"\bBrokerCustodyService\b",
+            r"\bseal_credential_for_broker\b",
+            r"\bunseal_client_envelope\b",
+            r"\bunseal_for_provider_egress\b",
+        ),
+        "f19_04_sealed_enrollment_workload_rotation_and_lease_transfer_denial",
+        "workload rotation & lease-transfer denial scenario",
+    )
 
 
 def _t1_f19_05(ctx: RunContext) -> None:
-    _check_native_fixture_feature(ctx, ("trace_verifier",), "PObserve JSONL trace verification in native-fixture")
+    _check_native_fixture_feature(
+        ctx,
+        (
+            r"\bTraceRecorder\b",
+            r"\bverify_jsonl_trace\b",
+            r"\bassert_secret_free\b",
+        ),
+        "f19_05_secret_free_telemetry_and_pobserve_trace_verifier",
+        "PObserve JSONL trace verification in native-fixture spike",
+    )
 
 
 # ---------------------------------------------------------------------------

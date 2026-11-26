@@ -12,6 +12,5 @@ pub mod postgres_diagnostics;
 pub mod process;
 pub mod shutdown_measurement;
 pub mod status_capture;
-pub mod topology_spike;
 #[cfg(test)]
 const TEST_SCHEMA: &str = "definition fixture_probe {}";
