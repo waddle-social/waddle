@@ -344,6 +344,7 @@ pub async fn build_websocket_state_for_test(
         #[cfg(feature = "test-support")]
         sasl2_test_capability: false,
         room_listings: Default::default(),
+        muji_session_rooms: Default::default(),
         local_space_publications: Arc::new(tokio::sync::Semaphore::new(8)),
         deps: WebSocketDeps {
             app_state,
