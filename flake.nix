@@ -662,7 +662,7 @@
           waddle-server-test-deps = serverTestArtifacts;
           default = waddle-server;
         }
-        // lib.optionalAttrs pkgs.stdenv.isLinux {
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           waddle-server-image-stream = image;
           # Fail before compiling if a CI runner cannot create the namespaces
           # required by the four co-located test sandboxes.
