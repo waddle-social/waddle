@@ -276,12 +276,12 @@ workflow: {
 			type: "choice"
 			default: "all"
 			required: true
-			options: ["all", "namespace", "cargo", "namespace-volume"]
+			options: ["all", "namespace", "cargo", "namespace-volume", "namespace-test-volume"]
 		}
 	}
 	permissions: {}
 	concurrency: {
-		group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume') && format('-{0}', inputs.scope) || '' }}"
+		group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume' || inputs.scope == 'namespace-test-volume') && format('-{0}', inputs.scope) || '' }}"
 		"cancel-in-progress": true
 	}
 	jobs: {
@@ -290,7 +290,7 @@ workflow: {
 		"bazel-seed": #BazelJob & {_phase: "seed"}
 		"bazel-restore": #BazelJob & {_phase: "restore"}
 		"normal-ci": {
-			if: "${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' }}"
+			if: "${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}"
 			permissions: {contents: "read", actions: "read"}
 			name: "Wait for normal CI before cache qualification"
 			"runs-on": "ubuntu-24.04"
@@ -320,7 +320,7 @@ workflow: {
 			permissions: {contents: "read", actions: "read"}
 			name: "Cache qualification report"
 			needs: ["existing", "seed", "warm", "h3-seed", "h3-warm"]
-			if: "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' }}"
+			if: "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}"
 			"runs-on": "ubuntu-24.04"
 			"timeout-minutes": 5
 			steps: [

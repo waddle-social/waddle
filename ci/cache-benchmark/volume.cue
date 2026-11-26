@@ -29,14 +29,37 @@ let _volumeJobRunner = [
 ]
 let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume'"
 
+let _testIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume'"
+
 #VolumeJob: {
+	_suite: *false | true
+	_tagSuffix: *"" | string
+	_probeName: *"Build the Clippy lane from the volume" | string
+	_artifact: *"nix-volume" | string
+	_probeScript: *"ci-nix-volume-probe.py" | string
 	_phase: string
 	_edit:  *true | false
 	if:     string
 	needs?: [...string]
-	name:   "nix-volume/\(_phase)"
-	"runs-on": _volumeJobRunner
-	"timeout-minutes": 90
+	outputs?: [string]: string
+	name:   "\(_artifact)/\(_phase)"
+	if !_suite {
+		"runs-on": _volumeJobRunner
+		"timeout-minutes": 90
+	}
+	if _suite {
+		_artifact: "nix-test-volume"
+		_probeName: "Build and run the production default-feature test suite"
+		_probeScript: "ci-nix-test-volume.py"
+		"runs-on": [
+			"nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features",
+			"nscloud-cache-tag-waddle-test-\(_tagSuffix)",
+			"nscloud-cache-size-50gb",
+			"namespace-features:container.privileged=true",
+			if _phase != "seed" {"nscloud-cache-exp-do-not-commit"},
+		]
+		"timeout-minutes": 230
+	}
 	permissions: contents: "read"
 	steps: [
 		{name: "Checkout", uses: _checkout},
@@ -98,15 +121,16 @@ let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'na
 				"""
 		},
 		{
-			name: "Build the Clippy lane from the volume"
-			run:  "python3 scripts/ci-nix-volume-probe.py probe --phase \(_phase)\([if _edit {" --edit"}, ""][0])"
+			name: _probeName
+			run:  "python3 scripts/\(_probeScript) probe --phase \(_phase)\([if _edit {" --edit"}, ""][0])"
 		},
 		{
 			name: "Upload probe measurements"
 			if:   "${{ always() }}"
 			uses: _upload
 			with: {
-				name: "nix-volume-\(_phase)"
+				name: "\(_artifact)-\(_phase)"
+				if _suite {overwrite: true}
 				path: ".ci/nix-volume"
 				"include-hidden-files": true
 				"if-no-files-found":    "error"
@@ -197,6 +221,64 @@ workflow: jobs: {
 			{
 				name: "Summarize"
 				run:  "python3 scripts/test-ci-nix-volume-probe.py && python3 scripts/ci-nix-volume-probe.py summary --input .ci/nix-volume-results"
+			},
+		]
+	}
+}
+
+let _seedTag = "${{ github.run_id }}-${{ github.run_attempt }}"
+let _restoreTag = "${{ github.run_id }}-${{ needs.test-volume-seed.outputs.attempt }}"
+
+workflow: jobs: {
+	"test-volume-seed": #VolumeJob & {
+		_suite: true, _phase: "seed", _edit: false, _tagSuffix: _seedTag
+		if: "${{ \(_testIf) }}"
+		outputs: attempt: "${{ github.run_attempt }}"
+	}
+	"test-volume-cold": #VolumeJob & {
+		_suite: true, _phase: "cold", _tagSuffix: "\(_seedTag)-cold"
+		if: "${{ \(_testIf) }}"
+	}
+	"test-volume-immediate": #VolumeJob & {
+		_suite: true, _phase: "immediate", _tagSuffix: _restoreTag
+		needs: ["test-volume-seed"]
+		if: "${{ \(_testIf) }}"
+	}
+	"test-volume-wait": {
+		name: "nix-test-volume/wait-600s"
+		needs: ["test-volume-seed"]
+		if: "${{ \(_testIf) }}"
+		"runs-on": "ubuntu-24.04"
+		"timeout-minutes": 15
+		permissions: {}
+		steps: [{name: "Allow the seed volume to replicate", run: "sleep 600"}]
+	}
+	"test-volume-delayed": #VolumeJob & {
+		_suite: true, _phase: "delayed", _tagSuffix: _restoreTag
+		needs: ["test-volume-seed", "test-volume-wait"]
+		if: "${{ \(_testIf) }}"
+	}
+	"test-volume-summary": {
+		name: "nix-test-volume/summary"
+		needs: ["test-volume-seed", "test-volume-cold", "test-volume-immediate", "test-volume-delayed"]
+		if: "${{ !cancelled() && \(_testIf) }}"
+		"runs-on": "ubuntu-24.04"
+		"timeout-minutes": 5
+		permissions: {contents: "read", actions: "read"}
+		steps: [
+			{name: "Checkout", uses: _checkout},
+			{
+				name: "Download measurements"
+				uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+				with: {pattern: "nix-test-volume-*", path: ".ci/test-volume-results", "digest-mismatch": "error"}
+			},
+			{
+				name: "Compare test inventories, crate reuse and job durations"
+				env: GH_TOKEN: "${{ github.token }}"
+				run: """
+					gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > .ci/test-volume-jobs.json
+					python3 scripts/ci-nix-test-volume.py summary --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
+					"""
 			},
 		]
 	}

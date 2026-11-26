@@ -31,9 +31,10 @@ name: waddle-ci-cache-benchmark
           - namespace
           - cargo
           - namespace-volume
+          - namespace-test-volume
 permissions: {}
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume') && format('-{0}', inputs.scope) || '' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume' || inputs.scope == 'namespace-test-volume') && format('-{0}', inputs.scope) || '' }}
   cancel-in-progress: true
 jobs:
   cargo-seed:
@@ -461,7 +462,7 @@ jobs:
           EXPECTED_ACTION_DIGEST: ${{ needs.bazel-seed.outputs.digest }}
         run: bash ci/cache-benchmark/verify-bazel.sh restore
   normal-ci:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}
     permissions:
       contents: read
       actions: read
@@ -742,14 +743,13 @@ jobs:
   volume-seed:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume' }}
     name: nix-volume/0-seed
+    permissions:
+      contents: read
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
       - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
       - namespace-features:container.privileged=true
-    timeout-minutes: 90
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -803,19 +803,19 @@ jobs:
           path: .ci/nix-volume
           include-hidden-files: true
           if-no-files-found: error
+    timeout-minutes: 90
   volume-probe-1:
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume' }}
     needs:
       - volume-seed
     name: nix-volume/1-immediate
+    permissions:
+      contents: read
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
       - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
       - namespace-features:container.privileged=true
-    timeout-minutes: 90
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -869,6 +869,7 @@ jobs:
           path: .ci/nix-volume
           include-hidden-files: true
           if-no-files-found: error
+    timeout-minutes: 90
   volume-wait-1:
     name: nix-volume/wait-600s
     needs:
@@ -885,14 +886,13 @@ jobs:
     needs:
       - volume-wait-1
     name: nix-volume/2-after-10m
+    permissions:
+      contents: read
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
       - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
       - namespace-features:container.privileged=true
-    timeout-minutes: 90
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -946,6 +946,7 @@ jobs:
           path: .ci/nix-volume
           include-hidden-files: true
           if-no-files-found: error
+    timeout-minutes: 90
   volume-wait-2:
     name: nix-volume/wait-1800s
     needs:
@@ -962,14 +963,13 @@ jobs:
     needs:
       - volume-wait-2
     name: nix-volume/3-after-30m
+    permissions:
+      contents: read
     runs-on:
       - nscloud-ubuntu-24.04-amd64-8x16-with-cache-with-features
       - nscloud-cache-tag-waddle-nix-layers-trial-2
       - nscloud-cache-size-20gb
       - namespace-features:container.privileged=true
-    timeout-minutes: 90
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -1023,6 +1023,7 @@ jobs:
           path: .ci/nix-volume
           include-hidden-files: true
           if-no-files-found: error
+    timeout-minutes: 90
   profile-sandbox:
     name: nix-volume/profile-sandbox
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume' }}
@@ -1066,6 +1067,315 @@ jobs:
           digest-mismatch: error
       - name: Summarize
         run: python3 scripts/test-ci-nix-volume-probe.py && python3 scripts/ci-nix-volume-probe.py summary --input .ci/nix-volume-results
+  test-volume-seed:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    outputs:
+      attempt: ${{ github.run_attempt }}
+    name: nix-test-volume/seed
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features
+      - nscloud-cache-tag-waddle-test-${{ github.run_id }}-${{ github.run_attempt }}
+      - nscloud-cache-size-50gb
+      - namespace-features:container.privileged=true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Mount Namespace Nix volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Record volume contents
+        run: python3 scripts/ci-nix-volume-probe.py volume --phase seed
+      - name: Prepare retained Namespace store for fresh host installation
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase seed
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-volume-seed
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-volume-cold:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    name: nix-test-volume/cold
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features
+      - nscloud-cache-tag-waddle-test-${{ github.run_id }}-${{ github.run_attempt }}-cold
+      - nscloud-cache-size-50gb
+      - namespace-features:container.privileged=true
+      - nscloud-cache-exp-do-not-commit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Mount Namespace Nix volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Record volume contents
+        run: python3 scripts/ci-nix-volume-probe.py volume --phase cold
+      - name: Prepare retained Namespace store for fresh host installation
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase cold --edit
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-volume-cold
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-volume-immediate:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    needs:
+      - test-volume-seed
+    name: nix-test-volume/immediate
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features
+      - nscloud-cache-tag-waddle-test-${{ github.run_id }}-${{ needs.test-volume-seed.outputs.attempt }}
+      - nscloud-cache-size-50gb
+      - namespace-features:container.privileged=true
+      - nscloud-cache-exp-do-not-commit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Mount Namespace Nix volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Record volume contents
+        run: python3 scripts/ci-nix-volume-probe.py volume --phase immediate
+      - name: Prepare retained Namespace store for fresh host installation
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase immediate --edit
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-volume-immediate
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-volume-wait:
+    name: nix-test-volume/wait-600s
+    needs:
+      - test-volume-seed
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Allow the seed volume to replicate
+        run: sleep 600
+  test-volume-delayed:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    needs:
+      - test-volume-seed
+      - test-volume-wait
+    name: nix-test-volume/delayed
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features
+      - nscloud-cache-tag-waddle-test-${{ github.run_id }}-${{ needs.test-volume-seed.outputs.attempt }}
+      - nscloud-cache-size-50gb
+      - namespace-features:container.privileged=true
+      - nscloud-cache-exp-do-not-commit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Mount Namespace Nix volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          cache: nix
+      - name: Record volume contents
+        run: python3 scripts/ci-nix-volume-probe.py volume --phase delayed
+      - name: Prepare retained Namespace store for fresh host installation
+        run: |-
+          set -euo pipefail
+          if ! sudo test -f /nix/receipt.json; then
+            echo "No cached installation receipt; continue with fresh installation."
+            exit 0
+          fi
+          if command -v nix >/dev/null 2>&1 || sudo test -e /usr/local/bin/determinate-nixd; then
+            echo "::error::Unexpected existing host Nix installation; refusing receipt recovery."
+            exit 1
+          fi
+          receipt_backup="$(mktemp -d "$RUNNER_TEMP/nix-volume-receipt.XXXXXX")"
+          sudo mv /nix/receipt.json "$receipt_backup/receipt.json"
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase delayed --edit
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-volume-delayed
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-volume-summary:
+    name: nix-test-volume/summary
+    needs:
+      - test-volume-seed
+      - test-volume-cold
+      - test-volume-immediate
+      - test-volume-delayed
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Download measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: nix-test-volume-*
+          path: .ci/test-volume-results
+          digest-mismatch: error
+      - name: Compare test inventories, crate reuse and job durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > .ci/test-volume-jobs.json
+          python3 scripts/ci-nix-test-volume.py summary --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
   warm:
     name: cache-benchmark/warm/${{ matrix.variant }}
     needs:
@@ -1452,7 +1762,7 @@ jobs:
       - warm
       - h3-seed
       - h3-warm
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
