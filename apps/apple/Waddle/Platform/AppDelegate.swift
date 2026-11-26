@@ -17,7 +17,7 @@ final class AppDelegate: NSObject {
     private let voipRegistrar = PushTokenRegistrar(kind: .voip)
     private var voipRegistry: VoIPPushRegistry?
     #elseif os(macOS)
-    private var isWaitingForCallHangUp = false
+    private var isWaitingForCallTermination = false
     #endif
 
     func attach(_ appState: AppState) {
@@ -271,11 +271,13 @@ extension AppDelegate: UIApplicationDelegate {
 
     func applicationWillTerminate(_ application: UIApplication) {
         var finished = false
-        guard let deadline = appState?.session?.coordinator.calls.hangUpForTermination(onComplete: { finished = true }) else { return }
+        let shouldWait = appState?.session?.coordinator.beginCallTermination { finished = true } ?? false
+        guard shouldWait else { return }
 
-        // UIKit needs this callback to return. Pump the run loop so the
-        // main-actor hang-up can progress while UIKit waits.
-        while !finished, ContinuousClock.now < deadline {
+        // UIKit needs this callback to return. If it arrived on the main
+        // dispatch queue, the nested run loop can't service that queue.
+        // In that case the timer ends the wait without running the hang-up.
+        while !finished {
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
         }
     }
@@ -295,11 +297,12 @@ extension AppDelegate: NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if isWaitingForCallHangUp { return .terminateLater }
-        guard appState?.session?.coordinator.calls.hangUpForTermination(runLoopMode: .modalPanel, onComplete: {
+        if isWaitingForCallTermination { return .terminateLater }
+        let shouldWait = appState?.session?.coordinator.beginCallTermination {
             sender.reply(toApplicationShouldTerminate: true)
-        }) != nil else { return .terminateNow }
-        isWaitingForCallHangUp = true
+        } ?? false
+        guard shouldWait else { return .terminateNow }
+        isWaitingForCallTermination = true
         return .terminateLater
     }
 

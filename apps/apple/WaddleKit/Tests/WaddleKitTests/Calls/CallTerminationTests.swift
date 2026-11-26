@@ -5,117 +5,233 @@ import Testing
 
 @MainActor
 @Suite("Call termination") struct CallTerminationTests {
-    @Test func quittingEndsAnActiveCall() async {
-        let f = CallFixture()
-        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
-        f.store.handle(f.event(.proceed))
-        f.store.handle(f.event(.sessionAccept(join: callJoin, media: callAudio)))
-        await eventually { f.port.completedCallSends.count == 2 }
-        f.port.completedCallSends = []
+    @Test func quittingWaitsForTheStreamToCloseAfterHangUp() async throws {
+        let (coordinator, port) = await connectedSession(emitsDisconnectEvent: false)
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
+        port.heldCallVerbs = ["retract"]
 
-        var sendsAtCompletion: [CallSend]?
-        #expect(f.store.hangUpForTermination { sendsAtCompletion = f.port.completedCallSends } != nil)
-        await eventually(timeout: 1) { sendsAtCompletion != nil }
+        var completions = 0
+        #expect(coordinator.beginCallTermination { completions += 1 })
+        await eventually { port.callSends.last == .retract(callPeer.bare, sid) }
+        #expect(port.disconnectCount == 0)
+        port.releaseCallSends()
 
-        #expect(f.store.state == .idle)
-        #expect(sendsAtCompletion == [.terminate(callPeer, "c1", .success), .finish(callPeer, "c1", nil)])
+        await eventually { port.disconnectCount == 1 || completions > 0 }
+        #expect(port.disconnectCount == 1)
+        #expect(completions == 0)
+        #expect(port.completedCallSends.last == .retract(callPeer.bare, sid))
+
+        port.emit(.disconnected)
+        await eventually { completions > 0 }
+        #expect(completions == 1)
+        #expect(coordinator.connection == .offline(retryAt: nil))
+        coordinator.resume()
+        coordinator.start()
+        #expect(coordinator.connection == .offline(retryAt: nil))
+        #expect(port.connectCount == 1)
     }
 
-    @Test func quittingLeavesTheRoomCall() async {
-        let f = GroupFixture()
-        await f.activate()
-        f.port.completedCallSends = []
+    @Test func quittingStopsWaitingAtTheBoundWhenTheStreamNeverCloses() async throws {
+        let (coordinator, port) = await connectedSession(emitsDisconnectEvent: false)
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
+
+        let timeout: Duration = .seconds(2)
+        let requestedAt = ContinuousClock.now
+        var completions: [ContinuousClock.Instant] = []
+        #expect(coordinator.beginCallTermination(timeout: timeout) { completions.append(.now) })
+        await eventually { !completions.isEmpty }
+
+        #expect(port.disconnectCount == 1)
+        #expect(port.completedCallSends.last == .retract(callPeer.bare, sid))
+        #expect(completions.count == 1)
+        let completion = try #require(completions.first)
+        #expect(completion >= requestedAt + timeout)
+        port.emit(.disconnected)
+        await eventually { coordinator.connection == .offline(retryAt: nil) }
+        #expect(completions.count == 1)
+    }
+
+    @Test func quittingFinishesAnAcceptingCallThatReplacedOurs() async throws {
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        #expect(await calls.startCall(to: callPeer.bare, media: callAudio))
+
+        var completed = false
+        #expect(coordinator.beginCallTermination { completed = true })
+        // Install the winner without yielding so the quit task sees the new slot.
+        let replacement = CallEvent(from: callPeer, sid: "replacement", kind: .propose(callAudio))
+        try #require(calls.installIncoming(replacement, media: callAudio, expected: calls.state, accepting: true, epoch: calls.generation))
+        await eventually { completed }
+
+        #expect(completed)
+        #expect(calls.state == .idle)
+        #expect(port.completedCallSends.contains(.finish(callPeer, "replacement", .cancel)))
+    }
+
+    @Test func quittingCompletesAfterHangUpIfTheStreamAlreadyClosed() async throws {
+        let (coordinator, port) = await connectedSession(emitsDisconnectEvent: false)
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
+        port.heldCallVerbs = ["retract"]
+
+        var completions = 0
+        #expect(coordinator.beginCallTermination { completions += 1 })
+        await eventually { port.callSends.last == .retract(callPeer.bare, sid) }
+        port.emit(.disconnected)
+        await eventually { coordinator.connection == .offline(retryAt: nil) }
+        #expect(completions == 0)
+        port.releaseCallSends()
+
+        await eventually { completions > 0 }
+        #expect(completions == 1)
+        #expect(port.completedCallSends.last == .retract(callPeer.bare, sid))
+        #expect(port.disconnectCount == 0)
+    }
+
+    @Test func quittingEndsAnActiveCall() async throws {
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        #expect(await calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(calls.state.sid)
+        calls.handle(.init(from: callPeer, sid: sid, kind: .proceed))
+        calls.handle(.init(from: callPeer, sid: sid, kind: .sessionAccept(join: callJoin, media: callAudio)))
+        await eventually { port.completedCallSends.count == 2 }
+        port.completedCallSends = []
 
         var sendsAtCompletion: [CallSend]?
-        #expect(f.store.hangUpForTermination { sendsAtCompletion = f.port.completedCallSends } != nil)
+        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
-        #expect(f.store.state == .idle)
+        #expect(calls.state == .idle)
+        #expect(sendsAtCompletion == [.terminate(callPeer, sid, .success), .finish(callPeer, sid, nil)])
+    }
+
+    @Test func quittingLeavesTheRoomCall() async throws {
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        let joining = Task { await calls.joinGroupCall(in: groupRoom, media: callAudio, nick: "alice") }
+        await eventually { port.callSends.contains(.groupPresence(groupRoom, "alice", .init(state: .preparing))) }
+        let sid = try #require(calls.state.sid)
+        calls.handleGroupPresence(groupWire(nick: "alice", preparing: true, realJID: callOwn))
+        await eventually { port.callSends.contains(.groupInitiate(groupRoom, callOwn, sid, false)) }
+        calls.handle(.init(from: groupMixer, sid: sid, kind: .sessionAccept(join: groupJoin, media: callAudio)))
+        #expect(await joining.value)
+        port.completedCallSends = []
+
+        var sendsAtCompletion: [CallSend]?
+        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
+        await eventually { sendsAtCompletion != nil }
+
+        #expect(calls.state == .idle)
         #expect(sendsAtCompletion == [
-            .groupPresence(groupRoom, "alice", .init(state: .left)), .groupTerminate(groupRoom, "g1"),
+            .groupPresence(groupRoom, "alice", .init(state: .left)), .groupTerminate(groupRoom, sid),
         ])
     }
 
-    @Test func quittingWithoutACallDoesNotWait() {
-        let f = CallFixture()
+    @Test func quittingWithoutACallDoesNotWait() async {
+        let (coordinator, port) = await connectedSession()
 
-        #expect(f.store.hangUpForTermination { Issue.record("No hang-up was started") } == nil)
-        #expect(f.store.state == .idle)
-        #expect(f.port.callSends.isEmpty)
+        #expect(!coordinator.beginCallTermination { Issue.record("No hang-up was started") })
+        #expect(coordinator.calls.state == .idle)
+        #expect(port.disconnectCount == 0)
+        #expect(port.callSends.isEmpty)
     }
 
     @Test func quittingLeavesAnUnansweredIncomingCallAlone() async {
-        let f = CallFixture()
-        f.store.handle(f.event(.propose(callAudio)))
-        await eventually { f.port.completedCallSends.count == 1 }
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        calls.handle(.init(from: callPeer, sid: "c1", kind: .propose(callAudio)))
+        await eventually { port.completedCallSends.count == 1 }
 
-        #expect(f.store.hangUpForTermination { Issue.record("The call was never answered here") } == nil)
-        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
-        #expect(f.port.callSends == [.ringing(callPeer, "c1")])
-        f.store.clear()
+        #expect(!coordinator.beginCallTermination { Issue.record("The call was never answered here") })
+        #expect(calls.state == .incoming(IncomingCall(from: callPeer, sid: "c1", media: callAudio)))
+        #expect(port.disconnectCount == 0)
+        #expect(port.callSends == [.ringing(callPeer, "c1")])
+        calls.clear()
     }
 
-    @Test func quittingRetractsAnOutgoingRing() async {
-        let f = CallFixture()
-        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+    @Test func quittingRetractsAnOutgoingRing() async throws {
+        let (coordinator, port) = await connectedSession()
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
 
         var sendsAtCompletion: [CallSend]?
-        #expect(f.store.hangUpForTermination { sendsAtCompletion = f.port.completedCallSends } != nil)
+        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
-        #expect(f.store.state == .idle)
-        #expect(sendsAtCompletion == [.propose(callPeer.bare, "c1", callAudio), .retract(callPeer.bare, "c1")])
+        #expect(coordinator.calls.state == .idle)
+        #expect(sendsAtCompletion == [.propose(callPeer.bare, sid, callAudio), .retract(callPeer.bare, sid)])
     }
 
     @Test func quittingFinishesACallWeAnsweredThatIsStillConnecting() async {
-        let f = CallFixture()
-        f.store.handle(f.event(.propose(callAudio)))
-        await eventually { f.port.completedCallSends.count == 1 }
-        #expect(await f.store.acceptIncoming())
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        calls.handle(.init(from: callPeer, sid: "c1", kind: .propose(callAudio)))
+        await eventually { port.completedCallSends.count == 1 }
+        #expect(await calls.acceptIncoming())
 
         var sendsAtCompletion: [CallSend]?
-        #expect(f.store.hangUpForTermination { sendsAtCompletion = f.port.completedCallSends } != nil)
+        #expect(coordinator.beginCallTermination { sendsAtCompletion = port.completedCallSends })
         await eventually { sendsAtCompletion != nil }
 
-        #expect(f.store.state == .idle)
+        #expect(calls.state == .idle)
         #expect(sendsAtCompletion == [.ringing(callPeer, "c1"), .proceed(callPeer, "c1"), .finish(callPeer, "c1", .cancel)])
     }
 
-    @Test func quittingDoesNotHangUpAReplacementRing() async {
-        let f = CallFixture()
-        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
+    @Test func quittingDoesNotHangUpAReplacementRing() async throws {
+        let (coordinator, port) = await connectedSession()
+        let calls = coordinator.calls
+        #expect(await calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(calls.state.sid)
 
         var completed = false
-        #expect(f.store.hangUpForTermination { completed = true } != nil)
-        f.store.clear()
-        f.store.handle(f.event(.propose(callAudio), sid: "c2"))
-        await eventually { completed && f.port.completedCallSends.count >= 2 }
+        #expect(coordinator.beginCallTermination { completed = true })
+        calls.clear()
+        calls.handle(.init(from: callPeer, sid: "c2", kind: .propose(callAudio)))
+        await eventually { completed && port.completedCallSends.count >= 2 }
 
         #expect(completed)
-        #expect(f.store.state == .incoming(IncomingCall(from: callPeer, sid: "c2", media: callAudio)))
-        #expect(f.port.callSends == [.propose(callPeer.bare, "c1", callAudio), .ringing(callPeer, "c2")])
-        f.store.clear()
+        #expect(calls.state == .incoming(IncomingCall(from: callPeer, sid: "c2", media: callAudio)))
+        #expect(port.callSends == [.propose(callPeer.bare, sid, callAudio), .ringing(callPeer, "c2")])
+        calls.clear()
     }
 
     @Test func quittingStopsWaitingEvenWhenTheSendDoesNotComplete() async throws {
-        let f = CallFixture()
-        #expect(await f.store.startCall(to: callPeer.bare, media: callAudio))
-        f.port.heldCallVerbs = ["retract"]
+        let (coordinator, port) = await connectedSession()
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
+        port.heldCallVerbs = ["retract"]
 
+        let timeout: Duration = .seconds(2)
+        let requestedAt = ContinuousClock.now
         var completions: [ContinuousClock.Instant] = []
-        let deadline = try #require(f.store.hangUpForTermination(timeout: 0.5) {
-            completions.append(.now)
-        })
+        #expect(coordinator.beginCallTermination(timeout: timeout) { completions.append(.now) })
         await eventually { !completions.isEmpty }
 
         #expect(completions.count == 1)
-        if let completion = completions.first { #expect(completion >= deadline) }
-        #expect(f.port.callSends.last == .retract(callPeer.bare, "c1"))
-        #expect(f.port.completedCallSends == [.propose(callPeer.bare, "c1", callAudio)])
+        let completion = try #require(completions.first)
+        #expect(completion >= requestedAt + timeout)
+        #expect(port.callSends.last == .retract(callPeer.bare, sid))
+        #expect(port.completedCallSends == [.propose(callPeer.bare, sid, callAudio)])
+        #expect(port.disconnectCount == 0)
 
-        f.port.heldCallVerbs = []
-        f.port.releaseCallSends()
-        await eventually { f.port.completedCallSends.last == .retract(callPeer.bare, "c1") }
+        port.releaseCallSends()
+        await eventually { port.completedCallSends.last == .retract(callPeer.bare, sid) }
         #expect(completions.count == 1)
+    }
+
+    private func connectedSession(emitsDisconnectEvent: Bool = true) async -> (SessionCoordinator, FakePort) {
+        let port = FakePort()
+        port.emitsDisconnectEvent = emitsDisconnectEvent
+        let coordinator = SessionCoordinator(
+            account: AccountIdentity(jid: callOwn.bare, nick: "alice", resource: callOwn.resource),
+            port: port, handlesCalls: true)
+        coordinator.start()
+        await eventually { port.connectCount == 1 }
+        port.emit(.connected)
+        await eventually { coordinator.connection == .online }
+        return (coordinator, port)
     }
 }

@@ -79,12 +79,14 @@ public final class SessionCoordinator {
     @ObservationIgnored private let handlesCalls: Bool
     @ObservationIgnored private let callLifecycleOutbox: CallLifecycleOutbox?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
-    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var reconnectTask: Task<Void, Never>?
     @ObservationIgnored var foregroundProbeTask: Task<Void, Never>?
     @ObservationIgnored private var typingSweepTask: Task<Void, Never>?
     @ObservationIgnored private(set) var readyTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored private(set) var isStopped = false
+    @ObservationIgnored var isTerminating = false
+    @ObservationIgnored var onTerminationDisconnect: (@MainActor () -> Void)?
     @ObservationIgnored var outboundQueue: [OutboundMessage] = []
     @ObservationIgnored var failedOutbound: [String: OutboundMessage] = [:]
     @ObservationIgnored var sentOutbound: [String: OutboundMessage] = [:]
@@ -179,10 +181,10 @@ public final class SessionCoordinator {
     @ObservationIgnored var roomManagementGeneration = 0
 
     @ObservationIgnored private let connectBudget: TimeInterval
-    @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
+    @ObservationIgnored private(set) var connectWatchdog: Task<Void, Never>?
     /// One connect at a time: the FFI keeps a single stream handle and a
     /// second attempt would overwrite, and orphan, the first one's stream.
-    @ObservationIgnored private var isConnectInFlight = false
+    @ObservationIgnored private(set) var isConnectInFlight = false
     /// A transport is being retired; the next attempt must wait for its
     /// terminal `.disconnected` event.
     @ObservationIgnored var isConnectResetting = false
@@ -271,6 +273,7 @@ public final class SessionCoordinator {
 
     /// Restores the saved outbox, starts consuming events and connects.
     public func start() {
+        guard !isTerminating else { return }
         isStopped = false
         connectionEpoch += 1
         isConnectResetting = false
@@ -290,6 +293,7 @@ public final class SessionCoordinator {
     /// Disconnects and clears all session state. The saved outbox is kept
     /// for the next `start()`; `signOut()` also deletes it.
     public func stop() async {
+        guard !isTerminating else { return }
         isStopped = true
         cancelCallActivityRetry()
         roomManagementGeneration += 1
@@ -323,6 +327,7 @@ public final class SessionCoordinator {
     /// Recovers the session on foreground, including queued sends on a
     /// transport that still appears online after iOS suspended the app.
     public func resume() {
+        guard !isTerminating else { return }
         restoreOutboxIfNeeded()
         switch status.connection {
         case .offline, .connecting:
@@ -356,7 +361,7 @@ public final class SessionCoordinator {
     /// Retires a transport whose health or send result is uncertain. The
     /// reconnect loop starts only after the port emits its terminal event.
     func resetStaleConnection() async {
-        guard !isStopped, status.connection == .online, !isConnectResetting else { return }
+        guard !isStopped, !isTerminating, status.connection == .online, !isConnectResetting else { return }
         isConnectResetting = true
         cancelCallActivityRetry()
         callLifecycleOutbox?.setOnline(false)
@@ -369,7 +374,7 @@ public final class SessionCoordinator {
     }
 
     private func connectNow() {
-        guard !isStopped, status.connection != .online else { return }
+        guard !isStopped, !isTerminating, status.connection != .online else { return }
         guard !isConnectResetting else {
             retryWhenConnectSettles = true
             return
@@ -384,7 +389,7 @@ public final class SessionCoordinator {
         let port = self.port
         isConnectInFlight = true
         Task { [weak self] in
-            await port.connect()
+            if self?.isTerminating != true { await port.connect() }
             // A connect that completes after sign-out (or after the
             // coordinator is gone) must not leave a live stream behind.
             guard let self, !self.isStopped else {
@@ -408,7 +413,7 @@ public final class SessionCoordinator {
         isConnectInFlight = false
         guard retryWhenConnectSettles else { return }
         retryWhenConnectSettles = false
-        guard !isStopped else { return }
+        guard !isStopped, !isTerminating else { return }
         guard status.connection != .online else {
             isConnectResetting = false
             return
@@ -422,7 +427,7 @@ public final class SessionCoordinator {
     }
 
     private func connectAttemptTimedOut(_ timedOut: Int) async {
-        guard timedOut == attempt, status.connection == .connecting, !isStopped else { return }
+        guard timedOut == attempt, status.connection == .connecting, !isStopped, !isTerminating else { return }
         guard !isConnectInFlight else {
             // The FFI has not returned a handle yet, so a disconnect cannot
             // stop this attempt. Wait for it to settle, then close it before
@@ -511,7 +516,7 @@ public final class SessionCoordinator {
         switch event {
         case .connected:
             // Signed out: a late connect is torn down by its own task.
-            guard !isStopped else { return }
+            guard !isStopped, !isTerminating else { return }
             guard !isConnectResetting else { return }
             connectionEpoch += 1
             foregroundProbeTask?.cancel()
@@ -561,7 +566,9 @@ public final class SessionCoordinator {
             calls.groupPresence.clear()
             calls.elsewhere.clear()
             mdsPublishSupported = nil
-            if !isStopped, status.connection != .authenticationFailed {
+            if isTerminating {
+                completeTerminationOnDisconnect()
+            } else if !isStopped, status.connection != .authenticationFailed {
                 scheduleReconnect()
             }
         case let .call(event):
@@ -618,6 +625,7 @@ public final class SessionCoordinator {
         case let .roomConfigurationChanged(room):
             readPinPermissionAgain(of: room)
         case .authenticationFailed:
+            guard !isTerminating else { return }
             callLifecycleOutbox?.stop()
             cancelCallActivityRetry()
             connectionEpoch += 1
