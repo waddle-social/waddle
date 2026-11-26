@@ -32,9 +32,10 @@ name: waddle-ci-cache-benchmark
           - cargo
           - namespace-volume
           - namespace-test-volume
+          - test-layer-artifact
 permissions: {}
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume' || inputs.scope == 'namespace-test-volume') && format('-{0}', inputs.scope) || '' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}${{ (inputs.scope == 'cargo' || inputs.scope == 'namespace-volume' || inputs.scope == 'namespace-test-volume' || inputs.scope == 'test-layer-artifact') && format('-{0}', inputs.scope) || '' }}
   cancel-in-progress: true
 jobs:
   cargo-seed:
@@ -462,7 +463,7 @@ jobs:
           EXPECTED_ACTION_DIGEST: ${{ needs.bazel-seed.outputs.digest }}
         run: bash ci/cache-benchmark/verify-bazel.sh restore
   normal-ci:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' && inputs.scope != 'test-layer-artifact' }}
     permissions:
       contents: read
       actions: read
@@ -1348,14 +1349,176 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
     timeout-minutes: 230
+  test-artifact-seed:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'test-layer-artifact' }}
+    outputs:
+      closure: ${{ steps.export.outputs.closure }}
+      payload: ${{ steps.payload.outputs.artifact-id }}
+    name: nix-test-artifact/seed
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-features
+      - namespace-features:container.privileged=true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase seed
+      - name: Export member layer closure
+        id: export
+        run: 'bash scripts/ci-test-layer-transfer.sh export "$(nix eval --raw .#checks.x86_64-linux.waddle-server-default-test.cargoArtifacts.outPath)"'
+      - name: Upload member layer artifact
+        id: payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rust-member-layer-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-layer-cache
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-artifact-seed
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-artifact-cold:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'test-layer-artifact' }}
+    name: nix-test-artifact/cold
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-features
+      - namespace-features:container.privileged=true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase cold --edit
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-artifact-cold
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
+  test-artifact-warm:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.scope == 'test-layer-artifact' }}
+    needs:
+      - test-artifact-seed
+    name: nix-test-artifact/warm
+    permissions:
+      contents: read
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-16x32-with-features
+      - namespace-features:container.privileged=true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Create a root-owned build directory outside the volume
+        run: sudo install -d -m 0755 -o root -g root /var/lib/nix-build
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: |-
+            accept-flake-config = true
+            substituters = https://cache.nixos.org/
+            build-dir = /var/lib/nix-build
+            sandbox = true
+            sandbox-fallback = false
+      - name: Verify Nix daemon without building
+        run: |-
+          for attempt in 1 2 3 4 5; do
+            if timeout 5s nix store ping --store daemon; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Nix daemon did not become ready."
+          exit 1
+      - name: Download member layer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.test-artifact-seed.outputs.payload }}
+          path: ${{ runner.temp }}/rust-layer-cache
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify and import member layer
+        env:
+          EXPECTED_CLOSURE: ${{ needs.test-artifact-seed.outputs.closure }}
+        run: |-
+          python3 scripts/ci-nix-test-volume.py require-empty
+          bash scripts/ci-test-layer-transfer.sh restore "$(nix eval --raw .#checks.x86_64-linux.waddle-server-default-test.cargoArtifacts.outPath)"
+      - name: Build and run the production default-feature test suite
+        run: python3 scripts/ci-nix-test-volume.py probe --phase warm --edit
+      - name: Upload probe measurements
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nix-test-artifact-warm
+          overwrite: true
+          path: .ci/nix-volume
+          include-hidden-files: true
+          if-no-files-found: error
+    timeout-minutes: 230
   test-volume-summary:
-    name: nix-test-volume/summary
     needs:
       - test-volume-seed
       - test-volume-cold
       - test-volume-immediate
       - test-volume-delayed
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume' }}
+    name: nix-test-volume/summary
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1375,7 +1538,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |-
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > .ci/test-volume-jobs.json
-          python3 scripts/ci-nix-test-volume.py summary --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
+          python3 scripts/ci-nix-test-volume.py summary --transport volume --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
+  test-artifact-summary:
+    needs:
+      - test-artifact-seed
+      - test-artifact-cold
+      - test-artifact-warm
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope == 'test-layer-artifact' }}
+    name: nix-test-artifact/summary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Download measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: nix-test-artifact-*
+          path: .ci/test-volume-results
+          digest-mismatch: error
+      - name: Compare test inventories, crate reuse and job durations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > .ci/test-volume-jobs.json
+          python3 scripts/ci-nix-test-volume.py summary --transport artifact --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
   warm:
     name: cache-benchmark/warm/${{ matrix.variant }}
     needs:
@@ -1762,7 +1952,7 @@ jobs:
       - warm
       - h3-seed
       - h3-warm
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.scope != 'cargo' && inputs.scope != 'namespace-volume' && inputs.scope != 'namespace-test-volume' && inputs.scope != 'test-layer-artifact' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

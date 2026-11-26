@@ -29,10 +29,13 @@ let _volumeJobRunner = [
 ]
 let _volumeIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-volume'"
 
+let _artifactIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'test-layer-artifact'"
+let _download = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 let _testIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'namespace-test-volume'"
 
 #VolumeJob: {
 	_suite: *false | true
+	_explicit: *false | true
 	_tagSuffix: *"" | string
 	_probeName: *"Build the Clippy lane from the volume" | string
 	_artifact: *"nix-volume" | string
@@ -48,32 +51,36 @@ let _testIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'name
 		"timeout-minutes": 90
 	}
 	if _suite {
-		_artifact: "nix-test-volume"
+		if !_explicit {_artifact: "nix-test-volume"}
+		if _explicit {_artifact: "nix-test-artifact"}
 		_probeName: "Build and run the production default-feature test suite"
 		_probeScript: "ci-nix-test-volume.py"
-		"runs-on": [
+		if _explicit {
+			"runs-on": ["nscloud-ubuntu-24.04-amd64-16x32-with-features", "namespace-features:container.privileged=true"]
+		}
+		if !_explicit {"runs-on": [
 			"nscloud-ubuntu-24.04-amd64-16x32-with-cache-with-features",
 			"nscloud-cache-tag-waddle-test-\(_tagSuffix)",
 			"nscloud-cache-size-50gb",
 			"namespace-features:container.privileged=true",
 			if _phase != "seed" {"nscloud-cache-exp-do-not-commit"},
-		]
+		]}
 		"timeout-minutes": 230
 	}
 	permissions: contents: "read"
 	steps: [
 		{name: "Checkout", uses: _checkout},
-		{
+		if !_explicit {
 			// Before Nix: /nix must come from the volume.
 			name: "Mount Namespace Nix volume"
 			uses: _volume
 			with: cache: "nix"
 		},
-		{
+		if !_explicit {
 			name: "Record volume contents"
 			run:  "python3 scripts/ci-nix-volume-probe.py volume --phase \(_phase)"
 		},
-		{
+		if !_explicit {
 			name: "Prepare retained Namespace store for fresh host installation"
 			// Same receipt relocation as the provider benchmark; never reinstall.
 			run: """
@@ -120,9 +127,44 @@ let _testIf = "github.event_name == 'workflow_dispatch' && inputs.scope == 'name
 				exit 1
 				"""
 		},
+		if _explicit && _phase == "warm" {
+			name: "Download member layer artifact"
+			uses: _download
+			with: {
+				"artifact-ids": "${{ needs.test-artifact-seed.outputs.payload }}"
+				path: "${{ runner.temp }}/rust-layer-cache"
+				"merge-multiple": true
+				"digest-mismatch": "error"
+			}
+		},
+		if _explicit && _phase == "warm" {
+			name: "Verify and import member layer"
+			env: EXPECTED_CLOSURE: "${{ needs.test-artifact-seed.outputs.closure }}"
+			run: """
+				python3 scripts/ci-nix-test-volume.py require-empty
+				bash scripts/ci-test-layer-transfer.sh restore "$(nix eval --raw .#checks.x86_64-linux.waddle-server-default-test.cargoArtifacts.outPath)"
+				"""
+		},
 		{
 			name: _probeName
 			run:  "python3 scripts/\(_probeScript) probe --phase \(_phase)\([if _edit {" --edit"}, ""][0])"
+		},
+		if _explicit && _phase == "seed" {
+			name: "Export member layer closure"
+			id: "export"
+			run: #"bash scripts/ci-test-layer-transfer.sh export "$(nix eval --raw .#checks.x86_64-linux.waddle-server-default-test.cargoArtifacts.outPath)""#
+		},
+		if _explicit && _phase == "seed" {
+			name: "Upload member layer artifact"
+			id: "payload"
+			uses: _upload
+			with: {
+				name: "rust-member-layer-${{ github.run_attempt }}"
+				path: "${{ runner.temp }}/rust-layer-cache"
+				"compression-level": 0
+				"retention-days": 1
+				"if-no-files-found": "error"
+			}
 		},
 		{
 			name: "Upload probe measurements"
@@ -215,7 +257,7 @@ workflow: jobs: {
 			{name: "Checkout", uses: _checkout},
 			{
 				name: "Download measurements"
-				uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+				uses: _download
 				with: {pattern: "nix-volume-*", path: ".ci/nix-volume-results", "digest-mismatch": "error"}
 			},
 			{
@@ -258,10 +300,37 @@ workflow: jobs: {
 		needs: ["test-volume-seed", "test-volume-wait"]
 		if: "${{ \(_testIf) }}"
 	}
-	"test-volume-summary": {
-		name: "nix-test-volume/summary"
+	"test-artifact-seed": #VolumeJob & {
+		_suite: true, _explicit: true, _phase: "seed", _edit: false
+		if: "${{ \(_artifactIf) }}"
+		outputs: {closure: "${{ steps.export.outputs.closure }}", payload: "${{ steps.payload.outputs.artifact-id }}"}
+	}
+	"test-artifact-cold": #VolumeJob & {
+		_suite: true, _explicit: true, _phase: "cold"
+		if: "${{ \(_artifactIf) }}"
+	}
+	"test-artifact-warm": #VolumeJob & {
+		_suite: true, _explicit: true, _phase: "warm"
+		needs: ["test-artifact-seed"]
+		if: "${{ \(_artifactIf) }}"
+	}
+	"test-volume-summary": #SuiteSummary & {
+		_kind: "volume"
 		needs: ["test-volume-seed", "test-volume-cold", "test-volume-immediate", "test-volume-delayed"]
 		if: "${{ !cancelled() && \(_testIf) }}"
+	}
+	"test-artifact-summary": #SuiteSummary & {
+		_kind: "artifact"
+		needs: ["test-artifact-seed", "test-artifact-cold", "test-artifact-warm"]
+		if: "${{ !cancelled() && \(_artifactIf) }}"
+	}
+}
+
+#SuiteSummary: {
+		_kind: "volume" | "artifact"
+		needs: [...string]
+		if: string
+		name: "nix-test-\(_kind)/summary"
 		"runs-on": "ubuntu-24.04"
 		"timeout-minutes": 5
 		permissions: {contents: "read", actions: "read"}
@@ -269,17 +338,16 @@ workflow: jobs: {
 			{name: "Checkout", uses: _checkout},
 			{
 				name: "Download measurements"
-				uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
-				with: {pattern: "nix-test-volume-*", path: ".ci/test-volume-results", "digest-mismatch": "error"}
+				uses: _download
+				with: {pattern: "nix-test-\(_kind)-*", path: ".ci/test-volume-results", "digest-mismatch": "error"}
 			},
 			{
 				name: "Compare test inventories, crate reuse and job durations"
 				env: GH_TOKEN: "${{ github.token }}"
 				run: """
 					gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > .ci/test-volume-jobs.json
-					python3 scripts/ci-nix-test-volume.py summary --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
+					python3 scripts/ci-nix-test-volume.py summary --transport \(_kind) --input .ci/test-volume-results --jobs .ci/test-volume-jobs.json
 					"""
 			},
 		]
 	}
-}

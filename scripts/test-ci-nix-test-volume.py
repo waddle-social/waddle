@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Proof conditions for the changed-crate Namespace benchmark."""
 
+import json
+import os
 import tempfile
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 import unittest
 from importlib import import_module
 from pathlib import Path
@@ -51,6 +57,43 @@ class SuiteTests(unittest.TestCase):
             data = measurements()
             data["delayed"]["start"]["base"][field] = value
             self.assertTrue(suite.validate(data))
+
+    def test_artifact_transfer_and_job_wall(self):
+        data = measurements()
+        data["warm"] = data.pop("delayed")
+        del data["immediate"]
+        jobs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for phase, row in data.items():
+                row["runner"] = phase
+                row["build_seconds"] = 200 if phase == "warm" else 1200
+                row["members"]["fresh"] = ["other"]
+                row["tests"].update(ran=100, failed=[], flaky=[])
+                for layer, state in row["start"].items():
+                    name = state["path"]
+                    if layer == "lane":
+                        name = "waddle-server-default-test-nextest-0.1.0"
+                    state["path"] = "/nix/store/" + ("b" if phase == "seed" and layer == "lane" else "a") * 32 + "-" + name
+                row["unedited_lane"]["path"] = "/nix/store/" + "b" * 32 + "-waddle-server-default-test-nextest-0.1.0"
+                folder = root / f"nix-test-artifact-{phase}"
+                folder.mkdir()
+                (folder / "suite.json").write_text(json.dumps(row))
+                steps = [{"name": n, "started_at": "2026-11-26T00:01:00Z", "completed_at": "2026-11-26T00:02:00Z"}
+                         for n in ("Export member layer closure", "Upload member layer artifact", "Download member layer artifact",
+                                   "Verify and import member layer", "Build and run the production default-feature test suite")]
+                jobs.append({"name": f"nix-test-artifact/{phase}", "runner_name": phase, "conclusion": "success", "steps": steps,
+                             "started_at": "2026-11-26T00:00:00Z", "completed_at": f"2026-11-26T00:{'08' if phase == 'warm' else '25'}:00Z"})
+            args = Namespace(input=tmp, jobs=root / "jobs.json", transport="artifact")
+            for success in (True, False):
+                if not success:
+                    next(j for j in jobs if j["runner_name"] == "warm")["completed_at"] = "2026-11-26T00:30:00Z"
+                args.jobs.write_text(json.dumps([{"jobs": jobs}]))
+                output = StringIO()
+                with patch.dict(os.environ, GITHUB_STEP_SUMMARY=str(root / "summary")), redirect_stdout(output):
+                    self.assertEqual(suite.summary(args), 0 if success else 1)
+                self.assertIn("Download member layer artifact: 60s", output.getvalue())
+                self.assertIn("1020s" if success else "did not beat the cold job", output.getvalue())
 
     def test_only_additional_executed_test_is_removed_from_comparison(self):
         with tempfile.TemporaryDirectory() as tmp:

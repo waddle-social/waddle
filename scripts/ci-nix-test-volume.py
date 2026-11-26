@@ -22,6 +22,7 @@ LANE = "checks.x86_64-linux.waddle-server-default-test"
 PROBE = TestId("waddle-server", "namespace_volume_one_crate_edit")
 EDIT = f"\n#[test]\nfn {PROBE.name}() {{ assert_eq!(env!(\"CARGO_PKG_NAME\"), \"waddle-server\"); }}\n"
 PHASES = ("seed", "immediate", "delayed", "cold")
+ARTIFACT_PHASES = ("seed", "warm", "cold")
 
 
 def command(*args):
@@ -48,6 +49,13 @@ def layer_state():
         result[name] = {"path": path, "present": in_store(path)}
         attribute += ".cargoArtifacts"
     return result
+
+
+def require_empty():
+    state = layer_state()
+    print(json.dumps(state, indent=2))
+    if any(value["present"] for value in state.values()):
+        raise SystemExit("fresh runner already has a Waddle input before transfer")
 
 
 def inventory(report, edited, build_log):
@@ -154,9 +162,11 @@ def probe(args):
     return int("error" in result)
 
 
-def validate(rows):
+def validate(rows, transport="volume"):
+    phases = ARTIFACT_PHASES if transport == "artifact" else PHASES
+    warm = "warm" if transport == "artifact" else "delayed"
     errors = []
-    for phase in PHASES:
+    for phase in phases:
         row = rows.get(phase, {})
         if not row.get("tests") or row.get("error"):
             errors.append(f"{phase}: {row.get('error', 'missing completed measurements')}")
@@ -166,15 +176,15 @@ def validate(rows):
         if len({r[key] for r in rows.values()}) != 1:
             errors.append(f"runner {key} values differ")
     seed = rows["seed"]
-    if len({r["runner"] for r in rows.values()}) != len(PHASES):
+    if len({r["runner"] for r in rows.values()}) != len(phases):
         errors.append("each phase must run on a distinct runner")
     if len({r["tests"]["inventory_hash"] for r in rows.values()}) != 1:
         errors.append("executed or skipped tests differ across phases")
     if len({r["tests"]["skipped"] for r in rows.values()}) != 1:
         errors.append("skipped test counts differ across phases")
-    edited = [rows[p] for p in PHASES if p != "seed"]
+    edited = [rows[p] for p in phases if p != "seed"]
     if len({r["source_after"] for r in edited}) != 1 or edited[0]["source_after"] == seed["source_after"]:
-        errors.append("expected identical one-file edits in all three comparisons")
+        errors.append("expected identical one-file edits in every changed-source comparison")
     if len({r["start"]["lane"]["path"] for r in edited}) != 1 or edited[0]["start"]["lane"]["path"] == seed["start"]["lane"]["path"]:
         errors.append("the compared test derivations differ or the edit did not invalidate the seed")
     if any(r["unedited_lane"]["path"] != seed["start"]["lane"]["path"] for r in edited):
@@ -182,14 +192,22 @@ def validate(rows):
     for layer in ("dependencies", "base", "xmpp"):
         if any(r["start"][layer]["path"] != seed["start"][layer]["path"] for r in edited):
             errors.append(f"{layer}: output identity differs across phases")
-        if not rows["delayed"]["start"][layer]["present"]:
-            errors.append(f"delayed: {layer} was missing from the seeded volume")
-    for phase in ("immediate", "delayed"):
+        if not rows[warm]["start"][layer]["present"]:
+            errors.append(f"{warm}: {layer} was missing before the edited build")
+    for phase in phases:
+        if phase in ("seed", "cold"):
+            continue
         row = rows[phase]
         if all(row["start"][layer]["present"] for layer in ("dependencies", "base", "xmpp")):
             # When all required inputs are resident, only the final derivation may build.
             plan = row["plan"]["built"]
-            if len(plan) != 1 or "waddle-server-default-test-nextest-" not in plan[0]:
+            if transport == "artifact":
+                # The payload contains the member layers' runtime closure.
+                # An empty runner may still build unrelated build-time tools.
+                names = {name: Path(entry["path"]).name[33:] + ".drv" for name, entry in row["start"].items()}
+                if names["lane"] not in plan or any(names[layer] in plan for layer in ("dependencies", "base", "xmpp")):
+                    errors.append(f"{phase}: edited lane or member layers have an unexpected build plan: {plan}")
+            elif len(plan) != 1 or "waddle-server-default-test-nextest-" not in plan[0]:
                 errors.append(f"{phase}: expected only the edited production test derivation to build, observed {plan}")
             if any("members-base" in drv or "members-xmpp" in drv for drv in row["compiles_by_derivation"]):
                 errors.append(f"{phase}: observed lower-layer compilation on a warm volume")
@@ -201,8 +219,11 @@ def validate(rows):
 def summary(args):
     jobs = {j["name"]: j for page in json.loads(Path(args.jobs).read_text()) for j in page["jobs"]}
     roots = Path(args.input)
-    rows = {p: volume.read(roots / f"nix-test-volume-{p}" / "suite.json") for p in PHASES}
-    errors = validate(rows)
+    phases = ARTIFACT_PHASES if args.transport == "artifact" else PHASES
+    warm_phase = "warm" if args.transport == "artifact" else "delayed"
+    prefix = f"nix-test-{args.transport}"
+    rows = {p: volume.read(roots / f"{prefix}-{p}" / "suite.json") for p in phases}
+    errors = validate(rows, args.transport)
     lines = [
         "## Default-feature workspace test suite",
         "",
@@ -211,7 +232,7 @@ def summary(args):
     ]
     wall_times = {}
     for phase, row in rows.items():
-        job = jobs.get(f"nix-test-volume/{phase}", {})
+        job = jobs.get(f"{prefix}/{phase}", {})
         wall = "—"
         if job.get("completed_at") and job.get("started_at"):
             wall_times[phase] = int((datetime.fromisoformat(job["completed_at"]) - datetime.fromisoformat(job["started_at"])).total_seconds())
@@ -228,18 +249,44 @@ def summary(args):
         if tests and tests["failed"]:
             errors.append(f"{phase}: failed tests: {', '.join(tests['failed'])}")
         lines.append(f"| [{phase}]({job.get('html_url', '')}) | {exact} | {hits} | {crates} | {cases} | {build} | {wall} |")
-    if "cold" in wall_times and "delayed" in wall_times:
-        saved = wall_times["cold"] - wall_times["delayed"]
-        lines += ["", f"Cold job minus delayed warm job: {saved}s, including runner setup, restore and post-job work."]
+    if args.transport == "artifact":
+        transfer_seconds = {}
+        lines += ["", "| Phase | Setup before build or transfer | Member-layer transfer steps |", "|---|---:|---|"]
+        for phase in phases:
+            job = jobs.get(f"{prefix}/{phase}", {})
+            steps = {step["name"]: step for step in job.get("steps", [])}
+            transfer = {"seed": ("Export member layer closure", "Upload member layer artifact"),
+                        "warm": ("Download member layer artifact", "Verify and import member layer")}.get(phase, ())
+            first = transfer[0] if phase == "warm" else "Build and run the production default-feature test suite"
+            try:
+                setup = (datetime.fromisoformat(steps[first]["started_at"]) - datetime.fromisoformat(job["started_at"])).total_seconds()
+                measured = []
+                transfer_seconds[phase] = 0
+                for name in transfer:
+                    step = steps[name]
+                    seconds = (datetime.fromisoformat(step["completed_at"]) - datetime.fromisoformat(step["started_at"])).total_seconds()
+                    measured.append(f"{name}: {seconds:.0f}s")
+                    transfer_seconds[phase] += seconds
+                lines.append(f"| {phase} | {setup:.0f}s | {', '.join(measured) or '—'} |")
+            except (KeyError, TypeError, ValueError):
+                errors.append(f"{phase}: incomplete setup/transfer timings")
+        if not errors:
+            saved = rows["cold"]["build_seconds"] - rows["warm"]["build_seconds"] - transfer_seconds["warm"]
+            lines += ["", f"Cold build minus warm build, download and verified import: {saved:.1f}s."]
+            if saved <= 0:
+                errors.append("downloading and importing the layers consumed the build-time saving")
+    if "cold" in wall_times and warm_phase in wall_times:
+        saved = wall_times["cold"] - wall_times[warm_phase]
+        lines += ["", f"Cold job minus {warm_phase} job: {saved}s, including runner setup, restore and post-job work."]
         if saved <= 0:
-            errors.append("the delayed warm job did not beat the cold job on end-to-end runner time")
+            errors.append("the warm job did not beat the cold job on end-to-end runner time")
     else:
         errors.append("cold or delayed job timing is missing")
     if errors:
         lines += ["", *[f"- {error}" for error in errors]]
     else:
-        cold, warm = (rows[phase]["build_seconds"] for phase in ("cold", "delayed"))
-        lines += ["", f"Warm volume saved {cold - warm:.1f}s versus an isolated cold volume for the same edited source."]
+        cold, warm = (rows[phase]["build_seconds"] for phase in ("cold", warm_phase))
+        lines += ["", f"Cold minus warm Nix build time: {cold - warm:.1f}s on the same edited source."]
     text = "\n".join(lines) + "\n"
     print(text)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
@@ -250,11 +297,16 @@ def summary(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("require-empty")
     trial = sub.add_parser("probe")
-    trial.add_argument("--phase", choices=PHASES, required=True)
+    trial.add_argument("--phase", choices=(*PHASES, "warm"), required=True)
     trial.add_argument("--edit", action="store_true")
     report = sub.add_parser("summary")
+    report.add_argument("--transport", choices=("volume", "artifact"), default="volume")
     report.add_argument("--input", required=True)
     report.add_argument("--jobs", required=True)
     opts = parser.parse_args()
-    sys.exit(probe(opts) if opts.command == "probe" else summary(opts))
+    if opts.command == "require-empty":
+        require_empty()
+    else:
+        sys.exit(probe(opts) if opts.command == "probe" else summary(opts))
