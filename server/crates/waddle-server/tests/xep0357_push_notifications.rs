@@ -27,6 +27,182 @@ async fn fresh_db(name: &str) -> Database {
     Database::in_memory(name).await.expect("fresh in-memory db")
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn opted_in_reply_publishes_only_the_reply_text_in_the_summary() {
+    use jid::BareJid;
+    use minidom::Element;
+    use waddle_server::notification_activity::NoopActivityReader;
+    use waddle_server::notification_outbox::{
+        DrainBatch, DrainScope, NoopDndReader, NoopRoomPolicy, NotificationDrainDeps,
+        NotificationOutboxPublishOutcome, NotificationOutboxStore,
+    };
+    use waddle_server::notification_settings_projection::{
+        ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
+        NotificationSettingsSource,
+    };
+    use waddle_server::pubsub::DatabasePubSubStorage;
+    use waddle_server::push_registrations::DatabasePushRegistrationStore;
+    use waddle_server::push_service::{
+        DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
+    };
+    use waddle_server::test_support::direct_notification_candidate_from_envelope_for_test;
+    use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
+    use waddle_xmpp::push::{InMemoryPushStore, PushSubscription, PushSubscriptionStore};
+    use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
+    use waddle_xmpp::xep::xep0428::{set_fallback_payloads, FallbackIndication};
+    use waddle_xmpp::xep::xep0461::{set_reply_payload, ReplyReference, NS_REPLY};
+    use waddle_xmpp::xep::{NotificationLevel, NS_DATA_FORMS};
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::message::{Lang, Message};
+
+    let db = fresh_db("reply-push-preview").await;
+    let store = NotificationOutboxStore::try_new(db.clone())
+        .await
+        .expect("outbox");
+    let pubsub = DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        .await
+        .expect("settings schema");
+    let projection = NotificationSettingsProjectionStore::new(pubsub.database());
+    let push_service = DatabasePushServiceStore::new_with_secret_key(db.clone(), ROOT_KEY)
+        .await
+        .expect("push service");
+    DatabasePushRegistrationStore::try_new(db.clone())
+        .await
+        .expect("registrations");
+    let recipient: BareJid = "juliet@example.com".parse().expect("recipient");
+    let conversation: BareJid = "romeo@example.com".parse().expect("conversation");
+    let service: BareJid = "push.example.com".parse().expect("push service JID");
+    let node = push_service
+        .ensure_node(&recipient, "web")
+        .await
+        .expect("node");
+    push_service
+        .upsert_device(
+            &recipient,
+            PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test"),
+        )
+        .await
+        .expect("device");
+    push_service
+        .register_first_party_node_for_owner(&recipient, &service.to_string(), node.node(), None)
+        .await
+        .expect("first-party registration");
+    let registrations = InMemoryPushStore::new();
+    registrations
+        .register(PushSubscription {
+            user_jid: recipient.to_string(),
+            service_jid: service.to_string(),
+            node: Some(node.node().to_owned()),
+            publish_options: None,
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
+        })
+        .await
+        .expect("XEP-0357 registration");
+    projection
+        .upsert(&NotificationSettingsProjection {
+            owner_bare_jid: recipient.clone(),
+            conversation_jid: conversation.clone(),
+            conversation_kind: ConversationKind::Direct,
+            mode: NotificationLevel::Always,
+            rich_payload_opt_in: true,
+            source_version: 1,
+            updated_at_ms: 1,
+            source: NotificationSettingsSource::Xep0402Bookmarks,
+            source_item_jid: conversation.clone(),
+        })
+        .await
+        .expect("rich push opt-in");
+
+    let quote = "> Wherefore art thou, Romeo?\n";
+    let mut reply = Message::new(None);
+    reply.bodies.insert(Lang::new(), format!("{quote}Here."));
+    set_reply_payload(&mut reply, &ReplyReference::new("original"));
+    set_fallback_payloads(
+        &mut reply,
+        &[FallbackIndication::for_range(
+            NS_REPLY,
+            0,
+            quote.chars().count(),
+        )],
+    );
+    let sender = conversation
+        .with_resource_str("phone")
+        .expect("sender")
+        .into();
+    let candidate = direct_notification_candidate_from_envelope_for_test(
+        &reply,
+        &recipient,
+        &sender,
+        &StanzaId::new("archived-reply", recipient.clone().into()),
+    )
+    .expect("candidate");
+    store
+        .insert_candidate(&candidate)
+        .await
+        .expect("insert candidate");
+    let blocking = InMemoryBlockingStorage::new();
+    store
+        .drain_pending_candidates_into_outbox(
+            &registrations,
+            &blocking,
+            &projection,
+            NotificationDrainDeps::new(&NoopRoomPolicy, &NoopDndReader, &NoopActivityReader),
+            &service,
+            DrainBatch {
+                scope: DrainScope::All,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("drain candidates");
+    let jobs = store
+        .claim_due_outbox_jobs(DrainScope::All, 16)
+        .await
+        .expect("claim");
+    assert_eq!(jobs.len(), 1);
+    let outcome = store
+        .publish_claimed_job(
+            &jobs[0],
+            &push_service,
+            &registrations,
+            &InMemoryInboxStorage::new(),
+            &blocking,
+            &service,
+        )
+        .await
+        .expect("publish");
+    assert!(matches!(
+        outcome,
+        NotificationOutboxPublishOutcome::Published { .. }
+    ));
+    let conn = db.guard().await.expect("database");
+    let mut rows = conn
+        .query("SELECT payload_xml FROM push_publish_jobs", ())
+        .await
+        .expect("published notification");
+    let payload: Element = rows
+        .next()
+        .await
+        .expect("read job")
+        .expect("queued job")
+        .get::<String>(0)
+        .expect("payload XML")
+        .parse()
+        .expect("notification");
+    let summary = payload.get_child("x", NS_DATA_FORMS).expect("summary form");
+    let body = summary
+        .children()
+        .find(|field| field.attr("var") == Some("last-message-body"))
+        .expect("rich body field")
+        .get_child("value", NS_DATA_FORMS)
+        .expect("body value")
+        .text();
+    assert_eq!(body, "Here.");
+}
+
 fn b64u(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }

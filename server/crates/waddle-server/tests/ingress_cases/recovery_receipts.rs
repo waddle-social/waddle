@@ -27,13 +27,20 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp_core::xep0359::StanzaId;
 
-fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
+fn recovery_plan(fixture: &IngressFixture, retracts: Option<&str>) -> IngressSubmission {
     let mut submission = fixture.submission(Some("recovery-receipts"), "frozen canonical body");
     let owner = "juliet@example.com".parse().expect("recipient");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     submission.target = waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone());
     submission.plan.sanitized_message.to = Some(room.clone().into());
     submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    if let Some(id) = retracts {
+        submission
+            .plan
+            .sanitized_message
+            .payloads
+            .push(waddle_xmpp::xep::xep0424::build_retract_element(id));
+    }
     submission.digest_input = waddle_xmpp::ingress::DigestInput::from_parsed(
         &submission.plan.sanitized_message,
         &waddle_xmpp::ingress::DigestContext {
@@ -158,13 +165,25 @@ async fn committed(
     NotificationOutboxStore,
     GroupchatNotificationRecovery,
 ) {
+    commit_recovery_plan(fixture, recovery_plan(fixture, None)).await
+}
+
+async fn commit_recovery_plan(
+    fixture: &IngressFixture,
+    submission: IngressSubmission,
+) -> (
+    IngressDecision,
+    DatabaseInboxStorage,
+    NotificationOutboxStore,
+    GroupchatNotificationRecovery,
+) {
     let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())
         .await
         .expect("inbox");
-    let decision = commit_submission(&fixture.uow, &recovery_plan(fixture), 5)
+    let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit recovery plan");
     assert_eq!(decision.external_receipts[0].len(), 2);
@@ -494,6 +513,49 @@ async fn completed_orphan(fixture: IngressFixture) {
     fixture.close().await;
 }
 
+async fn retraction_discharges_frozen_groupchat_candidate(fixture: IngressFixture) {
+    use waddle_server::ingress::{
+        RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome,
+    };
+    let submission = recovery_plan(&fixture, Some("earlier-message"));
+    let (_, _, _, recovery) = commit_recovery_plan(&fixture, submission).await;
+    let authority = fixture.authority().await;
+    assert!(matches!(
+        authority
+            .prepare_notification_recovery(&recovery)
+            .await
+            .expect("prepare"),
+        RecoveryPreparation::Ready {
+            candidate_required: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        authority
+            .settle_notification_recovery(&recovery, RecoveryPolicyDecision::Suppressed)
+            .await
+            .expect("settle retraction recovery"),
+        RecoverySweepOutcome::Completed
+    );
+    assert_eq!(fixture.count("notification_candidates").await, 0);
+    assert_eq!(fixture.count("notification_outbox").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
+    assert_eq!(
+        fixture
+            .count("ingress_messages WHERE terminal_at IS NOT NULL")
+            .await,
+        1
+    );
+    assert!(authority.drain_and_join(Duration::from_secs(5)).await);
+    fixture.close().await;
+}
+
+dialect_tests!(
+    recovery_retraction_groupchat_sqlite,
+    recovery_retraction_groupchat_postgres,
+    retraction_discharges_frozen_groupchat_candidate
+);
+
 async fn deferred(fixture: IngressFixture, deliver: bool) {
     use waddle_server::ingress::{
         RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome,
@@ -504,7 +566,7 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())
         .await
         .expect("inbox");
-    let mut submission = recovery_plan(&fixture);
+    let mut submission = recovery_plan(&fixture, None);
     submission
         .plan
         .plan
@@ -601,7 +663,7 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
         .expect("no reset after replay")
         .is_empty());
     let recorded_intents = fixture.count("ingress_effect_intents").await;
-    let healthy_duplicate = commit_submission(&fixture.uow, &recovery_plan(&fixture), 5)
+    let healthy_duplicate = commit_submission(&fixture.uow, &recovery_plan(&fixture, None), 5)
         .await
         .expect("fresh duplicate with healthy policy");
     assert_eq!(

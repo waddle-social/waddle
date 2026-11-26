@@ -9,6 +9,151 @@ use waddle_server::notification_outbox::{
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
+#[cfg(feature = "test-support")]
+mod envelopes {
+    use super::bare;
+    use waddle_server::notification_outbox::{
+        candidate_from_envelope, GroupchatCandidateIdentity, NotificationCandidate,
+        NotificationOutboxError, NotificationThreadId,
+    };
+    use waddle_server::test_support::direct_notification_candidate_from_envelope_for_test;
+    use waddle_xmpp::xep::xep0334::{build_hint_element, Hint};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+    use waddle_xmpp::xep::xep0424::{build_retract_element, NS_MESSAGE_RETRACT};
+    use waddle_xmpp::xep::xep0428::{set_fallback_payloads, FallbackIndication, FallbackRange};
+    use waddle_xmpp::xep::xep0447::NS_SFS;
+    use waddle_xmpp::xep::xep0461::{set_reply_payload, ReplyReference, NS_REPLY};
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::message::{Lang, Message};
+
+    fn candidates(
+        message: &Message,
+    ) -> [Result<NotificationCandidate, NotificationOutboxError>; 2] {
+        let owner = bare("alice@example.com");
+        let room = bare("room@conference.example.com");
+        [
+            direct_notification_candidate_from_envelope_for_test(
+                message,
+                &owner,
+                &"bob@example.com/web".parse().expect("sender"),
+                &StanzaId::new("dm-archive", owner.clone().into()),
+            ),
+            candidate_from_envelope(
+                message,
+                GroupchatCandidateIdentity {
+                    owner: &owner,
+                    room: &room,
+                    sender: &room.with_resource_str("bob").expect("occupant").into(),
+                    thread_id: NotificationThreadId::root(),
+                    archive_stanza_id: &StanzaId::new("room-archive", room.clone().into()),
+                    is_live_occupant: false,
+                    sender_can_broadcast_channel_mention: false,
+                },
+                &OccupantIdSecret::try_new(vec![7; 32]).expect("secret"),
+            ),
+        ]
+    }
+
+    fn message_with_body(body: &str, fallbacks: &[FallbackIndication]) -> Message {
+        let mut message = Message::new(None);
+        message.bodies.insert(Lang::new(), body.to_owned());
+        set_fallback_payloads(&mut message, fallbacks);
+        message
+    }
+
+    fn assert_preview(message: &Message, expected: Option<&str>) {
+        for result in candidates(message) {
+            let candidate = result.expect("notification candidate");
+            assert_eq!(
+                candidate.last_message_body(),
+                expected,
+                "{:?}",
+                candidate.class()
+            );
+        }
+    }
+
+    #[test]
+    fn xep0461_reply_preview_strips_quote_by_unicode_code_points() {
+        let mut reply = message_with_body(
+            "> 🙂 & tea\n  Yes, please.  ",
+            &[FallbackIndication::for_range(NS_REPLY, 0, 10)],
+        );
+        set_reply_payload(&mut reply, &ReplyReference::new("original"));
+        assert_preview(&reply, Some("Yes, please."));
+    }
+
+    #[test]
+    fn xep0428_whole_body_fallback_leaves_no_preview() {
+        let fallback = message_with_body("> earlier", &[FallbackIndication::whole_body(NS_REPLY)]);
+        assert_preview(&fallback, None);
+    }
+
+    #[test]
+    fn xep0428_ranges_are_combined_and_clamped_to_the_body() {
+        let fallback = message_with_body(
+            "quote keep tail",
+            &[
+                FallbackIndication::for_ranges(
+                    NS_REPLY,
+                    [
+                        FallbackRange { start: 0, end: 5 },
+                        FallbackRange { start: 3, end: 6 },
+                    ],
+                ),
+                FallbackIndication::for_range(NS_MESSAGE_RETRACT, 10, 200),
+                FallbackIndication::for_range(NS_REPLY, 300, 400),
+            ],
+        );
+        assert_preview(&fallback, Some("keep"));
+    }
+
+    #[test]
+    fn xep0428_fallback_ranges_that_leave_only_whitespace_omit_the_preview() {
+        let fallback = message_with_body(
+            "> quote\n  ",
+            &[FallbackIndication::for_range(NS_REPLY, 0, 8)],
+        );
+        assert_preview(&fallback, None);
+    }
+
+    #[test]
+    fn xep0447_file_share_fallback_stays_in_the_preview() {
+        let url = "https://example.com/photo.jpg";
+        let fallback = message_with_body(url, &[FallbackIndication::whole_body(NS_SFS)]);
+        assert_preview(&fallback, Some(url));
+    }
+
+    #[test]
+    fn xep0424_retraction_creates_no_candidate_even_without_fallback_indication() {
+        let mut message = message_with_body("This message was retracted.", &[]);
+        message.payloads.push(build_retract_element("original"));
+        for result in candidates(&message) {
+            assert!(
+                matches!(
+                    result,
+                    Err(NotificationOutboxError::RetractionNotNotifiable)
+                ),
+                "expected retraction rejection, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xep0334_no_store_drops_even_the_visible_reply_text() {
+        let mut reply = message_with_body(
+            "> quote\nPrivate reply",
+            &[FallbackIndication::for_range(NS_REPLY, 0, 8)],
+        );
+        reply.payloads.push(build_hint_element(Hint::NoStore));
+        for result in candidates(&reply) {
+            let candidate = result.expect("notification candidate");
+            assert!(candidate.no_store());
+            assert_eq!(candidate.last_message_body(), None);
+        }
+    }
+}
+
 #[test]
 fn candidate_snapshots_body_when_unhinted() {
     let candidate = candidate("archive-body")

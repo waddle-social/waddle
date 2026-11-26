@@ -1,10 +1,12 @@
 //! Pure direct-message candidate reconstruction from the canonical envelope.
 use super::candidate::NotificationCallData;
+use super::summary_body::summary_body;
 use super::{
     NotificationCall, NotificationCandidate, NotificationClass, NotificationMessageHints,
     NotificationOutboxError,
 };
 use jid::{BareJid, Jid};
+use waddle_xmpp::xep::xep0424::is_retraction_message;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
@@ -15,6 +17,9 @@ pub(crate) fn direct_candidate_from_envelope(
     sender_jid: &Jid,
     archive_stanza_id: &StanzaId,
 ) -> Result<NotificationCandidate, NotificationOutboxError> {
+    if is_retraction_message(message) {
+        return Err(NotificationOutboxError::RetractionNotNotifiable);
+    }
     // XEP-0203 `<delay/>` filter NOT applied here (Copilot review on
     // PR #738): see the matching comment in `groupchat_inbox.rs`'s
     // `enqueue_groupchat_notification_candidate`. An earlier shape
@@ -70,13 +75,7 @@ pub(crate) fn direct_candidate_from_envelope(
             hints,
         )?,
     };
-    Ok(candidate.with_last_message_body(
-        message
-            .bodies
-            .get("")
-            .or_else(|| message.bodies.values().next())
-            .cloned(),
-    ))
+    Ok(candidate.with_last_message_body(summary_body(message)))
 }
 
 /// Message-intrinsic classification is independent from archive provenance.

@@ -13,6 +13,7 @@ use waddle_xmpp::ingress::{
     GroupchatNotificationRecoveryAction, IngressEffectIntent, NotificationActivityMutation,
     NotificationCandidateOutcome,
 };
+use waddle_xmpp::xep::xep0424::is_retraction_message;
 
 /// Frozen work read under the canonical lock. Policy evaluation happens only after release.
 #[derive(Debug)]
@@ -188,12 +189,30 @@ impl IngressAuthority {
             RecoveryReceiptRepository::is_completed(&mut tx, recovery.message_key, &recovery.key)
                 .await?;
         let candidate_required = intents.iter().any(is_candidate);
-        if completed && candidate_required {
+        // Older decisions could freeze a candidate for the retraction itself.
+        // Confirm the canonical stanza under lock before discharging that intent.
+        let discarded_retraction = candidate_required
+            && matches!(&policy, RecoveryPolicyDecision::Suppressed)
+            && CanonicalMessageRepository::load_envelope(&mut tx, recovery.message_key)
+                .await?
+                .is_some_and(|envelope| is_retraction_message(envelope.message()));
+        if completed && candidate_required && !discarded_retraction {
             return Ok(RecoverySweepOutcome::Pending);
         }
         let deferred = intents.iter().any(|intent| matches!(intent, IngressEffectIntent::GroupchatNotificationRecovery { mutation } if mutation.action == GroupchatNotificationRecoveryAction::DeferredPolicy));
         let mut evidence = Vec::new();
-        if !completed && (candidate_required || deferred) {
+        if discarded_retraction {
+            for intent in intents.iter().filter(|intent| is_candidate(intent)) {
+                let receipt = super::receipt_key(intent)?;
+                EffectReceiptRepository::record_receipt(
+                    &mut tx,
+                    recovery.message_key,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash,
+                )
+                .await?;
+            }
+        } else if !completed && (candidate_required || deferred) {
             match &policy {
                 RecoveryPolicyDecision::Deliver(candidate) => {
                     if candidate.recipient_bare_jid() != &recovery.key.recipient

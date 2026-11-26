@@ -5,10 +5,12 @@ use crate::ingress_substrate::MessageEnvelope;
 use std::collections::BTreeSet;
 use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NotificationActivityMutation};
+use waddle_xmpp::xep::xep0424::is_retraction_message;
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::notification_outbox::{
-    NotificationCandidate, NotificationCandidateInsertOutcome, NotificationOutboxStore,
+    selected_message_body, NotificationCandidate, NotificationCandidateInsertOutcome,
+    NotificationOutboxError, NotificationOutboxStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,9 +302,8 @@ fn pending_candidate_from_envelope(
     ) {
         Ok(candidate) => Ok(Some(candidate)),
         Err(
-            crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
-                _,
-            ),
+            NotificationOutboxError::SelfDirectedNotificationCandidate(_)
+            | NotificationOutboxError::RetractionNotNotifiable,
         ) => Ok(None),
         Err(_) => Err(IngressUowError::EffectIntentConflict),
     }
@@ -344,6 +345,7 @@ impl RecoveryReceiptRepository {
         message: MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
+        legacy_body: Option<&str>,
     ) -> Result<bool, IngressUowError> {
         let (transaction, prepared) = tx.prepared_parts();
         let api =
@@ -359,6 +361,7 @@ impl RecoveryReceiptRepository {
             message,
             effect,
             candidate,
+            legacy_body,
         )
         .await
     }
@@ -395,10 +398,17 @@ impl RecoveryReceiptRepository {
         row: &waddle_xmpp::pending_delivery::PendingRow,
     ) -> Result<bool, IngressUowError> {
         let Some(candidate) = pending_candidate_from_envelope(envelope, row)? else {
-            return Ok(false);
+            // The canonical retraction itself proves suppression for this parent.
+            return Ok(is_retraction_message(envelope.message()));
         };
-        Self::attach_existing_candidate_lineage(tx, message, &intent.semantic_key(), &candidate)
-            .await
+        Self::attach_existing_candidate_lineage(
+            tx,
+            message,
+            &intent.semantic_key(),
+            &candidate,
+            selected_message_body(envelope.message()),
+        )
+        .await
     }
 
     /// Resolve host-owned pending provenance before taking any pending or

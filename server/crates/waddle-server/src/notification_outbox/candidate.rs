@@ -54,10 +54,10 @@ pub struct NotificationCandidate {
     /// When `true` the body is stripped from the XEP-0357 summary at T1
     /// (the minimal push still fires).
     pub(super) no_permanent_store: bool,
-    /// Snapshot of the message body, message-frozen at T0, used to build
+    /// Snapshot of the push preview, message-frozen at T0, used to build
     /// the optional XEP-0357 §5.4 `last-message-body` field when the
     /// recipient opts in (see [`RichSummary`]). `None` when the message
-    /// had no body OR when an XEP-0334 `<no-store/>`/`<no-permanent-store/>`
+    /// had no preview text or when an XEP-0334 `<no-store/>`/`<no-permanent-store/>`
     /// hint applies — an off-the-record body is never persisted onto the
     /// candidate row, even temporarily (XEP-0334 §3 storage conformance).
     pub(super) last_message_body: Option<String>,
