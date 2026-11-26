@@ -1420,9 +1420,9 @@ pub struct WaddleExtensionFormField {
 #[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
 pub enum WaddleBlockListChange {
     /// The listed JIDs were blocked.
-    Blocked { jids: Vec<String> },
+    Blocked { jids: Vec<Jid> },
     /// The listed JIDs were unblocked.
-    Unblocked { jids: Vec<String> },
+    Unblocked { jids: Vec<Jid> },
     /// Every JID was unblocked.
     UnblockedAll,
 }

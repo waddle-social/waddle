@@ -1407,7 +1407,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_block_jids() != 55748) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_block_list() != 22507) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_block_list() != 34056) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unblock_all() != 37974) {
@@ -2432,7 +2432,7 @@ public interface WaddleClientInterface {
      * before changing it. This session receives block-list pushes only
      * after it requests the list.
      */
-    suspend fun `fetchBlockList`(): List<kotlin.String>
+    suspend fun `fetchBlockList`(): List<Jid>
 
     /**
      * Unblock every JID on the account's block list.
@@ -3569,7 +3569,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fetchBlockList`() : List<kotlin.String> {
+    override suspend fun `fetchBlockList`() : List<Jid> {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_block_list(
@@ -3581,7 +3581,7 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterSequenceString.lift(it) },
+        { FfiConverterSequenceTypeJid.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -14580,7 +14580,7 @@ sealed class WaddleBlockListChange {
      * The listed JIDs were blocked.
      */
     data class Blocked(
-        val `jids`: List<kotlin.String>) : WaddleBlockListChange()
+        val `jids`: List<social.waddle.client.ffi.Jid>) : WaddleBlockListChange()
 
     {
 
@@ -14592,7 +14592,7 @@ sealed class WaddleBlockListChange {
      * The listed JIDs were unblocked.
      */
     data class Unblocked(
-        val `jids`: List<kotlin.String>) : WaddleBlockListChange()
+        val `jids`: List<social.waddle.client.ffi.Jid>) : WaddleBlockListChange()
 
     {
 
@@ -14623,10 +14623,10 @@ public object FfiConverterTypeWaddleBlockListChange : FfiConverterRustBuffer<Wad
     override fun read(buf: ByteBuffer): WaddleBlockListChange {
         return when(buf.getInt()) {
             1 -> WaddleBlockListChange.Blocked(
-                FfiConverterSequenceString.read(buf),
+                FfiConverterSequenceTypeJid.read(buf),
                 )
             2 -> WaddleBlockListChange.Unblocked(
-                FfiConverterSequenceString.read(buf),
+                FfiConverterSequenceTypeJid.read(buf),
                 )
             3 -> WaddleBlockListChange.UnblockedAll
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -14638,14 +14638,14 @@ public object FfiConverterTypeWaddleBlockListChange : FfiConverterRustBuffer<Wad
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterSequenceString.allocationSize(value.`jids`)
+                + FfiConverterSequenceTypeJid.allocationSize(value.`jids`)
             )
         }
         is WaddleBlockListChange.Unblocked -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterSequenceString.allocationSize(value.`jids`)
+                + FfiConverterSequenceTypeJid.allocationSize(value.`jids`)
             )
         }
         is WaddleBlockListChange.UnblockedAll -> {
@@ -14660,12 +14660,12 @@ public object FfiConverterTypeWaddleBlockListChange : FfiConverterRustBuffer<Wad
         when(value) {
             is WaddleBlockListChange.Blocked -> {
                 buf.putInt(1)
-                FfiConverterSequenceString.write(value.`jids`, buf)
+                FfiConverterSequenceTypeJid.write(value.`jids`, buf)
                 Unit
             }
             is WaddleBlockListChange.Unblocked -> {
                 buf.putInt(2)
-                FfiConverterSequenceString.write(value.`jids`, buf)
+                FfiConverterSequenceTypeJid.write(value.`jids`, buf)
                 Unit
             }
             is WaddleBlockListChange.UnblockedAll -> {
@@ -21806,6 +21806,34 @@ public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleWeekday.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeJid: FfiConverterRustBuffer<List<Jid>> {
+    override fun read(buf: ByteBuffer): List<Jid> {
+        val len = buf.getInt()
+        return List<Jid>(len) {
+            FfiConverterTypeJid.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Jid>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeJid.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Jid>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeJid.write(it, buf)
         }
     }
 }
