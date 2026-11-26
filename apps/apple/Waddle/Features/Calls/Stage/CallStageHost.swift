@@ -106,6 +106,7 @@ struct CallStageHost: View {
             ownScreen: media?.isScreenShareOn == true ? CallStageTile(
                 identity: call.own.description, source: .screen, label: "Your screen", isSelf: true, hasVideo: true
             ) : nil,
+            density: coversScreen ? .phone : .window,
             isChromeHidden: size == .immersive && !chrome.isShown,
             tileSource: model.tileSource,
             // Using the call, by a key too, is a sign of life as much as a move of the pointer.

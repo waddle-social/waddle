@@ -4,8 +4,8 @@ import WaddleKit
 /// The signed-in session's call dock: shows the call slot through
 /// `CallDockView`, or `GroupCallDockView` for a room's call, runs the
 /// in-call clock, and answers through the store. Absent while the slot is
-/// idle, and while the call has a stage of its own beside its conversation
-/// (`CallSurface`): one surface draws a call.
+/// idle, and while the call has a stage of its own, beside its conversation
+/// or over a phone's screen (`CallSurface`): one surface draws a call.
 struct CallDock: View {
     /// Absent where a presentation was given no session.
     @Environment(SessionCoordinator.self) private var session: SessionCoordinator?

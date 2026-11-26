@@ -134,6 +134,9 @@ open leaves the dock for a stage beside it. `CallSurface` in WaddleKit says
 which surface has the call and what a dock still draws; `Shell/` mounts
 `Features/Calls/Stage/CallSplitHost`, and `CallStageHost` feeds the pure
 `CallStageView` (tiles from `CallStageTiles`, laid out by `CallStageLayout`).
+On iPhone, and iPad squeezed to a phone's size, the dock has Open call and
+the same stage then covers the screen (`CallSurface.cover`, mounted by
+`Features/Calls/Stage/CallCover`), with a closer grid (`CallGrid.Density`).
 
 Outside the dock a call is heard and seen through the platform. `CallAlert`
 in WaddleKit says what the call slot asks for: a ring for a call coming in

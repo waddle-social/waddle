@@ -52,6 +52,21 @@ import Testing
         #expect(!memory.isOpened)
     }
 
+    @Test func theListOverAPhonesScreenLeavesTheStagesSizeAlone() {
+        var memory = CallStageMemory()
+        memory.open()
+        memory.toggleParticipants()
+        #expect(memory.showsParticipants)
+        #expect(memory.size == .split)
+    }
+
+    @Test func aCallOpensOnAPhoneWithItsTilesInFront() {
+        var memory = CallStageMemory()
+        memory.toggleParticipants()
+        memory.open()
+        #expect(!memory.showsParticipants)
+    }
+
     @Test func pinningThePinnedTileUnpinsIt() {
         var memory = CallStageMemory()
         memory.togglePin(Self.linus.id)

@@ -1,11 +1,6 @@
 import SwiftUI
 import WaddleKit
 
-/// Who is in the call (web `CallParticipantsPanel` in the call dock): a row
-/// per device with whether it is speaking, its hand, microphone and camera,
-/// and how loud we play it. Nobody has a volume for themselves.
-///
-/// Pure: everything it shows is passed in.
 /// The panel as a sheet over a stage that covers a phone's screen: on the
 /// stage's own Night ground, half the screen to begin with.
 struct CallParticipantsSheet: View {
@@ -23,6 +18,11 @@ struct CallParticipantsSheet: View {
     }
 }
 
+/// Who is in the call (web `CallParticipantsPanel` in the call dock): a row
+/// per device with whether it is speaking, its hand, microphone and camera,
+/// and how loud we play it. Nobody has a volume for themselves.
+///
+/// Pure: everything it shows is passed in.
 struct CallParticipantsPanel: View {
     let rows: [CallParticipantRow]
     var canResetVolumes = false

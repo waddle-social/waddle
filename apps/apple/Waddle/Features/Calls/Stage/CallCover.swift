@@ -29,7 +29,7 @@ private struct CallCover: ViewModifier {
         let covers = stage.surface(of: state, open: navigation.selection, platform: platform, in: nil) == .cover
         content.fullScreenCover(isPresented: Binding(
             get: { covers },
-            set: { shows in if !shows, let sid = state.sid { stage.update(sid) { $0.minimise() } } }
+            set: { shows in if !shows { minimise() } }
         )) {
             CallStageHost(coversScreen: true)
                 // The stage's ground reaches under the status bar and the home indicator; its contents do not.
@@ -40,6 +40,23 @@ private struct CallCover: ViewModifier {
                 .environment(navigation)
                 .environment(\.callMediaControls, media)
         }
+        // Whatever takes the person elsewhere must be seen: a sheet of the
+        // shell's, as from a keyboard's shortcut, or another conversation,
+        // as from a notification. The call goes back to the dock for it.
+        .onChange(of: navigation.sheet) { _, sheet in
+            if sheet != nil { minimise() }
+        }
+        .onChange(of: navigation.selection) { minimise() }
+        // A screen that has grown a pane for the stage, an iPad let out of
+        // a narrow window: the call is there now, and a narrow window later starts in the dock.
+        .onChange(of: platform) { _, platform in
+            if platform != .phone { minimise() }
+        }
+    }
+
+    private func minimise() {
+        guard let sid = session.calls.state.sid else { return }
+        stage.update(sid) { $0.minimise() }
     }
 }
 #endif

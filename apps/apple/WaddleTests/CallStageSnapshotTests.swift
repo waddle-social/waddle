@@ -71,7 +71,8 @@ final class CallStageSnapshotTests: XCTestCase {
             of: CallStageView(
                 title: title, subtitle: subtitle, status: status, tiles: tiles, presentation: presentation,
                 promotedSpeaker: promotedSpeaker, controls: controls, issues: issues, checkingIssues: checkingIssues,
-                isChromeHidden: isChromeHidden, tileSource: Self.cameras, announcesChanges: false,
+                density: minimises ? .phone : .window, isChromeHidden: isChromeHidden, tileSource: Self.cameras,
+                announcesChanges: false,
                 perform: { _ in }
             )
             .frame(width: size.width, height: size.height),

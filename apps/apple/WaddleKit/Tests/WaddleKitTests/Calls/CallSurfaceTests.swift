@@ -271,5 +271,13 @@ import Testing
         #expect(CallSurface.placement(of: active, open: nil, platform: .regularWidth, pane: nil) == .sidebarCard)
         #expect(CallSurface.placement(of: inGroup, open: .room(Self.room), platform: .regularWidth, pane: nil) == .split)
         #expect(CallSurface.placement(of: inGroup, open: .room(Self.room), platform: .phone, pane: nil) == .dock)
+        // Opened on a phone, a call in session covers the screen, its conversation open or not and whatever the pane.
+        #expect(CallSurface.placement(of: inGroup, open: nil, platform: .phone, pane: nil, isOpened: true) == .cover)
+        #expect(CallSurface.placement(
+            of: active, open: .direct(Self.peer.bare), platform: .phone, pane: CGSize(width: 300, height: 100), isOpened: true
+        ) == .cover)
+        for state in others {
+            #expect(CallSurface.placement(of: state, open: nil, platform: .phone, pane: nil, isOpened: true) == .dock)
+        }
     }
 }
