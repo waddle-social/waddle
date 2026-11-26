@@ -209,10 +209,9 @@ consumer. Removing them preserves cached check results while avoiding that
 unnecessary upload; savings still require a live comparison.
 
 The changed-source archive trial compiled with **rustc/Cargo 1.98.1**, the latest
-stable release listed by the Rust project on 20 September 2026. The repository
-already pins it. A compiled probe using the same Nix compiler and GCC wrapper
-confirmed LLD 22.1.8 is selected; no flag disables the faster linker. Those gains
-are already in the baseline, so no Rust version bump is needed. See the
+stable release listed by the Rust project on 20 September 2026. A probe using
+the same Nix compiler and GCC wrapper confirmed that the September baseline
+used LLD 22.1.8. See the
 [1.98.1 announcement](https://blog.rust-lang.org/2026/09/03/Rust-1.98.1/).
 The trial's compile phase took 513 seconds. The visible cgroup lifetime peak was
 61.5 GiB with no OOM events; this includes cache and setup memory and is not compiler

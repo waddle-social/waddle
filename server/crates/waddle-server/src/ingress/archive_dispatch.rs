@@ -30,7 +30,7 @@ pub(crate) struct DispatchProbeBudget {
 impl DispatchProbeBudget {
     pub(super) fn next_backoff(&self) -> Option<Duration> {
         self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used < 4).then_some(used + 1)
             })
             .ok()

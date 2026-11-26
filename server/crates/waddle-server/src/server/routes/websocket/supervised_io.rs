@@ -1315,7 +1315,7 @@ impl IoCustodianInventory {
         connection_ref: ConnectionRef,
     ) -> Result<IoCustodianReservation, CustodianInventoryError> {
         let reservation_id = NEXT_CUSTODIAN_RESERVATION_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .map_err(|_| CustodianInventoryError::ReservationIdExhausted)?;

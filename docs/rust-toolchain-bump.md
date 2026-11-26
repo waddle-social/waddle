@@ -2,7 +2,8 @@
 
 Waddle pins one explicit Rust version in `server/rust-toolchain.toml`
 (`channel = "1.100.0"`, plus the rustfmt and clippy components and the wasm and
-Android targets). Every build path reads that file:
+Android targets). The server and its clients use this pin. The operator and
+Linux desktop workspaces pin the same version in their own toolchain files.
 
 - Nix and cuenv: `flake.nix` builds the toolchain with
   `rust-bin.fromRustupToolchainFile`, so the server checks, the cuenv tasks on
@@ -16,11 +17,12 @@ Android targets). Every build path reads that file:
 
 ## Procedure
 
-1. Edit `channel` in `server/rust-toolchain.toml` (and keep `operator/rust-toolchain.toml` aligned if bumping both workspaces together) to the new stable version.
-2. Update the flake inputs so `rust-overlay` knows the new release:
+1. Set `channel` to the new version in `server/rust-toolchain.toml`,
+   `operator/rust-toolchain.toml` and `apps/linux/rust-toolchain.toml`.
+2. Update the Rust overlay if the pinned revision predates the new release.
 
    ```sh
-   nix flake update
+   nix flake update rust-overlay
    ```
 
    If nix is not installed locally, run the same command in a container from
@@ -30,7 +32,7 @@ Android targets). Every build path reads that file:
 
    ```sh
    docker run --rm -v "$PWD:/src" -w /src nixos/nix:latest \
-     nix --extra-experimental-features "nix-command flakes" flake update
+     nix --extra-experimental-features "nix-command flakes" flake update rust-overlay
    ```
 
 3. Regenerate the cuenv lock, since it digests `flake.lock`:

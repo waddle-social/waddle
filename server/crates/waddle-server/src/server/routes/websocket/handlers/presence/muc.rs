@@ -300,13 +300,13 @@ mod resolver_sync_retry_tests {
                 || self.block_at_check.load(Ordering::SeqCst) == check
                 || self
                     .blocks_remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                         remaining.checked_sub(1)
                     })
                     .is_ok();
             let should_fail = self
                 .failures_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok();

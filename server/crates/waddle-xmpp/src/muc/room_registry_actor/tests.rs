@@ -3406,7 +3406,7 @@ mod ownership_claims_tests {
         ) -> Result<Option<ClaimSnapshot>, ClaimError> {
             if self
                 .current_claim_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()
@@ -3462,7 +3462,7 @@ mod ownership_claims_tests {
             }
             if self
                 .release_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()
@@ -3504,7 +3504,7 @@ mod ownership_claims_tests {
             }
             if self
                 .release_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()
@@ -4291,7 +4291,7 @@ mod ownership_claims_tests {
                         .is_some_and(|first_blocked_call| load_call >= first_blocked_call);
                 let fail_fenced_load = store
                     .fail_fenced_loads_remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                         remaining.checked_sub(1)
                     })
                     .is_ok();

@@ -3396,7 +3396,7 @@ mod tests {
         ) -> Option<waddle_xmpp::stream_management::ReclaimedClaimReservation> {
             self.admission_attempts.fetch_add(1, Ordering::SeqCst);
             self.remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .ok()
