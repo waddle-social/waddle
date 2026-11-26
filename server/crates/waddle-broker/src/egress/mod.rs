@@ -9,8 +9,8 @@ pub mod ssrf;
 
 pub use client::{
     verify_dispatch_matches_request, BrokerEgressClient, EgressChunk, EgressError,
-    EgressInferenceRequest, EgressResponse, EgressStream, EgressStreamEvent,
-    ExpectedEgressBinding, ProviderOperationWire,
+    EgressInferenceRequest, EgressResponse, EgressStream, EgressStreamEvent, ExpectedEgressBinding,
+    ProviderOperationWire,
 };
 pub use profile::{
     is_blocked_admin_path, validate_operation_path, EgressBindingPolicy, EgressCaps,

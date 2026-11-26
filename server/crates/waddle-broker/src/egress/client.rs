@@ -737,12 +737,7 @@ async fn stream_response_pump(
             break;
         }
         if let Err(err) = validate_sse_buffer(&mut sse_buffer) {
-            send_terminal_event(
-                &tx,
-                EgressStreamEvent::Error(err),
-                &mut consumer_cancel_rx,
-            )
-            .await;
+            send_terminal_event(&tx, EgressStreamEvent::Error(err), &mut consumer_cancel_rx).await;
             break;
         }
 

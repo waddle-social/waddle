@@ -334,15 +334,15 @@ impl EgressProfileRegistry {
             model: model.to_owned(),
             operation,
         };
-        let profile =
-            self.profiles
-                .get(&key)
-                .ok_or_else(|| ProfileError::UnapprovedProfile {
-                    provider: provider.to_owned(),
-                    deployment: deployment.to_owned(),
-                    model: model.to_owned(),
-                    operation: operation.as_str(),
-                })?;
+        let profile = self
+            .profiles
+            .get(&key)
+            .ok_or_else(|| ProfileError::UnapprovedProfile {
+                provider: provider.to_owned(),
+                deployment: deployment.to_owned(),
+                model: model.to_owned(),
+                operation: operation.as_str(),
+            })?;
         Ok((profile, self.policies.get(&key)))
     }
 }

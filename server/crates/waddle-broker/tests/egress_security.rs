@@ -1551,7 +1551,10 @@ async fn egress_profile_and_dispatch_binding_reject_body_overrides_and_policy_mi
         )
         .await
         .expect_err("model override rejected");
-    assert!(matches!(err_model_override, EgressError::BindingMismatch(_)));
+    assert!(matches!(
+        err_model_override,
+        EgressError::BindingMismatch(_)
+    ));
 
     // 3. body_json["max_output_tokens"] exceeding admitted budget rejected.
     let err_tokens = client
