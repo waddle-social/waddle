@@ -109,6 +109,37 @@ final class LiveKitCallCaptureTests: XCTestCase {
         try await until { self.published(.camera, by: call).count == 1 }
     }
 
+    /// The camera the call itself started, with no choice made by the person (#2823).
+    func testCheckingAgainStartsACameraTheCallStartedAndTheBlurGaveNoPictureTo() async throws {
+        let call = try await call(video: true) {
+            $0.feedsCameras = false
+        }
+        call.media.setBackground(.blur)
+        // No frame, so the SDK gives up on the track and there is no camera.
+        try await until(timeout: .seconds(40)) { call.capture.cameras.count == 1 && call.media.isBackgroundFailing }
+        XCTAssertFalse(call.media.isCameraOn)
+
+        call.capture.feedsCameras = true
+        await call.media.restartBackground()
+        XCTAssertEqual(call.capture.cameras.count, 2, "checking again starts the camera again")
+    }
+
+    func testAPromptAnsweredAfterTheCallEndedSaysNothingOfTheCamera() async throws {
+        let call = try await call {
+            $0.allows[.video] = false
+            $0.holdsAnswers = true
+        }
+        let turningOn = Task { await call.media.setCamera(true) }
+        try await until { call.capture.asked == [.video] }
+
+        await call.media.disconnect()
+        call.capture.answerPrompts()
+        await turningOn.value
+
+        XCTAssertFalse(call.media.isCameraBlocked, "the answer was for a call that is over")
+        XCTAssertTrue(call.media.mediaRefusals.isEmpty)
+    }
+
     // MARK: - Our screen
 
     #if os(macOS)

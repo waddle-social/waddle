@@ -150,14 +150,16 @@ final class CallScreenShare {
         }
         // Published, and still being captured: a capture can end before its watcher hears of it.
         guard let publication, track.capturer.captureState == .started else {
+            // Said before the cleanup can suspend: by then the call may have
+            // ended or a newer pick begun, and this would be said about that.
             track.capturer.delegates.remove(delegate: watcher)
-            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
-            _ = try? await track.stop()
-            screenCaptureWatcher = nil
+            if screenCaptureWatcher === watcher { screenCaptureWatcher = nil }
             wantsScreenShare = false
             didScreenShareFail = true
             roomAccess.recordRefusal(.screen)
-            roomAccess.tracksChanged()
+            if let publication { try? await room.localParticipant.unpublish(publication: publication) }
+            _ = try? await track.stop()
+            if roomAccess.holds(room) { roomAccess.tracksChanged() }
             return
         }
         roomAccess.tracksChanged()

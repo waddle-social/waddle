@@ -37,9 +37,11 @@ final class CallVideoMeter {
         await measureNewVideoTracks(videoStreams: videoStreams)
     }
 
+    /// The tracks went with the room. Who is looking is not the room's to
+    /// say: a sheet still open closes later and takes its own count back,
+    /// and must not take that of one opened in the next call.
     func roomWentAway() {
         measuredTracks = [:]
-        videoWatchers = 0
     }
 
     private func measureNewVideoTracks(videoStreams: @MainActor () -> [VideoStream]) async {

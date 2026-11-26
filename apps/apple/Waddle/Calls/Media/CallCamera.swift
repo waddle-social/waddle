@@ -67,7 +67,10 @@ final class CallCamera {
         // A blur that gave no picture while the camera was starting leaves no
         // camera at all: the SDK gives up on a track it gets no frames from.
         // Checking again then means starting the camera again, if it is still wanted.
-        guard let room = roomAccess.room, cameraPublications(in: room).isEmpty, wantsCamera() else { return }
+        // And not while one is still starting: a blur says it is failing
+        // well before the SDK gives up on the track, and a second camera
+        // started then would be published beside the first.
+        guard let room = roomAccess.room, camerasStarting == 0, cameraPublications(in: room).isEmpty, wantsCamera() else { return }
         await startCamera(room)
     }
 
@@ -115,6 +118,24 @@ final class CallCamera {
         refreshBackgroundFailing()
     }
 
+    /// A camera publication we took down on purpose, as a duplicate left by
+    /// a reconnect: its processor goes, and what it said about the blur
+    /// with it, unless a camera still published captures through it.
+    ///
+    /// An unpublish can fail part-way, with the track still capturing and
+    /// still attached: the track is stopped here, and a capturer that goes
+    /// on capturing all the same keeps its processor.
+    func cameraWasDropped(_ publication: LocalTrackPublication, from room: Room) async {
+        guard roomAccess.holds(room), let track = publication.track as? LocalVideoTrack else { return }
+        let capturer = track.capturer
+        let stillPublished = cameraPublications(in: room).contains { ($0.track as? LocalVideoTrack)?.capturer === capturer }
+        guard !stillPublished else { return }
+        _ = try? await track.stop()
+        if roomAccess.holds(room), capturer.captureState != .started {
+            discardBackgroundProcessor(of: ObjectIdentifier(capturer))
+        }
+    }
+
     /// The one thing the stage is told: the blur is on and no picture is getting out.
     private func refreshBackgroundFailing() {
         let isFailing = roomAccess.room != nil && background == .blur && (!failingBackgrounds.isEmpty || cameraFailedToStartBlurred)
@@ -154,6 +175,10 @@ final class CallCamera {
     /// camera of ours is unmuted here, and one that is not there is
     /// made by `publishCamera`, with its processor on it from the start.
     func turnCameraOn(in room: Room) async {
+        // A change of camera drops a camera that is off. Unmuting it while
+        // it is being dropped would capture for a publication on its way out.
+        await cameraChoiceWork?.value
+        guard roomAccess.holds(room) else { return }
         for publication in cameraPublications(in: room) where publication.isMuted {
             try? await publication.unmute()
         }
@@ -168,6 +193,8 @@ final class CallCamera {
     /// makes the track without a processor and sends frames before one can
     /// be attached; ours has it from before the first frame.
     private func publishCamera(in room: Room) async {
+        camerasStarting += 1
+        defer { camerasStarting -= 1 }
         let processor = makeBackgroundProcessor()
         let track = await capture.makeCamera(options: cameraCaptureOptions(), processor: processor)
         let id = ObjectIdentifier(track.capturer)
@@ -195,12 +222,16 @@ final class CallCamera {
             }
             return
         }
-        // A camera that came up puts an earlier failed start behind us.
-        if cameraFailedToStartBlurred {
+        // A camera that came up puts an earlier failed start behind us,
+        // in the call it came up in.
+        if roomAccess.holds(room), cameraFailedToStartBlurred {
             cameraFailedToStartBlurred = false
             refreshBackgroundFailing()
         }
     }
+
+    /// The cameras being made and published now, not yet among the publications.
+    @ObservationIgnored private var camerasStarting = 0
 
     func cameraNoLongerWanted() {
         // A camera they no longer want is not a camera that failed to start.
@@ -252,10 +283,12 @@ final class CallCamera {
         for publication in cameraPublications(in: room) {
             if publication.isMuted {
                 if droppingIdleTracks {
-                    if let capturer = (publication.track as? LocalVideoTrack)?.capturer {
-                        discardBackgroundProcessor(of: ObjectIdentifier(capturer))
-                    }
+                    // The processor goes after the publication, never before:
+                    // a capturer holds it weakly, and one unmuted while its
+                    // publication was still coming down would send frames as they are.
+                    let capturer = (publication.track as? LocalVideoTrack)?.capturer
                     try? await room.localParticipant.unpublish(publication: publication)
+                    if let capturer, roomAccess.holds(room) { discardBackgroundProcessor(of: ObjectIdentifier(capturer)) }
                 }
             } else if let capturer = (publication.track as? LocalVideoTrack)?.capturer as? CameraCapturer,
                       capturer.options.device?.uniqueID != wanted?.device?.uniqueID {
