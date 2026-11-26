@@ -6,5 +6,5 @@ fallback theme, so an icon theme that has an icon still wins and one that lacks
 it no longer shows a broken-image glyph.
 
 Source: adwaita-icon-theme, © GNOME Project, LGPL-3.0-or-later or
-CC-BY-SA-3.0. Not bundled (absent from older Adwaita): `chat-bubbles-text-symbolic`,
-`external-link-symbolic`.
+CC-BY-SA-3.0. `chat-bubbles-text-symbolic` and `external-link-symbolic` are
+absent from older Adwaita, so they are drawn here for Waddle (AGPL-3.0-or-later).
