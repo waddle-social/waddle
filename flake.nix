@@ -241,6 +241,124 @@
           export PATH="${pkgs.lib.makeBinPath [ pkgs.mold ]}:$PATH"
           exec "$@" -C linker-features=-lld -C link-arg=-fuse-ld=mold
         '';
+      # Waddle for Linux (apps/linux): the GTK4 + libadwaita client, built as
+      # `packages.<system>.linux` so `nix build .#linux` and `nix run .#linux`
+      # work. It is its own Cargo workspace and reaches the shared client
+      # crates in server/ by path, so the source is those crates plus the app.
+      mkWaddleLinux =
+        pkgs:
+        let
+          lib = pkgs.lib;
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./apps/linux/rust-toolchain.toml;
+          # libwebrtc is built against Chromium's libc++, and its C++ bridges
+          # need clang 21 or later. Setting CXX alone is not enough: stdenv's
+          # cc-wrapper hook re-exports CXX=g++ at build time, so the whole
+          # derivation uses the clang 21 stdenv.
+          craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
+            _final: _prev: { stdenvSelector = p: p.llvmPackages_21.stdenv; }
+          );
+          # The livekit crate's build script would download this prebuilt
+          # libwebrtc archive, which the sandbox forbids; LK_CUSTOM_WEBRTC
+          # points it at the unpacked copy instead. The tag is the
+          # WEBRTC_TAG of the locked webrtc-sys-build, so bump the tag and
+          # both hashes together whenever `cargo update` moves webrtc-sys.
+          webrtcTag = "webrtc-a545de4";
+          webrtcArchive =
+            {
+              "x86_64-linux" = {
+                triple = "linux-x64-release";
+                hash = "sha256-Ls5zuacqLKzXPQxirDpBTiAvN4hcPI9J3dtDwUQ6wL0=";
+              };
+              "aarch64-linux" = {
+                triple = "linux-arm64-release";
+                hash = "sha256-6H3/cUIsXLFHD2zwDsxK1pZOdGxQOYMbcga5RrXRPF8=";
+              };
+            }
+            .${pkgs.stdenv.hostPlatform.system};
+          webrtc =
+            pkgs.runCommand "livekit-libwebrtc-${webrtcTag}-${webrtcArchive.triple}"
+              {
+                nativeBuildInputs = [ pkgs.unzip ];
+                src = pkgs.fetchurl {
+                  url = "https://github.com/livekit/rust-sdks/releases/download/${webrtcTag}/webrtc-${webrtcArchive.triple}.zip";
+                  inherit (webrtcArchive) hash;
+                };
+              }
+              ''
+                unzip -q "$src" -d "$TMPDIR/unpacked"
+                mv "$TMPDIR/unpacked/${webrtcArchive.triple}" "$out"
+              '';
+          # libwebrtc opens PulseAudio and ALSA at run time, and loads the
+          # screen-capture libraries lazily.
+          runtimeLibs = [
+            pkgs.libpulseaudio
+            pkgs.alsa-lib
+            pkgs.libdrm
+            pkgs.libgbm
+            pkgs.libx11
+            pkgs.libxfixes
+            pkgs.libxdamage
+            pkgs.libxrandr
+            pkgs.libxcomposite
+            pkgs.libxext
+          ];
+        in
+        craneLib.buildPackage {
+          pname = "waddle-linux";
+          version = "0.1.0";
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./apps/linux
+              ./server/Cargo.toml
+              ./server/crates
+            ];
+          };
+          cargoLock = ./apps/linux/Cargo.lock;
+          cargoToml = ./apps/linux/Cargo.toml;
+          postUnpack = ''
+            cd "$sourceRoot/apps/linux"
+            sourceRoot="$PWD"
+          '';
+          strictDeps = true;
+          doCheck = false;
+          # No dependency-only derivation: the path dependencies outside the
+          # app's own directory do not survive Crane's source stubbing.
+          cargoArtifacts = null;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.blueprint-compiler
+            pkgs.wrapGAppsHook4
+          ];
+          buildInputs = [
+            pkgs.gtk4
+            pkgs.libadwaita
+            pkgs.gdk-pixbuf
+            pkgs.glib
+          ]
+          ++ runtimeLibs;
+          env.LK_CUSTOM_WEBRTC = "${webrtc}";
+          preFixup = ''
+            gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs})
+          '';
+          postInstall = ''
+            install -Dm644 data/social.waddle.Waddle.desktop \
+              "$out/share/applications/social.waddle.Waddle.desktop"
+            install -Dm644 data/social.waddle.Waddle.metainfo.xml \
+              "$out/share/metainfo/social.waddle.Waddle.metainfo.xml"
+            install -Dm644 data/icons/hicolor/scalable/apps/social.waddle.Waddle.svg \
+              "$out/share/icons/hicolor/scalable/apps/social.waddle.Waddle.svg"
+          '';
+          meta = {
+            description = "Waddle for Linux: a GTK4 + libadwaita client";
+            license = lib.licenses.agpl3Plus;
+            mainProgram = "waddle-linux";
+            platforms = [
+              "x86_64-linux"
+              "aarch64-linux"
+            ];
+          };
+        };
     in
     {
       packages = forAllSystems (
@@ -710,7 +828,7 @@
           waddle-server-test-deps = serverTestArtifacts;
           default = waddle-server;
         }
-        // lib.optionalAttrs pkgs.stdenv.isLinux {
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           waddle-server-image-stream = image;
           # Fail before compiling if a CI runner cannot create the namespaces
           # required by the four co-located test sandboxes.
@@ -730,6 +848,9 @@
           waddle-server-test-shard-3 = mkServerTestShard 3;
           waddle-server-test-shard-4 = mkServerTestShard 4;
 
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux = mkWaddleLinux pkgs;
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           lib.concatMapAttrs (
