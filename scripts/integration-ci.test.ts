@@ -399,5 +399,3 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
     expect(() => readFileSync(marker, "utf8")).toThrow();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
-
-
