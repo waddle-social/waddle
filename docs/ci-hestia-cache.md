@@ -48,5 +48,5 @@ by `cue.mod/module.cue`:
 cuenv sync ci -A
 ```
 
-The separate tag workflow still publishes Waddle releases to FlakeHub. It is a
-release destination, not the CI binary cache.
+Waddle no longer publishes release tags to FlakeHub; the tag workflow was
+removed on 2026-11-26.

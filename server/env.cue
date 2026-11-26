@@ -145,40 +145,6 @@ schema.#Project & {
 		wc.#NamespaceBazelCache,
 		wc.#CuenvRelease,
 		c.#OnePassword,
-		schema.#Contributor & {
-			id: "flakehub"
-			when: environment: ["flakehub"]
-			tasks: [
-				{
-					id:       "checkout.tag"
-					label:    "Checkout tag"
-					priority: 1
-					provider: github: {
-						uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-						with: {
-							"persist-credentials": false
-							ref:                   "${{ (inputs.tag != null) && format('refs/tags/{0}', inputs.tag) || '' }}"
-						}
-					}
-				},
-				{
-					id:       "push"
-					label:    "Push to FlakeHub"
-					priority: 5
-					dependsOn: ["checkout.tag", "hestia.setup"]
-					ci: github: permissions: "id-token": "write"
-					provider: github: {
-						uses: "DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425"
-						with: {
-							visibility:             "public"
-							name:                   "waddle-social/waddle"
-							tag:                    "${{ inputs.tag }}"
-							"include-output-paths": true
-						}
-					}
-				},
-			]
-		},
 	]
 
 	ci: provider: github: {
@@ -226,7 +192,13 @@ schema.#Project & {
 				// and uses the normal profile. The JSON round trip permits a
 				// lookup of a dependency the job does not have; CI checks the
 				// generated graph and its default-success gates.
-				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
+				//
+				// The profile runner is privileged too: unprivileged, Nix
+				// silently disables its build sandbox and builds each
+				// derivation in a random directory, and Cargo (whose crate
+				// identity includes the workspace path) then recompiles every
+				// workspace member instead of reusing the member layers.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -250,23 +222,6 @@ schema.#Project & {
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
-		}
-		"Publish tags to FlakeHub": {
-			environment: "flakehub"
-			when: {
-				tag: ["v?[0-9]+.[0-9]+.[0-9]+*"]
-				manual: tag: {
-					description: "The existing tag to publish to FlakeHub"
-					type:        "string"
-					required:    true
-				}
-			}
-			provider: github: permissions: {
-				"id-token":      "write"
-				contents:        "read"
-				"pull-requests": "none"
-			}
-			tasks: [_t.flakehubPublished]
 		}
 		pullRequest: {
 			when: manual: true
@@ -381,7 +336,9 @@ schema.#Project & {
 			}
 			// The queue runs the default-feature, no-Postgres suite; mainTest
 			// repeats that configuration on the revision eligible to publish.
-			tasks: [_t.test]
+			// Privileged so the Nix sandbox works and member layers are reused.
+			provider: github: runner: "namespace-profile-linux-x86;container.privileged=true"
+			tasks: [_t.nixDefaultTest]
 		}
 		// The manual-only rustTests workflow (workflow_dispatch) runs the same
 		// archives and shards; it is generated from ci/rust-tests/workflow.cue.
@@ -626,7 +583,6 @@ schema.#Project & {
 					".github/workflows/waddle-server-queuechecks.yml",
 					".github/workflows/waddle-server-namespacerustchecks.yml",
 					".github/workflows/waddle-server-parentmovenative.yml",
-					".github/workflows/waddle-server-publish-tags-to-flakehub.yml",
 					".github/workflows/waddle-server-pullrequest.yml",
 					".github/workflows/waddle-server-roomchildcontract.yml",
 					".github/workflows/waddle-server-rootsync.yml",
@@ -985,6 +941,19 @@ schema.#Project & {
 			inputs: _namespaceRustTaskInputs
 		}
 
+		// The default-feature, no-Postgres suite of `test` as an x86_64-linux
+		// Nix check, for CI. Third-party dependencies and unchanged workspace
+		// member layers come from cached artifacts, so a server-only change
+		// compiles one crate instead of all 675 packages, and main reuses
+		// the result a merge group built for the same tree. `test` stays the
+		// plain Cargo task for local runs on any host.
+		nixDefaultTest: schema.#Task & {
+			hermetic: false
+			command:  "nix"
+			args: ["build", "--print-build-logs", "--print-out-paths", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "../#checks.x86_64-linux.waddle-server-default-test"]
+			inputs: _namespaceRustTaskInputs
+		}
+
 		// nextest cannot run doctests; keep them verified via cargo test --doc.
 		doctest: schema.#Task & {
 			hermetic: false
@@ -1021,19 +990,25 @@ schema.#Project & {
 		// expression of the default pipeline keys on that dependency, and
 		// declaring it on the shared tasks would add an fmt job to every
 		// pull-request pipeline that lists them.
+		//
+		// mainClippy builds the Nix Clippy check that merge groups build: the
+		// same workspace, features, lints and structure scripts, with
+		// dependencies and unchanged workspace members from cached artifacts
+		// rather than an empty target directory. It keeps the namespace
+		// task's inputs, which define this pipeline's triggers.
 		mainClippy: schema.#Task & {
 			hermetic: false
-			command:  tasks.clippy.command
-			args:     tasks.clippy.args
+			command:  tasks.nixClippy.command
+			args:     tasks.nixClippy.args
 			inputs:   tasks.clippy.inputs
 			dependsOn: [tasks.fmt]
 		}
 
 		mainTest: schema.#Task & {
 			hermetic: false
-			command:  tasks.test.command
-			args:     tasks.test.args
-			inputs:   tasks.test.inputs
+			command:  tasks.nixDefaultTest.command
+			args:     tasks.nixDefaultTest.args
+			inputs:   tasks.nixDefaultTest.inputs
 			dependsOn: [tasks.fmt]
 		}
 
@@ -1754,13 +1729,6 @@ schema.#Project & {
 				// Postgres + all-features lane ran every required cluster
 				// test on this exact commit.
 				tasks.nixTestLocal,
-			]
-		}
-
-		flakehubPublished: schema.#Task & {
-			command: "true"
-			inputs: [
-				schema.#ModuleFiles & {paths: ["flake.nix", "flake.lock"]},
 			]
 		}
 

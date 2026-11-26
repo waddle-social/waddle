@@ -26,8 +26,6 @@ on:
     - .github/workflows/waddle-server-namespacerustchecks.yml/**
     - .github/workflows/waddle-server-parentmovenative.yml
     - .github/workflows/waddle-server-parentmovenative.yml/**
-    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml
-    - .github/workflows/waddle-server-publish-tags-to-flakehub.yml/**
     - .github/workflows/waddle-server-pullrequest.yml
     - .github/workflows/waddle-server-pullrequest.yml/**
     - .github/workflows/waddle-server-queuechecks.yml
@@ -224,7 +222,7 @@ jobs:
       contents: read
       id-token: write
     name: fmt
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -418,7 +416,7 @@ jobs:
       contents: read
       id-token: write
     name: mainBuildExtensionModules
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -564,7 +562,7 @@ jobs:
       contents: read
       id-token: write
     name: mainBuildImageStream
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -710,7 +708,7 @@ jobs:
       contents: read
       id-token: write
     name: mainChecks
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -906,7 +904,7 @@ jobs:
       contents: read
       id-token: write
     name: mainClippy
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1031,56 +1029,6 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
-    - name: Setup cuenv (release)
-      run: |-
-        set -euo pipefail
-        cuenv_version="0.81.1"
-        if [ "$cuenv_version" != "0.81.1" ]; then
-          echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
-          exit 1
-        fi
-        cuenv_platform="$(uname -s)-$(uname -m)"
-        case "$cuenv_platform" in
-          Darwin-arm64|Darwin-aarch64)
-            cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244"
-            ;;
-          Linux-aarch64|Linux-arm64)
-            cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8"
-            ;;
-          Linux-x86_64|Linux-amd64)
-            cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc"
-            ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        if [[ ! "$cuenv_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-          echo "Missing or invalid cuenv SHA-256" >&2
-          exit 1
-        fi
-        test -d "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-        : "${GITHUB_PATH:?GITHUB_PATH is required}"
-        cuenv_download="$(mktemp "$RUNNER_TEMP/cuenv-download.XXXXXX")"
-        trap 'rm -f "$cuenv_download"' EXIT
-        cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
-        curl --proto '=https' --proto-redir '=https' -fsSL -o "$cuenv_download" "$cuenv_url"
-        case "$cuenv_platform" in
-          Darwin-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | shasum -a 256 -c - ;;
-          Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.81.1" ]; then
-          echo "Downloaded cuenv version differs from the pinned release" >&2
-          exit 1
-        fi
-        cuenv_bin="$(mktemp -d "$RUNNER_TEMP/waddle-cuenv.XXXXXX")"
-        install -m 0755 "$cuenv_download" "$cuenv_bin/cuenv"
-        printf '%s\n' "$cuenv_bin" >> "$GITHUB_PATH"
-        "$cuenv_bin/cuenv" sync vcs -p .
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Check Namespace Bazel Remote Cache
       run: |-
         set -euo pipefail
@@ -1090,7 +1038,7 @@ jobs:
         fi
         cuenv cache status || true
     - name: mainClippy
-      run: cuenv task mainClippy --skip-dependencies
+      run: nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-clippy
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1102,7 +1050,7 @@ jobs:
       contents: read
       id-token: write
     name: mainDoctest
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1248,7 +1196,7 @@ jobs:
       contents: read
       id-token: write
     name: mainTest
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     steps:
@@ -1373,56 +1321,6 @@ jobs:
                     raise SystemExit(f"Invalid newline in {k}")
                 handle.write(f"{k}={v}\n")
         PY
-    - name: Setup cuenv (release)
-      run: |-
-        set -euo pipefail
-        cuenv_version="0.81.1"
-        if [ "$cuenv_version" != "0.81.1" ]; then
-          echo "Unsupported cuenv version: $cuenv_version; reviewed digests are required" >&2
-          exit 1
-        fi
-        cuenv_platform="$(uname -s)-$(uname -m)"
-        case "$cuenv_platform" in
-          Darwin-arm64|Darwin-aarch64)
-            cuenv_asset="cuenv-darwin-arm64"
-            cuenv_sha256="2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244"
-            ;;
-          Linux-aarch64|Linux-arm64)
-            cuenv_asset="cuenv-linux-arm64"
-            cuenv_sha256="287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8"
-            ;;
-          Linux-x86_64|Linux-amd64)
-            cuenv_asset="cuenv-linux-x64"
-            cuenv_sha256="f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc"
-            ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        if [[ ! "$cuenv_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-          echo "Missing or invalid cuenv SHA-256" >&2
-          exit 1
-        fi
-        test -d "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-        : "${GITHUB_PATH:?GITHUB_PATH is required}"
-        cuenv_download="$(mktemp "$RUNNER_TEMP/cuenv-download.XXXXXX")"
-        trap 'rm -f "$cuenv_download"' EXIT
-        cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
-        curl --proto '=https' --proto-redir '=https' -fsSL -o "$cuenv_download" "$cuenv_url"
-        case "$cuenv_platform" in
-          Darwin-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | shasum -a 256 -c - ;;
-          Linux-*) printf '%s  %s\n' "$cuenv_sha256" "$cuenv_download" | sha256sum -c - ;;
-          *) echo "Unsupported cuenv platform: $cuenv_platform" >&2; exit 1 ;;
-        esac
-        chmod 0755 "$cuenv_download"
-        if [ "$("$cuenv_download" --version)" != "cuenv 0.81.1" ]; then
-          echo "Downloaded cuenv version differs from the pinned release" >&2
-          exit 1
-        fi
-        cuenv_bin="$(mktemp -d "$RUNNER_TEMP/waddle-cuenv.XXXXXX")"
-        install -m 0755 "$cuenv_download" "$cuenv_bin/cuenv"
-        printf '%s\n' "$cuenv_bin" >> "$GITHUB_PATH"
-        "$cuenv_bin/cuenv" sync vcs -p .
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: Check Namespace Bazel Remote Cache
       run: |-
         set -euo pipefail
@@ -1432,7 +1330,7 @@ jobs:
         fi
         cuenv cache status || true
     - name: mainTest
-      run: cuenv task mainTest --skip-dependencies
+      run: nix build --print-build-logs --print-out-paths --option sandbox true --option sandbox-fallback false ../#checks.x86_64-linux.waddle-server-default-test
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1444,7 +1342,7 @@ jobs:
       contents: read
       id-token: write
     name: nixTestLocal
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -1646,7 +1544,7 @@ jobs:
       id-token: write
       packages: write
     name: publishContainerImage
-    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86;container.privileged=true"]') }}
     needs:
     - fmt
     - mainChecks

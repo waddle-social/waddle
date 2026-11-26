@@ -1,17 +1,37 @@
 # Nix cache experiments
 
 The goal remains all applicable changed-code PR checks completing within 15
-minutes, including queue, setup, transfer and post-job work. These experiments
-measure cache availability and transfer costs. They do not compile Waddle and
-cannot establish that goal by themselves.
+minutes, including queue, setup, transfer and post-job work. The historical
+artifact probes measure cache availability and transfer. The Rust suite trials
+also compile a changed crate and execute its tests.
 
-Waddle currently runs on Namespace compute with FlakeHub and Hestia 2 binary
-caches. The Rust workflows do not currently mount a Namespace Nix cache volume.
-Cache location and build granularity are separate questions: Nix reuses whole
-derivation outputs, while the current Crane checks include the workspace source
-in a shared derivation. Changing a source file can therefore invalidate several
-checks while the third-party dependency artifact remains reusable. Moving that
-artifact to another provider does not change the derivation's source inputs.
+Production Rust jobs use Namespace compute with FlakeHub and Hestia binary
+caches. The manual volume trials mount a dedicated Namespace Nix store.
+Each Rust lane caches third-party dependencies, the 14 base workspace members
+and `waddle-xmpp` separately. A `waddle-server` edit leaves those outputs
+eligible for reuse on any runner with access to them.
+
+## Default-feature Nix suite trial
+
+Dispatch `waddle-ci-cache-benchmark.yml` with `scope=namespace-test-volume`.
+The seed builds the production `mainTest` derivation. Three other runners each
+add the same unit test to `waddle-server` and build the edited derivation.
+The cold runner gets a separate empty volume. The other two request the seed
+volume immediately after the seed job finishes and after a ten-minute delay.
+
+The workflow summary reports the dependency and member layers present before
+compilation, Cargo's built and fresh crate counts, executed tests, Nix build
+time and full job time. Download the four `nix-test-volume-*` artifacts for
+the build logs, member names and JUnit results. The controlled comparison uses
+16-core, 32 GB runners and excludes the two production binary caches.
+
+To measure a guaranteed transfer, choose `scope=test-layer-artifact`. The
+seed exports the top workspace layer and its references as a Nix binary cache
+in a one-day Actions artifact. A fresh runner verifies and imports the
+closure, then runs the same edit as a separate cold control. The summary
+includes the producer's export and upload times, the consumer's download
+and import times, and both full job times. The edited test output is built on
+each runner.
 
 ## Default-feature Cargo volume trial
 
@@ -21,8 +41,7 @@ Namespace volume. A fresh runner restores the snapshot and runs the same tests
 twice, first unchanged and then with a new test in the server crate. The job
 checks the test inventory, verifies that Cargo rebuilt the changed crate, and
 reports the time spent on each phase and available volume space. The restore
-runner discards its writes. Normal main and queue jobs retain the existing
-test command until the trial establishes changed-code performance.
+runner discards its writes.
 
 ## First measured qualification: 2026-09-20
 
@@ -163,6 +182,15 @@ of repeated rate-limit failures and its 895–899-second post-save cost.
 Namespace's missing warm population does not justify migration. Any future
 provider change needs a controlled changed-code CI trial; this diagnostic
 workflow now runs only by explicit manual dispatch.
+
+## Namespace-only volume trials: 2026-11-26
+
+The `namespace-volume` scope builds real Rust layers instead of restoring a
+pinned archive, so it needs no FlakeHub. Results and interpretation are in
+[ci-performance.md](ci-performance.md#namespace-nix-volume-measurements-2026-11-26).
+In both trials the job right after the seed missed the volume, and the job ten
+minutes later found it complete. Trial 1 also showed that unprivileged runners
+build without the Nix sandbox, which defeats Cargo reuse between derivations.
 
 ## Qualification workflow
 
@@ -348,6 +376,8 @@ Test these architectural options separately:
 - Crane per-package source closures and artifacts: unchanged independent crates
   should retain derivation identities. Tests, Clippy and protocol coverage must
   remain complete; dependency features must match the workspace build.
+  Implemented as workspace member layers; see
+  [ci-performance.md](ci-performance.md#workspace-member-layers-2026-11).
 - Native Cargo target caching with content-validated mtime restoration, under
   the same pinned Nix toolchain. Deno and Warp use native Cargo cache patterns;
   a persistent `/nix` store does not test that architecture. Validate actual

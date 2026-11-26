@@ -16,7 +16,7 @@ RUNNER = (
     "${{ fromJSON(fromJSON(toJSON(needs)).fmt.result == '' "
     "&& '[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\","
     "\"namespace-features:container.privileged=true;job.priority=1\"]' "
-    "|| '[\"namespace-profile-linux-x86\"]') }}"
+    "|| '[\"namespace-profile-linux-x86;container.privileged=true\"]') }}"
 )
 # The runner expression gives the 32-core builder to every job that does not
 # wait for fmt, so exactly these two jobs may have no dependencies.
@@ -42,8 +42,8 @@ BATCHED_CHECKS = [
 ]
 # Each main-only gate runs the command of the task pull requests run.
 ALIASES = {
-    "mainClippy": "clippy",
-    "mainTest": "test",
+    "mainClippy": "nixClippy",
+    "mainTest": "nixDefaultTest",
     "mainDoctest": "nixDoctest",
     "mainBuildImageStream": "nixBuildImageStream",
     "mainBuildExtensionModules": "nixBuildExtensionModules",

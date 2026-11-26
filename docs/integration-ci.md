@@ -102,10 +102,8 @@ requires >=2.329.0 according to its
 Current Namespace/Apple runner execution must establish that qualification;
 local YAML/actionlint checks do not prove it.
 
-The same regeneration now emits the source-declared FlakeHub tag push trigger
-(`v?[0-9]+.[0-9]+.[0-9]+*`) which the older generator omitted. That newly effective
-trigger is intentionally preserved alongside manual dispatch; publication itself
-is not run as local verification. No trigger suppression or implicit version
+The FlakeHub tag workflow that relied on the generator's tag push trigger was
+removed on 2026-11-26. No trigger suppression or implicit version
 fallback is used. Checksums provide release-integrity hardening, not the missing
 independent trusted-verifier boundary. Keep this PR draft until hosted exact-head
 execution and independent exact-head review are complete. The remaining

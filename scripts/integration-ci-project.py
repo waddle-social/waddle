@@ -156,10 +156,17 @@ def execute_pipeline(result, requested_path):
     if path.exists() or path.is_symlink():
         raise ValueError("report already exists before invocation")
     command = ["cuenv", "ci", "--all", "--pipeline", result["pipeline"], "--path", target]
-    environment = {**os.environ, "CUENV_CACHE": "off"}
     # cuenv can execute inline pipeline entries. Compare its selected tasks
     # with the project bindings before allowing the executor to run them.
     with tempfile.TemporaryDirectory() as directory:
+        environment = {**os.environ, "CUENV_CACHE": "off"}
+        if (result["path"], result["project"], result["pipeline"]) == ("operator", "waddle-operator", "queueChecks"):
+            # The strict CRD task needs the local action store to run with its
+            # locked Nix environment. Write-only mode executes every queue task.
+            cache = Path(directory) / "cache"
+            cache.mkdir(mode=0o700)
+            environment.update(CUENV_CACHE="write", CUENV_CACHE_DIR=str(cache),
+                               CUENV_REMOTE_CACHE="", CUENV_REMOTE_CACHE_UPLOAD="false")
         plan = Path(directory) / "plan.json"
         subprocess.run(command + ["--dry-run", "--plan-format", "json", "--output", str(plan)],
                        check=True, env=environment)
@@ -168,9 +175,9 @@ def execute_pipeline(result, requested_path):
                 or projects[0]["pipeline"] != result["pipeline"]
                 or Counter(projects[0]["tasks"]) != Counter(result["task_names"])):
             raise ValueError("cuenv selected tasks differ from the reviewed pipeline bindings")
-    started = time.time()
-    subprocess.run(command, check=True, env=environment)
-    finished = time.time()
+        started = time.time()
+        subprocess.run(command, check=True, env=environment)
+        finished = time.time()
     if git_head() != head or expected_context() != context:
         raise ValueError("candidate/context changed during invocation")
     after = verify_project(read_info(requested_path), read_info(requested_path, metadata=True), requested_path, result["pipeline"])
