@@ -57,6 +57,17 @@ pub trait TenantStore: Send + Sync {
     /// or register Postgres tenant scope).
     async fn provision_tenant(&self, tenant_id: &TenantId) -> Result<(), TenantStoreError>;
 
+    /// Idempotently ensure isolated storage exists and is initialized for `tenant_id`.
+    ///
+    /// Unlike [`Self::provision_tenant`], this succeeds when `tenant_id` is already provisioned
+    /// (for example across process restarts on persistent storage).
+    async fn ensure_tenant(&self, tenant_id: &TenantId) -> Result<(), TenantStoreError> {
+        match self.provision_tenant(tenant_id).await {
+            Ok(()) | Err(TenantStoreError::TenantAlreadyExists(_)) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Acquire a fenced tenant handle after verifying `(tenant_id, holder, placement_generation)`.
     async fn open_tenant(
         &self,

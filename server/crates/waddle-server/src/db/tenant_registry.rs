@@ -54,6 +54,15 @@ impl ServerTenantRegistry {
         self.inner.provision_tenant(tenant_id).await
     }
 
+    /// Idempotently ensure isolated storage (and optional authz store) is
+    /// provisioned and registered for `tenant_id` across restarts.
+    pub async fn ensure_tenant(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Option<TenantAuthzStoreRef>, TenantRegistryError> {
+        self.inner.ensure_tenant(tenant_id).await
+    }
+
     /// Acquire a fenced [`TenantHandleGuard`] for a verified [`TenantQueryScope`].
     pub async fn acquire_tenant(
         &self,

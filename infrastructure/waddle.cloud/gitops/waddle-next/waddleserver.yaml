@@ -61,6 +61,9 @@ spec:
         teamId: 6KXCJGJ45W
         keyId: CJR7U5CXHP
         bundleId: p4x.waddle.social
+  deployment:
+    uuid: 7f97572b-8de7-4e74-bf28-20b3d77e17bf
+    lineageAction: enroll
   clustering:
     enabled: false
   updateStrategy: Recreate

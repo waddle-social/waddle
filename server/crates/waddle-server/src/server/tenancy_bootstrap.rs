@@ -159,10 +159,10 @@ pub async fn bootstrap_turso_tenant_registry(
     }
 
     for tenant_id in &tenants_to_provision {
-        let _ = registry.provision_tenant(tenant_id).await.map_err(|err| {
+        let _ = registry.ensure_tenant(tenant_id).await.map_err(|err| {
             anyhow::anyhow!("failed to provision Turso tenant '{tenant_id}': {err}")
         })?;
-        info!(tenant_id = %tenant_id, "Provisioned Turso tenant store");
+        info!(tenant_id = %tenant_id, "Ensured Turso tenant store");
     }
 
     Ok(Arc::new(registry))

@@ -34,7 +34,10 @@ use waddle_broker::authz::openfga::InProcessOpenFgaServer;
 use waddle_broker::custody::EnrollCredentialInput;
 use waddle_broker::secret::SecretBytes;
 use waddle_broker_core::admission::{BudgetLimits, RoomScopeKey};
-use waddle_broker_core::identity::{AccountId, TenantId};
+use waddle_broker_core::holder_pop::HolderKeypair;
+use waddle_broker_core::identity::{AccountId, SpiffeId, TenantId};
+use waddle_broker_core::placement::FenceGeneration;
+use waddle_broker_core::store::{TenantQueryScope, TenantStore, TenantStoreError};
 use waddle_extensions::host_tools::{InvocationContext, InvocationKind};
 use waddle_extensions::{PluginId, WaddleId};
 use waddle_server::auth::redirect::TrustedWebOrigins;
@@ -57,6 +60,8 @@ use waddle_server::server::extension_inference_host::{
 use waddle_server::server::tenancy_bootstrap::{
     bootstrap_turso_tenant_registry, extract_openfga_store_refs, load_tenant_manifests,
 };
+use waddle_tenancy::data_ops::{TenantDataOps, TenantUserRecord};
+use waddle_tenancy::turso_store::{TursoPoolConfig, TursoTenantStore};
 use waddle_xmpp::protocol::KeepaliveConfig;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -830,4 +835,235 @@ async fn openfga_turso_scaleway_broker_boot_and_credential_resolution_e2e() {
     // Yield briefly for background fence task shutdown.
     tokio::time::sleep(Duration::from_millis(20)).await;
     let _ = acme_tenant;
+}
+
+#[tokio::test]
+async fn bootstrap_turso_tenant_registry_is_idempotent_across_restarts_and_preserves_data() {
+    let fga_server = InProcessOpenFgaServer::start()
+        .await
+        .expect("start openfga");
+    let tmp = TempDir::new().expect("tempdir");
+    let turso_data_dir = tmp.path().join("turso-tenants");
+    let tenants_dir = tmp.path().join("tenants");
+    std::fs::create_dir_all(&tenants_dir).expect("create tenants dir");
+
+    // Include a manifest for the default tenant itself (`waddle.social.json`)
+    // alongside a second tenant to verify deduplication and restart idempotency.
+    std::fs::write(
+        tenants_dir.join("waddle.social.json"),
+        json!({
+            "tenantId": "waddle.social",
+            "owners": ["rawkode", "icepuma", "randax"],
+            "placementMode": "SharedPool"
+        })
+        .to_string(),
+    )
+    .expect("write default tenant manifest");
+    std::fs::write(
+        tenants_dir.join("acme.waddle.social.json"),
+        json!({
+            "tenantId": "acme.waddle.social",
+            "owners": ["alice"],
+            "placementMode": "SharedPool"
+        })
+        .to_string(),
+    )
+    .expect("write acme manifest");
+
+    let manifests = load_tenant_manifests(&tenants_dir)
+        .await
+        .expect("load manifests");
+    let extra_refs = extract_openfga_store_refs(&manifests).expect("extract refs");
+    let default_tenant = TenantId::parse("waddle.social").expect("default tenant");
+    let acme_tenant = TenantId::parse("acme.waddle.social").expect("acme tenant");
+    let turso_cfg = TursoRuntimeConfig {
+        data_dir: turso_data_dir.clone(),
+        reserved_fds: 256,
+        rlimit_nofile: Some(1024),
+    };
+    let server_config = ServerConfig {
+        mode: ServerMode::HomeServer,
+        base_url: "http://localhost:3000".to_owned(),
+        session_key: "test-session-key-32-bytes-minimum".to_owned(),
+        auth: AuthConfig::default(),
+        extensions: waddle_extensions::ExtensionConfig::default(),
+        link_preview: LinkPreviewConfig::default(),
+        ws_keepalive: KeepaliveConfig::default(),
+        max_websocket_connections: MaxWebSocketConnections::default(),
+        spicedb: None,
+        openfga: Some(OpenFgaConfig {
+            endpoint: fga_server.endpoint().to_owned(),
+            api_token: None,
+            consistency: OpenFgaConsistencySetting::HigherConsistency,
+            store_map: HashMap::new(),
+        }),
+        authz_backend: AuthzBackendSelection::Auto,
+        broker: BrokerRuntimeConfig::default(),
+        turso: Some(turso_cfg.clone()),
+        tenancy: MultiTenantConfig {
+            default_tenant_id: Some(default_tenant.clone()),
+            tenants_dir: Some(tenants_dir.clone()),
+        },
+        occupant_id_secret: OccupantIdSecret::try_new(
+            b"test-occupant-id-secret-32-bytes-long".to_vec(),
+        )
+        .expect("occupant secret"),
+        ingress: IngressConfig::default(),
+        clustering: ClusteringConfig::default(),
+        apns: None,
+        fcm: None,
+        trusted_web_origins: TrustedWebOrigins::try_new("http://localhost:3000", None)
+            .expect("trusted origins"),
+        host_grant_restore_epoch: RestoreEpoch::INITIAL,
+    };
+
+    let spiffe_id =
+        SpiffeId::parse("spiffe://waddle.social/ns/waddle-next/sa/waddle").expect("spiffe");
+    let keypair = HolderKeypair::generate().expect("keypair");
+    let holder = keypair.sign_channel_binding(&spiffe_id, &[0x33; 32]);
+    let scope = TenantQueryScope {
+        tenant_id: default_tenant.clone(),
+        holder,
+        placement_generation: FenceGeneration::new(1),
+    };
+    let rawkode_account = AccountId::new_v4();
+
+    // Boot #0: fresh PVC -> creates both DBs, registers OpenFGA stores, writes a tenant row.
+    let boot0_authz_ref = {
+        let (_actor, broker_perm_backend) =
+            PermissionActor::from_server_config_with_broker_backend(
+                &server_config,
+                "waddle.social",
+                &extra_refs,
+            )
+            .await
+            .expect("openfga actor boot #0");
+        let registry = bootstrap_turso_tenant_registry(
+            &turso_cfg,
+            &default_tenant,
+            &manifests,
+            broker_perm_backend,
+        )
+        .await
+        .expect("bootstrap boot #0");
+        assert!(turso_data_dir.join("waddle.social.db").exists());
+        assert!(turso_data_dir.join("acme.waddle.social.db").exists());
+
+        let guard = registry
+            .acquire_tenant(&scope)
+            .await
+            .expect("acquire default tenant boot #0");
+        let authz_ref = guard
+            .authz_ref()
+            .cloned()
+            .expect("authz_ref populated on boot #0");
+        registry
+            .evict_tenant(&default_tenant)
+            .await
+            .expect("evict default tenant boot #0");
+        authz_ref
+    };
+
+    // Persist a user row into waddle.social.db before restarting.
+    {
+        let store = TursoTenantStore::new(
+            &turso_data_dir,
+            TursoPoolConfig {
+                rlimit_nofile_override: turso_cfg.rlimit_nofile,
+                reserved_fds: turso_cfg.reserved_fds,
+            },
+            None,
+        )
+        .expect("direct turso store");
+        assert!(matches!(
+            store.provision_tenant(&default_tenant).await,
+            Err(TenantStoreError::TenantAlreadyExists(_))
+        ));
+        store.open_tenant(&scope).await.expect("open direct store");
+        store
+            .upsert_user(
+                &scope,
+                &TenantUserRecord {
+                    jid: "rawkode@waddle.social".to_owned(),
+                    account_id: rawkode_account,
+                    username: "rawkode".to_owned(),
+                    xmpp_localpart: "rawkode".to_owned(),
+                    display_name: Some("David".to_owned()),
+                },
+            )
+            .await
+            .expect("seed rawkode user");
+        store
+            .checkpoint_and_release(&default_tenant)
+            .await
+            .expect("checkpoint direct store");
+    }
+
+    // Boot #1 (pod restart): same PVC + same OpenFGA -> must succeed cleanly and preserve data!
+    {
+        let (_actor, broker_perm_backend) =
+            PermissionActor::from_server_config_with_broker_backend(
+                &server_config,
+                "waddle.social",
+                &extra_refs,
+            )
+            .await
+            .expect("openfga actor boot #1");
+        let registry = bootstrap_turso_tenant_registry(
+            &turso_cfg,
+            &default_tenant,
+            &manifests,
+            broker_perm_backend,
+        )
+        .await
+        .expect("bootstrap boot #1 must succeed when tenant DBs already exist");
+
+        let guard = registry
+            .acquire_tenant(&scope)
+            .await
+            .expect("acquire default tenant boot #1");
+        let boot1_authz_ref = guard
+            .authz_ref()
+            .cloned()
+            .expect("authz_ref must remain populated after restart");
+        assert_eq!(boot1_authz_ref.store_id, boot0_authz_ref.store_id);
+        assert_eq!(boot1_authz_ref.model_version, boot0_authz_ref.model_version);
+
+        // Verify the second manifest tenant also acquires cleanly after restart.
+        let acme_scope = TenantQueryScope {
+            tenant_id: acme_tenant.clone(),
+            holder: scope.holder.clone(),
+            placement_generation: FenceGeneration::new(1),
+        };
+        let acme_guard = registry
+            .acquire_tenant(&acme_scope)
+            .await
+            .expect("acquire acme tenant boot #1");
+        assert!(acme_guard.authz_ref().is_some());
+        registry
+            .evict_tenant(&default_tenant)
+            .await
+            .expect("evict default tenant boot #1");
+    }
+
+    // Confirm the user row written prior to restart is still intact.
+    {
+        let store = TursoTenantStore::new(
+            &turso_data_dir,
+            TursoPoolConfig {
+                rlimit_nofile_override: turso_cfg.rlimit_nofile,
+                reserved_fds: turso_cfg.reserved_fds,
+            },
+            None,
+        )
+        .expect("verify turso store");
+        store.open_tenant(&scope).await.expect("open verify store");
+        let user = store
+            .get_user_by_localpart(&scope, "rawkode")
+            .await
+            .expect("query rawkode")
+            .expect("rawkode user must survive restart");
+        assert_eq!(user.account_id, rawkode_account);
+        assert_eq!(user.display_name.as_deref(), Some("David"));
+    }
 }

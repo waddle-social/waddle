@@ -141,6 +141,30 @@ impl TenantRegistry {
         Ok(authz_ref)
     }
 
+    /// Idempotently ensure isolated storage (and optional authz store) is
+    /// provisioned and registered for `tenant_id`.
+    ///
+    /// Unlike [`Self::provision_tenant`], this succeeds when `tenant_id` already
+    /// exists on persistent storage (for example across process restarts) while
+    /// still ensuring the schema and authz store reference are initialized.
+    pub async fn ensure_tenant(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Option<TenantAuthzStoreRef>, TenantRegistryError> {
+        self.store.ensure_tenant(tenant_id).await?;
+        let authz_ref = match &self.permissions {
+            Some(backend) => Some(backend.provision_tenant_store(tenant_id).await?),
+            None => None,
+        };
+        self.entries.insert(
+            tenant_id.clone(),
+            Arc::new(TenantRegistryEntry {
+                authz_ref: authz_ref.clone(),
+            }),
+        );
+        Ok(authz_ref)
+    }
+
     /// Acquire a fenced [`TenantHandleGuard`] for `scope`.
     ///
     /// Verifies provisioning, holder identity, and `placement_generation` via
