@@ -322,55 +322,67 @@ extension View {
 struct MessageLinkPreviewCard: View {
     @Environment(\.openURL) private var openURL
     let preview: LinkPreview
+    /// Off where the card is shown for a draft: there it is what will be sent, not a link.
+    var opensLink = true
 
     var body: some View {
-        Button {
-            openURL(preview.url)
-        } label: {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Label {
-                    Text(preview.url.host ?? preview.url.absoluteString)
-                } icon: {
-                    Image(systemName: "arrow.up.forward.square")
+        Group {
+            if opensLink {
+                Button {
+                    openURL(preview.url)
+                } label: {
+                    card
                 }
-                .huddleText(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.fgMuted)
-                .lineLimit(1)
-                if let title = preview.title, !title.isEmpty {
-                    Text(title)
-                        .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.md).weight(700))
-                        .foregroundStyle(Theme.Colors.fg)
-                        .lineLimit(2)
-                }
-                if let summary = preview.summary, !summary.isEmpty {
-                    Text(summary)
-                        .huddleText(Theme.Typography.caption.sized(WaddleTokens.FontSize.sm))
-                        .foregroundStyle(Theme.Colors.fgMuted)
-                        .lineLimit(3)
-                }
-                if let imageURL = preview.imageURL {
-                    previewImage(imageURL)
-                        .padding(.top, Theme.Spacing.xs)
-                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(preview.title ?? preview.url.absoluteString))
+                .accessibilityAddTraits(.isLink)
+            } else {
+                card
             }
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(Theme.Spacing.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .fill(Theme.Colors.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                    .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
         }
-        .buttonStyle(.plain)
         .frame(maxWidth: Theme.Size.mediaMaxWidth + Theme.Spacing.m * 2, alignment: .leading)
-        .accessibilityLabel(Text(preview.title ?? preview.url.absoluteString))
-        .accessibilityAddTraits(.isLink)
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Label {
+                Text(preview.url.host ?? preview.url.absoluteString)
+            } icon: {
+                Image(systemName: "arrow.up.forward.square")
+            }
+            .huddleText(Theme.Typography.caption)
+            .foregroundStyle(Theme.Colors.fgMuted)
+            .lineLimit(1)
+            if let title = preview.title, !title.isEmpty {
+                Text(title)
+                    .huddleText(Theme.Typography.label.sized(WaddleTokens.FontSize.md).weight(700))
+                    .foregroundStyle(Theme.Colors.fg)
+                    .lineLimit(2)
+            }
+            if let summary = preview.summary, !summary.isEmpty {
+                Text(summary)
+                    .huddleText(Theme.Typography.caption.sized(WaddleTokens.FontSize.sm))
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .lineLimit(3)
+            }
+            if let imageURL = preview.imageURL {
+                previewImage(imageURL)
+                    .padding(.top, Theme.Spacing.xs)
+            }
+        }
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(Theme.Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                .fill(Theme.Colors.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
     }
 
     private func previewImage(_ url: URL) -> some View {

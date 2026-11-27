@@ -59,8 +59,8 @@ extension FFIInbound {
 
     /// A live stanza, with the live-only payloads (chat state, markers,
     /// pin broadcasts, XEP-0490 sibling cursors).
-    static func wireMessage(_ message: WaddleMessage) -> WireMessage? {
-        guard var wire = wireMessage(fields: message, source: .live) else { return nil }
+    static func wireMessage(_ message: WaddleMessage, mediaOrigin: URL?) -> WireMessage? {
+        guard var wire = wireMessage(fields: message, source: .live, mediaOrigin: mediaOrigin) else { return nil }
         wire.chatState = message.chatState.map(chatState)
         wire.displayedMarkerRequested = message.displayedMarkerRequested
         wire.displayedMarkerID = message.displayedMarkerId
@@ -72,17 +72,18 @@ extension FFIInbound {
 
     /// A XEP-0313 row. Rows carrying call signalling are dropped: calls
     /// are not part of the timeline surface.
-    static func wireMessage(_ archived: WaddleArchivedMessage) -> WireMessage? {
+    static func wireMessage(_ archived: WaddleArchivedMessage, mediaOrigin: URL?) -> WireMessage? {
         guard archived.callEvent == nil else { return nil }
-        guard var wire = wireMessage(fields: archived, source: .archive(mamID: archived.mamId)) else { return nil }
+        guard var wire = wireMessage(fields: archived, source: .archive(mamID: archived.mamId), mediaOrigin: mediaOrigin)
+        else { return nil }
         // The room's XEP-0045 item names the account, not a resource.
         wire.authorRealJID = jid(archived.authorRealJid)?.bare
         return wire
     }
 
-    static func archivePage(_ page: WaddleMamPage) -> ArchivePage {
+    static func archivePage(_ page: WaddleMamPage, mediaOrigin: URL?) -> ArchivePage {
         ArchivePage(
-            messages: page.messages.compactMap { wireMessage($0) },
+            messages: page.messages.compactMap { wireMessage($0, mediaOrigin: mediaOrigin) },
             first: page.firstId,
             isComplete: page.isComplete
         )
@@ -91,7 +92,7 @@ extension FFIInbound {
     /// Nil when a sender is present but unparseable: an absent `from`
     /// means the account's own server (RFC 6120 §8.1.2.1), so it must not
     /// stand in for one we could not read.
-    static func wireMessage(fields: some FFIMessageFields, source: WireMessage.Source) -> WireMessage? {
+    static func wireMessage(fields: some FFIMessageFields, source: WireMessage.Source, mediaOrigin: URL?) -> WireMessage? {
         let from = jid(fields.from)
         guard fields.from == nil || from != nil else { return nil }
         var wire = WireMessage(
@@ -121,7 +122,7 @@ extension FFIInbound {
             isSticker: fields.isSticker,
             stickerPack: fields.stickerPack.flatMap(stickerReference),
             sharedFiles: fields.sharedFiles.compactMap(sharedFile),
-            linkPreviews: fields.linkPreviews.compactMap(linkPreview),
+            linkPreviews: fields.linkPreviews.compactMap { linkPreview($0, mediaOrigin: mediaOrigin) },
             isMucUser: fields.mucUser
         )
         wire.callThread = fields.callThread.flatMap(callThreadAnchor)

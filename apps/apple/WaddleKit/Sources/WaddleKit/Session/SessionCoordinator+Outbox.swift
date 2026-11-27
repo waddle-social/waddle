@@ -92,6 +92,9 @@ extension SessionCoordinator {
     /// when the FFI creates a fresh stream. The stable client id makes uncertain
     /// delivery an at-least-once retry, matching the persisted outbox policy.
     func requeueUnconfirmedSendsForFreshStream() {
+        for index in outboundQueue.indices {
+            outboundQueue[index] = outboundQueue[index].withoutLinkPreview()
+        }
         var seen = Set<String>()
         let unconfirmed = sentOrder.compactMap { clientID -> OutboundMessage? in
             guard seen.insert(clientID).inserted,
@@ -135,7 +138,7 @@ extension SessionCoordinator {
     }
 
     private func persisted(_ message: OutboundMessage, state: PersistedOutbound.State) -> PersistedOutbound {
-        PersistedOutbound(message: message, createdAt: composedAt(message), state: state)
+        PersistedOutbound(message: message.withoutLinkPreview(), createdAt: composedAt(message), state: state)
     }
 
     /// The echo's first-seen time; once a long wait trimmed the echo from

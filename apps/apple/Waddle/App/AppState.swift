@@ -752,7 +752,8 @@ final class ActiveSession {
         self.auth = auth
         self.callMedia = callMedia
         self.coordinator = SessionCoordinator(
-            account: account, port: FFIXmppPort(config: config), outboxStore: outbox,
+            account: account, port: FFIXmppPort(config: config, linkPreviewMediaOrigin: auth.linkPreviewMediaOrigin),
+            outboxStore: outbox,
             handlesCalls: true, callMedia: callMedia
         )
         coordinator.sendsReadReceipts = preferences.sendsReadReceipts

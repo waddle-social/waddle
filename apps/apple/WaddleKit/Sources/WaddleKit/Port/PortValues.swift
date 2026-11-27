@@ -44,6 +44,10 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     /// XEP-0449: the message is a sticker, whose picture is the one file
     /// in `sharedFiles`.
     public var sticker: StickerReference?
+    public var linkPreviewToken: LinkPreviewToken? { linkPreview?.token }
+    /// Omitted from CodingKeys. This authorization expires and is valid for
+    /// the live send only, so a restored outbox must never replay it.
+    var linkPreview: LinkPreviewPayload? = nil
 
     /// XEP-0461 reply with its XEP-0428 fallback range.
     public struct Reply: Hashable, Sendable, Codable {

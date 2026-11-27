@@ -106,15 +106,21 @@ extension FFIInbound {
 
     /// `urn:waddle:link-preview:0` card, keyed on the normalized URL when
     /// the server supplied one.
-    static func linkPreview(_ preview: WaddleLinkPreview) -> LinkPreview? {
+    static func linkPreview(_ preview: WaddleLinkPreview, mediaOrigin: URL?) -> LinkPreview? {
         guard let location = webURL(preview.normalizedUrl) ?? webURL(preview.originalUrl) else { return nil }
+        let image = linkPreviewImage(preview.image, mediaOrigin: mediaOrigin)
         return LinkPreview(
             url: location,
             title: preview.title,
             summary: preview.description,
-            imageURL: webURL(preview.image?.url),
-            imageAlt: preview.image?.alt
+            imageURL: image,
+            imageAlt: image == nil ? nil : preview.image?.alt,
+            originalURL: preview.originalUrl
         )
+    }
+
+    static func linkPreviewImage(_ image: WaddleLinkPreviewImage?, mediaOrigin: URL?) -> URL? {
+        LinkPreviewMedia.trustedImageURL(image?.url, mediaType: image?.mediaType, origin: mediaOrigin)
     }
 
     static func pinPreview(_ preview: WaddlePinPreview) -> PinPreview {

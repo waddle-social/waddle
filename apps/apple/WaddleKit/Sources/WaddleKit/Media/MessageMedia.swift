@@ -55,7 +55,10 @@ public struct MessageMedia: Sendable {
         inlineBody = inlineImage == nil ? .text : .withheld
         visibleAttachments = hiddenFiles.isEmpty ? attachments : attachments.filter { !Self.gatesAttachment($0) }
         linkPreviews = previews.map { preview in
-            LinkPreview(url: preview.url, title: preview.title, summary: preview.summary, imageURL: nil, imageAlt: nil)
+            LinkPreview(
+                url: preview.url, title: preview.title, summary: preview.summary, imageURL: nil, imageAlt: nil,
+                originalURL: preview.originalURL
+            )
         }
         stickerPackLocation = nil
         withheld = items.isEmpty ? nil : Withheld(host: host, items: items)

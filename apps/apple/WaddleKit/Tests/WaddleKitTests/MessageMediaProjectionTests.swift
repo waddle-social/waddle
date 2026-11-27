@@ -37,7 +37,7 @@ struct MessageMediaProjectionTests {
     @Test func withholdingDoesNotExposeImageURLsToRenderers() throws {
         var row = directRow()
         row.body = mediaURL("clip.gif").absoluteString
-        let preview = LinkPreview(url: mediaURL("page"), title: "Title", summary: "Summary", imageURL: mediaURL("poster.png"), imageAlt: "Poster")
+        let preview = LinkPreview(url: mediaURL("page"), title: "Title", summary: "Summary", imageURL: mediaURL("poster.png"), imageAlt: "Poster", originalURL: nil)
         row.message.linkPreviews = [preview]
 
         let presented = MessageMedia(item: row, decision: .withheld(host: Host("remote.test")))
@@ -65,7 +65,7 @@ struct MessageMediaProjectionTests {
             SharedFile(url: mediaURL("sound.mp3"), disposition: .inline),
         ]
         row.message.linkPreviews = [
-            LinkPreview(url: mediaURL("page"), title: nil, summary: nil, imageURL: mediaURL("poster.png"), imageAlt: nil),
+            LinkPreview(url: mediaURL("page"), title: nil, summary: nil, imageURL: mediaURL("poster.png"), imageAlt: nil, originalURL: nil),
         ]
 
         let withheld = MessageMedia(item: row, decision: .withheld(host: Host("remote.test")))

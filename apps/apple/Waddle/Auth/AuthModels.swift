@@ -22,6 +22,7 @@ struct AuthSession: Decodable, Equatable {
     let username: String
     let jid: String
     let xmppWebsocketURL: String
+    let linkPreviewMediaOrigin: String?
     let isExpired: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -29,6 +30,7 @@ struct AuthSession: Decodable, Equatable {
         case username
         case jid
         case xmppWebsocketURL = "xmpp_websocket_url"
+        case linkPreviewMediaOrigin = "link_preview_media_origin"
         case isExpired = "is_expired"
     }
 }

@@ -48,20 +48,17 @@ struct ConversationComposer: View {
             // Suggestions and notices open away from the screen edge the
             // composer sits on: above it at the bottom, below it at the
             // top in the social order.
-            if isTopPinned {
-                ComposerContextBanner(model: model)
-                composerCard
-                suggestionsAndNotices(presentation.list)
-            } else {
-                suggestionsAndNotices(presentation.list)
-                ComposerContextBanner(model: model)
-                composerCard
-            }
+            if !isTopPinned { suggestionsAndNotices(presentation.list) }
+            ComposerContextBanner(model: model)
+            ComposerLinkPreviewAccessory(model: model)
+            composerCard
+            if isTopPinned { suggestionsAndNotices(presentation.list) }
         }
         .padding(.horizontal, Theme.Spacing.m)
         .padding(.top, Theme.Spacing.s)
         .padding(.bottom, Theme.Spacing.s)
         .background(Theme.Colors.bg)
+        .modifier(ComposerLinkPreviewUpdates(model: model, conversation: conversation))
         .modifier(ComposerAttachmentPickers(
             showsPhotoPicker: $showsPhotoPicker,
             showsFileImporter: $showsFileImporter,
@@ -220,6 +217,7 @@ struct ConversationComposer: View {
     // MARK: - Sending and slash commands
 
     private func submit() {
+        guard !model.linkPreviews.isPreparing else { return }
         // An open list takes Send before anything else, in an edit too, as it takes Return.
         if let pick = suggestionPresentation.pickForSubmit(in: model.text) { return apply(pick) }
         guard !model.isEditing else {
@@ -274,28 +272,34 @@ struct ConversationComposer: View {
     }
 
     private func sendDraft() {
-        guard let submission = model.takeSubmission(thread: thread) else { return }
-        draftRevision += 1
-        dispatch(submission)
+        Task {
+            await model.submitDraft(thread: thread, session: session, in: conversation) { submission, payload, onQueued in
+                // What is sent leaves the field, and its undo history with it.
+                draftRevision += 1
+                await dispatch(submission, payload, onQueued)
+            }
+        }
     }
 
     /// A picked GIF is sent as a message whose body is its URL.
     private func sendGIF(_ item: GifSearchItem) {
         gifSearch = nil
-        dispatch(model.takeLinkSubmission(item.originalURL, thread: thread))
+        let submission = model.takeLinkSubmission(item.originalURL, thread: thread)
+        Task { await dispatch(submission) }
     }
 
     private func sendSticker(_ sticker: Sticker, from pack: StickerPack) {
         showsStickers = false
-        dispatch(model.takeStickerSubmission(sticker, from: pack, thread: thread))
+        let submission = model.takeStickerSubmission(sticker, from: pack, thread: thread)
+        Task { await dispatch(submission) }
     }
 
-    private func dispatch(_ submission: ComposerSubmission) {
+    private func dispatch(
+        _ submission: ComposerSubmission, _ payload: LinkPreviewPayload? = nil,
+        _ onQueued: @escaping @MainActor @Sendable () -> Void = {}
+    ) async {
         sendCount += 1
-        let model = self.model
-        let session = self.session
-        let conversation = self.conversation
-        Task { await model.perform(submission, session: session, in: conversation) }
+        await model.perform(submission, session: session, in: conversation, linkPreview: payload, onQueued: onQueued)
     }
 
     /// Escape with the suggestion list closed leaves edit mode, else drops the reply.
