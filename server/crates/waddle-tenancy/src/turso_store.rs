@@ -410,6 +410,43 @@ impl TursoTenantStore {
         Ok(())
     }
 
+    async fn apply_tenant_schema(conn: &turso::Connection) -> Result<(), TenantStoreError> {
+        for stmt in TENANT_SCHEMA_STATEMENTS {
+            conn.execute(stmt, ()).await.map_err(|err| {
+                TenantStoreError::Backend(format!("tenant schema DDL failed: {err}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn initialize_schema_and_flush(path: &Path) -> Result<(), TenantStoreError> {
+        let (db, conn) = Self::open_raw_turso_db(path).await?;
+        Self::apply_tenant_schema(&conn).await?;
+        Self::checkpoint_and_flush(&conn).await?;
+        drop(conn);
+        drop(db);
+        Ok(())
+    }
+
+    async fn remove_tenant_files(db_path: &Path) -> Result<(), TenantStoreError> {
+        let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+        for candidate in [db_path.to_path_buf(), wal_path, shm_path] {
+            let exists = tokio::fs::try_exists(&candidate).await.map_err(|err| {
+                TenantStoreError::Backend(format!("failed to stat {}: {err}", candidate.display()))
+            })?;
+            if exists {
+                tokio::fs::remove_file(&candidate).await.map_err(|err| {
+                    TenantStoreError::Backend(format!(
+                        "failed to remove {}: {err}",
+                        candidate.display()
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn map_fd_pool_err(&self, err: FdPoolError) -> TenantStoreError {
         match err {
             FdPoolError::AllHandlesPinned => TenantStoreError::FdPoolExhausted {
@@ -818,16 +855,32 @@ impl TenantStore for TursoTenantStore {
         if exists {
             return Err(TenantStoreError::TenantAlreadyExists(tenant_id.clone()));
         }
-        let (db, conn) = Self::open_raw_turso_db(&path).await?;
-        for stmt in TENANT_SCHEMA_STATEMENTS {
-            conn.execute(stmt, ()).await.map_err(|err| {
-                TenantStoreError::Backend(format!("tenant schema DDL failed: {err}"))
-            })?;
+        if let Err(err) = Self::initialize_schema_and_flush(&path).await {
+            let _ = Self::remove_tenant_files(&path).await;
+            return Err(err);
         }
-        Self::checkpoint_and_flush(&conn).await?;
-        drop(conn);
-        drop(db);
         Ok(())
+    }
+
+    async fn ensure_tenant(&self, tenant_id: &TenantId) -> Result<(), TenantStoreError> {
+        let path = self.tenant_db_path(tenant_id)?;
+        let exists = tokio::fs::try_exists(&path).await.map_err(|err| {
+            TenantStoreError::Backend(format!("failed to stat {}: {err}", path.display()))
+        })?;
+        if !exists {
+            return self.provision_tenant(tenant_id).await;
+        }
+        let already_open = {
+            let guard = self.pool.lock().await;
+            guard.lru.contains(tenant_id)
+        };
+        if already_open {
+            let pinned = self.acquire_pinned_conn(tenant_id).await?;
+            let conn = pinned.lock_conn().await;
+            Self::apply_tenant_schema(&conn).await?;
+            return Ok(());
+        }
+        Self::initialize_schema_and_flush(&path).await
     }
 
     async fn open_tenant(
@@ -893,22 +946,7 @@ impl TenantStore for TursoTenantStore {
         self.checkpoint_and_release(tenant_id).await?;
         self.local_fences.lock().await.remove(tenant_id);
         let db_path = self.tenant_db_path(tenant_id)?;
-        let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
-        let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
-        for candidate in [db_path, wal_path, shm_path] {
-            let exists = tokio::fs::try_exists(&candidate).await.map_err(|err| {
-                TenantStoreError::Backend(format!("failed to stat {}: {err}", candidate.display()))
-            })?;
-            if exists {
-                tokio::fs::remove_file(&candidate).await.map_err(|err| {
-                    TenantStoreError::Backend(format!(
-                        "failed to remove {}: {err}",
-                        candidate.display()
-                    ))
-                })?;
-            }
-        }
-        Ok(())
+        Self::remove_tenant_files(&db_path).await
     }
 }
 

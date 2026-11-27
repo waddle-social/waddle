@@ -67,6 +67,10 @@ impl TenantStore for ServerTursoTenantStore {
         self.inner.provision_tenant(tenant_id).await
     }
 
+    async fn ensure_tenant(&self, tenant_id: &TenantId) -> Result<(), TenantStoreError> {
+        self.inner.ensure_tenant(tenant_id).await
+    }
+
     async fn open_tenant(
         &self,
         scope: &TenantQueryScope,

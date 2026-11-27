@@ -781,3 +781,92 @@ async fn cancelled_cold_open_neither_leaks_fd_pool_nor_livelocks_waiters() {
     let (_, pinned_final, _) = store.pool_stats().await;
     assert_eq!(pinned_final, 0, "zero pins must remain after cleanup");
 }
+
+#[tokio::test]
+async fn turso_ensure_tenant_is_idempotent_across_restarts_and_preserves_data() {
+    let dir = tempdir().expect("tempdir");
+    let pool_cfg = TursoPoolConfig {
+        rlimit_nofile_override: Some(320),
+        reserved_fds: 256,
+    };
+    let tenant = TenantId::parse("waddle.social").expect("valid tenant");
+    let holder = make_holder(
+        "spiffe://waddle.social/ns/waddle-next/sa/waddle",
+        [0x77; 32],
+    );
+    let scope = TenantQueryScope {
+        tenant_id: tenant.clone(),
+        holder: holder.clone(),
+        placement_generation: FenceGeneration::new(1),
+    };
+    let alice_id = AccountId::new_v4();
+
+    // Boot #1: fresh directory -> ensure_tenant creates DB, writes a user, and shuts down.
+    {
+        let store = TursoTenantStore::new(dir.path(), pool_cfg, None).expect("turso store #1");
+        store
+            .ensure_tenant(&tenant)
+            .await
+            .expect("ensure_tenant boot #1");
+        assert!(matches!(
+            store.provision_tenant(&tenant).await,
+            Err(TenantStoreError::TenantAlreadyExists(_))
+        ));
+        store.open_tenant(&scope).await.expect("open boot #1");
+        store
+            .upsert_user(
+                &scope,
+                &TenantUserRecord {
+                    jid: "alice@waddle.social".to_owned(),
+                    account_id: alice_id,
+                    username: "alice".to_owned(),
+                    xmpp_localpart: "alice".to_owned(),
+                    display_name: Some("Alice".to_owned()),
+                },
+            )
+            .await
+            .expect("upsert alice");
+        store
+            .checkpoint_and_release(&tenant)
+            .await
+            .expect("checkpoint boot #1");
+    }
+
+    // Boot #2: simulated pod restart against the existing persistent volume.
+    {
+        let store =
+            Arc::new(TursoTenantStore::new(dir.path(), pool_cfg, None).expect("turso store #2"));
+        let registry = TenantRegistry::new(
+            Arc::clone(&store) as Arc<dyn TenantStore>,
+            None,
+            TenantResourceQuotas::default(),
+        )
+        .expect("registry #2");
+
+        registry
+            .ensure_tenant(&tenant)
+            .await
+            .expect("ensure_tenant boot #2 must succeed on existing DB");
+        let (open_after_ensure, pinned_after_ensure, _) = store.pool_stats().await;
+        assert_eq!(open_after_ensure, 0);
+        assert_eq!(pinned_after_ensure, 0);
+
+        // Warm re-ensure while open must also succeed without leaking pins.
+        let _guard = registry
+            .acquire_tenant(&scope)
+            .await
+            .expect("acquire boot #2");
+        registry
+            .ensure_tenant(&tenant)
+            .await
+            .expect("warm ensure_tenant must succeed");
+
+        let loaded = store
+            .get_user_by_localpart(&scope, "alice")
+            .await
+            .expect("read alice after restart")
+            .expect("alice must survive restart");
+        assert_eq!(loaded.account_id, alice_id);
+        assert_eq!(loaded.display_name.as_deref(), Some("Alice"));
+    }
+}
