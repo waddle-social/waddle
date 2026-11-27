@@ -141,10 +141,15 @@ class AppGraph(
     /** Current server origin, for callers that need it as a fallback. */
     val serverUrl: String get() = serverSelection.current.value
 
-    val authApi: WaddleAuthApi = WaddleAuthApi({ serverSelection.current.value }, okHttpClient)
+    /**
+     * REST auth client bound to one origin. Nothing holds a process-wide
+     * client: each caller names the server the credential belongs to, so a
+     * session id can never be presented to another origin.
+     */
+    fun authApiFor(origin: String): WaddleAuthApi = WaddleAuthApi(origin, okHttpClient)
 
     val loginGateway: () -> LoginAuthGateway =
-        loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
+        loginGatewayFactory ?: { WaddleLoginAuthGateway { authApiFor(serverSelection.current.value) } }
 
     /**
      * GIF search over the web client's `/api/giphy` proxy. The XMPP/auth
@@ -219,10 +224,23 @@ class AppGraph(
     /** The signed-in REST session (jid/username/avatar); `null` when signed out. */
     val currentSession: StateFlow<WaddleSessionInfo?> = _currentSession.asStateFlow()
 
+    private val _sessionOrigin = MutableStateFlow<String?>(null)
+
+    /**
+     * Origin the signed-in session belongs to; `null` when signed out. Home
+     * media trust and other per-server scoping read this, never the login
+     * screen's [serverSelection] (which can differ once a user is browsing
+     * for another server).
+     */
+    val sessionOrigin: StateFlow<String?> = _sessionOrigin.asStateFlow()
+
     val bootstrap: SessionBootstrap = SessionBootstrap(
-        sessionPrefs = sessionPrefs,
-        authApi = authApi,
-        loadServer = { serverSelection.load(sessionPrefs.serverUrl.first()) },
+        authApiFor = ::authApiFor,
+        loadStoredSession = {
+            val stored = sessionPrefs.serverUrl.first()?.takeIf { it.isNotBlank() }
+            serverSelection.load(stored)
+            sessionPrefs.sessionId.first()?.let { StoredSession(it, stored ?: serverSelection.current.value) }
+        },
         signIn = ::signIn,
         signOutLocally = { sessionManager.logout() },
         managerAppState = sessionManager.appState,
@@ -396,11 +414,12 @@ class AppGraph(
     }
 
     /** Persist + start the XMPP session for a validated REST session. */
-    suspend fun signIn(session: WaddleSessionInfo) {
+    suspend fun signIn(session: WaddleSessionInfo, origin: String = serverSelection.current.value) {
         _currentSession.value = session
+        _sessionOrigin.value = origin
         // The origin this session belongs to, beside its id: the unit a
         // per-account list will key on.
-        sessionPrefs.setServerUrl(serverSelection.current.value)
+        sessionPrefs.setServerUrl(origin)
         sessionManager.login(session)
     }
 
@@ -427,13 +446,15 @@ class AppGraph(
     /** Local-first sign-out; the server logout is best-effort async. */
     suspend fun signOut() {
         val sessionId = sessionPrefs.sessionId.first()
+        val origin = _sessionOrigin.value ?: sessionPrefs.serverUrl.first() ?: serverSelection.current.value
         messageNotifier.clearAll()
         _currentSession.value = null
+        _sessionOrigin.value = null
         sessionManager.logout()
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
         // sign-out, nor wait on the push teardown below.
-        applicationScope.launch { authApi.logout(sessionId) }
+        applicationScope.launch { authApiFor(origin).logout(sessionId) }
         runCatching { push.unregister() }
     }
 }

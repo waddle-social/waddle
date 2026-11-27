@@ -74,6 +74,7 @@ fun ChannelScreen(
         factory = ChannelViewModel.factory(graph, roomJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
+    val sessionOrigin by graph.sessionOrigin.collectAsStateWithLifecycle()
     val isRoomOwner by viewModel.isRoomOwner.collectAsStateWithLifecycle()
     var roomSettingsOpen by remember { mutableStateOf(false) }
 
@@ -168,7 +169,7 @@ fun ChannelScreen(
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
         onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
-        trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        trustedMediaOrigin = trustedPreviewOriginOf(session, sessionOrigin),
         slashCommandHost = SlashCommandHost(
             controller = rememberExtensionCommandController(graph),
             roomJid = roomJid,

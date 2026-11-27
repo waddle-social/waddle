@@ -77,6 +77,7 @@ fun GroupDmScreen(
         factory = ChannelViewModel.factory(graph, roomJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
+    val sessionOrigin by graph.sessionOrigin.collectAsStateWithLifecycle()
     val groupDms by graph.sessionManager.roomStore.groupDms.collectAsStateWithLifecycle()
     // Renames land via the topology refresh (server-rewritten
     // bookmarks), so the live store name wins over the nav argument.
@@ -97,7 +98,7 @@ fun GroupDmScreen(
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
         onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
-        trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        trustedMediaOrigin = trustedPreviewOriginOf(session, sessionOrigin),
         extraTopBarActions = {
             IconButton(
                 onClick = onOpenMembers,
