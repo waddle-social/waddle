@@ -1,5 +1,6 @@
 package social.waddle.android
 
+import android.app.Activity
 import android.content.Context
 import android.net.ConnectivityManager
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -11,17 +12,21 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import social.waddle.android.client.ClientFactory
@@ -33,6 +38,11 @@ import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.RustClientFactory
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.account.Account
+import social.waddle.android.client.account.AccountRegistry
+import social.waddle.android.client.account.AccountStoreProvider
+import social.waddle.android.client.account.AccountStores
+import social.waddle.android.client.account.LegacySessionMigration
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
@@ -40,14 +50,12 @@ import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.prefs.accountRegistryDataStore
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
 import social.waddle.android.client.push.PushStatus
-import social.waddle.android.client.push.pushStatusOf
 import social.waddle.android.client.server.ServerDiscovery
 import social.waddle.android.client.server.ServerSelection
-import social.waddle.android.client.session.fixedRateTicks
-import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.call.CallMediaController
 import social.waddle.android.feature.call.CallSessionController
 import social.waddle.android.feature.call.LiveKitCallMediaController
@@ -58,7 +66,7 @@ import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
 import social.waddle.android.flavour.Distribution
-import social.waddle.android.jid.localpartOf
+import social.waddle.android.jid.bareJidOf
 import social.waddle.android.push.AlarmWakeTimer
 import social.waddle.android.push.AndroidKeystoreWrapper
 import social.waddle.android.push.ConnectionDemand
@@ -68,24 +76,29 @@ import social.waddle.android.push.KeyWrapper
 import social.waddle.android.push.PowerManagerWakeLocks
 import social.waddle.android.push.PushCoordinator
 import social.waddle.android.push.PushDistributor
-import social.waddle.android.push.PushMessageHandler
 import social.waddle.android.push.needsStream
-import social.waddle.android.push.pushSummaryOf
-import social.waddle.android.service.CallNotifier
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
-import social.waddle.android.service.SessionPrefsPushedItems
+import java.io.File
 
 /**
  * Single manual-DI composition root, created once by [WaddleApplication].
  * Everything the UI, service, and receivers need hangs off this graph —
  * no Hilt.
  *
+ * Per-account state lives in [AccountRuntime]s (one per signed-in account,
+ * all connected up to [LIVE_ACCOUNT_CAP]); the graph owns what is shared
+ * across them and exposes the selected account's runtime through the
+ * `sessionManager`, `sessionPrefs`, `currentSession`... passthroughs, so
+ * screens keep reading "the current account" without knowing there are
+ * several.
+ *
  * Every parameter defaults to the production wiring; instrumentation
  * tests construct a second graph with fakes (in-memory DataStores are
  * mandatory there — a second graph on the real preference delegates
  * crashes with "multiple DataStores active for the same file").
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class AppGraph(
     context: Context,
     clientFactory: ClientFactory = RustClientFactory(),
@@ -95,7 +108,11 @@ class AppGraph(
      * see [serverSelection].
      */
     defaultServerUrl: String = BuildConfig.WADDLE_SERVER_URL,
-    sessionStore: DataStore<Preferences>? = null,
+    /** The pre-accounts single session file, moved into the first account once. */
+    legacySessionStore: DataStore<Preferences>? = null,
+    /** Where each account's session store lives; default one file per account. */
+    accountStores: AccountStoreProvider? = null,
+    accountRegistryStore: DataStore<Preferences>? = null,
     userStore: DataStore<Preferences>? = null,
     networkSignal: NetworkSignal? = null,
     loginGatewayFactory: (() -> LoginAuthGateway)? = null,
@@ -129,7 +146,13 @@ class AppGraph(
 
     val okHttpClient: OkHttpClient = OkHttpClient()
 
-    val sessionPrefs: SessionPrefs = SessionPrefs(sessionStore ?: appContext.sessionPreferencesDataStore)
+    private val legacySessionStore: DataStore<Preferences> =
+        legacySessionStore ?: appContext.sessionPreferencesDataStore
+    private val accountStores: AccountStoreProvider =
+        accountStores ?: AccountStores(File(appContext.filesDir, "datastore"))
+    private val accountRegistry = AccountRegistry(accountRegistryStore ?: appContext.accountRegistryDataStore)
+    private val defaultOrigin: String = defaultServerUrl
+
     val userPrefs: UserPrefs = UserPrefs(userStore ?: appContext.userPreferencesDataStore)
 
     /** The server in use: the build default until a custom one is chosen. */
@@ -137,9 +160,6 @@ class AppGraph(
 
     /** Validates and resolves a typed server address (host-meta aware). */
     val serverDiscovery: ServerDiscovery = ServerDiscovery(okHttpClient)
-
-    /** Current server origin, for callers that need it as a fallback. */
-    val serverUrl: String get() = serverSelection.current.value
 
     /**
      * REST auth client bound to one origin. Nothing holds a process-wide
@@ -173,26 +193,119 @@ class AppGraph(
         ),
     )
 
-    val sessionManager: XmppSessionManager = XmppSessionManager(
-        sessionPrefs = sessionPrefs,
-        clientFactory = clientFactory,
-        networkSignal = this.networkSignal,
+    // ---- accounts -------------------------------------------------------
+
+    private val accountsLock = Any()
+    private val _accounts = MutableStateFlow<List<Account>>(emptyList())
+
+    /** Every account, in the order they were added. */
+    val accounts: StateFlow<List<Account>> = _accounts.asStateFlow()
+
+    private val _runtimes = MutableStateFlow<Map<String, AccountRuntime>>(emptyMap())
+
+    /** Live runtimes by account key. */
+    val runtimes: StateFlow<Map<String, AccountRuntime>> = _runtimes.asStateFlow()
+
+    private val _activeKey = MutableStateFlow<String?>(null)
+
+    /** The account the UI shows; `null` while signed out. */
+    val activeKey: StateFlow<String?> = _activeKey.asStateFlow()
+
+    private val registryLoaded = MutableStateFlow(false)
+    private val lastUsed = HashMap<String, Long>()
+
+    private val runtimeEnvironment = AccountRuntimeEnvironment(
+        services = RuntimeServices(appContext, okHttpClient, clientFactory, this.networkSignal),
         userPrefs = userPrefs,
-        livenessTicks = fixedRateTicks(),
+        connectionDemand = connectionDemand,
         connectionWanted = connectionWanted ?: connectionDemand.wanted,
-        desiredPresence = connectionDemand.presence,
+        push = PushServices(fcmTokens, keyWrapper),
+        callMediaFactory = callMediaControllerFactory ?: { scope -> LiveKitCallMediaController(appContext, scope) },
+        isShowing = { key ->
+            _activeKey.value == key &&
+                ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        },
     )
 
-    /** Push delivery for the signed-in account, known from disk on a cold start. */
-    val pushStatus: StateFlow<PushStatus?> =
-        combine(sessionManager.pushState, sessionPrefs.ownerBareJid, ::pushStatusOf)
-            .stateIn(applicationScope, SharingStarted.Eagerly, null)
+    /**
+     * Stand-in while signed out so `graph.sessionManager` and friends always
+     * resolve. Never signed in, never started: it holds no credentials.
+     */
+    private val idleRuntime: AccountRuntime = AccountRuntime(
+        account = Account(IDLE_KEY, defaultServerUrl, "", "", 0L),
+        sessionPrefs = SessionPrefs(this.accountStores.storeFor(IDLE_KEY)),
+        env = runtimeEnvironment,
+        parentScope = applicationScope,
+        onSessionRejected = {},
+    )
 
-    /** Which transport holds the signed-in account's push endpoint, if any. */
-    val pushEndpointKind: StateFlow<PushEndpointKind?> =
-        combine(sessionManager.pushState, sessionPrefs.ownerBareJid) { state, owner ->
-            state?.takeIf { owner != null && it.owner == owner }?.endpoint?.kind
-        }
+    private val _activeRuntime = MutableStateFlow(idleRuntime)
+
+    /** The selected account's runtime (the idle stand-in when signed out). */
+    val activeRuntime: StateFlow<AccountRuntime> = _activeRuntime.asStateFlow()
+
+    /** The runtime for [key], or the selected one when no key is given; `null` if the account is gone. */
+    fun runtimeFor(key: String?): AccountRuntime? =
+        if (key == null) _activeRuntime.value.takeIf { it !== idleRuntime } else _runtimes.value[key]
+
+    /** The runtime that has a call ringing or live, preferring the selected account's. */
+    fun callRuntime(): AccountRuntime? {
+        val active = _activeRuntime.value
+        return active.takeIf { it !== idleRuntime && it.hasCall() }
+            ?: _runtimes.value.values.firstOrNull { it.hasCall() }
+    }
+
+    private fun <T> perActive(select: (AccountRuntime) -> StateFlow<T>): StateFlow<T> =
+        SwitchingStateFlow(_activeRuntime, select)
+
+    // ---- selected-account passthroughs ----------------------------------
+
+    val sessionManager: XmppSessionManager get() = _activeRuntime.value.sessionManager
+    val sessionPrefs: SessionPrefs get() = _activeRuntime.value.sessionPrefs
+    val messageNotifier: MessageNotifier get() = _activeRuntime.value.messageNotifier
+    val push: PushCoordinator get() = _activeRuntime.value.push
+    val pushDistributor: PushDistributor get() = _activeRuntime.value.pushDistributor
+    val attachmentUploader: AttachmentUploader get() = _activeRuntime.value.attachmentUploader
+    val stickerPackCreator: StickerPackCreator get() = _activeRuntime.value.stickerPackCreator
+    val mucCallLiveParticipants: MucCallLiveParticipantsStore get() = _activeRuntime.value.mucCallLiveParticipants
+    val callSessionController: CallSessionController get() = _activeRuntime.value.callSessionController
+
+    /** The signed-in REST session (jid/username/avatar) of the selected account; `null` when signed out. */
+    val currentSession: StateFlow<WaddleSessionInfo?> = perActive { it.currentSession }
+
+    /**
+     * Origin of the selected account; `null` when signed out. Home media
+     * trust and other per-server scoping read this, never the login
+     * screen's [serverSelection] (which can differ while the person is
+     * adding another server).
+     */
+    val sessionOrigin: StateFlow<String?> = perActive { if (it === idleRuntime) signedOutOrigin else it.originState }
+
+    private val signedOutOrigin = MutableStateFlow<String?>(null)
+
+    /** Which transport holds the selected account's push endpoint, if any. */
+    val pushEndpointKind: StateFlow<PushEndpointKind?> = perActive { it.pushEndpointKind }
+
+    /**
+     * Push delivery across accounts: known only once every account's is, and
+     * [PushStatus.ACTIVE] only when all of them are. Any account push does not
+     * cover keeps the stream held (see [stayConnected]).
+     */
+    val pushStatus: StateFlow<PushStatus?> =
+        _runtimes
+            .flatMapLatest { runtimes ->
+                if (runtimes.isEmpty()) {
+                    flowOf(null)
+                } else {
+                    combine(runtimes.values.map { it.pushStatus }) { statuses ->
+                        when {
+                            statuses.any { it == null } -> null
+                            statuses.all { it == PushStatus.ACTIVE } -> PushStatus.ACTIVE
+                            else -> statuses.first { it != PushStatus.ACTIVE }
+                        }
+                    }
+                }
+            }
             .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
     /**
@@ -219,51 +332,44 @@ class AppGraph(
     val timelineDirection: StateFlow<TimelineDirection> =
         userPrefs.timelineDirection.stateIn(applicationScope, SharingStarted.Eagerly, TimelineDirection.CHAT)
 
-    private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
-
-    /** The signed-in REST session (jid/username/avatar); `null` when signed out. */
-    val currentSession: StateFlow<WaddleSessionInfo?> = _currentSession.asStateFlow()
-
-    private val _sessionOrigin = MutableStateFlow<String?>(null)
+    // ---- app shell state ------------------------------------------------
 
     /**
-     * Origin the signed-in session belongs to; `null` when signed out. Home
-     * media trust and other per-server scoping read this, never the login
-     * screen's [serverSelection] (which can differ once a user is browsing
-     * for another server).
+     * True only until the LOCAL reads complete: the system splash must never
+     * be pinned on the session-validation network round-trip.
      */
-    val sessionOrigin: StateFlow<String?> = _sessionOrigin.asStateFlow()
+    val splashHold: StateFlow<Boolean> = combine(
+        registryLoaded,
+        _accounts,
+        _activeRuntime.flatMapLatest { it.bootstrap.splashHold },
+    ) { loaded, accounts, restoring -> !loaded || (accounts.isNotEmpty() && restoring) }
+        .stateIn(applicationScope, SharingStarted.Eagerly, true)
 
-    val bootstrap: SessionBootstrap = SessionBootstrap(
-        authApiFor = ::authApiFor,
-        loadStoredSession = {
-            val stored = sessionPrefs.serverUrl.first()?.takeIf { it.isNotBlank() }
-            serverSelection.load(stored)
-            sessionPrefs.sessionId.first()?.let { StoredSession(it, stored ?: serverSelection.current.value) }
-        },
-        signIn = ::signIn,
-        signOutLocally = { sessionManager.logout() },
-        managerAppState = sessionManager.appState,
-        networkSignal = this.networkSignal,
-        scope = applicationScope,
-    )
-
-    /** App-shell gate: manager state plus cold-start restore failures. */
-    val appState: StateFlow<WaddleAppState> = bootstrap.appState
+    /**
+     * App-shell gate: no accounts or a rejected selected account is
+     * SignedOut (sign-in screen); otherwise the selected account's own state.
+     */
+    val appState: StateFlow<WaddleAppState> = combine(
+        registryLoaded,
+        _accounts,
+        _activeKey,
+        _activeRuntime.flatMapLatest { it.bootstrap.appState },
+    ) { loaded, accounts, key, runtimeState ->
+        val active = accounts.firstOrNull { it.key == key }
+        when {
+            !loaded -> WaddleAppState.Loading
+            active == null || active.needsSignIn -> WaddleAppState.SignedOut
+            else -> runtimeState
+        }
+    }
+        .stateIn(applicationScope, SharingStarted.Eagerly, WaddleAppState.Loading)
 
     val serviceController: ConnectionServiceController = ConnectionServiceController(
         context = appContext,
         appState = appState,
         stayConnected = stayConnected,
         scope = applicationScope,
-        onForeground = sessionManager::onAppForeground,
-    )
-
-    val attachmentUploader: AttachmentUploader = AttachmentUploader(
-        contentResolver = appContext.contentResolver,
-        httpClient = okHttpClient,
-        sessionManager = sessionManager,
-        cacheDir = appContext.cacheDir,
+        onForeground = { _runtimes.value.values.forEach { it.sessionManager.onAppForeground() } },
     )
 
     /** XEP-0448 decrypt-on-display fetch (memory-only plaintext). */
@@ -276,87 +382,8 @@ class AppGraph(
         downloader = encryptedAttachmentDownloader,
     )
 
-    /** XEP-0449 create-pack pipeline (downscale → slot upload → publish). */
-    val stickerPackCreator: StickerPackCreator = StickerPackCreator(
-        contentResolver = appContext.contentResolver,
-        httpClient = okHttpClient,
-        sessionManager = sessionManager,
-    )
-
-    /** LiveKit-fed roster projection for the room we're in a call with. */
-    val mucCallLiveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore()
-
-    /** Call platform glue: in-call FGS + LiveKit media session. */
-    val callSessionController: CallSessionController = CallSessionController(
-        context = appContext,
-        sessionManager = sessionManager,
-        media = callMediaControllerFactory?.invoke(applicationScope)
-            ?: LiveKitCallMediaController(appContext, applicationScope),
-        scope = applicationScope,
-        liveParticipants = mucCallLiveParticipants,
-    )
-
-    /** Incoming-call ring notification (full-screen intent + actions). */
-    val callNotifier: CallNotifier = CallNotifier(
-        context = appContext,
-        callState = sessionManager.callStore.state,
-    )
-
-    val messageNotifier: MessageNotifier = MessageNotifier(
-        context = appContext,
-        events = sessionManager.events,
-        userPrefs = userPrefs,
-        currentSession = currentSession,
-        notifyModeFor = { conversationJid, isGroupchat ->
-            sessionManager.notifySettingsStore.modeFor(
-                conversationJid,
-                // No public/private room discriminator yet (web parity):
-                // every MUC resolves as a private group (§3 default: always).
-                if (isGroupchat) ConversationKind.PRIVATE_GROUP else ConversationKind.DIRECT_CHAT,
-            )
-        },
-        pushedItems = SessionPrefsPushedItems(sessionPrefs),
-    )
-
-    val pushDistributor: PushDistributor = PushDistributor(
-        context = appContext,
-        scope = applicationScope,
-        sessionManager = sessionManager,
-        sessionPrefs = sessionPrefs,
-        userPrefs = userPrefs,
-    )
-
-    val pushMessageHandler: PushMessageHandler = PushMessageHandler(
-        sessionManager = sessionManager,
-        userPrefs = userPrefs,
-        notifier = messageNotifier,
-        isAppVisible = {
-            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-        },
-        summarize = { envelope -> pushSummaryOf(envelope, appContext.resources, ::conversationTitleOf) },
-    )
-
-    /** Which push transport holds the account's endpoint, and its callbacks. */
-    val push: PushCoordinator = PushCoordinator(
-        scope = applicationScope,
-        sessionManager = sessionManager,
-        userPrefs = userPrefs,
-        distributor = pushDistributor,
-        fcm = fcmTokens,
-        keyWrapper = keyWrapper,
-        handler = pushMessageHandler,
-    )
-
     /** Keep the stream up until [ConnectionDemand.Lease.release] (notification actions). */
     fun holdConnection(): ConnectionDemand.Lease = connectionDemand.acquire()
-
-    private fun conversationTitleOf(conversationJid: String, isGroupchat: Boolean): String {
-        if (!isGroupchat) return localpartOf(conversationJid)
-        val name = sessionManager.roomStore.topology.value.channels
-            .firstOrNull { it.roomJid == conversationJid }
-            ?.name
-        return "#" + (name ?: localpartOf(conversationJid))
-    }
 
     /** Feed the connection demand (and own presence) from the process, the delivery mode and calls. */
     private fun startConnectionDemand() {
@@ -371,91 +398,220 @@ class AppGraph(
         applicationScope.launch {
             // An ended call waits in its slot until the UI dismisses it;
             // only ringing or live calls need signalling.
-            sessionManager.callStore.state.collect {
-                connectionDemand.setCallActive(it.needsStream())
-                // ADR-010: a live call pauses auto-away; a ring does not.
-                connectionDemand.setInCall(it is CallState.Active)
-            }
-        }
-        // A newly learned or rotated server key needs a fresh endpoint.
-        applicationScope.launch {
-            sessionManager.pushState
-                .map { it?.advertised?.kid }
-                .distinctUntilChanged()
-                .filterNotNull()
-                .collect { runCatching { push.onKeyChanged() } }
-        }
-        // FCM needs no activity to register: do it as soon as an account
-        // is signed in, without waiting for the server's VAPID key.
-        applicationScope.launch {
-            // Distinct before dropping nulls: signing out and back into the
-            // same account must register again.
-            sessionPrefs.ownerBareJid
-                .distinctUntilChanged()
-                .filterNotNull()
-                .collect { runCatching { push.onAccountReady() } }
+            _runtimes
+                .flatMapLatest { runtimes ->
+                    if (runtimes.isEmpty()) {
+                        flowOf(emptyList())
+                    } else {
+                        combine(runtimes.values.map { it.sessionManager.callStore.state }) { it.toList() }
+                    }
+                }
+                .collect { states ->
+                    connectionDemand.setCallActive(states.any { it.needsStream() })
+                    // ADR-010: a live call pauses auto-away; a ring does not.
+                    connectionDemand.setInCall(states.any { it is CallState.Active })
+                }
         }
         pushDistributor.refresh()
     }
 
-    /** Wire the long-lived collectors and kick off session restore. */
+    /** Wire the long-lived collectors and kick off account restore. */
     fun start() {
         startConnectionDemand()
         serviceController.start()
-        messageNotifier.start(applicationScope)
-        callSessionController.start()
-        callNotifier.start(applicationScope)
-        startSignedOutCleanup()
         // Decrypted XEP-0448 attachments never survive a process
         // restart: their FileProvider grants are gone, so the
         // plaintext on disk is only liability.
         applicationScope.launch { encryptedAttachmentOpener.clearCache() }
-        bootstrap.restore()
+        applicationScope.launch { restoreAll() }
     }
 
-    /** Persist + start the XMPP session for a validated REST session. */
-    suspend fun signIn(session: WaddleSessionInfo, origin: String = serverSelection.current.value) {
-        _currentSession.value = session
-        _sessionOrigin.value = origin
-        // The origin this session belongs to, beside its id: the unit a
-        // per-account list will key on.
-        sessionPrefs.setServerUrl(origin)
-        sessionManager.login(session)
-    }
+    // ---- account lifecycle ----------------------------------------------
 
-    /**
-     * Terminal server-side auth failures flip appState to SignedOut from
-     * inside :core:client, which has no notifier handle — without this
-     * observer, stale MessagingStyle notifications (and their live reply
-     * intents) survive into the next account's session.
-     */
-    fun startSignedOutCleanup() {
-        applicationScope.launch {
-            sessionManager.appState.collect { state ->
-                if (state == WaddleAppState.SignedOut) {
-                    messageNotifier.clearAll()
-                    encryptedAttachmentOpener.clearCache()
-                    // Also covers a server-side sign-out that already
-                    // wiped the session: the endpoint must die with it.
-                    runCatching { push.unregister() }
-                }
+    /** Load the registry (moving a pre-accounts session in first) and restore every account. */
+    private suspend fun restoreAll() {
+        try {
+            LegacySessionMigration.migrate(legacySessionStore, accountRegistry, accountStores, defaultOrigin)
+            val stored = accountRegistry.accounts.first()
+            val storedActive = accountRegistry.activeKey.first()
+            synchronized(accountsLock) {
+                _accounts.value = stored
+                stored.forEach(::attachRuntime)
+                _activeKey.value = storedActive
+                selectLocked(storedActive)
             }
+        } finally {
+            registryLoaded.value = true
+        }
+        _runtimes.value.values.forEach { it.bootstrap.restore() }
+    }
+
+    /** Re-run restore for every account (the error screen's retry). */
+    fun restore() {
+        _runtimes.value.values.forEach { it.bootstrap.restore() }
+    }
+
+    private fun attachRuntime(account: Account): AccountRuntime = synchronized(accountsLock) {
+        _runtimes.value[account.key] ?: AccountRuntime(
+            account = account,
+            sessionPrefs = SessionPrefs(accountStores.storeFor(account.key)),
+            env = runtimeEnvironment,
+            parentScope = applicationScope,
+            onSessionRejected = ::markNeedsSignIn,
+        ).also { runtime ->
+            _runtimes.update { it + (account.key to runtime) }
+            runtime.start()
         }
     }
 
-    /** Local-first sign-out; the server logout is best-effort async. */
-    suspend fun signOut() {
-        val sessionId = sessionPrefs.sessionId.first()
-        val origin = _sessionOrigin.value ?: sessionPrefs.serverUrl.first() ?: serverSelection.current.value
-        messageNotifier.clearAll()
-        _currentSession.value = null
-        _sessionOrigin.value = null
-        sessionManager.logout()
+    private fun selectLocked(key: String?) {
+        _activeKey.value = key
+        val runtime = key?.let { _runtimes.value[it] }
+        _activeRuntime.value = runtime ?: idleRuntime
+        if (key != null) lastUsed[key] = System.nanoTime()
+        rebalanceLocked()
+    }
+
+    /** The newest [LIVE_ACCOUNT_CAP] accounts stay connected; the rest wait, signed in but paused. */
+    private fun rebalanceLocked() {
+        val ranked = _runtimes.value.values.sortedWith(
+            compareByDescending<AccountRuntime> { it.key == _activeKey.value }
+                .thenByDescending { lastUsed[it.key] ?: 0L },
+        )
+        ranked.forEachIndexed { index, runtime -> runtime.setParked(index >= LIVE_ACCOUNT_CAP) }
+    }
+
+    /** Show [key]'s account. It is already connected (or resumes if the cap had paused it). */
+    suspend fun selectAccount(key: String) {
+        val known = synchronized(accountsLock) {
+            if (_runtimes.value.containsKey(key)) {
+                selectLocked(key)
+                true
+            } else {
+                false
+            }
+        }
+        if (known) accountRegistry.select(key)
+    }
+
+    private fun markNeedsSignIn(key: String) {
+        val changed = synchronized(accountsLock) {
+            val current = _accounts.value
+            if (current.none { it.key == key && !it.needsSignIn }) {
+                false
+            } else {
+                _accounts.value = current.map { if (it.key == key) it.copy(needsSignIn = true) else it }
+                true
+            }
+        }
+        if (changed) applicationScope.launch { runCatching { accountRegistry.setNeedsSignIn(key, true) } }
+    }
+
+    /**
+     * Persist + start the XMPP session for a validated REST session. The
+     * account is (origin, bare JID): signing in again as an existing account
+     * refreshes it in place; any other identity becomes a new account.
+     */
+    suspend fun signIn(session: WaddleSessionInfo, origin: String = serverSelection.current.value) {
+        val account = Account.create(origin, bareJidOf(session.jid))
+        val runtime = synchronized(accountsLock) {
+            val existing = _accounts.value.firstOrNull { it.key == account.key }
+            val merged = existing?.copy(needsSignIn = false) ?: account
+            _accounts.value = if (existing == null) {
+                _accounts.value + merged
+            } else {
+                _accounts.value.map { if (it.key == merged.key) merged else it }
+            }
+            attachRuntime(merged)
+        }
+        accountRegistry.upsertAndSelect(account)
+        runtime.signIn(session, origin)
+        synchronized(accountsLock) { selectLocked(account.key) }
+    }
+
+    /**
+     * Sign out [key] (default: the selected account) and forget it. Local
+     * first: the server logout is best-effort and async, and never delays the
+     * visible sign-out. The other accounts are untouched.
+     */
+    suspend fun signOut(key: String? = _activeKey.value) {
+        val runtime = key?.let { _runtimes.value[it] } ?: return
+        val sessionId = runtime.sessionPrefs.sessionId.first()
+        runtime.messageNotifier.clearAll()
+        runtime.sessionManager.logout()
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
         // sign-out, nor wait on the push teardown below.
-        applicationScope.launch { authApiFor(origin).logout(sessionId) }
-        runCatching { push.unregister() }
+        applicationScope.launch { authApiFor(runtime.origin).logout(sessionId) }
+        // The FCM token belongs to the device: delete it only with the last account.
+        val lastAccount = _runtimes.value.size <= 1
+        runCatching { runtime.push.unregister(deleteFcmToken = lastAccount) }
+        removeAccount(runtime)
+    }
+
+    private suspend fun removeAccount(runtime: AccountRuntime) {
+        val next = synchronized(accountsLock) {
+            _runtimes.update { it - runtime.key }
+            _accounts.update { list -> list.filterNot { it.key == runtime.key } }
+            lastUsed.remove(runtime.key)
+            val nextKey = if (_activeKey.value == runtime.key) _accounts.value.firstOrNull()?.key else _activeKey.value
+            selectLocked(nextKey)
+            nextKey
+        }
+        runtime.shutdown()
+        accountRegistry.remove(runtime.key)
+        next?.let { accountRegistry.select(it) }
+        accountStores.remove(runtime.key)
+        if (next == null) encryptedAttachmentOpener.clearCache()
+    }
+
+    /** FCM rotated the device token: every account registers it. */
+    suspend fun onFcmToken(token: String) {
+        _runtimes.value.values.forEach { runCatching { it.push.onFcmToken(token) } }
+    }
+
+    /** The app came to the foreground: every account (re-)registers with its push transport. */
+    fun onPushForeground(activity: Activity) {
+        _runtimes.value.values.forEach { it.push.onForeground(activity) }
+    }
+
+    /** Offer one FCM data message to each account until one decrypts it (each holds its own keys). */
+    suspend fun onFcmMessage(data: Map<String, String>) {
+        for (runtime in _runtimes.value.values) {
+            if (runtime.push.onFcmMessage(data)) return
+        }
+    }
+
+    /** The account a UnifiedPush callback for [instance] belongs to, if it still exists. */
+    fun runtimeForPushInstance(instance: String): AccountRuntime? =
+        _runtimes.value.values.firstOrNull { it.ownsPushInstance(instance) }
+
+    private companion object {
+        /** Accounts beyond this many are paused (signed in, stream closed) until selected. */
+        const val LIVE_ACCOUNT_CAP = 5
+
+        /** Key of the signed-out stand-in runtime; never a real account key (those are 16 hex chars). */
+        const val IDLE_KEY = "idle"
+    }
+}
+
+/**
+ * A [StateFlow] that follows whichever flow [select] picks from the current
+ * [active] runtime, with a synchronous `value`: a reader right after the
+ * selection changes sees the new runtime's value, not the previous one's.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+private class SwitchingStateFlow<T>(
+    private val active: StateFlow<AccountRuntime>,
+    private val select: (AccountRuntime) -> StateFlow<T>,
+) : StateFlow<T> {
+    override val value: T get() = select(active.value).value
+
+    override val replayCache: List<T> get() = listOf(value)
+
+    override suspend fun collect(collector: FlowCollector<T>): Nothing {
+        active.flatMapLatest { select(it) }.collect(collector)
+        error("StateFlow collection never completes")
     }
 }
 

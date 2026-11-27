@@ -75,6 +75,8 @@ import social.waddle.client.ffi.WaddleVCard4
  */
 class XmppSessionManager(
     private val sessionPrefs: SessionPrefs,
+    /** The account registry key this manager serves; scopes the push instance name. */
+    private val accountKey: String? = null,
     clientFactory: ClientFactory,
     networkSignal: NetworkSignal,
     userPrefs: UserPrefs,
@@ -421,7 +423,10 @@ class XmppSessionManager(
     }
 
     /** The persisted account's UnifiedPush instance, readable before restore. */
-    suspend fun pushInstance(): String? = sessionPrefs.ownerBareJid.first()?.let(::pushInstanceFor)
+    suspend fun pushInstance(): String? = sessionPrefs.ownerBareJid.first()?.let(::pushInstanceOf)
+
+    /** The UnifiedPush instance name for [ownerBareJid] on this manager's account. */
+    fun pushInstanceOf(ownerBareJid: String): String = pushInstanceFor(ownerBareJid, accountKey)
 
     /**
      * Whether [instance] still belongs to a signed-in account. A terminal
@@ -432,7 +437,7 @@ class XmppSessionManager(
         _appState.value != WaddleAppState.SignedOut && pushInstance() == instance
 
     private suspend fun pushOwnerFor(instance: String): String? =
-        sessionPrefs.ownerBareJid.first()?.takeIf { pushInstanceFor(it) == instance }
+        sessionPrefs.ownerBareJid.first()?.takeIf { pushInstanceOf(it) == instance }
 
     // UI passthroughs (M1): the app module never touches the FFI client
     // directly — [ConversationVerbs], [OutboundMessenger], and

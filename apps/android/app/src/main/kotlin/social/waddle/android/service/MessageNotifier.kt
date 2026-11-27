@@ -52,6 +52,13 @@ data class PushSummary(
  */
 class MessageNotifier(
     private val context: Context,
+    /**
+     * The account this notifier serves. Every notification tag and intent
+     * carries it, because two servers can hold the same conversation JID.
+     */
+    private val accountKey: String,
+    /** The account's display name: the group summary and the notification subtext. */
+    private val accountLabel: String,
     private val events: SharedFlow<XmppEvent>,
     private val userPrefs: UserPrefs,
     private val currentSession: StateFlow<WaddleSessionInfo?>,
@@ -194,8 +201,49 @@ class MessageNotifier(
             }
             announced.clear()
             replyDeliveries.clear()
-            NotificationManagerCompat.from(context).cancelAll()
+            cancelAccountNotifications()
         }
+    }
+
+    /** Cancels only this account's notifications (they share the key prefix), not other accounts'. */
+    private fun cancelAccountNotifications() {
+        val manager = NotificationManagerCompat.from(context)
+        manager.activeNotifications
+            .filter { it.tag?.startsWith(tagPrefix) == true }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
+
+    private val tagPrefix: String get() = "$accountKey:"
+
+    private fun tagOf(conversationJid: String): String = tagPrefix + conversationJid
+
+    /**
+     * One summary per account groups its conversations in the shade (and
+     * names the server); it goes away with the last conversation.
+     */
+    private fun postGroupSummary() {
+        val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
+            .setContentTitle(accountLabel)
+            .setGroup(accountKey)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .setSilent(true)
+            .setStyle(NotificationCompat.InboxStyle().setSummaryText(accountLabel))
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
+        NotificationManagerCompat.from(context).notify(tagOf(SUMMARY_TAG), SUMMARY_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun retireGroupSummaryIfEmpty() {
+        val manager = NotificationManagerCompat.from(context)
+        val remaining = manager.activeNotifications.any {
+            it.tag?.startsWith(tagPrefix) == true && it.tag != tagOf(SUMMARY_TAG)
+        }
+        if (!remaining) manager.cancel(tagOf(SUMMARY_TAG), SUMMARY_NOTIFICATION_ID)
     }
 
     /** The conversation is being read in-app: retire its notification. */
@@ -207,7 +255,8 @@ class MessageNotifier(
                 summaryKinds.remove(conversationJid)
             }
             NotificationManagerCompat.from(context)
-                .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
+                .cancel(tagOf(conversationJid), MESSAGE_NOTIFICATION_ID)
+            retireGroupSummaryIfEmpty()
         }
     }
 
@@ -298,7 +347,7 @@ class MessageNotifier(
             .setSmallIcon(R.drawable.ic_stat_waddle)
             .setContentTitle(summary.title)
             .setContentText(summary.text)
-            .setGroup(conversationJid)
+            .setGroup(accountKey)
             .setAutoCancel(true)
             .setOnlyAlertOnce(!alert)
             .setSilent(silent)
@@ -315,7 +364,9 @@ class MessageNotifier(
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) return
-        NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+        NotificationManagerCompat.from(context)
+            .notify(tagOf(conversationJid), MESSAGE_NOTIFICATION_ID, builder.build())
+        postGroupSummary()
         val mentioned = summary.isMention || previous == SummaryKind.MENTION
         synchronized(historyLock) {
             summaryKinds[conversationJid] = if (mentioned) SummaryKind.MENTION else SummaryKind.MESSAGES
@@ -369,7 +420,7 @@ class MessageNotifier(
         val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
             .setSmallIcon(R.drawable.ic_stat_waddle)
             .setStyle(style)
-            .setGroup(conversationJid)
+            .setGroup(accountKey)
             .setAutoCancel(true)
             .setSilent(silent)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -387,11 +438,12 @@ class MessageNotifier(
         } else if (subText != null) {
             builder.setSubText(subText)
         }
-        // Tag = JID, fixed id: String.hashCode() collides across arbitrary
-        // remote-chosen JIDs (and with the foreground-service id), which
-        // would overwrite other conversations' notifications.
+        // Tag = account key + JID, fixed id: String.hashCode() collides across
+        // arbitrary remote-chosen JIDs (and with the foreground-service id),
+        // and the same JID text can exist on two servers.
         NotificationManagerCompat.from(context)
-            .notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+            .notify(tagOf(conversationJid), MESSAGE_NOTIFICATION_ID, builder.build())
+        postGroupSummary()
     }
 
     private fun selfPerson(): Person = Person.Builder()
@@ -409,6 +461,7 @@ class MessageNotifier(
             Intent(context, MainActivity::class.java)
                 .setData(conversationUri("open", conversationJid))
                 .putExtra(MainActivity.EXTRA_NAVIGATE_JID, conversationJid)
+                .putExtra(MainActivity.EXTRA_ACCOUNT_KEY, accountKey)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -420,7 +473,7 @@ class MessageNotifier(
      * do not participate in intent identity.
      */
     private fun conversationUri(kind: String, conversationJid: String): android.net.Uri =
-        android.net.Uri.fromParts("waddle-notify", kind, conversationJid)
+        android.net.Uri.fromParts("waddle-notify", kind, tagOf(conversationJid))
 
     private fun replyAction(
         conversationJid: String,
@@ -432,6 +485,7 @@ class MessageNotifier(
         val intent = Intent(context, ReplyReceiver::class.java)
             .setAction(ReplyReceiver.ACTION_REPLY)
             .setData(conversationUri("reply", conversationJid))
+            .putExtra(ReplyReceiver.EXTRA_ACCOUNT_KEY, accountKey)
             .putExtra(ReplyReceiver.EXTRA_CONVERSATION_JID, conversationJid)
             .putExtra(ReplyReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
         // FLAG_MUTABLE: the system fills in the RemoteInput result.
@@ -459,6 +513,7 @@ class MessageNotifier(
         val intent = Intent(context, MarkReadReceiver::class.java)
             .setAction(MarkReadReceiver.ACTION_MARK_READ)
             .setData(conversationUri("mark-read", conversationJid))
+            .putExtra(MarkReadReceiver.EXTRA_ACCOUNT_KEY, accountKey)
             .putExtra(MarkReadReceiver.EXTRA_CONVERSATION_JID, conversationJid)
             .putExtra(MarkReadReceiver.EXTRA_IS_GROUPCHAT, isGroupchat)
         displayedTarget?.let { target ->
@@ -488,6 +543,7 @@ class MessageNotifier(
             Intent(context, NotificationDismissReceiver::class.java)
                 .setAction(NotificationDismissReceiver.ACTION_DISMISS)
                 .setData(conversationUri("dismiss", conversationJid))
+                .putExtra(NotificationDismissReceiver.EXTRA_ACCOUNT_KEY, accountKey)
                 .putExtra(NotificationDismissReceiver.EXTRA_CONVERSATION_JID, conversationJid),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -506,6 +562,10 @@ class MessageNotifier(
          * Distinct from WaddleConnectionService.NOTIFICATION_ID.
          */
         const val MESSAGE_NOTIFICATION_ID = 2
+
+        /** Per-account group summary, tagged with the account key. */
+        const val SUMMARY_NOTIFICATION_ID = 6
+        const val SUMMARY_TAG = "summary"
         const val MAX_HISTORY = 25
         const val MAX_LIVE_ITEMS = 256
         const val SELF_PERSON_KEY = "me"

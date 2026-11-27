@@ -28,6 +28,8 @@ import social.waddle.android.jid.localpartOf
  */
 class CallNotifier(
     private val context: Context,
+    /** The account whose calls this notifier rings for; carried by every action. */
+    private val accountKey: String,
     private val callState: StateFlow<CallState>,
 ) {
     private var ringingSid: String? = null
@@ -37,7 +39,7 @@ class CallNotifier(
         // ring notification whose actions target a dead slot — retire
         // it unconditionally before observing the fresh state.
         runCatching {
-            NotificationManagerCompat.from(context).cancel(INCOMING_CALL_NOTIFICATION_ID)
+            NotificationManagerCompat.from(context).cancel(accountKey, INCOMING_CALL_NOTIFICATION_ID)
         }
         scope.launch {
             callState.collect { state ->
@@ -54,7 +56,7 @@ class CallNotifier(
         if (incoming == null || incoming.accepting) {
             if (ringingSid != null) {
                 ringingSid = null
-                NotificationManagerCompat.from(context).cancel(INCOMING_CALL_NOTIFICATION_ID)
+                NotificationManagerCompat.from(context).cancel(accountKey, INCOMING_CALL_NOTIFICATION_ID)
             }
             return
         }
@@ -82,7 +84,9 @@ class CallNotifier(
             context,
             0,
             Intent(context, CallActionReceiver::class.java)
-                .setAction(CallActionReceiver.ACTION_DECLINE),
+                .setAction(CallActionReceiver.ACTION_DECLINE)
+                .setData(android.net.Uri.fromParts("waddle-call", "decline", accountKey))
+                .putExtra(CallActionReceiver.EXTRA_ACCOUNT_KEY, accountKey),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(context, NotificationChannels.INCOMING_CALLS)
@@ -103,12 +107,13 @@ class CallNotifier(
             .setContentIntent(fullScreen)
             .build()
         NotificationManagerCompat.from(context)
-            .notify(INCOMING_CALL_NOTIFICATION_ID, notification)
+            .notify(accountKey, INCOMING_CALL_NOTIFICATION_ID, notification)
     }
 
     private fun activityIntent(answer: Boolean): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
-            .setData(android.net.Uri.fromParts("waddle-call", if (answer) "answer" else "open", null))
+            .setData(android.net.Uri.fromParts("waddle-call", if (answer) "answer" else "open", accountKey))
+            .putExtra(MainActivity.EXTRA_ACCOUNT_KEY, accountKey)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (answer) intent.putExtra(MainActivity.EXTRA_ANSWER_CALL, true)
         return PendingIntent.getActivity(

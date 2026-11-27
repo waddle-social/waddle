@@ -36,10 +36,10 @@ class PendingDeliveryService : Service() {
     /** Queued reply id → its conversation; merged across overlapping starts. */
     private val pendingReplies = ConcurrentHashMap<String, PendingReply>()
 
-    private data class PendingReply(val conversationJid: String, val isGroupchat: Boolean)
+    private data class PendingReply(val accountKey: String, val conversationJid: String, val isGroupchat: Boolean)
 
-    /** Conversations whose read marker is parked for the next ready session. */
-    private val pendingMarkers: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** (account key, conversation) pairs whose read marker is parked for the next ready session. */
+    private val pendingMarkers: MutableSet<Pair<String, String>> = ConcurrentHashMap.newKeySet()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,14 +50,17 @@ class PendingDeliveryService : Service() {
             .setSilent(true)
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
+        val accountKey = intent?.getStringExtra(EXTRA_ACCOUNT_KEY)
         val conversationJid = intent?.getStringExtra(EXTRA_CONVERSATION_JID)
         val isGroupchat = intent?.getBooleanExtra(EXTRA_IS_GROUPCHAT, false) ?: false
-        if (conversationJid != null) {
+        if (accountKey != null && conversationJid != null) {
             intent.getStringArrayExtra(EXTRA_QUEUED_IDS).orEmpty().forEach { id ->
-                pendingReplies[id] = PendingReply(conversationJid, isGroupchat)
+                pendingReplies[id] = PendingReply(accountKey, conversationJid, isGroupchat)
             }
         }
-        intent?.getStringExtra(EXTRA_MARKER_CONVERSATION_JID)?.let(pendingMarkers::add)
+        if (accountKey != null) {
+            intent.getStringExtra(EXTRA_MARKER_CONVERSATION_JID)?.let { pendingMarkers.add(accountKey to it) }
+        }
         // One waiter over everything still pending; a new start restarts
         // its window rather than dropping what earlier starts were owed.
         work?.cancel()
@@ -90,23 +93,34 @@ class PendingDeliveryService : Service() {
     private suspend fun awaitDelivered(): Boolean {
         val graph = (application as WaddleApplication).graph
         return withTimeoutOrNull(WINDOW_MILLIS) {
-            graph.sessionPrefs.outboundQueue.first { queue ->
-                val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
-                pendingReplies.keys.removeAll { it !in queued }
-                pendingReplies.isEmpty()
+            pendingReplies.values.map { it.accountKey }.distinct().forEach { key ->
+                val runtime = graph.runtimeFor(key)
+                if (runtime == null) {
+                    // The account was removed meanwhile: nothing left to deliver.
+                    pendingReplies.entries.removeAll { it.value.accountKey == key }
+                    return@forEach
+                }
+                runtime.sessionPrefs.outboundQueue.first { queue ->
+                    val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
+                    pendingReplies.entries.removeAll { it.value.accountKey == key && it.key !in queued }
+                    pendingReplies.values.none { it.accountKey == key }
+                }
             }
-            pendingMarkers.toList().forEach { conversationJid ->
-                graph.sessionManager.awaitMarkerNotParked(conversationJid)
-                pendingMarkers.remove(conversationJid)
+            pendingMarkers.toList().forEach { (key, conversationJid) ->
+                graph.runtimeFor(key)?.sessionManager?.awaitMarkerNotParked(conversationJid)
+                pendingMarkers.remove(key to conversationJid)
             }
         } != null
     }
 
     /** Replies still unacknowledged must not keep looking sent. */
     private suspend fun flagWaitingReplies() {
-        val notifier = (application as WaddleApplication).graph.messageNotifier
+        val graph = (application as WaddleApplication).graph
         pendingReplies.values.distinct().forEach { reply ->
-            runCatching { notifier.notifyReplyWaiting(reply.conversationJid, reply.isGroupchat) }
+            runCatching {
+                graph.runtimeFor(reply.accountKey)?.messageNotifier
+                    ?.notifyReplyWaiting(reply.conversationJid, reply.isGroupchat)
+            }
         }
         pendingReplies.clear()
     }
@@ -133,6 +147,7 @@ class PendingDeliveryService : Service() {
     companion object {
         /** Unique among the app's ids: 1 connection, 2 messages, 3 call, 4 incoming call. */
         private const val NOTIFICATION_ID = 5
+        private const val EXTRA_ACCOUNT_KEY = "social.waddle.android.extra.ACCOUNT_KEY"
         private const val EXTRA_QUEUED_IDS = "social.waddle.android.extra.QUEUED_IDS"
         private const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.PENDING_CONVERSATION_JID"
         private const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.PENDING_IS_GROUPCHAT"
@@ -148,6 +163,7 @@ class PendingDeliveryService : Service() {
          */
         fun start(
             context: Context,
+            accountKey: String,
             queuedIds: Collection<String> = emptyList(),
             conversationJid: String? = null,
             isGroupchat: Boolean = false,
@@ -155,6 +171,7 @@ class PendingDeliveryService : Service() {
             markerConversationJid: String? = null,
         ) {
             val intent = Intent(context, PendingDeliveryService::class.java)
+                .putExtra(EXTRA_ACCOUNT_KEY, accountKey)
                 .putExtra(EXTRA_QUEUED_IDS, queuedIds.toTypedArray())
                 .putExtra(EXTRA_MARKER_CONVERSATION_JID, markerConversationJid)
                 .putExtra(EXTRA_CONVERSATION_JID, conversationJid)
@@ -165,7 +182,9 @@ class PendingDeliveryService : Service() {
             if (!started && conversationJid != null && queuedIds.isNotEmpty()) {
                 val graph = (context.applicationContext as WaddleApplication).graph
                 graph.applicationScope.launch {
-                    runCatching { graph.messageNotifier.notifyReplyWaiting(conversationJid, isGroupchat) }
+                    runCatching {
+                        graph.runtimeFor(accountKey)?.messageNotifier?.notifyReplyWaiting(conversationJid, isGroupchat)
+                    }
                 }
             }
         }

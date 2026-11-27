@@ -103,7 +103,6 @@ class PushCoordinatorTest {
                 scope = testScope.backgroundScope,
                 sessionManager = manager,
                 sessionPrefs = sessionPrefs,
-                userPrefs = userPrefs,
             ),
             fcm = fcm,
             keyWrapper = PlainWrapper(),

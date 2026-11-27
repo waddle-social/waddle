@@ -15,7 +15,7 @@ class WaddleFirebaseMessagingService : FirebaseMessagingService() {
     private val graph get() = (application as WaddleApplication).graph
 
     override fun onNewToken(token: String) {
-        graph.applicationScope.launch { runCatching { graph.push.onFcmToken(token) } }
+        graph.applicationScope.launch { runCatching { graph.onFcmToken(token) } }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -24,7 +24,7 @@ class WaddleFirebaseMessagingService : FirebaseMessagingService() {
         // time FCM allows a high-priority message.
         runBlocking {
             withTimeoutOrNull(MESSAGE_BUDGET_MILLIS) {
-                runCatching { graph.push.onFcmMessage(message.data) }
+                runCatching { graph.onFcmMessage(message.data) }
             }
         }
     }

@@ -70,11 +70,9 @@ class CallFlowTest {
             InstrumentationRegistry.getInstrumentation().targetContext.packageName,
             Manifest.permission.RECORD_AUDIO,
         )
+        // Each account's call notifier and controller start with its runtime,
+        // on sign-in.
         harness = TestAppGraph()
-        // The production Application starts these on its own graph; the
-        // test graph wires its collectors explicitly.
-        harness.graph.callNotifier.start(harness.graph.applicationScope)
-        harness.graph.callSessionController.start()
     }
 
     @After

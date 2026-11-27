@@ -78,7 +78,7 @@ fun AppShell(
             WaddleAppState.SignedOut -> LoginScreen()
             is WaddleAppState.Error -> RestoreErrorScreen(
                 detail = state.message,
-                onRetry = graph.bootstrap::restore,
+                onRetry = graph::restore,
             )
             WaddleAppState.Ready -> ReadyShell(
                 pendingConversationJid = pendingConversationJid,

@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -22,12 +23,16 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.avatar.LocalPeerAvatars
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.theme.WaddleTheme
@@ -53,7 +58,7 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition {
             // Local init only — never the session-validation network call
             // (the in-app Loading composable covers that).
-            graph.bootstrap.splashHold.value
+            graph.splashHold.value
         }
         // Fresh starts read the launch extra; recreations restore the
         // still-unconsumed value from the saved state instead. Gating on
@@ -61,18 +66,16 @@ class MainActivity : ComponentActivity() {
         // restore (already navigated — must NOT replay the stale extra)
         // and a config change during the post-tap Loading window (must
         // keep the pending target or the tap silently lands on Home).
-        pendingConversationJid.value = if (savedInstanceState == null) {
-            intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        if (savedInstanceState == null) {
+            handleLaunchIntent(graph, intent)
         } else {
-            savedInstanceState.getString(STATE_PENDING_JID)
+            pendingConversationJid.value = savedInstanceState.getString(STATE_PENDING_JID)
         }
-        intent.removeExtra(EXTRA_NAVIGATE_JID)
         // Deliberately NOT restored across recreation: replaying a stale
         // answer after a config change could accept a later call.
-        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)) {
-            pendingCallAnswer.value = true
-        }
+        intent.removeExtra(EXTRA_NAVIGATE_JID)
         intent.removeExtra(EXTRA_ANSWER_CALL)
+        intent.removeExtra(EXTRA_ACCOUNT_KEY)
         watchPushKey(graph)
         setContent {
             val themeMode by graph.userPrefs.theme
@@ -98,17 +101,24 @@ class MainActivity : ComponentActivity() {
                 onDispose { }
             }
             WaddleTheme(themeMode, wallpaperColors = wallpaperColors) {
-                CompositionLocalProvider(
-                    LocalAppGraph provides graph,
-                    LocalPeerAvatars provides graph.sessionManager.peerAvatars,
-                    LocalReducedMotion provides rememberSystemReducedMotion(),
-                ) {
-                    AppShell(
-                        pendingConversationJid = pendingConversationJid,
-                        onConversationConsumed = { pendingConversationJid.value = null },
-                        pendingCallAnswer = pendingCallAnswer,
-                        onCallAnswerConsumed = { pendingCallAnswer.value = false },
-                    )
+                val runtime by graph.activeRuntime.collectAsStateWithLifecycle()
+                // Per account: everything below is rebuilt over the selected
+                // account's own view-model store, so no screen state, draft or
+                // scroll position carries across accounts.
+                key(runtime.key) {
+                    CompositionLocalProvider(
+                        LocalAppGraph provides graph,
+                        LocalViewModelStoreOwner provides runtime.viewModelStoreOwner,
+                        LocalPeerAvatars provides runtime.sessionManager.peerAvatars,
+                        LocalReducedMotion provides rememberSystemReducedMotion(),
+                    ) {
+                        AppShell(
+                            pendingConversationJid = pendingConversationJid,
+                            onConversationConsumed = { pendingConversationJid.value = null },
+                            pendingCallAnswer = pendingCallAnswer,
+                            onCallAnswerConsumed = { pendingCallAnswer.value = false },
+                        )
+                    }
                 }
             }
         }
@@ -119,7 +129,7 @@ class MainActivity : ComponentActivity() {
         // Foreground is the one place a distributor may be chosen (it can
         // show UI); UnifiedPush also asks for a register on every start,
         // and FCM tokens are re-checked here.
-        (application as WaddleApplication).graph.push.onForeground(this)
+        (application as WaddleApplication).graph.onPushForeground(this)
     }
 
     /**
@@ -130,13 +140,35 @@ class MainActivity : ComponentActivity() {
     private fun watchPushKey(graph: AppGraph) {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                graph.sessionManager.pushState
+                graph.activeRuntime
+                    .flatMapLatest { it.sessionManager.pushState }
                     .map { it?.advertised?.kid }
                     .distinctUntilChanged()
                     .drop(1)
                     .filterNotNull()
-                    .collect { graph.push.onForeground(this@MainActivity) }
+                    .collect { graph.onPushForeground(this@MainActivity) }
             }
+        }
+    }
+
+    /**
+     * A notification names the account it belongs to: show that account
+     * first, then hand over the conversation or the call answer. Handing
+     * them over earlier would let the previously shown account's shell
+     * consume them. On a cold start the accounts may not be restored yet,
+     * so wait (briefly) for the account to exist.
+     */
+    private fun handleLaunchIntent(graph: AppGraph, intent: Intent) {
+        val jid = intent.getStringExtra(EXTRA_NAVIGATE_JID)
+        val answer = intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)
+        val key = intent.getStringExtra(EXTRA_ACCOUNT_KEY)
+        lifecycleScope.launch {
+            if (key != null) {
+                withTimeoutOrNull(ACCOUNT_WAIT_MILLIS) { graph.runtimes.first { key in it } }
+                graph.selectAccount(key)
+            }
+            jid?.let { pendingConversationJid.value = it }
+            if (answer) pendingCallAnswer.value = true
         }
     }
 
@@ -147,18 +179,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.getStringExtra(EXTRA_NAVIGATE_JID)?.let { pendingConversationJid.value = it }
+        handleLaunchIntent((application as WaddleApplication).graph, intent)
         intent.removeExtra(EXTRA_NAVIGATE_JID)
-        if (intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)) {
-            pendingCallAnswer.value = true
-        }
         intent.removeExtra(EXTRA_ANSWER_CALL)
+        intent.removeExtra(EXTRA_ACCOUNT_KEY)
         setIntent(intent)
     }
 
     companion object {
         /** Notification taps carry the conversation bare JID to open. */
         const val EXTRA_NAVIGATE_JID = "waddle.navigate.jid"
+
+        /** The account (registry key) a notification belongs to. */
+        const val EXTRA_ACCOUNT_KEY = "waddle.account.key"
+
+        private const val ACCOUNT_WAIT_MILLIS = 10_000L
 
         /** Incoming-call Answer action: accept once the shell is up. */
         const val EXTRA_ANSWER_CALL = "waddle.call.answer"

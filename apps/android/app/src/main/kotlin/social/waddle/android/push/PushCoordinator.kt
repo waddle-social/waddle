@@ -12,7 +12,6 @@ import social.waddle.android.client.prefs.PushEndpoint
 import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.PushTransportChoice
 import social.waddle.android.client.prefs.UserPrefs
-import social.waddle.android.client.push.pushInstanceFor
 
 /**
  * FCM as a build provides it: the Play build backs this with Google's FCM
@@ -81,7 +80,7 @@ class PushCoordinator(
     private suspend fun heldFcmEndpoint(): PushEndpoint.Fcm? {
         val instance = sessionManager.pushInstance() ?: return null
         return sessionManager.pushState.first()
-            ?.takeIf { pushInstanceFor(it.owner) == instance }
+            ?.takeIf { sessionManager.pushInstanceOf(it.owner) == instance }
             ?.endpoint as? PushEndpoint.Fcm
     }
 
@@ -122,14 +121,17 @@ class PushCoordinator(
     /**
      * An FCM data message: decrypt its `payload` with this install's keys
      * and hand the envelope to [PushMessageHandler]. Anything that does not
-     * decrypt for the signed-in account is dropped unseen.
+     * decrypt for this account is dropped unseen; the result says whether it
+     * did, so the app can offer one message to each account in turn (every
+     * account holds its own envelope keys).
      */
-    suspend fun onFcmMessage(data: Map<String, String>) {
-        val payload = data[FCM_PAYLOAD_KEY] ?: return
-        val instance = sessionManager.pushInstance() ?: return
-        val endpoint = heldFcmEndpoint() ?: return
-        val plaintext = FcmEnvelopeKeys.decrypt(endpoint, payload, keyWrapper) ?: return
+    suspend fun onFcmMessage(data: Map<String, String>): Boolean {
+        val payload = data[FCM_PAYLOAD_KEY] ?: return false
+        val instance = sessionManager.pushInstance() ?: return false
+        val endpoint = heldFcmEndpoint() ?: return false
+        val plaintext = FcmEnvelopeKeys.decrypt(endpoint, payload, keyWrapper) ?: return false
         handler.handle(instance, plaintext, decrypted = true)
+        return true
     }
 
     /** Settings: push over FCM, dropping any distributor registration. */
@@ -156,11 +158,16 @@ class PushCoordinator(
 
     /**
      * Sign-out: kill every endpoint this install holds for the account.
+     * [deleteFcmToken] is false while another account still uses the token.
      * A token that cannot be deleted now is deleted before the next one is
      * fetched, so the old account's device stops receiving pushes.
      */
-    suspend fun unregister() {
+    suspend fun unregister(deleteFcmToken: Boolean = true) {
         runCatching { distributor.unregister() }
+        // The FCM token belongs to the device, not the account: while other
+        // accounts still push through it, only this account's endpoint goes
+        // (the session manager already disabled it at the Push Service).
+        if (!deleteFcmToken) return
         val fcm = fcm ?: return
         fcmLock.withLock {
             fcm.setAutoInit(false)

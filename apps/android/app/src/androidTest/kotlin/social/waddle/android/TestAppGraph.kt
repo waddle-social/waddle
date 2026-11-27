@@ -11,6 +11,7 @@ import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.FakeClientFactory
 import social.waddle.android.client.FakeNetworkSignal
 import social.waddle.android.client.FakeWaddleClient
+import social.waddle.android.client.InMemoryAccountStores
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.auth.AuthProvider
 import social.waddle.android.client.auth.DevicePollResult
@@ -83,7 +84,9 @@ class TestAppGraph {
         context = ApplicationProvider.getApplicationContext(),
         clientFactory = clientFactory,
         defaultServerUrl = "https://waddle.test",
-        sessionStore = InMemoryPreferencesDataStore(),
+        legacySessionStore = InMemoryPreferencesDataStore(),
+        accountStores = InMemoryAccountStores(),
+        accountRegistryStore = InMemoryPreferencesDataStore(),
         userStore = InMemoryPreferencesDataStore(),
         networkSignal = networkSignal,
         loginGatewayFactory = { loginGateway },

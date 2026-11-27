@@ -42,10 +42,12 @@ class CallForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val graph = (application as WaddleApplication).graph
-        promoteToForeground(graph.sessionManager.callStore.state.value)
+        // The account holding the call, not necessarily the one on screen.
+        val callStore = (graph.callRuntime() ?: graph.activeRuntime.value).sessionManager.callStore
+        promoteToForeground(callStore.state.value)
         if (stateJob == null) {
             stateJob = scope.launch {
-                graph.sessionManager.callStore.state.collectLatest { state ->
+                callStore.state.collectLatest { state ->
                     when {
                         // MucPending is the group-call twin of Outgoing:
                         // signaling-only setup that must survive

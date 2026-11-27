@@ -13,3 +13,6 @@ import androidx.datastore.preferences.preferencesDataStore
 val Context.sessionPreferencesDataStore: DataStore<Preferences> by preferencesDataStore(name = "session")
 
 val Context.userPreferencesDataStore: DataStore<Preferences> by preferencesDataStore(name = "user")
+
+/** The account registry (`accounts.preferences_pb`): non-secret metadata, one entry per signed-in account. */
+val Context.accountRegistryDataStore: DataStore<Preferences> by preferencesDataStore(name = "accounts")
