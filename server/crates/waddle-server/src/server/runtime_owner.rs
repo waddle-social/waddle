@@ -508,6 +508,8 @@ const TABLE_GRANTS: &[(&str, &str)] = &[
     // Spaces.
     ("spaces_metadata", READ_WRITE),
     ("channel_space_links", READ_WRITE),
+    // Multi-tenant placement leases.
+    ("tenant_placement_leases", READ_WRITE),
     // Push and notifications.
     ("push_registrations", READ_WRITE),
     ("notification_activity", READ_INSERT_UPDATE),
