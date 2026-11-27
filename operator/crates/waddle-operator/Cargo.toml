@@ -25,7 +25,7 @@ hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
 k8s-openapi.workspace = true
-kube = { workspace = true, features = ["client", "derive", "ring", "runtime", "rustls-tls"] }
+kube = { workspace = true, features = ["client", "derive", "ring", "runtime", "rustls-tls", "unstable-runtime"] }
 rand.workspace = true
 rustls.workspace = true
 serde.workspace = true
