@@ -80,11 +80,22 @@ fun richBlocksOf(
     broadcastSpans: List<WaddleBroadcastSpan> = emptyList(),
 ): List<RichBlock> {
     if (body.isEmpty()) return emptyList()
-    val context = RichParseContext.of(body, markupSpans, references, broadcastSpans, fallbackStart, fallbackEnd)
+    val context = RichParseContext.of(
+        body = body,
+        annotations = RichAnnotations(markupSpans, references, broadcastSpans),
+        fallbackStart = fallbackStart,
+        fallbackEnd = fallbackEnd,
+    )
     return context.blocksFromRange(0L, context.totalCodePoints)
 }
 
 // ── Parse context ────────────────────────────────────────────────────
+
+private data class RichAnnotations(
+    val markupSpans: List<WaddleMarkupSpan>,
+    val references: List<WaddleReference>,
+    val broadcastSpans: List<WaddleBroadcastSpan>,
+)
 
 private data class StyledRange(val type: WaddleMarkupSpanType, val start: Long, val end: Long)
 
@@ -101,26 +112,24 @@ private class RichParseContext(
     companion object {
         fun of(
             body: String,
-            markupSpans: List<WaddleMarkupSpan>,
-            references: List<WaddleReference>,
-            broadcastSpans: List<WaddleBroadcastSpan>,
+            annotations: RichAnnotations,
             fallbackStart: UInt?,
             fallbackEnd: UInt?,
         ): RichParseContext {
             val totalCodePoints = body.codePointCount(0, body.length).toLong()
             val strip = strippedRangeOf(fallbackStart, fallbackEnd, totalCodePoints)
-            val spans = markupSpans
+            val spans = annotations.markupSpans
                 .mapNotNull { span -> span.rebasedRange(strip, totalCodePoints) }
                 .sortedWith(compareBy<StyledRange> { it.start }.thenByDescending { it.end })
-            val links = linkRangesOf(body, references, spans, strip, totalCodePoints)
+            val links = linkRangesOf(body, annotations.references, spans, strip, totalCodePoints)
             return RichParseContext(
                 body = body,
                 totalCodePoints = totalCodePoints,
                 inlineSpans = spans.filter { !it.type.isBlock() },
                 blockSpans = spans.filter { it.type.isBlock() },
                 linkRanges = links,
-                mentionRanges = mentionRangesOf(references, strip, totalCodePoints) +
-                    broadcastRangesOf(broadcastSpans, strip, totalCodePoints),
+                mentionRanges = mentionRangesOf(annotations.references, strip, totalCodePoints) +
+                    broadcastRangesOf(annotations.broadcastSpans, strip, totalCodePoints),
             )
         }
     }

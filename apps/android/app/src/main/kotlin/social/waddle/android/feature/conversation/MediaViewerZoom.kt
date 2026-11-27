@@ -21,7 +21,8 @@ internal data class ViewerTransform(val scale: Float = VIEWER_MIN_SCALE, val off
         // The gesture helpers return Offset.Unspecified (NaN) for the centroid on the
         // event where the last finger lifts; one NaN would poison the layer's
         // translation and the image would vanish.
-        if (!centroid.isSpecified || !pan.isSpecified || !zoom.isFinite() || zoom <= 0f) return this
+        if (!centroid.isSpecified || !pan.isSpecified) return this
+        if (!zoom.isFinite() || zoom <= 0f) return this
         val newScale = (scale * zoom).coerceIn(VIEWER_MIN_SCALE, VIEWER_MAX_SCALE)
         val applied = newScale / scale
         val centre = Offset(viewport.width / 2f, viewport.height / 2f)
