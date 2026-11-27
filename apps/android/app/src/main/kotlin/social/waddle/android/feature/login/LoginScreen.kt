@@ -70,7 +70,10 @@ import social.waddle.android.ui.huddleFieldColors
 @Composable
 fun LoginScreen() {
     val graph = LocalAppGraph.current
-    val viewModel: LoginViewModel = viewModel(factory = LoginViewModel.factory(graph))
+    // A fresh view model per attempt: adding a second account must not
+    // reopen the first sign-in's finished state.
+    val attempt by graph.loginAttempt.collectAsStateWithLifecycle()
+    val viewModel: LoginViewModel = viewModel(key = "login-$attempt", factory = LoginViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val server by viewModel.server.collectAsStateWithLifecycle()
     val context = LocalContext.current

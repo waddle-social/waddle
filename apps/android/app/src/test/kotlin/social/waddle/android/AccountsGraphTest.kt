@@ -153,4 +153,31 @@ class AccountsGraphTest {
         assertTrue(graph.accounts.value.single().needsSignIn)
         assertEquals(setOf(a), graph.runtimes.value.keys)
     }
+
+    @Test
+    fun `tiles list every account and mark the selected one`() {
+        signIn("https://a.example", "ann@a.example", "sess-a")
+        signIn("https://b.example", "bob@b.example", "sess-b")
+        val a = accountKey("https://a.example", "ann@a.example")
+
+        val tiles = runBlocking { graph.accountTiles.first { it.size == 2 && it.last().selected } }
+
+        assertEquals(listOf("a.example", "b.example"), tiles.map { it.label })
+        assertEquals(listOf(false, true), tiles.map { it.selected })
+        runBlocking { graph.selectAccount(a) }
+        val after = runBlocking { graph.accountTiles.first { tiles -> tiles.firstOrNull()?.selected == true } }
+        assertEquals(listOf(true, false), after.map { it.selected })
+    }
+
+    @Test
+    fun `adding an account is a mode that signing in ends`() {
+        signIn("https://a.example", "ann@a.example", "sess-a")
+
+        graph.beginAddAccount()
+        assertTrue(graph.addingAccount.value)
+        signIn("https://b.example", "bob@b.example", "sess-b")
+
+        assertTrue(!graph.addingAccount.value)
+        assertEquals(2, graph.runtimes.value.size)
+    }
 }

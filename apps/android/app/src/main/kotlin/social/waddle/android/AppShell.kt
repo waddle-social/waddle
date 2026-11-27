@@ -18,15 +18,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -42,6 +45,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.feature.call.CallOverlayHost
 import social.waddle.android.feature.login.LoginScreen
@@ -73,19 +77,55 @@ fun AppShell(
         modifier = Modifier.fillMaxSize().testTag(AppShellTestTags.ROOT),
         color = Waddle.colors.bg,
     ) {
+        val adding by graph.addingAccount.collectAsStateWithLifecycle()
         when (val state = appState) {
             WaddleAppState.Loading -> LoadingScreen()
-            WaddleAppState.SignedOut -> LoginScreen()
+            WaddleAppState.SignedOut -> LoginHost(adding = false)
             is WaddleAppState.Error -> RestoreErrorScreen(
                 detail = state.message,
                 onRetry = graph::restore,
             )
-            WaddleAppState.Ready -> ReadyShell(
-                pendingConversationJid = pendingConversationJid,
-                onConversationConsumed = onConversationConsumed,
-                pendingCallAnswer = pendingCallAnswer,
-                onCallAnswerConsumed = onCallAnswerConsumed,
-            )
+            WaddleAppState.Ready -> if (adding) {
+                LoginHost(adding = true)
+            } else {
+                ReadyShell(
+                    pendingConversationJid = pendingConversationJid,
+                    onConversationConsumed = onConversationConsumed,
+                    pendingCallAnswer = pendingCallAnswer,
+                    onCallAnswerConsumed = onCallAnswerConsumed,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The sign-in screen for the first account, for adding another, or for
+ * signing in again after a server rejected a session. With other accounts
+ * to go back to, a Cancel button leaves without signing in.
+ */
+@Composable
+private fun LoginHost(adding: Boolean) {
+    val graph = LocalAppGraph.current
+    val accounts by graph.accounts.collectAsStateWithLifecycle()
+    val activeKey by graph.activeKey.collectAsStateWithLifecycle()
+    // Signing in again: ask the account's own server, not the last one typed.
+    LaunchedEffect(activeKey, adding) { if (!adding) graph.prepareReauth() }
+    val fallback = accounts.firstOrNull { it.key != activeKey && !it.needsSignIn }
+    val scope = rememberCoroutineScope()
+    Box {
+        LoginScreen()
+        if (adding || fallback != null) {
+            TextButton(
+                onClick = {
+                    if (adding) {
+                        graph.cancelAddAccount()
+                    } else {
+                        fallback?.let { scope.launch { graph.selectAccount(it.key) } }
+                    }
+                },
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(Waddle.space.sm),
+            ) { Text(stringResource(R.string.accounts_cancel)) }
         }
     }
 }

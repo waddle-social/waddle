@@ -36,6 +36,7 @@ import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.UnfoldMore
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -68,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
+import social.waddle.android.feature.account.AccountSheet
 import social.waddle.android.feature.dm.DmListItem
 import social.waddle.android.feature.dm.DmListRow
 import social.waddle.android.feature.dm.DmListViewModel
@@ -114,6 +116,8 @@ class SidebarActions(
     val onOpenSettings: () -> Unit = {},
     /** Joins a live huddle from its card (phone Home tab). */
     val onJoinHuddle: (RoomActivity) -> Unit = {},
+    /** Opens the account switcher (the community header). */
+    val onOpenAccounts: (() -> Unit)? = null,
 )
 
 /**
@@ -132,6 +136,8 @@ fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null, tab: Bo
     val session by graph.currentSession.collectAsStateWithLifecycle()
     val vcard by graph.sessionManager.profileStore.selfVcard.collectAsStateWithLifecycle()
     val connection by graph.sessionManager.connectionState.collectAsStateWithLifecycle()
+    var showAccounts by rememberSaveable { mutableStateOf(false) }
+    if (showAccounts) AccountSheet(onDismiss = { showAccounts = false })
     val jid = session?.jid?.let(::bareJidOf)
     val name = vcard?.fullName?.takeIf { it.isNotBlank() }
         ?: vcard?.nickname?.takeIf { it.isNotBlank() }
@@ -155,6 +161,7 @@ fun SidebarScreen(actions: SidebarActions, current: SidebarPage? = null, tab: Bo
             onOpenYou = actions.onOpenYou,
             onOpenSettings = actions.onOpenSettings,
             onJoinHuddle = rememberHuddleJoiner(onJoined = { room -> actions.onOpenRoom(room.roomJid, room.name) }),
+            onOpenAccounts = { showAccounts = true },
         ),
         current = current,
         tab = tab,
@@ -170,6 +177,7 @@ object SidebarTestTags {
     const val ALL_DMS = "sidebar-all-dms"
     const val YOU = "sidebar-you"
     const val SETTINGS = "sidebar-settings"
+    const val ACCOUNTS = "sidebar-accounts"
     const val ROOM_PREFIX = "sidebar-room-"
 }
 
@@ -196,7 +204,7 @@ internal fun SidebarContent(
             .background(colors.bgRail)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
     ) {
-        CommunityHeader(state.community)
+        CommunityHeader(state.community, actions.onOpenAccounts)
         SearchField(query = query, onQueryChange = { query = it })
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -331,12 +339,22 @@ private fun jidOf(row: DmListRow): String = when (row) {
 
 /** The community: the waddle mark on a white tile and the server's name. */
 @Composable
-private fun CommunityHeader(community: String) {
+private fun CommunityHeader(community: String, onOpenAccounts: (() -> Unit)?) {
+    val switchLabel = stringResource(R.string.accounts_switch_description)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (onOpenAccounts != null) {
+                    Modifier
+                        .testTag(SidebarTestTags.ACCOUNTS)
+                        .clickable(onClickLabel = switchLabel, onClick = onOpenAccounts)
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = Waddle.space.md, vertical = Waddle.space.sm),
     ) {
         Box(
@@ -358,8 +376,11 @@ private fun CommunityHeader(community: String) {
             color = Waddle.colors.fg,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.semantics { heading() },
+            modifier = Modifier.weight(1f, fill = false).semantics { heading() },
         )
+        if (onOpenAccounts != null) {
+            Icon(Icons.Outlined.UnfoldMore, contentDescription = null, tint = Waddle.colors.fgMuted)
+        }
     }
 }
 
