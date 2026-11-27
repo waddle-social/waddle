@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 
 /** Where each account's session DataStore lives; tests swap in memory-backed ones. */
@@ -44,7 +45,7 @@ class AccountStores(private val directory: File) : AccountStoreProvider {
     override fun remove(key: String) {
         requireSafe(key)
         entries.remove(key)?.scope?.cancel()
-        fileFor(key).delete()
+        Files.deleteIfExists(fileFor(key).toPath())
     }
 
     private fun requireSafe(key: String) = require(key.isNotEmpty() && key.all { it.isLetterOrDigit() }) {
