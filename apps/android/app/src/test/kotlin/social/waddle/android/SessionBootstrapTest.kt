@@ -6,6 +6,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.test.TestScope
@@ -89,19 +90,30 @@ class SessionBootstrapTest {
         val network = FakeNetworkSignal()
         val managerAppState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
         val signedIn = mutableListOf<WaddleSessionInfo>()
+        val signedInOrigins = mutableListOf<String>()
+        val askedOrigins = mutableListOf<String>()
         var signOutCalls = 0
 
         val bootstrap = SessionBootstrap(
-            sessionPrefs = sessionPrefs,
-            authApi = WaddleAuthApi(
-                "https://waddle.test",
-                OkHttpClient.Builder()
-                    .dispatcher(Dispatcher(DirectExecutorService()))
-                    .addInterceptor(interceptor)
-                    .build(),
-            ),
-            signIn = { session ->
+            authApiFor = { origin ->
+                askedOrigins += origin
+                WaddleAuthApi(
+                    origin,
+                    OkHttpClient.Builder()
+                        .dispatcher(Dispatcher(DirectExecutorService()))
+                        .addInterceptor(interceptor)
+                        .build(),
+                )
+            },
+            loadStoredSession = {
+                sessionPrefs.sessionId.first()?.let { id ->
+                    val origin = sessionPrefs.serverUrl.first()?.takeIf { it.isNotBlank() }
+                    StoredSession(id, origin ?: "https://waddle.test")
+                }
+            },
+            signIn = { session, origin ->
                 signedIn += session
+                signedInOrigins += origin
                 managerAppState.value = WaddleAppState.Ready
             },
             signOutLocally = {
@@ -134,6 +146,32 @@ class SessionBootstrapTest {
         assertEquals(0, harness.signOutCalls)
         assertEquals(WaddleAppState.Ready, harness.bootstrap.appState.value)
         assertFalse(harness.bootstrap.splashHold.value)
+    }
+
+    @Test
+    fun `restore asks the origin stored beside the session, not the current selection`() = runTest {
+        val harness = Harness(this)
+        harness.sessionPrefs.setSessionId("sess-1")
+        harness.sessionPrefs.setServerUrl("https://other.example")
+        responses += Canned.Json(200, sessionJson())
+
+        harness.bootstrap.restore()
+        runCurrent()
+
+        assertEquals(listOf("https://other.example"), harness.askedOrigins)
+        assertEquals(listOf("https://other.example"), harness.signedInOrigins)
+    }
+
+    @Test
+    fun `a session without a stored origin falls back to the current selection`() = runTest {
+        val harness = Harness(this)
+        harness.sessionPrefs.setSessionId("sess-1")
+        responses += Canned.Json(200, sessionJson())
+
+        harness.bootstrap.restore()
+        runCurrent()
+
+        assertEquals(listOf("https://waddle.test"), harness.askedOrigins)
     }
 
     @Test
@@ -247,7 +285,8 @@ class SessionBootstrapTest {
         assertTrue("splash held until the local read completes", harness.bootstrap.splashHold.value)
 
         harness.bootstrap.restore()
-        advanceTimeBy(50)
+        // Each prefs read (session id, stored origin) waits out the delay.
+        advanceTimeBy(100)
         runCurrent()
 
         assertEquals("the double-tapped retry coalesces", 1, requestCount)

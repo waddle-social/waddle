@@ -17,8 +17,13 @@ interface LoginAuthGateway {
     suspend fun session(sessionId: String): Result<WaddleSessionInfo?>
 }
 
-/** Production gateway delegating to the shared [WaddleAuthApi]. */
-class WaddleLoginAuthGateway(private val api: WaddleAuthApi) : LoginAuthGateway {
+/**
+ * Production gateway delegating to a [WaddleAuthApi]. The client is resolved
+ * per call so a server change on the login screen applies to the next request.
+ */
+class WaddleLoginAuthGateway(private val apiProvider: () -> WaddleAuthApi) : LoginAuthGateway {
+    private val api: WaddleAuthApi get() = apiProvider()
+
     override suspend fun providers(): Result<List<AuthProvider>> = api.providers()
 
     override suspend fun startDeviceAuth(providerId: String): Result<DeviceStartResponse> =

@@ -7,15 +7,16 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.client.NetworkSignal
 import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
-import social.waddle.android.client.prefs.SessionPrefs
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** A session id with the origin it was issued by (the server that must validate it). */
+data class StoredSession(val sessionId: String, val origin: String)
 
 /**
  * Cold-start session restore (the `AppModel.bootstrap()` analog): a
@@ -24,11 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [WaddleAppState.Error] with a retry hook.
  */
 class SessionBootstrap(
-    private val sessionPrefs: SessionPrefs,
-    private val authApi: WaddleAuthApi,
-    /** Loads the persisted server choice so the restore asks the right server. */
-    private val loadServer: suspend () -> Unit = {},
-    private val signIn: suspend (WaddleSessionInfo) -> Unit,
+    /** Builds the auth client for one origin; the restore asks the server the session came from. */
+    private val authApiFor: (String) -> WaddleAuthApi,
+    /** The persisted session, or `null` when signed out. */
+    private val loadStoredSession: suspend () -> StoredSession?,
+    private val signIn: suspend (WaddleSessionInfo, String) -> Unit,
     private val signOutLocally: suspend () -> Unit,
     managerAppState: StateFlow<WaddleAppState>,
     private val networkSignal: NetworkSignal,
@@ -102,16 +103,16 @@ class SessionBootstrap(
         // retryable Error screen.
         try {
             restoreFailure.value = null
-            loadServer()
-            val sessionId = sessionPrefs.sessionId.first()
+            val stored = loadStoredSession()
             _splashHold.value = false
-            if (sessionId == null) {
+            if (stored == null) {
                 signOutLocally()
                 return
             }
-            authApi.session(sessionId).fold(
+            val origin = stored.origin
+            authApiFor(origin).session(stored.sessionId).fold(
                 onSuccess = { session ->
-                    if (session == null || session.isExpired) signOutLocally() else signIn(session)
+                    if (session == null || session.isExpired) signOutLocally() else signIn(session, origin)
                 },
                 onFailure = { failure ->
                     restoreFailure.value = failure.message ?: failure.javaClass.simpleName

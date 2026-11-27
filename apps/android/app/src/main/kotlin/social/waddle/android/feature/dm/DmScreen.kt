@@ -58,6 +58,7 @@ fun DmScreen(
         factory = DmViewModel.factory(graph, peerJid),
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
+    val sessionOrigin by graph.sessionOrigin.collectAsStateWithLifecycle()
     val peer by viewModel.peerPresence.collectAsStateWithLifecycle()
     val directoryShow by viewModel.peerDirectoryShow.collectAsStateWithLifecycle()
     // Same lookup as the DM list: the People directory (rooms and contacts,
@@ -94,7 +95,7 @@ fun DmScreen(
         kind = ConversationKind.Dm(name),
         titleLeading = { DmHeaderAvatar(jid = bareJidOf(peerJid), name = name, presence = peerShow) },
         titleSubline = peerShow?.let { show -> { DmHeaderSubline(presenceWordOf(show, idleAge(peer?.presence))) } },
-        trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
+        trustedMediaOrigin = trustedPreviewOriginOf(session, sessionOrigin),
         slashCommandHost = SlashCommandHost(
             controller = rememberExtensionCommandController(graph),
             roomJid = null,
