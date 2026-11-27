@@ -67,7 +67,7 @@ final class ComposerLinkPreviewSnapshotTests: XCTestCase {
             // Keep the debounce pending even under load and across themes.
             model.linkPreviews = ComposerLinkPreviewSubmission(sleep: { _ in
                 let signal = AsyncStream<Void>.makeStream()
-                for await _ in signal.stream {}
+                for await _ in signal.stream { /* never yields: the lookup stays pending */ }
             })
         }
         defer { model.linkPreview.reset() }
