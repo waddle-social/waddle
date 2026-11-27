@@ -18,3 +18,10 @@ spec:
           dnsZones:
             - waddle.chat
             - waddle.social
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: waddle-gateway
+                namespace: default
+                kind: Gateway
+                sectionName: http-byo-tenants

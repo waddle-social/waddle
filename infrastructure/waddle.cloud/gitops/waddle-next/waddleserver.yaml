@@ -85,6 +85,18 @@ spec:
     deploymentEnvironment: preview-next
     tracesSampler: parentbased_traceidratio
     tracesSamplerArg: "1.0"
+  ingress:
+    enabled: true
+    gatewayRef:
+      name: waddle-gateway
+      namespace: default
+    managedBaseDomain: waddle.social
+    managedWildcardHttpsSection: https-waddle-tenants
+    managedWildcardHttpSection: http-waddle-tenants
+    byoHttpSection: http-byo-tenants
+    targetIps:
+      - 51.159.109.202
+    tlsClusterIssuer: letsencrypt-production
   serverOwnerLocalparts:
     - rawkode
     - icepuma

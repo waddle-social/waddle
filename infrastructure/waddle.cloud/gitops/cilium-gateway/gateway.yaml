@@ -96,3 +96,27 @@ spec:
       allowedRoutes:
         namespaces:
           from: All
+    - name: https-waddle-tenants
+      protocol: HTTPS
+      port: 443
+      hostname: "*.waddle.social"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: waddle-social-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http-waddle-tenants
+      protocol: HTTP
+      port: 80
+      hostname: "*.waddle.social"
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http-byo-tenants
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All

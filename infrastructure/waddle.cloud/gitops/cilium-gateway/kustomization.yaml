@@ -4,5 +4,6 @@ resources:
   - gateway-class.yaml
   - gateway.yaml
   - wildcard-certificate.yaml
+  - waddle-social-wildcard-certificate.yaml
   - api-certificate.yaml
   - sfu-certificate.yaml
