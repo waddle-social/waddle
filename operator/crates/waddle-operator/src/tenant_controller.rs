@@ -1,20 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition as KubeCondition, Time};
-use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams, Preconditions};
+use kube::api::{
+    Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams, Preconditions,
+};
 use kube::runtime::controller::Action;
 use kube::runtime::events::{Event, EventType, Recorder};
 use kube::{Client, Resource, ResourceExt};
 use serde::Serialize;
 use serde_json::json;
 use waddle_operator_crd::{
-    validate_tenant_spec, AuthzBackendKind, SecretKeyRef, TenantExtensionsSpec,
-    TenantPlacementMode, TenantQuotasSpec, WaddleServer, WaddleServerPhase, WaddleTenant,
-    WaddleTenantPhase, WaddleTenantStatus,
+    validate_tenant_ingress_against_server, validate_tenant_spec, AuthzBackendKind, SecretKeyRef,
+    TenantExtensionsSpec, TenantPlacementMode, TenantQuotasSpec, WaddleServer, WaddleServerPhase,
+    WaddleTenant, WaddleTenantPhase, WaddleTenantStatus,
 };
 
 use crate::error::OperatorError;
@@ -22,6 +24,9 @@ use crate::leader_election::LeadershipFence;
 use crate::metrics::OperatorMetrics;
 use crate::openfga_client::OpenFgaClient;
 use crate::resources;
+use crate::tenant_ingress::{
+    cleanup_tenant_ingress, reconcile_tenant_ingress, IngressReconcileOutcome,
+};
 
 /// Finalizer attached to `WaddleTenant` resources for projection & aggregator cleanup.
 pub const TENANT_FINALIZER: &str = "waddle.social/tenant-cleanup";
@@ -74,6 +79,9 @@ pub struct TenantProjectionSpec {
     /// Optional tenant extension policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<TenantExtensionsSpec>,
+    /// Authoritative hostnames routed to this tenant (omitted when empty; defaults to `[tenantId]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
 }
 
 /// Reconciles a single `WaddleTenant` resource:
@@ -104,11 +112,14 @@ pub async fn reconcile_tenant(
     if let Err(report) = validate_tenant_spec(&wt.spec) {
         let existing = wt.status.as_ref();
         let status = build_tenant_status(
-            WaddleTenantPhase::Degraded,
-            generation,
-            existing.and_then(|s| s.openfga_store_id.clone()),
-            existing.and_then(|s| s.openfga_model_id.clone()),
-            existing.and_then(|s| s.lease_epoch),
+            TenantStatusFields {
+                phase: WaddleTenantPhase::Degraded,
+                observed_generation: generation,
+                openfga_store_id: existing.and_then(|s| s.openfga_store_id.clone()),
+                openfga_model_id: existing.and_then(|s| s.openfga_model_id.clone()),
+                lease_epoch: existing.and_then(|s| s.lease_epoch),
+                hostnames: existing.map_or_else(Vec::new, |s| s.hostnames.clone()),
+            },
             vec![
                 make_condition(
                     "Ready",
@@ -190,6 +201,144 @@ pub async fn reconcile_tenant(
         .and_then(|s| s.openfga_model_id.clone())
         .filter(|v| !v.trim().is_empty());
 
+    let resolved_ingress = match validate_tenant_ingress_against_server(&wt.spec, &ws.spec.ingress)
+    {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let msg = err.to_string();
+            let degraded = build_tenant_status(
+                TenantStatusFields {
+                    phase: WaddleTenantPhase::Degraded,
+                    observed_generation: generation,
+                    openfga_store_id: store_id,
+                    openfga_model_id: model_id,
+                    lease_epoch: existing_status.and_then(|s| s.lease_epoch),
+                    hostnames: existing_status.map_or_else(Vec::new, |s| s.hostnames.clone()),
+                },
+                vec![
+                    make_condition(
+                        "Ready",
+                        "False",
+                        "IngressInvalid",
+                        &msg,
+                        generation,
+                        &now,
+                        existing_status,
+                    ),
+                    make_condition(
+                        "SpecValid",
+                        "True",
+                        "SpecValid",
+                        "WaddleTenant specification is valid",
+                        generation,
+                        &now,
+                        existing_status,
+                    ),
+                    make_condition(
+                        "ServerReady",
+                        "True",
+                        "Ready",
+                        &format!("WaddleServer {server_name} is Ready"),
+                        generation,
+                        &now,
+                        existing_status,
+                    ),
+                    make_condition(
+                        "IngressReady",
+                        "False",
+                        "IngressInvalid",
+                        &msg,
+                        generation,
+                        &now,
+                        existing_status,
+                    ),
+                ],
+            )?;
+            patch_tenant_status_if_changed(&ctx.client, &wt, &degraded, &ctx.leadership).await?;
+            publish_tenant_event(
+                ctx.recorder.as_ref(),
+                &wt,
+                EventType::Warning,
+                "IngressInvalid",
+                &msg,
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(DEGRADED_REQUEUE_SECS)));
+        }
+    };
+
+    if let Some((conflict_host, other_tenant)) = check_namespace_hostname_conflicts(
+        &ctx.client,
+        ns,
+        cr_name,
+        server_name,
+        &resolved_ingress.hostnames,
+    )
+    .await?
+    {
+        let msg = format!(
+            "Hostname '{conflict_host}' is already claimed by WaddleTenant '{other_tenant}' on server '{server_name}'"
+        );
+        let degraded = build_tenant_status(
+            TenantStatusFields {
+                phase: WaddleTenantPhase::Degraded,
+                observed_generation: generation,
+                openfga_store_id: store_id,
+                openfga_model_id: model_id,
+                lease_epoch: existing_status.and_then(|s| s.lease_epoch),
+                hostnames: existing_status.map_or_else(Vec::new, |s| s.hostnames.clone()),
+            },
+            vec![
+                make_condition(
+                    "Ready",
+                    "False",
+                    "HostnameConflict",
+                    &msg,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "SpecValid",
+                    "True",
+                    "SpecValid",
+                    "WaddleTenant specification is valid",
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "ServerReady",
+                    "True",
+                    "Ready",
+                    &format!("WaddleServer {server_name} is Ready"),
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "IngressReady",
+                    "False",
+                    "HostnameConflict",
+                    &msg,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+            ],
+        )?;
+        patch_tenant_status_if_changed(&ctx.client, &wt, &degraded, &ctx.leadership).await?;
+        publish_tenant_event(
+            ctx.recorder.as_ref(),
+            &wt,
+            EventType::Warning,
+            "HostnameConflict",
+            &msg,
+        )
+        .await;
+        return Ok(Action::requeue(Duration::from_secs(DEGRADED_REQUEUE_SECS)));
+    }
+
     let openfga_condition = if ws.spec.authz.backend == AuthzBackendKind::OpenFga {
         match provision_tenant_openfga(
             &ctx,
@@ -213,11 +362,14 @@ pub async fn reconcile_tenant(
             Err(err) => {
                 let msg = err.to_string();
                 let degraded = build_tenant_status(
-                    WaddleTenantPhase::Degraded,
-                    generation,
-                    store_id,
-                    model_id,
-                    existing_status.and_then(|s| s.lease_epoch),
+                    TenantStatusFields {
+                        phase: WaddleTenantPhase::Degraded,
+                        observed_generation: generation,
+                        openfga_store_id: store_id,
+                        openfga_model_id: model_id,
+                        lease_epoch: existing_status.and_then(|s| s.lease_epoch),
+                        hostnames: resolved_ingress.hostnames,
+                    },
                     vec![
                         make_condition(
                             "Ready",
@@ -292,6 +444,7 @@ pub async fn reconcile_tenant(
         auth_providers_secret_ref: wt.spec.auth_providers_secret_ref.clone(),
         quotas: wt.spec.quotas.clone(),
         extensions: wt.spec.extensions.clone(),
+        hostnames: resolved_ingress.hostnames.clone(),
     };
     let projection_json = serde_json::to_string_pretty(&projection)
         .map_err(|err| OperatorError::Serialization(err.to_string()))?;
@@ -308,23 +461,178 @@ pub async fn reconcile_tenant(
     )
     .await?;
 
-    let lease_epoch = Some(existing_status.and_then(|s| s.lease_epoch).unwrap_or(1));
-    let ready_status = build_tenant_status(
-        WaddleTenantPhase::Ready,
+    let projection_condition = make_condition(
+        "ProjectionReady",
+        "True",
+        "Synced",
+        &format!(
+            "Synced ConfigMap {} and {}-tenants",
+            resources::tenant_projection_config_map_name(cr_name),
+            server_name
+        ),
         generation,
-        store_id,
-        model_id,
-        lease_epoch,
-        vec![
-            make_condition(
-                "Ready",
-                "True",
-                "Ready",
-                "Tenant OpenFGA store and projection ConfigMap are ready",
-                generation,
-                &now,
-                existing_status,
+        &now,
+        existing_status,
+    );
+
+    let ingress_outcome = reconcile_tenant_ingress(
+        &ctx.client,
+        ns,
+        &ws,
+        &wt,
+        &resolved_ingress,
+        &ctx.leadership,
+    )
+    .await?;
+
+    let lease_epoch = Some(existing_status.and_then(|s| s.lease_epoch).unwrap_or(1));
+    let (phase, requeue_secs, ready_cond, tls_cond, ingress_cond, warning_event) =
+        match ingress_outcome {
+            IngressReconcileOutcome::Disabled => (
+                WaddleTenantPhase::Ready,
+                READY_REQUEUE_SECS,
+                make_condition(
+                    "Ready",
+                    "True",
+                    "Ready",
+                    "Tenant OpenFGA store and projection ConfigMap are ready",
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "TlsReady",
+                    "True",
+                    "IngressDisabled",
+                    "Tenant ingress management is disabled",
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "IngressReady",
+                    "True",
+                    "IngressDisabled",
+                    "Tenant ingress management is disabled",
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                None,
             ),
+            IngressReconcileOutcome::Ready {
+                tls_reason,
+                tls_message,
+                ingress_message,
+            } => (
+                WaddleTenantPhase::Ready,
+                READY_REQUEUE_SECS,
+                make_condition(
+                    "Ready",
+                    "True",
+                    "Ready",
+                    "Tenant OpenFGA store, projection ConfigMap, TLS, and ingress are ready",
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "TlsReady",
+                    "True",
+                    tls_reason,
+                    &tls_message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "IngressReady",
+                    "True",
+                    "Reconciled",
+                    &ingress_message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                None,
+            ),
+            IngressReconcileOutcome::WaitingForCertificate { message } => (
+                WaddleTenantPhase::Provisioning,
+                PENDING_REQUEUE_SECS,
+                make_condition(
+                    "Ready",
+                    "False",
+                    "WaitingForCertificate",
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "TlsReady",
+                    "False",
+                    "CertificateNotReady",
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "IngressReady",
+                    "False",
+                    "WaitingForCertificate",
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                None,
+            ),
+            IngressReconcileOutcome::Degraded { reason, message } => (
+                WaddleTenantPhase::Degraded,
+                DEGRADED_REQUEUE_SECS,
+                make_condition(
+                    "Ready",
+                    "False",
+                    reason,
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "TlsReady",
+                    "False",
+                    reason,
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                make_condition(
+                    "IngressReady",
+                    "False",
+                    reason,
+                    &message,
+                    generation,
+                    &now,
+                    existing_status,
+                ),
+                Some((reason, message)),
+            ),
+        };
+
+    let status = build_tenant_status(
+        TenantStatusFields {
+            phase,
+            observed_generation: generation,
+            openfga_store_id: store_id,
+            openfga_model_id: model_id,
+            lease_epoch,
+            hostnames: resolved_ingress.hostnames,
+        },
+        vec![
+            ready_cond,
             make_condition(
                 "SpecValid",
                 "True",
@@ -344,25 +652,24 @@ pub async fn reconcile_tenant(
                 existing_status,
             ),
             openfga_condition,
-            make_condition(
-                "ProjectionReady",
-                "True",
-                "Synced",
-                &format!(
-                    "Synced ConfigMap {} and {}-tenants",
-                    resources::tenant_projection_config_map_name(cr_name),
-                    server_name
-                ),
-                generation,
-                &now,
-                existing_status,
-            ),
+            projection_condition,
+            tls_cond,
+            ingress_cond,
         ],
     )?;
 
     let patched =
-        patch_tenant_status_if_changed(&ctx.client, &wt, &ready_status, &ctx.leadership).await?;
-    if patched {
+        patch_tenant_status_if_changed(&ctx.client, &wt, &status, &ctx.leadership).await?;
+    if let Some((reason, message)) = warning_event {
+        publish_tenant_event(
+            ctx.recorder.as_ref(),
+            &wt,
+            EventType::Warning,
+            reason,
+            &message,
+        )
+        .await;
+    } else if patched && phase == WaddleTenantPhase::Ready {
         publish_tenant_event(
             ctx.recorder.as_ref(),
             &wt,
@@ -376,7 +683,52 @@ pub async fn reconcile_tenant(
         .await;
     }
 
-    Ok(Action::requeue(Duration::from_secs(READY_REQUEUE_SECS)))
+    Ok(Action::requeue(Duration::from_secs(requeue_secs)))
+}
+
+async fn check_namespace_hostname_conflicts(
+    client: &Client,
+    ns: &str,
+    cr_name: &str,
+    server_name: &str,
+    desired_hostnames: &[String],
+) -> Result<Option<(String, String)>, OperatorError> {
+    let desired_lower: BTreeSet<String> = desired_hostnames
+        .iter()
+        .map(|h| h.to_ascii_lowercase())
+        .collect();
+    if desired_lower.is_empty() {
+        return Ok(None);
+    }
+
+    let api: Api<WaddleTenant> = Api::namespaced(client.clone(), ns);
+    let tenants = api
+        .list(&ListParams::default())
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "list WaddleTenants for hostname uniqueness check",
+            source,
+        })?;
+
+    for other in tenants.items {
+        let Some(other_name) = other.metadata.name.as_deref() else {
+            continue;
+        };
+        if other_name == cr_name || other.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
+        if other.spec.server_ref.name != server_name {
+            continue;
+        }
+        for other_host in other.spec.effective_hostnames() {
+            let lower = other_host.to_ascii_lowercase();
+            if desired_lower.contains(&lower) {
+                return Ok(Some((lower, other_name.to_owned())));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 async fn handle_tenant_deletion(
@@ -389,16 +741,19 @@ async fn handle_tenant_deletion(
 ) -> Result<Action, OperatorError> {
     let existing = wt.status.as_ref();
     let term_status = build_tenant_status(
-        WaddleTenantPhase::Terminating,
-        generation,
-        existing.and_then(|s| s.openfga_store_id.clone()),
-        existing.and_then(|s| s.openfga_model_id.clone()),
-        existing.and_then(|s| s.lease_epoch),
+        TenantStatusFields {
+            phase: WaddleTenantPhase::Terminating,
+            observed_generation: generation,
+            openfga_store_id: existing.and_then(|s| s.openfga_store_id.clone()),
+            openfga_model_id: existing.and_then(|s| s.openfga_model_id.clone()),
+            lease_epoch: existing.and_then(|s| s.lease_epoch),
+            hostnames: existing.map_or_else(Vec::new, |s| s.hostnames.clone()),
+        },
         vec![make_condition(
             "Ready",
             "False",
             "Terminating",
-            "WaddleTenant is terminating and cleaning up projection ConfigMaps",
+            "WaddleTenant is terminating and cleaning up ingress and projection resources",
             generation,
             now,
             existing,
@@ -407,6 +762,16 @@ async fn handle_tenant_deletion(
     patch_tenant_status_if_changed(&ctx.client, wt, &term_status, &ctx.leadership).await?;
 
     let server_name = wt.spec.server_ref.name.as_str();
+    let server_api: Api<WaddleServer> = Api::namespaced(ctx.client.clone(), ns);
+    let ws = server_api
+        .get_opt(server_name)
+        .await
+        .map_err(|source| OperatorError::Kube {
+            context: "get referenced WaddleServer during tenant deletion",
+            source,
+        })?;
+    cleanup_tenant_ingress(&ctx.client, ns, cr_name, wt, ws.as_ref(), &ctx.leadership).await?;
+
     sync_server_tenants_config_map(
         &ctx.client,
         ns,
@@ -467,11 +832,14 @@ async fn set_pending_status(
 ) -> Result<Action, OperatorError> {
     let existing = wt.status.as_ref();
     let status = build_tenant_status(
-        WaddleTenantPhase::Pending,
-        generation,
-        existing.and_then(|s| s.openfga_store_id.clone()),
-        existing.and_then(|s| s.openfga_model_id.clone()),
-        existing.and_then(|s| s.lease_epoch),
+        TenantStatusFields {
+            phase: WaddleTenantPhase::Pending,
+            observed_generation: generation,
+            openfga_store_id: existing.and_then(|s| s.openfga_store_id.clone()),
+            openfga_model_id: existing.and_then(|s| s.openfga_model_id.clone()),
+            lease_epoch: existing.and_then(|s| s.lease_epoch),
+            hostnames: existing.map_or_else(Vec::new, |s| s.hostnames.clone()),
+        },
         vec![
             make_condition("Ready", "False", reason, message, generation, now, existing),
             make_condition(
@@ -856,12 +1224,17 @@ fn make_condition(
     }
 }
 
-fn build_tenant_status(
+struct TenantStatusFields {
     phase: WaddleTenantPhase,
     observed_generation: i64,
     openfga_store_id: Option<String>,
     openfga_model_id: Option<String>,
     lease_epoch: Option<u64>,
+    hostnames: Vec<String>,
+}
+
+fn build_tenant_status(
+    fields: TenantStatusFields,
     drafts: Vec<ConditionDraft>,
 ) -> Result<WaddleTenantStatus, OperatorError> {
     let conditions = drafts
@@ -887,11 +1260,12 @@ fn build_tenant_status(
         .collect::<Result<Vec<_>, OperatorError>>()?;
 
     Ok(WaddleTenantStatus {
-        phase,
-        observed_generation: Some(observed_generation),
-        openfga_store_id,
-        openfga_model_id,
-        lease_epoch,
+        phase: fields.phase,
+        observed_generation: Some(fields.observed_generation),
+        openfga_store_id: fields.openfga_store_id,
+        openfga_model_id: fields.openfga_model_id,
+        lease_epoch: fields.lease_epoch,
+        hostnames: fields.hostnames,
         conditions,
     })
 }

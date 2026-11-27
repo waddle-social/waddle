@@ -464,22 +464,77 @@ spec:
                 type: object
               ingress:
                 default:
+                  enabled: false
                   poolSize: 4
                   retryAttempts: 5
                 description: Durable ingress authority transaction limits.
                 properties:
+                  byoHttpSection:
+                    description: Static HTTP catch-all listener `sectionName` on `gatewayRef` for BYO HTTP-01 and redirects.
+                    nullable: true
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enable operator-managed per-tenant Gateway API, DNS, and TLS reconciliation.
+                    type: boolean
+                  gatewayRef:
+                    description: Target Gateway API `Gateway` used for tenant `HTTPRoute`s and BYO listeners.
+                    nullable: true
+                    properties:
+                      name:
+                        description: '`Gateway` object name (e.g. `waddle-gateway`).'
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                      namespace:
+                        description: Namespace containing the `Gateway` (e.g. `default`).
+                        type: string
+                        x-kubernetes-validations:
+                        - rule: size(self) > 0
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                  managedBaseDomain:
+                    description: Managed wildcard base DNS domain for `ManagedSubdomain` tenants (e.g. `waddle.social`).
+                    nullable: true
+                    type: string
+                  managedWildcardHttpSection:
+                    description: Static HTTP wildcard listener `sectionName` on `gatewayRef` for managed subdomain redirects.
+                    nullable: true
+                    type: string
+                  managedWildcardHttpsSection:
+                    description: Static HTTPS wildcard listener `sectionName` on `gatewayRef` for managed subdomains.
+                    nullable: true
+                    type: string
                   poolSize:
                     default: 4
                     description: Ingress DB pool size (`1..=32`, default `4`).
                     format: uint32
                     minimum: 0.0
                     type: integer
+                  reservedSubdomains:
+                    description: |-
+                      Additional reserved single-label subdomains under `managedBaseDomain` (merged with
+                      the always-enforced built-in reserved floor).
+                    items:
+                      type: string
+                    type: array
                   retryAttempts:
                     default: 5
                     description: Ingress DB retry attempts (`1..=32`, default `5`).
                     format: uint32
                     minimum: 0.0
                     type: integer
+                  targetIps:
+                    description: Static target IP addresses written into `DNSEndpoint` for `ManagedSubdomain` tenants.
+                    items:
+                      type: string
+                    type: array
+                  tlsClusterIssuer:
+                    description: '`cert-manager` `ClusterIssuer` name used for `CustomDomain` tenant `Certificate`s.'
+                    nullable: true
+                    type: string
                 type: object
               mode:
                 default: HomeServer

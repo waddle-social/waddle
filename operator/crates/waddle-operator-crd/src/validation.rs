@@ -313,6 +313,7 @@ pub fn validate_spec(spec: &WaddleServerSpec) -> Result<ValidatedSpec, Validatio
     }
     validate_secrets(&spec.secrets, &mut violations);
     validate_numeric_knobs(spec, &mut violations);
+    validate_ingress_routing(&spec.ingress, &mut violations);
     validate_s3_and_s2s_and_env(spec, &mut violations);
 
     if !violations.is_empty() {
@@ -985,6 +986,74 @@ fn validate_numeric_knobs(spec: &WaddleServerSpec, violations: &mut Vec<Validati
             max: u64::from(MAX_INGRESS_KNOB),
             actual: u64::from(spec.ingress.retry_attempts),
         });
+    }
+}
+
+fn validate_ingress_routing(
+    ingress: &crate::server_config::IngressSpec,
+    violations: &mut Vec<ValidationViolation>,
+) {
+    if !ingress.enabled {
+        return;
+    }
+
+    match &ingress.gateway_ref {
+        Some(gw) => {
+            validate_resource_name(&gw.name, "spec.ingress.gatewayRef.name", violations);
+            validate_resource_name(
+                &gw.namespace,
+                "spec.ingress.gatewayRef.namespace",
+                violations,
+            );
+        }
+        None => {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.ingress.gatewayRef",
+                detail: "gatewayRef is required when spec.ingress.enabled=true",
+            });
+        }
+    }
+
+    if let Some(base) = ingress.managed_base_domain.as_deref() {
+        let trimmed = base.trim();
+        if base != trimmed || !trimmed.contains('.') || XmppDomain::try_new(trimmed).is_err() {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.ingress.managedBaseDomain",
+                detail: "managedBaseDomain must be a valid lower-case FQDN",
+            });
+        }
+    }
+
+    if let Some(issuer) = ingress.tls_cluster_issuer.as_deref() {
+        validate_resource_name(issuer, "spec.ingress.tlsClusterIssuer", violations);
+    }
+
+    for ip in &ingress.target_ips {
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.ingress.targetIps",
+                detail: "targetIps entries must be valid IPv4 or IPv6 addresses",
+            });
+            break;
+        }
+    }
+
+    for sub in &ingress.reserved_subdomains {
+        let valid_label = !sub.is_empty()
+            && sub.len() <= 63
+            && !sub.contains('.')
+            && !sub.starts_with('-')
+            && !sub.ends_with('-')
+            && sub
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !valid_label {
+            violations.push(ValidationViolation::InconsistentDiscriminatedSpec {
+                section: "spec.ingress.reservedSubdomains",
+                detail: "reservedSubdomains entries must be lower-case single DNS labels",
+            });
+            break;
+        }
     }
 }
 

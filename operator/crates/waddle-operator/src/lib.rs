@@ -29,6 +29,8 @@ pub mod openfga_client;
 pub mod resources;
 /// `WaddleTenant` reconciliation controller and projection ConfigMap manager.
 pub mod tenant_controller;
+/// Per-tenant Gateway API, cert-manager, and ExternalDNS resource builders and reconciler.
+pub mod tenant_ingress;
 /// Cryptographic generators, redacted secret wrappers, and keypool validators.
 pub mod yolo;
 

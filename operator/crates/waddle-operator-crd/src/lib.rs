@@ -27,7 +27,7 @@ pub use secrets::{
     SecretStoreRef, SecretsSpec, YoloSecretsSpec,
 };
 pub use server_config::{
-    ClusteringSpec, DeploymentIdentitySpec, HttpProbeSpec, ImageSpec, IngressSpec,
+    ClusteringSpec, DeploymentIdentitySpec, GatewayRefSpec, HttpProbeSpec, ImageSpec, IngressSpec,
     NetworkPolicySpec, PersistenceAccessMode, PersistenceSpec, PodAntiAffinitySpec,
     PodDisruptionBudgetSpec, ProbesSpec, PullPolicy, ResourceRequirementsSpec, ResourceSpec,
     S2sServiceType, S2sSpec, S3StorageSpec, ServerMode, ServiceSpec, ServiceType, ShutdownSpec,
@@ -40,7 +40,9 @@ pub use waddle_server::{
     WaddleServerPhase, WaddleServerSpec, WaddleServerStatus,
 };
 pub use waddle_tenant::{
-    validate_tenant_spec, TenantExtensionsSpec, TenantPlacementMode, TenantQuotasSpec,
-    TenantValidationReport, TenantValidationViolation, WaddleTenant, WaddleTenantPhase,
-    WaddleTenantSpec, WaddleTenantStatus,
+    validate_tenant_ingress_against_server, validate_tenant_spec, ResolvedIngressMode,
+    ResolvedTenantIngress, TenantExtensionsSpec, TenantIngressError, TenantIngressMode,
+    TenantIngressSpec, TenantPlacementMode, TenantQuotasSpec, TenantValidationReport,
+    TenantValidationViolation, WaddleTenant, WaddleTenantPhase, WaddleTenantSpec,
+    WaddleTenantStatus, BUILTIN_RESERVED_SUBDOMAINS,
 };
