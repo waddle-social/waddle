@@ -1,4 +1,5 @@
 import Foundation
+import WaddleKit
 
 /// Finds bare links in message text with `NSDataDetector`, reported in
 /// Unicode scalar offsets like every other range in the body layout. Only

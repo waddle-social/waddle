@@ -9,11 +9,12 @@ import WaddleKit
 /// The field reports its selection (as Unicode scalar offsets) so
 /// formatting wraps the selected text.
 struct ComposerTextField: View {
-    @Binding var text: String
+    let text: String
     @Binding var selection: ComposerScalarRange?
     let placeholder: String
     /// Kept in step with the system's focus both ways.
     @Binding var isFocused: Bool
+    let onTextChange: (ComposerTextReplacement) -> Void
     let onSubmit: () -> Void
     /// Returns true when an open suggestion list used the key.
     let onSuggestionKey: (ComposerHardwareKey) -> Bool
@@ -24,10 +25,11 @@ struct ComposerTextField: View {
 
     var body: some View {
         ComposerTextView(
-            text: $text,
+            text: text,
             selection: $selection,
             isFocused: $isFocused,
             placeholder: placeholder,
+            onTextChange: onTextChange,
             onSubmit: onSubmit,
             onSuggestionKey: onSuggestionKey,
             onCancel: onCancel,

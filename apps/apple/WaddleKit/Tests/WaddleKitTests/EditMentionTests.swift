@@ -41,7 +41,7 @@ struct EditMentionTests {
     /// What the composer sends after the user turns the editable text into
     /// `newText`: the seeded mentions re-located like new-message mentions.
     private func editDraft(_ editable: EditableMessage, to newText: String) -> Draft {
-        Draft(text: newText, mentions: MentionTokens.locate(editable.recordedMentions, in: newText))
+        Draft(text: newText, references: editable.recordedReferences.located(in: newText))
     }
 
     private func mention(_ jid: BareJID, _ begin: Int, _ end: Int) -> Reference {
@@ -63,11 +63,11 @@ struct EditMentionTests {
     }
 
     @Test func unchangedTextKeepsMention() async {
-        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)]))
+        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 3..<9)])))
         let editable = EditableMessage(item: item)
         #expect(editable.text == "hi @carol")
-        #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 3..<9)])
-        #expect(editable.recordedMentions == [RecordedMention(token: "@carol", target: .user(carol))])
+        #expect(editable.references.mentions == [MentionDraft(target: .user(carol), range: 3..<9)])
+        #expect(editable.recordedReferences.mentions == [RecordedMention(token: "@carol", target: .user(carol))])
 
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: editable.text)))
         #expect(port.corrections.last?.body == "hi @carol")
@@ -75,7 +75,7 @@ struct EditMentionTests {
     }
 
     @Test func textInsertedBeforeShiftsMention() async {
-        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)]))
+        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 3..<9)])))
         let editable = EditableMessage(item: item)
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "oh hi there @carol")))
         #expect(port.corrections.last?.options.references == [mention(carol, 12, 18)])
@@ -84,7 +84,7 @@ struct EditMentionTests {
     }
 
     @Test func deletedMentionTextDropsMention() async {
-        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)]))
+        let (coordinator, port, item) = await sent(Draft(text: "hi @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 3..<9)])))
         let editable = EditableMessage(item: item)
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "hi everybody")))
         #expect(port.corrections.last?.body == "hi everybody")
@@ -93,11 +93,11 @@ struct EditMentionTests {
 
     @Test func mentionAfterBoldSpanLandsPastMarkers() async {
         // Wire: "hey @carol", bold 0..<3, mention 4..<10.
-        let (coordinator, port, item) = await sent(Draft(text: "**hey** @carol", mentions: [MentionDraft(target: .user(carol), range: 8..<14)]))
+        let (coordinator, port, item) = await sent(Draft(text: "**hey** @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 8..<14)])))
         #expect(item.message.references == [mention(carol, 4, 10)])
         let editable = EditableMessage(item: item)
         #expect(editable.text == "**hey** @carol")
-        #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 8..<14)])
+        #expect(editable.references.mentions == [MentionDraft(target: .user(carol), range: 8..<14)])
 
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "**hey** there @carol")))
         let options = port.corrections.last?.options
@@ -107,10 +107,10 @@ struct EditMentionTests {
     }
 
     @Test func mentionWrappedInBoldSurvives() async {
-        let (coordinator, port, item) = await sent(Draft(text: "**@carol** hi", mentions: [MentionDraft(target: .user(carol), range: 2..<8)]))
+        let (coordinator, port, item) = await sent(Draft(text: "**@carol** hi", references: .init(mentions: [MentionDraft(target: .user(carol), range: 2..<8)])))
         let editable = EditableMessage(item: item)
         #expect(editable.text == "**@carol** hi")
-        #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 2..<8)])
+        #expect(editable.references.mentions == [MentionDraft(target: .user(carol), range: 2..<8)])
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "**@carol** hello")))
         #expect(port.corrections.last?.options.references == [mention(carol, 0, 6)])
         #expect(port.corrections.last?.options.markupSpans == [MarkupSpan(kind: .bold, start: 0, end: 6)])
@@ -121,12 +121,12 @@ struct EditMentionTests {
         // builder derives XEP-0513 `#channel` mentions from the typed text.
         let draft = Draft(
             text: "@everyone and @here look",
-            mentions: [MentionDraft(target: .everyone, range: 0..<9), MentionDraft(target: .here, range: 14..<19)]
+            references: .init(mentions: [MentionDraft(target: .everyone, range: 0..<9), MentionDraft(target: .here, range: 14..<19)])
         )
         let (coordinator, port, item) = await sent(draft)
         #expect(item.message.references.isEmpty)
         let editable = EditableMessage(item: item)
-        #expect(editable.mentions.isEmpty)
+        #expect(editable.references.mentions.isEmpty)
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "@everyone and @here look now")))
         #expect(port.corrections.last?.options.references.isEmpty == true)
     }
@@ -136,25 +136,25 @@ struct EditMentionTests {
         let reply = ReplyContext(targetID: "p1", author: jid("bob@waddle.test"), parentBody: "q", parentAuthorName: "bob")
         // The fallback "> q\n\n" is 5 scalars ahead of the typed body.
         let (coordinator, port, item) = await sent(
-            Draft(text: "hi @carol", mentions: [MentionDraft(target: .user(carol), range: 3..<9)], reply: reply),
+            Draft(text: "hi @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 3..<9)]), reply: reply),
             after: [parent]
         )
         #expect(item.message.references == [mention(carol, 8, 14)])
         let editable = EditableMessage(item: item)
-        #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 3..<9)])
+        #expect(editable.references.mentions == [MentionDraft(target: .user(carol), range: 3..<9)])
         #expect(await coordinator.edit(item, draft: editDraft(editable, to: "yo @carol")))
         #expect(port.corrections.last?.body == "> q\n\nyo @carol")
         #expect(port.corrections.last?.options.references == [mention(carol, 8, 14)])
     }
 
     @Test func correctedRowKeepsMentionOnSecondEdit() async {
-        let (coordinator, port, item) = await sent(Draft(text: "**hi** @carol", mentions: [MentionDraft(target: .user(carol), range: 7..<13)]))
+        let (coordinator, port, item) = await sent(Draft(text: "**hi** @carol", references: .init(mentions: [MentionDraft(target: .user(carol), range: 7..<13)])))
         #expect(await coordinator.edit(item, draft: editDraft(EditableMessage(item: item), to: "**hi** there @carol")))
         let corrected = ownRow(coordinator)
         #expect(corrected.isEdited)
         let editable = EditableMessage(item: corrected)
         #expect(editable.text == "**hi** there @carol")
-        #expect(editable.mentions == [MentionDraft(target: .user(carol), range: 13..<19)])
+        #expect(editable.references.mentions == [MentionDraft(target: .user(carol), range: 13..<19)])
         #expect(await coordinator.edit(corrected, draft: editDraft(editable, to: "**hi** again @carol")))
         #expect(port.corrections.last?.options.references == [mention(carol, 9, 15)])
     }
@@ -173,7 +173,7 @@ struct EditMentionTests {
         let item = TimelineItem(id: "m1", conversation: bobConversation, isMine: true, message: message, body: "hey carol and room")
         let editable = EditableMessage(item: item)
         #expect(editable.text == "hey c**ar**ol and room")
-        #expect(editable.mentions.isEmpty)
+        #expect(editable.references.mentions.isEmpty)
     }
 
     @Test func markerInsideMentionDropsIt() {
@@ -183,7 +183,7 @@ struct EditMentionTests {
         let item = TimelineItem(id: "m1", conversation: bobConversation, isMine: true, message: message, body: "hi @carol")
         let editable = EditableMessage(item: item)
         #expect(editable.text == "hi @c*arol*")
-        #expect(editable.mentions.isEmpty)
+        #expect(editable.references.mentions.isEmpty)
     }
 
     @Test func mentionTargetReversesURI() {

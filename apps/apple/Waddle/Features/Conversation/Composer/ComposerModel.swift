@@ -2,24 +2,23 @@ import Foundation
 import Observation
 import WaddleKit
 
-/// One composer's draft: text, reply or edit target, picked mentions and
+/// One composer's draft: text, reply or edit target, picked references and
 /// attachments. Lives in `ComposerDraftStore`, so it survives switching
 /// conversations.
 @MainActor
 @Observable
 final class ComposerModel {
-    var text = ""
+    private(set) var text = ""
     private(set) var reply: ReplyContext?
     private(set) var editing: TimelineItem?
-    private(set) var mentions: [RecordedMention] = []
+    private(set) var references = RecordedDraftReferences()
     private(set) var attachments: [ComposerAttachment] = []
     var errorMessage: String?
 
     /// The draft that was in progress when an edit started.
-    @ObservationIgnored private var stashedText: String?
-    @ObservationIgnored private var stashedMentions: [RecordedMention] = []
+    @ObservationIgnored private var stashedDraft: (text: String, references: RecordedDraftReferences)?
     /// The editable text the edit started from, to skip no-op corrections.
-    @ObservationIgnored private var editBaseline = ""
+    @ObservationIgnored private var editBaseline: EditableMessage?
     /// Bytes kept for retrying failed uploads.
     @ObservationIgnored private var payloads: [UUID: AttachmentPayload] = [:]
     @ObservationIgnored private var uploads: [UUID: Task<Void, Never>] = [:]
@@ -52,38 +51,39 @@ final class ComposerModel {
 
     func beginEdit(_ item: TimelineItem) {
         if !isEditing {
-            stashedText = text
-            stashedMentions = mentions
+            stashedDraft = (text, references)
         }
         let editable = EditableMessage(item: item)
         editing = item
         reply = nil
-        mentions = editable.recordedMentions
-        editBaseline = editable.text
-        text = editable.text
+        editBaseline = editable
+        (text, references) = (editable.text, editable.recordedReferences)
     }
 
     func cancelEdit() {
         editing = nil
-        text = stashedText ?? ""
-        mentions = stashedMentions
-        stashedText = nil
-        stashedMentions = []
+        (text, references) = stashedDraft ?? ("", .init())
+        stashedDraft = nil
+        editBaseline = nil
     }
 
     // MARK: - Draft text
 
-    /// Empties the text and the mentions recorded in it, keeping the
+    /// Empties the text and its picked references, keeping the
     /// reply target and attachments (a slash command consumed the text).
     func clearText() {
-        text = ""
-        mentions = []
+        (text, references) = ("", .init())
     }
 
-    // MARK: - Mentions
+    func replaceText(_ replacement: ComposerTextReplacement) {
+        references.relocate(from: text, applying: replacement)
+        text = replacement.text
+    }
 
-    func recordMention(_ mention: RecordedMention) {
-        mentions.append(mention)
+    func accept(_ pick: ComposerSuggestionsModel.Pick) {
+        replaceText(ComposerTextReplacement(pick.edit.text, replacing: pick.replacementRange))
+        if let reference = pick.reference { references.append(reference) }
+        if pick.clearsError { errorMessage = nil }
     }
 
     // MARK: - Attachments
@@ -162,19 +162,18 @@ final class ComposerModel {
     /// Takes what the composer holds as a send or an edit and clears it at
     /// once, so a second Return before the round trip cannot resend.
     func takeSubmission(thread: String?) -> ComposerSubmission? {
-        if let editing {
-            let newText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !newText.isEmpty else { return nil }
-            let baseline = editBaseline.trimmingCharacters(in: .whitespacesAndNewlines)
-            let draft = Draft(text: text, mentions: MentionTokens.locate(mentions, in: text))
+        if let editing, let editBaseline {
+            guard hasText else { return nil }
+            let changed = editBaseline.hasChanges(text: text, references: references)
+            let draft = Draft(text: text, references: references.located(in: text))
             cancelEdit()
-            guard newText != baseline else { return nil }
+            guard changed else { return nil }
             return .edit(editing, draft)
         }
         guard canSend else { return nil }
         let draft = Draft(
             text: text,
-            mentions: MentionTokens.locate(mentions, in: text),
+            references: references.located(in: text),
             reply: reply,
             thread: thread,
             attachments: attachments.compactMap(\.sharedFile)
@@ -214,9 +213,8 @@ final class ComposerModel {
     }
 
     private func clearDraft() {
-        text = ""
+        clearText()
         reply = nil
-        mentions = []
         attachments = []
         payloads = [:]
         uploads = [:]
@@ -227,7 +225,7 @@ final class ComposerModel {
 enum ComposerSubmission {
     case send(Draft)
     case sticker(Sticker, StickerPack, reply: ReplyContext?, thread: String?)
-    /// XEP-0308 correction of `item` to the draft's text and mentions.
+    /// XEP-0308 correction of `item` to the draft's text and references.
     case edit(TimelineItem, Draft)
 }
 

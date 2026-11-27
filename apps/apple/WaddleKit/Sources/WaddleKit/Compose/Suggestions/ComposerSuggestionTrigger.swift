@@ -8,6 +8,12 @@ public struct ComposerSuggestionTrigger: Hashable, Sendable {
     /// A nil selection means a caret at the end of the draft. An active
     /// text selection does not trigger suggestions.
     public static func find(in text: String, selection: ComposerScalarRange? = nil) -> Self? {
+        find(in: text, selection: selection, roomLinks: [], includesRooms: true)
+    }
+
+    static func find(
+        in text: String, selection: ComposerScalarRange?, roomLinks: [RoomLinkDraft], includesRooms: Bool
+    ) -> Self? {
         let scalars = Array(text.unicodeScalars)
         let caret = selection?.lowerBound ?? scalars.count
         guard (selection?.isEmpty ?? true), caret > 0, caret <= scalars.count else { return nil }
@@ -17,6 +23,11 @@ public struct ComposerSuggestionTrigger: Hashable, Sendable {
         if start < caret {
             let query = scalars[(start + 1)..<caret]
             let range = start..<caret
+            if includesRooms, scalars[start] == "#", query.allSatisfy(isRoomQueryScalar),
+               !roomLinks.contains(where: { $0.range.overlaps(range) }),
+               !RoomSuggestionCodeContext.overlapsCode(range, in: scalars) {
+                return Self(kind: .room, query: String(String.UnicodeScalarView(query)), replacementRange: range)
+            }
             if scalars[start] == "@" {
                 return Self(kind: .mention, query: String(String.UnicodeScalarView(query)), replacementRange: range)
             }
@@ -37,6 +48,15 @@ public struct ComposerSuggestionTrigger: Hashable, Sendable {
         // the list. Do not arm it from a later line.
         guard command.prefix.isEmpty, !beforeCaret.contains(where: { $0 == "\n" || $0 == "\r" }) else { return nil }
         return Self(kind: .slash, query: "", replacementRange: command.wordRange)
+    }
+
+    // The web room pattern uses Unicode letters and numbers plus "-" and "_".
+    private static func isRoomQueryScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+             .decimalNumber, .letterNumber, .otherNumber: true
+        default: scalar == "-" || scalar == "_"
+        }
     }
 
     private static func isEmojiKeywordScalar(_ scalar: Unicode.Scalar) -> Bool {

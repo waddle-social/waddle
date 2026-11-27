@@ -9,36 +9,38 @@ import WaddleKit
 /// secondary click for its own Cut/Copy/Paste menu and a right-click on
 /// the words would never reach the row's menu.
 struct MessageRichBody: View {
-    let item: TimelineItem
-    let account: AccountIdentity
+    @Environment(\.openURL) private var openURL
+    let presentation: MessageBodyPresentation
     /// Compact rows show "(edited)" inline since they have no header.
     let showsEditedMark: Bool
-    /// The name the row header shows, used for `/me` action lines.
-    let authorName: String
     let isSelectable: Bool
+    let openRoom: (BareJID) -> Void
     /// Dynamic Type's factor, for the faces runs pick for themselves.
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
     var body: some View {
-        let hidden = MeAction.hiddenScalarCount(ofBody: item.body)
-        let rendered = RichTextLayout.blocks(
-            for: MentionHighlight.input(for: item, account: account, hiddenPrefix: hidden),
-            detectLinks: MessageLinkDetector.links(in:)
-        )
-        let blocks = hidden > 0 ? MeActionLine.blocks(rendered, actor: authorName) : rendered
+        let blocks = presentation.blocks
         VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s1Half) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 blockView(block, isLast: index == blocks.count - 1)
             }
         }
         .modifier(MessageTextSelection(isEnabled: isSelectable))
+        .environment(\.openURL, OpenURLAction { url in
+            switch presentation.roomLinks.destination(for: url) {
+            case let .room(room): openRoom(room)
+            case .external: openURL(url)
+            case .discard: return .discarded
+            }
+            return .handled
+        })
     }
 
     @ViewBuilder
     private func blockView(_ block: RichBlock, isLast: Bool) -> some View {
         switch block {
         case let .paragraph(segments):
-            Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark, scale: scale))
+            Text(attributed(segments, isLast: isLast))
                 .huddleText(Theme.Typography.message)
                 .foregroundStyle(Theme.Colors.fg)
                 .fixedSize(horizontal: false, vertical: true)
@@ -47,7 +49,7 @@ struct MessageRichBody: View {
                 Capsule()
                     .fill(Theme.Colors.border)
                     .frame(width: Theme.Size.rail)
-                Text(RichTextAttributes.attributed(segments, editedMark: isLast && showsEditedMark, scale: scale))
+                Text(attributed(segments, isLast: isLast))
                     .huddleText(Theme.Typography.message)
                     .foregroundStyle(Theme.Colors.fgMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -66,16 +68,24 @@ struct MessageRichBody: View {
             )
         }
     }
+
+    private func attributed(_ segments: [RichSegment], isLast: Bool) -> AttributedString {
+        RichTextAttributes.attributed(
+            segments, editedMark: isLast && showsEditedMark, scale: scale, roomURL: presentation.roomLinks.url(for:)
+        )
+    }
 }
 
 /// Maps styled runs to SwiftUI text attributes (web `MessageBody`). Bold,
 /// code and mentions pick their own face from the message style at
 /// `scale`; the rest inherits it.
 enum RichTextAttributes {
-    static func attributed(_ segments: [RichSegment], editedMark: Bool, scale: CGFloat = 1) -> AttributedString {
+    static func attributed(
+        _ segments: [RichSegment], editedMark: Bool, scale: CGFloat = 1, roomURL: (BareJID) -> URL?
+    ) -> AttributedString {
         var result = AttributedString()
         for segment in segments {
-            result.append(styled(segment, scale: scale))
+            result.append(styled(segment, scale: scale, roomURL: roomURL))
         }
         if editedMark {
             var mark = AttributedString(" (edited)")
@@ -86,7 +96,7 @@ enum RichTextAttributes {
         return result
     }
 
-    private static func styled(_ segment: RichSegment, scale: CGFloat) -> AttributedString {
+    private static func styled(_ segment: RichSegment, scale: CGFloat, roomURL: (BareJID) -> URL?) -> AttributedString {
         var piece = AttributedString(segment.text)
         var intent: InlinePresentationIntent = []
         var isBold = false
@@ -105,6 +115,11 @@ enum RichTextAttributes {
             case let .link(url):
                 piece.link = url
                 piece.foregroundColor = Theme.Colors.actionText
+            case let .roomLink(room):
+                if let url = roomURL(room) {
+                    piece.link = url
+                    piece.foregroundColor = Theme.Colors.actionText
+                }
             case .mention:
                 // Every mention alike, as on web; the row marks ours. The
                 // text takes the action colour, as in the Penpot frames.

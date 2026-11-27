@@ -35,6 +35,7 @@ private struct MessageRowContent: View {
     /// The pointer is over the row (iPad with a pointer too; touch never
     /// hovers). The row's only hover state.
     @State private var isHovering = false
+    @State private var bodyLayout = MessageBodyPresentationMemo()
     @State private var imagePreviewFile: SharedFile?
     private var placement = ConversationInspectorPlacement()
 
@@ -61,6 +62,14 @@ private struct MessageRowContent: View {
             isBot: authorJID.map { session.roomBots.isDeclared($0, in: item.conversation.jid) } ?? false
         )
         let available = MessageActions.available(for: item, in: actionContext)
+        let presentation: MessageBodyPresentation? = if media.inlineBody == .text {
+            bodyLayout.presentation(
+                item: item, account: session.account, channels: session.directory.channels, actor: author.name
+            )
+        } else {
+            nil
+        }
+        let openRoom: (BareJID) -> Void = { MessageRoomLinks.open($0, using: navigation, channels: session.directory.channels) }
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)
@@ -77,12 +86,12 @@ private struct MessageRowContent: View {
                 }
                 MessageRowBody(
                     entry: entry,
-                    authorName: author.name,
+                    presentation: presentation,
                     showsThreadChip: showsThreadChip,
                     media: media,
                     loadMedia: loadMedia,
                     openThread: openThread,
-                    openImage: openImage
+                    openImage: openImage, openRoom: openRoom
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -133,7 +142,8 @@ private struct MessageRowContent: View {
                 item: item, media: media, available: available, perform: perform, opensThreadOnActivate: opensThreadOnTap,
                 authorName: author.name, openThread: openThread,
                 hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
-                openProfile: { openProfile(author) }, openImage: openImage
+                openProfile: { openProfile(author) }, openImage: openImage,
+                roomActions: presentation?.roomLinks.actions ?? [], openRoom: openRoom
             ),
             withheld: media.withheld, loadMedia: loadMedia
         ))
@@ -252,15 +262,15 @@ private struct MessageRowContent: View {
 /// Everything under the header: reply quote, body or tombstone, files,
 /// link cards, reactions, the attached reply card and delivery state.
 private struct MessageRowBody: View {
-    @Environment(SessionCoordinator.self) private var session
     @Environment(MessageActionModel.self) private var actions
     let entry: TimelineFeedEntry
-    let authorName: String
+    let presentation: MessageBodyPresentation?
     let showsThreadChip: Bool
     let media: MessageMedia
     let loadMedia: () -> Void
     let openThread: () -> Void
     let openImage: (SharedFile) -> Void
+    let openRoom: (BareJID) -> Void
 
     private var item: TimelineItem { entry.item }
 
@@ -305,13 +315,10 @@ private struct MessageRowBody: View {
         case .withheld: EmptyView()
         case let .image(url): MessageImageAttachment(file: MessageContent.inlineImageFile(url), open: openImage)
         case .text:
-            if MessageContent.visibleBody(of: item) != nil {
+            if let presentation {
                 MessageRichBody(
-                    item: item,
-                    account: session.account,
-                    showsEditedMark: item.isEdited && !entry.startsGroup,
-                    authorName: authorName,
-                    isSelectable: isSelectable
+                    presentation: presentation, showsEditedMark: item.isEdited && !entry.startsGroup,
+                    isSelectable: isSelectable, openRoom: openRoom
                 )
             }
         }

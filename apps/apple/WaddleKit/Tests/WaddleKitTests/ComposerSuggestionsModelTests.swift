@@ -17,7 +17,7 @@ struct ComposerSuggestionsModelTests {
     @Test(arguments: ["/shrug", "/gif", "/me", "/shrug hi", "/poll"])
     func returnPassesForResolvedCommandsAndTabStillCompletes(text: String) {
         let selection = text == "/shrug hi" ? 3..<3 : nil
-        let presentation = present(text, selection: selection)
+        let presentation = present(.init(text: text, selection: selection, isEditing: false))
         #expect(presentation.list.selected != nil)
         #expect(presentation.handle(.returnKey, in: text) == .pass)
         guard case let .pick(pick) = presentation.handle(.tab, in: text) else {
@@ -48,11 +48,11 @@ struct ComposerSuggestionsModelTests {
 
     @Test func onlyEmojiSuggestionsAreOfferedInEditsAndMentionsNeedARoom() {
         let directPlace = ComposerSuggestionsModel.Place(conversation: peer, inChannel: false, account: account)
-        let emoji = present(":joy", isEditing: true, place: directPlace)
+        let emoji = present(.init(text: ":joy", selection: nil, isEditing: true), place: directPlace)
         #expect(emoji.list.items.first == .emoji(.init(name: "joy", glyph: "😀")))
         #expect(emoji.directoryQuery == nil)
-        for text in ["@pri", "/sh"] {
-            let editing = present(text, isEditing: true)
+        for text in ["@pri", "/sh", "#gen"] {
+            let editing = present(.init(text: text, selection: nil, isEditing: true))
             #expect(editing.list.items.isEmpty)
             #expect(editing.directoryQuery == nil)
         }
@@ -92,24 +92,95 @@ struct ComposerSuggestionsModelTests {
         #expect(present(exact, navigation: elsewhere).handle(.returnKey, in: exact) == .pass)
     }
 
-    /// A draft with no list open reads neither the room's occupants nor the extensions.
-    @Test func occupantsAndExtensionsAreReadOnlyForTheTriggerThatNeedsThem() {
+    @Test func sendPicksTheHighlightedRoomMentionEmojiOrPartialCommand() throws {
+        let priya = BareJID(parsing: "priya@waddle.test")!
+        let cases = [
+            ("#gen", "#General "), ("@pri", "@Priya "), (":joy", "😀 "), ("/shr", "/shrug "),
+        ]
+        for (text, completed) in cases {
+            let model = present(text, occupants: [occupant("Priya", jid: priya)])
+            let pick = try #require(model.pickForSubmit(in: text))
+            #expect(pick.edit.text == completed)
+            #expect(model.handle(.returnKey, in: text) == .pick(pick))
+        }
+        for text in ["/shrug", "/missing", "#missing", "@missing", ":missing", "hello"] {
+            #expect(present(text).pickForSubmit(in: text) == nil)
+        }
+
+        let open = present("/")
+        guard case let .navigate(navigation) = open.handle(.down, in: "/") else {
+            Issue.record("Down should highlight another command")
+            return
+        }
+        let moved = present("/", navigation: navigation)
+        #expect(moved.pickForSubmit(in: "/") != open.pickForSubmit(in: "/"))
+        #expect(moved.pickForSubmit(in: "/") != nil)
+    }
+
+    @Test func roomRowsDisambiguateOnlyDuplicateLabelsAmongTheResults() throws {
+        let alpha = BareJID(parsing: "alpha@rooms.waddle.test")!
+        let beta = BareJID(parsing: "beta@rooms.waddle.test")!
+        let channels = [Channel(roomJID: alpha, name: "Ops"), Channel(roomJID: beta, name: "Ops")]
+        let duplicates = present("#op", rooms: channels).list.items.compactMap(roomCandidate)
+        #expect(duplicates.map(\.label) == ["#Ops", "#Ops"])
+        #expect(duplicates.map(\.addressDetail) == [alpha.description, beta.description])
+        #expect(duplicates.map(\.accessibilityName) == ["#Ops, \(alpha)", "#Ops, \(beta)"])
+
+        let unique = try #require(present("#alp", rooms: channels).list.items.compactMap(roomCandidate).first)
+        #expect(unique.room == alpha)
+        #expect(unique.addressDetail == nil)
+        #expect(unique.accessibilityName == "#Ops")
+    }
+
+    @Test func aRoomStaysSelectedWhenADuplicateLabelAppears() throws {
+        let text = "#op"
+        let alpha = BareJID(parsing: "alpha@rooms.waddle.test")!
+        let beta = BareJID(parsing: "beta@rooms.waddle.test")!
+        let other = BareJID(parsing: "other@rooms.waddle.test")!
+        let channels = [Channel(roomJID: other, name: "DevOps"), Channel(roomJID: beta, name: "Ops")]
+        guard case let .navigate(navigation) = present(text, rooms: channels).handle(.down, in: text) else {
+            Issue.record("Down should highlight the second room")
+            return
+        }
+        let before = present(text, navigation: navigation, rooms: channels)
+        let updated = present(text, navigation: navigation, rooms: [Channel(roomJID: alpha, name: "Ops")] + channels)
+        let selected = try #require(updated.list.selected.flatMap(roomCandidate))
+        #expect(selected.room == beta)
+        #expect(selected.addressDetail == beta.description)
+
+        let item = try #require(before.list.selected)
+        let trigger = try #require(before.list.trigger)
+        #expect(updated.pick(item, from: trigger, in: text)?.reference == .roomLink(RoomLinkDraft(room: beta, range: 0..<4)))
+    }
+
+    @Test func existingRoomLinksAndUnmatchedRoomQueriesFallThrough() {
+        let existing = RoomLinkDraft(room: room.jid, range: 0..<4)
+        #expect(present(.init(text: "#gen", selection: nil, isEditing: false, roomLinks: [existing])).list.items.isEmpty)
+        #expect(present("/ #unmatched").list.selected?.kind == .slash)
+    }
+
+    @Test func suggestionDataIsReadOnlyForTheTriggerThatNeedsIt() {
         var occupantReads = 0
         var extensionReads = 0
-        func presentCounting(_ text: String) {
+        var roomReads = 0
+        func presentCounting(_ text: String, isEditing: Bool = false) {
             _ = ComposerSuggestionsModel.present(
-                draft: .init(text: text, selection: nil, isEditing: false), place: roomPlace,
+                draft: .init(text: text, selection: nil, isEditing: isEditing), place: roomPlace,
                 occupants: { occupantReads += 1; return [] }(),
-                extensions: { extensionReads += 1; return [poll] }(), directory: nil, navigation: nil
+                extensions: { extensionReads += 1; return [poll] }(), directory: nil, navigation: nil,
+                rooms: { roomReads += 1; return [Channel(roomJID: room.jid, name: "General")] }()
             )
         }
         presentCounting("hello")
         presentCounting(":jo")
-        #expect((occupantReads, extensionReads) == (0, 0))
+        presentCounting("#gen", isEditing: true)
+        #expect((occupantReads, extensionReads, roomReads) == (0, 0, 0))
         presentCounting("@pri")
-        #expect((occupantReads, extensionReads) == (1, 0))
+        #expect((occupantReads, extensionReads, roomReads) == (1, 0, 0))
         presentCounting("/shr")
-        #expect((occupantReads, extensionReads) == (1, 1))
+        #expect((occupantReads, extensionReads, roomReads) == (1, 1, 0))
+        presentCounting("#gen")
+        #expect((occupantReads, extensionReads, roomReads) == (1, 1, 1))
     }
 
     @Test func lateDirectoryAndOccupantRowsPreserveTheMentionChosenByDown() throws {
@@ -138,7 +209,7 @@ struct ComposerSuggestionsModelTests {
             return
         }
         #expect(pick.edit == ComposerTextEdit(text: "@Priya ", selection: 7..<7))
-        #expect(pick.recordedMention?.target == .user(BareJID(parsing: "priya@waddle.test")!))
+        #expect(pick.reference == .mention(RecordedMention(token: "@Priya", target: .user(BareJID(parsing: "priya@waddle.test")!))))
         #expect(!pick.clearsError)
     }
 
@@ -163,7 +234,7 @@ struct ComposerSuggestionsModelTests {
             return
         }
         #expect(pick.edit == ComposerTextEdit(text: "@Alice ", selection: 7..<7))
-        #expect(pick.recordedMention?.target == .user(alice))
+        #expect(pick.reference == .mention(RecordedMention(token: "@Alice", target: .user(alice))))
     }
 
     @Test func directoryResultsBelongToOneQueryAndRoomAndEscapeKeepsItClosed() throws {
@@ -213,16 +284,28 @@ struct ComposerSuggestionsModelTests {
     }
 
     private func present(
-        _ text: String, selection: ComposerScalarRange? = nil, isEditing: Bool = false,
-        place: ComposerSuggestionsModel.Place? = nil, occupants: [Occupant] = [],
+        _ text: String, place: ComposerSuggestionsModel.Place? = nil, occupants: [Occupant] = [],
         directory: ComposerSuggestionsModel.DirectoryResults? = nil,
-        navigation: ComposerSuggestionSelection.Navigation? = nil
+        navigation: ComposerSuggestionSelection.Navigation? = nil, rooms: [Channel]? = nil
+    ) -> ComposerSuggestionsModel {
+        present(.init(text: text, selection: nil, isEditing: false), place: place, occupants: occupants,
+                directory: directory, navigation: navigation, rooms: rooms)
+    }
+
+    private func present(
+        _ draft: ComposerSuggestionsModel.Draft, place: ComposerSuggestionsModel.Place? = nil,
+        occupants: [Occupant] = [], directory: ComposerSuggestionsModel.DirectoryResults? = nil,
+        navigation: ComposerSuggestionSelection.Navigation? = nil, rooms: [Channel]? = nil
     ) -> ComposerSuggestionsModel {
         ComposerSuggestionsModel.present(
-            draft: .init(text: text, selection: selection, isEditing: isEditing), place: place ?? roomPlace,
-            occupants: occupants, extensions: [poll],
-            directory: directory, navigation: navigation
+            draft: draft, place: place ?? roomPlace, occupants: occupants, extensions: [poll], directory: directory,
+            navigation: navigation, rooms: rooms ?? [Channel(roomJID: room.jid, name: "General")]
         )
+    }
+
+    private func roomCandidate(_ item: ComposerSuggestion) -> RoomLinks.Candidate? {
+        guard case let .room(candidate) = item else { return nil }
+        return candidate
     }
 
     private func occupant(_ nick: String, jid: BareJID) -> Occupant {

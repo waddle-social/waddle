@@ -7,8 +7,6 @@ import WaddleKit
 struct ComposerCard: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     let model: ComposerModel
-    /// The draft text; the composer notes what the field writes.
-    @Binding var text: String
     @Binding var selection: ComposerScalarRange?
     @Binding var showsFormatting: Bool
     @Binding var isFocused: Bool
@@ -42,10 +40,11 @@ struct ComposerCard: View {
                     actions: actions
                 )
                 ComposerTextField(
-                    text: $text,
+                    text: model.text,
                     selection: $selection,
                     placeholder: model.isEditing ? "Edit message" : placeholder,
                     isFocused: $isFocused,
+                    onTextChange: actions.changeText,
                     onSubmit: actions.submit,
                     onSuggestionKey: actions.handleSuggestionKey,
                     onCancel: actions.cancelContext,

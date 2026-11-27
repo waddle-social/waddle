@@ -15,10 +15,11 @@ import WaddleKit
 ///
 /// Grows from one line to `maxLines`, then scrolls.
 struct ComposerTextView: NSViewRepresentable {
-    @Binding var text: String
+    let text: String
     @Binding var selection: ComposerScalarRange?
     @Binding var isFocused: Bool
     let placeholder: String
+    let onTextChange: (ComposerTextReplacement) -> Void
     let onSubmit: () -> Void
     /// Returns true when an open suggestion list used the key.
     let onSuggestionKey: (ComposerHardwareKey) -> Bool
@@ -83,6 +84,7 @@ struct ComposerTextView: NSViewRepresentable {
             // formatting edit): the field's caret and undo history no
             // longer describe it.
             view.string = text
+            coordinator.pendingReplacement = nil
             coordinator.undoHistory.removeAllActions()
             coordinator.applied = nil
             if selection == nil {
@@ -130,6 +132,7 @@ struct ComposerTextView: NSViewRepresentable {
         /// Set while `updateNSView` writes into the view, whose change
         /// callbacks then describe the composer's own edit.
         var isApplying = false
+        var pendingReplacement: ComposerScalarRange?
         /// The field's own undo history, cleared when the composer
         /// replaces the draft so no undo step points into text that is
         /// gone.
@@ -144,9 +147,16 @@ struct ComposerTextView: NSViewRepresentable {
             undoHistory
         }
 
+        func textView(_ view: NSTextView, shouldChangeTextIn range: NSRange, replacementString _: String?) -> Bool {
+            pendingReplacement = ComposerUTF16Selection.scalarRange(of: range, in: view.string)
+            return true
+        }
+
         func textDidChange(_ notification: Notification) {
             guard !isApplying, let view = notification.object as? NSTextView else { return }
-            parent.text = view.string
+            let replaced = pendingReplacement
+            pendingReplacement = nil
+            parent.onTextChange(ComposerTextReplacement(view.string, replacing: replaced))
             report(view)
         }
 

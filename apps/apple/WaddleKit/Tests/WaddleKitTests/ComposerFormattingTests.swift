@@ -26,7 +26,7 @@ struct ComposerFormattingTests {
 
     @Test func wrappedTextComposesToTheStyle() {
         let edit = apply(.bold, "say hi", 4..<6)
-        let composed = ComposerMarkdown.compose(edit.text, mentions: [])
+        let composed = ComposerMarkdown.compose(edit.text)
         #expect(composed.body == "say hi")
         #expect(composed.spans == [MarkupSpan(kind: .bold, start: 4, end: 6)])
     }
@@ -48,7 +48,7 @@ struct ComposerFormattingTests {
 
     @Test func codeBlockComposesToACodeBlock() {
         let edit = apply(.codeBlock, "ls -la", 0..<6)
-        let composed = ComposerMarkdown.compose(edit.text, mentions: [])
+        let composed = ComposerMarkdown.compose(edit.text)
         #expect(composed.body == "ls -la")
         #expect(composed.spans == [MarkupSpan(kind: .codeBlock, start: 0, end: 6)])
     }

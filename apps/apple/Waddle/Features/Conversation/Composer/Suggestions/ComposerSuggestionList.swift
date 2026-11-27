@@ -10,12 +10,13 @@ struct ComposerSuggestionList: View {
     let onPick: (ComposerSuggestion) -> Void
 
     var body: some View {
-        let selected = items[selectedIndex]
+        let contents = items.map(SuggestionRowContent.init)
+        let selected = contents[selectedIndex]
         HeightUpTo(limit: Self.maxHeight) {
             ViewThatFits(in: .vertical) {
-                rows.fixedSize(horizontal: false, vertical: true)
+                rows(contents).fixedSize(horizontal: false, vertical: true)
                 ScrollViewReader { proxy in
-                    ScrollView { rows }
+                    ScrollView { rows(contents) }
                         .onChange(of: selectedIndex, initial: true) { _, index in
                             proxy.scrollTo(index)
                         }
@@ -24,16 +25,16 @@ struct ComposerSuggestionList: View {
         }
         .huddleSurface(.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(Text(SuggestionRowContent(selected).listAccessibilityTitle))
-        .onChange(of: selected, initial: true) { _, item in
-            AccessibilityNotification.Announcement(SuggestionRowContent(item).accessibilityTitle).post()
+        .accessibilityLabel(Text(selected.listAccessibilityTitle))
+        .onChange(of: items[selectedIndex], initial: true) { _, _ in
+            AccessibilityNotification.Announcement(selected.accessibilityTitle).post()
         }
     }
 
-    private var rows: some View {
+    private func rows(_ contents: [SuggestionRowContent]) -> some View {
         VStack(spacing: Theme.Spacing.xxs) {
             ForEach(items.indices, id: \.self) { index in
-                ComposerSuggestionRow(row: SuggestionRowContent(items[index]), isSelected: index == selectedIndex) {
+                ComposerSuggestionRow(row: contents[index], isSelected: index == selectedIndex) {
                     onPick(items[index])
                 }
                 .id(index)
@@ -155,6 +156,13 @@ private struct SuggestionRowContent {
             isBuiltin = false
             accessibilityTitle = candidate.token
             listAccessibilityTitle = "Mention suggestions"
+        case let .room(room):
+            leading = .symbol("number")
+            title = room.label
+            detail = room.addressDetail
+            isBuiltin = false
+            accessibilityTitle = room.accessibilityName
+            listAccessibilityTitle = "Link a room"
         case let .emoji(candidate):
             leading = .glyph(candidate.glyph)
             title = nil

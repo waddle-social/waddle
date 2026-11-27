@@ -130,6 +130,8 @@ struct MessageAccessibilityActions: ViewModifier {
     let hasSubThreadLink: Bool
     let openProfile: () -> Void
     let openImage: (SharedFile) -> Void
+    let roomActions: [MessageRoomLinks.Action]
+    let openRoom: (BareJID) -> Void
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -180,6 +182,9 @@ struct MessageAccessibilityActions: ViewModifier {
             }
             if let preview = media.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }
+            }
+            ForEach(roomActions) { action in
+                Button("Open room \(action.name)") { openRoom(action.room) }
             }
             if session.deliveries.state(of: item.id) == .failed {
                 Button("Retry sending") { Task { await session.retry(clientID: item.id) } }

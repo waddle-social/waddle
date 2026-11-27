@@ -28,20 +28,20 @@ public struct ReplyContext: Hashable, Sendable {
 /// What the user composed.
 public struct Draft: Hashable, Sendable {
     public var text: String
-    public var mentions: [MentionDraft]
+    public var references: DraftReferences
     public var reply: ReplyContext?
     public var thread: String?
     public var attachments: [SharedFile]
 
     public init(
         text: String,
-        mentions: [MentionDraft] = [],
+        references: DraftReferences = .init(),
         reply: ReplyContext? = nil,
         thread: String? = nil,
         attachments: [SharedFile] = []
     ) {
         self.text = text
-        self.mentions = mentions
+        self.references = references
         self.reply = reply
         self.thread = thread
         self.attachments = attachments
@@ -52,8 +52,9 @@ public struct Draft: Hashable, Sendable {
 public enum MessageComposer {
     public static func compose(_ draft: Draft) -> (body: String, options: OutboundOptions)? {
         let (trimmed, leading) = trim(draft.text)
-        let mentions = draft.mentions.compactMap { shift($0, by: -leading, within: trimmed.unicodeScalars.count) }
-        let markdown = ComposerMarkdown.compose(trimmed, mentions: mentions)
+        let length = trimmed.unicodeScalars.count
+        let references = draft.references.shifted(by: -leading, within: length)
+        let markdown = ComposerMarkdown.compose(trimmed, references: references)
         var body = markdown.body
         // An attachment-only send carries the first file URL as its body
         // so clients without XEP-0447 still get a link.
@@ -72,13 +73,7 @@ public enum MessageComposer {
             reply: draft.reply.map { OutboundOptions.Reply(targetID: $0.targetID, author: $0.author, fallback: fallback) },
             thread: draft.thread.map { ThreadTarget(id: $0) },
             markupSpans: markdown.spans.map { MarkupSpan(kind: $0.kind, start: $0.start + offset, end: $0.end + offset) },
-            // Broadcast tokens (`@everyone` / `@here`) are not references: the
-            // Rust send builder turns the typed token into an XEP-0513
-            // `#channel` mention through the room's mention directory.
-            references: markdown.mentions.compactMap { mention in
-                guard case let .user(jid) = mention.target else { return nil }
-                return Reference(kind: .mention, uri: "xmpp:\(jid)", begin: mention.range.lowerBound + offset, end: mention.range.upperBound + offset)
-            },
+            references: markdown.references.wireReferences(offset: offset),
             sharedFiles: draft.attachments,
             requestDisplayedMarker: true
         )
@@ -117,14 +112,5 @@ public enum MessageComposer {
         var view = String.UnicodeScalarView()
         view.append(contentsOf: scalars[first...last])
         return (String(view), first)
-    }
-
-    private static func shift(_ mention: MentionDraft, by delta: Int, within length: Int) -> MentionDraft? {
-        let lower = max(0, mention.range.lowerBound + delta)
-        let upper = min(length, mention.range.upperBound + delta)
-        guard lower < upper else { return nil }
-        var shifted = mention
-        shifted.range = lower..<upper
-        return shifted
     }
 }
