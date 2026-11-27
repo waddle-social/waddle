@@ -104,6 +104,8 @@
           "extensions"
           "crates/waddle-broker"
           "crates/waddle-broker-core"
+          # waddle-broker-core's turso_baseline_spike test embeds the v1 SQLite schema via include_str!.
+          "crates/waddle-server/sql/v1/sqlite.sql"
           "crates/waddle-client-session"
           "crates/waddle-ecdysis"
           "crates/waddle-extensions"
