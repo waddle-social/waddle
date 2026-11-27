@@ -48,6 +48,7 @@ private struct ThreadContent: View {
     /// In the iPad or Mac inspector rather than pushed on a stack.
     @Environment(\.isInInspector) private var isInInspector
     @State private var actions: MessageActionModel
+    @State private var gallerySelection: MediaGallery.Image.ID?
 
     let conversation: ConversationID
     let rootID: String
@@ -116,7 +117,7 @@ private struct ThreadContent: View {
                         if isRoot, newestFirst {
                             ThreadRepliesDivider(count: replyCount)
                         }
-                        MessageRow(entry: entry, showsThreadChip: false)
+                        MessageRow(entry: entry, showsThreadChip: false) { gallerySelection = $0 }
                             .id(entry.id)
                         if isRoot, !newestFirst {
                             ThreadRepliesDivider(count: replyCount)
@@ -147,6 +148,7 @@ private struct ThreadContent: View {
                 actions.highlight(target)
             }
         }
+        .modifier(MediaGalleryPresentation(selection: $gallerySelection, entries: entries))
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
                 ThreadHeaderView(

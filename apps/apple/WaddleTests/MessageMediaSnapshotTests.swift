@@ -34,7 +34,7 @@ final class MessageMediaSnapshotTests: XCTestCase {
         )
         let actions = MessageActionModel(conversation: conversation, composer: ComposerModel(), thread: nil)
         assertHuddleSnapshot(
-            of: sample.host(MessageRow(entry: entry).environment(actions)), testName: testName, line: line
+            of: sample.host(MessageRow(entry: entry) { _ in }.environment(actions)), testName: testName, line: line
         )
     }
 

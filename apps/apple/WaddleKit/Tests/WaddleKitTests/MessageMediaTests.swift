@@ -2,6 +2,10 @@ import Foundation
 import Testing
 @testable import WaddleKit
 @testable import WaddleKitTestSupport
+#if canImport(ImageIO)
+import ImageIO
+import UniformTypeIdentifiers
+#endif
 
 struct MeActionOffsetTests {
     @Test func hidesThePrefixOfMeBodiesOnly() {
@@ -73,6 +77,58 @@ struct GifMediaTests {
         #expect(!GifMedia.isGIF(data: Data()))
     }
 }
+
+#if canImport(ImageIO)
+struct AnimatedImageMediaTests {
+    @Test func gifAndPNGRequireMultipleFrames() throws {
+        for type in [UTType.gif, .png] {
+            let still = try encodedImage(type, frames: 1)
+            let animation = try encodedImage(type, frames: 2)
+            #expect(!AnimatedImageMedia.isAnimated(data: still))
+            #expect(AnimatedImageMedia.isAnimated(data: animation))
+        }
+    }
+
+    @Test func webPRequiresMultipleFrames() throws {
+        // Two-pixel-square WebP files with one and two frames.
+        let still = try #require(Data(base64Encoded: "UklGRhwAAABXRUJQVlA4TA8AAAAvAUAAAAcQ/Y/+ByKi/wEA"))
+        let animation = try #require(Data(base64Encoded:
+            "UklGRoQAAABXRUJQVlA4WAoAAAACAAAAAQAAAQAAQU5JTQYAAAD/////AABBTk1GKAAAAAAAAAAAAAEAAAEAAGQAAAJWUDhMDwAAAC8BQAAABxD9j/4HIqL/AQBBTk1GKAAAAAAAAAAAAAEAAAEAAGQAAABWUDhMDwAAAC8BQAAAB9D/iP4HIqL/AQA="
+        ))
+        #expect(!AnimatedImageMedia.isAnimated(data: still))
+        #expect(AnimatedImageMedia.isAnimated(data: animation))
+    }
+
+    @Test func invalidDataAndMultiPageTIFFAreNotAnimations() throws {
+        #expect(!AnimatedImageMedia.isAnimated(data: Data("GIF89a".utf8)))
+        let tiff = try encodedImage(.tiff, frames: 2)
+        let source = try #require(CGImageSourceCreateWithData(tiff as CFData, nil))
+        #expect(CGImageSourceGetCount(source) == 2)
+        #expect(!AnimatedImageMedia.isAnimated(data: tiff))
+    }
+
+    private func encodedImage(_ type: UTType, frames: Int) throws -> Data {
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, type.identifier as CFString, frames, nil))
+        let context = try #require(CGContext(
+            data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        let properties: [CFString: Any] = switch type {
+        case .gif: [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.1]]
+        case .png: [kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.1]]
+        default: [:]
+        }
+        for frame in 0..<frames {
+            context.setFillColor(red: CGFloat(frame), green: 0, blue: 0, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            CGImageDestinationAddImage(destination, try #require(context.makeImage()), properties as CFDictionary)
+        }
+        try #require(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+}
+#endif
 
 struct InlineImageBodyTests {
     @Test func singleHTTPSImageURLs() {

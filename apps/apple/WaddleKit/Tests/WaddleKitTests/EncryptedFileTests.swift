@@ -270,6 +270,9 @@ struct EncryptedFileTests {
         #expect(SharedFile(url: url, name: " .. ").localFileName == "attachment")
         #expect(SharedFile(url: url, name: "").localFileName == "attachment")
         #expect(SharedFile(url: url, name: String(repeating: "é", count: 300)).localFileName.utf8.count == 200)
+        #expect(SharedFile(url: url, name: "x/\u{301}y").localFileName == "x_\u{301}y")
+        #expect(SharedFile(url: url, name: "x" + String(repeating: "\u{301}", count: 100)).localFileName == "attachment")
+        #expect(SharedFile(url: url, name: String(repeating: ".", count: 200) + "x").localFileName == "attachment")
     }
 
     private func sha256(_ data: Data) -> FileDigests {

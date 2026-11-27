@@ -225,7 +225,7 @@ public struct SharedFile: Hashable, Sendable, Codable {
         self.encrypted = encrypted
     }
 
-    public var isImage: Bool { mediaType?.hasPrefix("image/") == true }
+    public var isImage: Bool { mediaType?.lowercased().hasPrefix("image/") == true }
     public var isVideo: Bool { mediaType?.hasPrefix("video/") == true }
     public var isAudio: Bool { mediaType?.hasPrefix("audio/") == true }
 

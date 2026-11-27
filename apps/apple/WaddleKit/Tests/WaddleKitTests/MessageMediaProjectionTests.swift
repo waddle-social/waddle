@@ -44,7 +44,7 @@ struct MessageMediaProjectionTests {
         let textPreview = try #require(presented.linkPreviews.first)
         #expect(presented.inlineBody == .withheld)
         #expect(presented.visibleAttachments.isEmpty)
-        #expect(presented.previewableImageURLs.isEmpty)
+        #expect(MediaGallery.images(in: row, media: presented).isEmpty)
         #expect(presented.stickerPackLocation == nil)
         #expect(textPreview.title == preview.title)
         #expect(textPreview.summary == preview.summary)
@@ -71,7 +71,7 @@ struct MessageMediaProjectionTests {
         let withheld = MessageMedia(item: row, decision: .withheld(host: Host("remote.test")))
         #expect(withheld.inlineBody == .text) // Attachments take precedence over the image URL in the body.
         #expect(withheld.visibleAttachments.isEmpty)
-        #expect(withheld.previewableImageURLs.isEmpty)
+        #expect(MediaGallery.images(in: row, media: withheld).isEmpty)
         #expect(withheld.stickerPackLocation == nil)
         #expect(withheld.linkPreviews.compactMap(\.imageURL).isEmpty)
         #expect(withheld.withheld?.items.count == 3)

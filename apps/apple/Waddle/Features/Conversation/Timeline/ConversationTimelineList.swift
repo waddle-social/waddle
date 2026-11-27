@@ -38,6 +38,7 @@ private struct TimelineScroller: View {
 
     @State private var isAtLiveEdge = true
     @State private var unseenCount = 0
+    @State private var gallerySelection: MediaGallery.Image.ID?
     /// The row at the top of the viewport. The social order inserts new
     /// rows above it; bound through `scrollPosition(id:)`, the scroll view
     /// keeps that row where it was, part-scrolled offset included.
@@ -110,11 +111,12 @@ private struct TimelineScroller: View {
                 actions.highlight(target)
             }
         }
+        .modifier(MediaGalleryPresentation(selection: $gallerySelection, entries: entries))
     }
 
     private func rows(_ entries: [TimelineFeedEntry]) -> some View {
         ForEach(entries) { entry in
-            MessageRow(entry: entry)
+            MessageRow(entry: entry) { gallerySelection = $0 }
                 .id(entry.id)
         }
     }

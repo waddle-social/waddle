@@ -21,6 +21,7 @@ enum Theme {
     enum Material {
         static let media = Color(night: 0xB8070C12, daylight: 0xB8070C12)
         static let mediaFg = Color(night: 0xFFF3F5F7, daylight: 0xFFF3F5F7)
+        static let mediaBackdrop = Color(night: 0xEB020912, daylight: 0xEB020912)
     }
 
     /// Text styles, applied with `.huddleText(_:)`.

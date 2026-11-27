@@ -6,6 +6,7 @@ import WaddleKit
 struct MessageRow: View {
     let entry: TimelineFeedEntry
     var showsThreadChip = true
+    let openImage: (MediaGallery.Image.ID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -19,7 +20,9 @@ struct MessageRow: View {
                 // The room's announcement of a call is a card, not a message from anyone.
                 CallAnchorRow(item: entry.item, anchor: anchor)
             } else {
-                MessageRowContent(entry: entry, showsThreadChip: showsThreadChip)
+                MessageRowContent(entry: entry, showsThreadChip: showsThreadChip) { source in
+                    openImage(.init(row: entry.id, source: source))
+                }
             }
         }
     }
@@ -36,16 +39,11 @@ private struct MessageRowContent: View {
     /// hovers). The row's only hover state.
     @State private var isHovering = false
     @State private var bodyLayout = MessageBodyPresentationMemo()
-    @State private var imagePreviewFile: SharedFile?
     private var placement = ConversationInspectorPlacement()
 
     let entry: TimelineFeedEntry
     let showsThreadChip: Bool
-
-    init(entry: TimelineFeedEntry, showsThreadChip: Bool) {
-        self.entry = entry
-        self.showsThreadChip = showsThreadChip
-    }
+    let openImage: (MediaGallery.Source) -> Void
 
     private var item: TimelineItem { entry.item }
     private var isCompact: Bool { app.preferences.compactMessages }
@@ -147,7 +145,6 @@ private struct MessageRowContent: View {
             ),
             withheld: media.withheld, loadMedia: loadMedia
         ))
-        .modifier(MessageImagePreviewPresentation(file: $imagePreviewFile, urls: media.previewableImageURLs))
     }
 
     private var actionContext: MessageActionContext {
@@ -253,10 +250,6 @@ private struct MessageRowContent: View {
             nick: nick
         ))
     }
-
-    private func openImage(_ file: SharedFile) {
-        imagePreviewFile = file
-    }
 }
 
 /// Everything under the header: reply quote, body or tombstone, files,
@@ -269,7 +262,7 @@ private struct MessageRowBody: View {
     let media: MessageMedia
     let loadMedia: () -> Void
     let openThread: () -> Void
-    let openImage: (SharedFile) -> Void
+    let openImage: (MediaGallery.Source) -> Void
     let openRoom: (BareJID) -> Void
 
     private var item: TimelineItem { entry.item }
@@ -313,7 +306,8 @@ private struct MessageRowBody: View {
     private var content: some View {
         switch media.inlineBody {
         case .withheld: EmptyView()
-        case let .image(url): MessageImageAttachment(file: MessageContent.inlineImageFile(url), open: openImage)
+        case let .image(url):
+            MessageImageAttachment(file: MessageContent.inlineImageFile(url)) { openImage(.inline(url)) }
         case .text:
             if let presentation {
                 MessageRichBody(
@@ -325,7 +319,7 @@ private struct MessageRowBody: View {
         if let withheld = media.withheld { WithheldMediaCard(media: withheld, load: loadMedia) }
         if !media.visibleAttachments.isEmpty {
             MessageAttachmentsView(
-                files: media.visibleAttachments,
+                attachments: media.attachments,
                 isSticker: item.message.isSticker,
                 openImage: openImage,
                 openStickerPack: media.stickerPackLocation.map { pack in

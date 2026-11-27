@@ -26,12 +26,25 @@ public struct MessageMedia: Sendable {
     public let stickerPackLocation: StickerPackLocation?
     public let withheld: Withheld?
 
-    /// An open preview must still refer to an image the row can display.
-    public var previewableImageURLs: Set<URL> {
-        if case let .image(url) = inlineBody { return [url] }
-        return Set(visibleAttachments.lazy.filter {
-            $0.encrypted == nil && $0.mediaType?.lowercased().hasPrefix("image/") == true
-        }.map(\.url))
+    public struct Attachment: Identifiable, Sendable {
+        public struct ID: Hashable, Sendable {
+            let file: SharedFile
+            let occurrence: Int
+        }
+
+        public let id: ID
+        public let file: SharedFile
+    }
+
+    /// A row can repeat a file. Keep the two taps distinct while preserving
+    /// selection across edits to unrelated attachments.
+    public var attachments: [Attachment] {
+        var occurrences: [SharedFile: Int] = [:]
+        return visibleAttachments.map { file in
+            let occurrence = occurrences[file, default: 0]
+            occurrences[file] = occurrence + 1
+            return Attachment(id: .init(file: file, occurrence: occurrence), file: file)
+        }
     }
 
     public init(item: TimelineItem, decision: RemoteMediaDecision) {
@@ -83,9 +96,9 @@ public struct MessageMedia: Sendable {
     // The web withholds inline image/video/audio/PDF files (message-attachments.ts).
     // Apple also renders an image MIME type regardless of disposition.
     static func gatesAttachment(_ file: SharedFile) -> Bool {
-        let type = file.mediaType?.lowercased() ?? ""
-        if type.hasPrefix("image/") { return true }
+        if file.isImage { return true }
         guard file.disposition == .inline else { return false }
+        let type = file.mediaType?.lowercased() ?? ""
         return type.hasPrefix("video/") || type.hasPrefix("audio/") || type == "application/pdf"
             || inlineExtensions.contains(file.url.pathExtension.lowercased()) || GifMedia.isGiphyMedia(file.url)
     }
@@ -93,4 +106,16 @@ public struct MessageMedia: Sendable {
     private static let inlineExtensions = InlineImageBody.imageExtensions.union([
         "avif", "bmp", "svg", "mp4", "webm", "mov", "m4v", "ogv", "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "pdf",
     ])
+}
+
+public enum MessageContent {
+    /// The inline image of a body as a file, so it renders and previews like a shared image.
+    public static func inlineImageFile(_ url: URL) -> SharedFile {
+        SharedFile(url: url, description: inlineImageNoun(url))
+    }
+
+    /// "GIF" or "Image", for VoiceOver and previews.
+    public static func inlineImageNoun(_ url: URL) -> String {
+        GifMedia.isGIF(mediaType: nil, url: url) ? "GIF" : "Image"
+    }
 }

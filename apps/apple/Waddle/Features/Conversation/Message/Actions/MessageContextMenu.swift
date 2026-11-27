@@ -129,7 +129,7 @@ struct MessageAccessibilityActions: ViewModifier {
     /// feed, or a reply in a thread view whose sub-thread has messages.
     let hasSubThreadLink: Bool
     let openProfile: () -> Void
-    let openImage: (SharedFile) -> Void
+    let openImage: (MediaGallery.Source) -> Void
     let roomActions: [MessageRoomLinks.Action]
     let openRoom: (BareJID) -> Void
 
@@ -169,16 +169,11 @@ struct MessageAccessibilityActions: ViewModifier {
             if let pack = media.stickerPackLocation {
                 Button("View sticker pack") { actions.showStickerPack(pack) }
             }
-            if let file = media.visibleAttachments.first, file.encrypted == nil {
-                Button("Open attachment") {
-                    if MessageAttachmentKind(file) == .image {
-                        openImage(file)
-                    } else {
-                        openURL(file.url)
-                    }
-                }
-            } else if case let .image(imageURL) = media.inlineBody {
-                Button("Open image") { openImage(MessageContent.inlineImageFile(imageURL)) }
+            ForEach(MediaGallery.images(in: item, media: media)) { image in
+                Button("Open image \(image.accessibilityName)") { openImage(image.id.source) }
+            }
+            if let file = media.visibleAttachments.first, file.encrypted == nil, !file.isImage {
+                Button("Open attachment") { openURL(file.url) }
             }
             if let preview = media.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }
