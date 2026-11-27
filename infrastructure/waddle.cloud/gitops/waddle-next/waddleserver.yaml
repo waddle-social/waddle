@@ -91,6 +91,7 @@ spec:
     - randax
   corsOrigins: https://waddle.chat,https://next.apps.waddle.chat,http://localhost:4321
   extraEnv:
+    TMPDIR: /var/lib/waddle
     WADDLE_DEFAULT_TENANT_ID: waddle.social
     WADDLE_PROVIDER_GITHUB_WEBHOOK_EVENT_HEADER: x-github-event
     WADDLE_PROVIDER_GITHUB_WEBHOOK_DELIVERY_HEADER: x-github-delivery
