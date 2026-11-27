@@ -175,6 +175,7 @@ final class FakePort: XmppPort {
 
     var connectDelay: UInt64 = 0
     var disconnectCount = 0
+    var emitsDisconnectEvent = true
     var holdsConnects = false
     private(set) var heldConnects: [CheckedContinuation<Void, Never>] = []
 
@@ -196,7 +197,7 @@ final class FakePort: XmppPort {
 
     func disconnect() async {
         disconnectCount += 1
-        emit(.disconnected)
+        if emitsDisconnectEvent { emit(.disconnected) }
     }
     func probeConnection() async -> Bool {
         probeConnectionCount += 1

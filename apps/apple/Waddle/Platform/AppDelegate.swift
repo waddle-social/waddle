@@ -16,6 +16,8 @@ final class AppDelegate: NSObject {
     #if os(iOS)
     private let voipRegistrar = PushTokenRegistrar(kind: .voip)
     private var voipRegistry: VoIPPushRegistry?
+    #elseif os(macOS)
+    private var isWaitingForCallTermination = false
     #endif
 
     func attach(_ appState: AppState) {
@@ -267,6 +269,19 @@ extension AppDelegate: UIApplicationDelegate {
         return true
     }
 
+    func applicationWillTerminate(_: UIApplication) {
+        var finished = false
+        let shouldWait = appState?.session?.coordinator.beginCallTermination { finished = true } ?? false
+        guard shouldWait else { return }
+
+        // UIKit needs this callback to return. If it arrived on the main
+        // dispatch queue, the nested run loop can't service that queue.
+        // In that case the timer ends the wait without running the hang-up.
+        while !finished {
+            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+        }
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         alertRegistrar.didRegister(deviceToken: deviceToken)
     }
@@ -279,6 +294,16 @@ extension AppDelegate: UIApplicationDelegate {
 extension AppDelegate: NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launched()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isWaitingForCallTermination { return .terminateLater }
+        let shouldWait = appState?.session?.coordinator.beginCallTermination {
+            sender.reply(toApplicationShouldTerminate: true)
+        } ?? false
+        guard shouldWait else { return .terminateNow }
+        isWaitingForCallTermination = true
+        return .terminateLater
     }
 
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
