@@ -418,6 +418,7 @@ pub(crate) fn resolve_xmpp_database_url(env_key: &str) -> ResolvedXmppDatabaseUr
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn resolve_xmpp_database_url_values(
     explicit: Option<&str>,
     global: Option<&str>,
