@@ -19,7 +19,7 @@ enum MessageReplySummary {
         if parent.tombstone != nil {
             return "Deleted message"
         }
-        if let imageURL = MessageContent.inlineImageURL(of: parent) {
+        if let imageURL = MessageMedia.inlineImageURL(of: parent) {
             return MessageContent.inlineImageNoun(imageURL)
         }
         if let body = MessageContent.visibleBody(of: parent) {

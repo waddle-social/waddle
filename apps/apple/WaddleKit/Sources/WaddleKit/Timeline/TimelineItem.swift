@@ -41,6 +41,8 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// correction applied.
     public var body: String
     public var isEdited: Bool
+    /// Provenance of the currently applied wire correction.
+    var mediaCorrection: MediaCorrection?
     public var tombstone: Tombstone?
     public var reactions: [ReactionGroup]
     /// Scores the room fastened to this message (XEP-0422,

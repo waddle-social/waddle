@@ -9,6 +9,7 @@ import WaddleKit
 /// inherit.
 struct MessageContextMenu: View {
     let item: TimelineItem
+    let media: MessageMedia
     let available: [MessageAction]
     let session: SessionCoordinator
     let actions: MessageActionModel
@@ -38,7 +39,7 @@ struct MessageContextMenu: View {
                     Label("Copy text", systemImage: "doc.on.doc")
                 }
             }
-            if let pack = session.stickerPackLocation(of: item) {
+            if let pack = media.stickerPackLocation {
                 Button {
                     actions.showStickerPack(pack)
                 } label: {
@@ -116,6 +117,7 @@ struct MessageAccessibilityActions: ViewModifier {
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.openURL) private var openURL
     let item: TimelineItem
+    let media: MessageMedia
     /// The row's actions; VoiceOver gets every one but the quick
     /// reactions and select text.
     let available: [MessageAction]
@@ -162,10 +164,10 @@ struct MessageAccessibilityActions: ViewModifier {
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button("Show \(row.title.lowercased()) content signal") { actions.showSafetyScores(for: item) }
             }
-            if let pack = session.stickerPackLocation(of: item), item.tombstone == nil {
+            if let pack = media.stickerPackLocation {
                 Button("View sticker pack") { actions.showStickerPack(pack) }
             }
-            if let file = item.message.sharedFiles.first, file.encrypted == nil {
+            if let file = media.visibleAttachments.first, file.encrypted == nil {
                 Button("Open attachment") {
                     if MessageAttachmentKind(file) == .image {
                         openImage(file)
@@ -173,10 +175,10 @@ struct MessageAccessibilityActions: ViewModifier {
                         openURL(file.url)
                     }
                 }
-            } else if let imageURL = MessageContent.inlineImageURL(of: item), item.tombstone == nil {
+            } else if case let .image(imageURL) = media.inlineBody {
                 Button("Open image") { openImage(MessageContent.inlineImageFile(imageURL)) }
             }
-            if let preview = item.message.linkPreviews.first {
+            if let preview = media.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }
             }
             if session.deliveries.state(of: item.id) == .failed {

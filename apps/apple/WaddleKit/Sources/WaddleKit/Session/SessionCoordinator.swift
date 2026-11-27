@@ -23,7 +23,6 @@ public final class SessionCoordinator {
     public let account: AccountIdentity
     public internal(set) var status: SessionStatus = .init()
     public var connection: ConnectionStatus { status.connection }
-
     public let calls: CallStore
     public let timelines: TimelineStore
     public let directory: DirectoryStore
@@ -37,6 +36,7 @@ public final class SessionCoordinator {
     public let pins: PinStore
     public let blockList = BlockListStore()
     public let avatars: AvatarStore
+    var mediaAccess: SessionMediaAccess
     /// The account's contact list; nil until it has been loaded once, so
     /// "not known yet" is never shown as "no contacts".
     public internal(set) var contacts: [Contact]?
@@ -226,6 +226,7 @@ public final class SessionCoordinator {
         callMedia: (any CallMediaController)? = nil
     ) {
         self.account = account
+        self.mediaAccess = SessionMediaAccess(policy: RemoteMediaPolicy(account: account.jid))
         self.port = port
         self.handlesCalls = handlesCalls
         let callLifecycleOutbox = handlesCalls ? CallLifecycleOutbox(port: port) : nil
@@ -469,6 +470,7 @@ public final class SessionCoordinator {
         pins.clear()
         blockList.clear()
         avatars.clear()
+        mediaAccess.clear()
         history.clear()
         inbox.clear()
         readCursors.clear()

@@ -38,12 +38,7 @@ extension SessionCoordinator {
     /// this account's address, so a message must not be able to choose
     /// who receives it.
     public func stickerPackLocation(of item: TimelineItem) -> StickerPackLocation? {
-        guard item.message.isSticker,
-              let reference = item.message.stickerPack,
-              let sender = item.authorJID,
-              reference.owner == nil || reference.owner == sender
-        else { return nil }
-        return StickerPackLocation(owner: sender, node: reference.node, packID: reference.packID)
+        MessageMedia.stickerPackLocation(of: item)
     }
 
     /// Fetches a pack from where it is kept; nil when it is no longer

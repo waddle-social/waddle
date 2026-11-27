@@ -36,7 +36,6 @@ private struct MessageRowContent: View {
     /// hovers). The row's only hover state.
     @State private var isHovering = false
     @State private var imagePreviewFile: SharedFile?
-    @State private var isImagePreviewPresented = false
     private var placement = ConversationInspectorPlacement()
 
     let entry: TimelineFeedEntry
@@ -53,6 +52,8 @@ private struct MessageRowContent: View {
 
     var body: some View {
         let authorJID = session.authorJID(of: item)
+        let media = MessageMedia(item: item, decision: session.remoteMediaDecision(for: item))
+        let loadMedia = { session.loadRemoteMedia(for: item) }
         let author = MessageAuthor.resolve(
             item,
             occupant: occupant,
@@ -78,6 +79,8 @@ private struct MessageRowContent: View {
                     entry: entry,
                     authorName: author.name,
                     showsThreadChip: showsThreadChip,
+                    media: media,
+                    loadMedia: loadMedia,
                     openThread: openThread,
                     openImage: openImage
                 )
@@ -119,42 +122,22 @@ private struct MessageRowContent: View {
             actions.endTextSelection(of: item.presentationID)
         }
         .contextMenu {
-            MessageContextMenu(item: item, available: available, session: session, actions: actions, perform: perform)
+            MessageContextMenu(item: item, media: media, available: available, session: session, actions: actions, perform: perform)
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(MessageAccessibilityText.label(
-            for: item,
-            authorName: author.name,
-            thread: entry.thread,
-            insideThread: actions.isThread,
-            time: item.sentAt.formatted(date: .omitted, time: .shortened)
-        )))
-        .modifier(MessageAccessibilityActions(
-            item: item,
-            available: available,
-            perform: perform,
-            opensThreadOnActivate: opensThreadOnTap,
-            authorName: author.name,
-            openThread: openThread,
-            hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
-            openProfile: { openProfile(author) },
-            openImage: openImage
+        .modifier(MessageRowAccessibility(
+            label: MessageAccessibilityText.label(
+                for: item, authorName: author.name, thread: entry.thread, insideThread: actions.isThread,
+                time: item.sentAt.formatted(date: .omitted, time: .shortened)
+            ),
+            actions: MessageAccessibilityActions(
+                item: item, media: media, available: available, perform: perform, opensThreadOnActivate: opensThreadOnTap,
+                authorName: author.name, openThread: openThread,
+                hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
+                openProfile: { openProfile(author) }, openImage: openImage
+            ),
+            withheld: media.withheld, loadMedia: loadMedia
         ))
-        #if os(iOS)
-        .fullScreenCover(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
-            if let imagePreviewFile {
-                MessageImagePreviewView(file: imagePreviewFile)
-                    .carryingCallDock()
-            }
-        }
-        #elseif os(macOS)
-        .sheet(isPresented: $isImagePreviewPresented, onDismiss: { imagePreviewFile = nil }) {
-            if let imagePreviewFile {
-                MessageImagePreviewView(file: imagePreviewFile)
-                    .carryingCallDock()
-            }
-        }
-        #endif
+        .modifier(MessageImagePreviewPresentation(file: $imagePreviewFile, urls: media.previewableImageURLs))
     }
 
     private var actionContext: MessageActionContext {
@@ -263,7 +246,6 @@ private struct MessageRowContent: View {
 
     private func openImage(_ file: SharedFile) {
         imagePreviewFile = file
-        isImagePreviewPresented = true
     }
 }
 
@@ -275,6 +257,8 @@ private struct MessageRowBody: View {
     let entry: TimelineFeedEntry
     let authorName: String
     let showsThreadChip: Bool
+    let media: MessageMedia
+    let loadMedia: () -> Void
     let openThread: () -> Void
     let openImage: (SharedFile) -> Void
 
@@ -317,10 +301,11 @@ private struct MessageRowBody: View {
 
     @ViewBuilder
     private var content: some View {
-        if MessageContent.visibleBody(of: item) != nil {
-            if let imageURL = MessageContent.inlineImageURL(of: item) {
-                MessageImageAttachment(file: MessageContent.inlineImageFile(imageURL), open: openImage)
-            } else {
+        switch media.inlineBody {
+        case .withheld: EmptyView()
+        case let .image(url): MessageImageAttachment(file: MessageContent.inlineImageFile(url), open: openImage)
+        case .text:
+            if MessageContent.visibleBody(of: item) != nil {
                 MessageRichBody(
                     item: item,
                     account: session.account,
@@ -330,17 +315,18 @@ private struct MessageRowBody: View {
                 )
             }
         }
-        if !item.message.sharedFiles.isEmpty {
+        if let withheld = media.withheld { WithheldMediaCard(media: withheld, load: loadMedia) }
+        if !media.visibleAttachments.isEmpty {
             MessageAttachmentsView(
-                files: item.message.sharedFiles,
+                files: media.visibleAttachments,
                 isSticker: item.message.isSticker,
                 openImage: openImage,
-                openStickerPack: session.stickerPackLocation(of: item).map { pack in
+                openStickerPack: media.stickerPackLocation.map { pack in
                     { actions.showStickerPack(pack) }
                 }
             )
         }
-        ForEach(item.message.linkPreviews, id: \.url) { preview in
+        ForEach(media.linkPreviews, id: \.url) { preview in
             MessageLinkPreviewCard(preview: preview)
         }
         if !item.reactions.isEmpty {
