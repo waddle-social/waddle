@@ -10,9 +10,11 @@ final class MessageMediaSnapshotTests: XCTestCase {
     }
 
     func testWithheldSeveralFiles() {
+        // The withheld players and PDF add no rows to the consent prompt.
         assertMessage(files: [
             Self.file("rink.jpg", mediaType: "image/jpeg"),
             Self.file("highlights.mp4", mediaType: "video/mp4"),
+            Self.file("commentary.mp3", mediaType: "audio/mpeg"),
             Self.file("lineup.pdf", mediaType: "application/pdf"),
         ])
     }

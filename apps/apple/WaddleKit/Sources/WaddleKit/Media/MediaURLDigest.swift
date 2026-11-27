@@ -1,7 +1,8 @@
 import Foundation
 
 /// The destinations a row presents, in render order. Each entry records
-/// whether it can load with the row or needs its own download tap.
+/// whether it is inline media or an explicit download. A player still waits
+/// for Play after the message's inline media is allowed.
 struct MediaURLDigest: Hashable, Sendable {
     private enum Surface: UInt8 {
         case attachment, download, inlineImage, previewImage, previewVideo, previewEmbed

@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// Names a message's withheld media so the reader can decide whether to load it.
+/// Asks the reader whether to load media from a foreign sender or room.
 struct WithheldMediaCard: View {
     let media: MessageMedia.Withheld
     let load: () -> Void
@@ -12,12 +12,14 @@ struct WithheldMediaCard: View {
             Text("Images and files from \(media.host?.description ?? "an unknown server") aren't loaded until you choose to.")
                 .huddleText(Theme.Typography.caption)
                 .foregroundStyle(Theme.Colors.fgMuted)
-            VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                ForEach(media.items.indices, id: \.self) { index in
-                    Text(title(for: media.items[index]))
-                        .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.fgMuted)
-                        .lineLimit(1)
+            if !media.items.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    ForEach(media.items.indices, id: \.self) { index in
+                        Text(title(for: media.items[index]))
+                            .huddleText(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.fgMuted)
+                            .lineLimit(1)
+                    }
                 }
             }
             Button("Load media", action: load)

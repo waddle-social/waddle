@@ -64,9 +64,8 @@ public struct MediaGallery: Equatable, Sendable {
         // A sticker attachment opens its pack from the row.
         guard !item.message.isSticker else { return [] }
         return media.attachments.compactMap { attachment in
-            let file = attachment.file
-            guard file.encrypted == nil, file.isImage else { return nil }
-            return Image(id: .init(row: item.presentationID, source: .attachment(attachment.id)), file: file)
+            guard attachment.presentation == .image else { return nil }
+            return Image(id: .init(row: item.presentationID, source: .attachment(attachment.id)), file: attachment.file)
         }
     }
 }

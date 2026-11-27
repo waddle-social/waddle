@@ -49,6 +49,7 @@ final class AppState {
 
     let notifications = NotificationController()
     @ObservationIgnored private let userInput = UserInputMonitor()
+    @ObservationIgnored private let pdfAttachments = PDFAttachmentStore.shared
     @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
     #if os(iOS)
     @ObservationIgnored private lazy var systemCalls = makeSystemCalls()
@@ -701,6 +702,7 @@ final class AppState {
         #endif
         pushRegistrationStatus = .waiting
         DecryptedFileStore.purge()
+        await pdfAttachments.purge()
         if signingOut {
             await active.coordinator.signOut()
         } else {

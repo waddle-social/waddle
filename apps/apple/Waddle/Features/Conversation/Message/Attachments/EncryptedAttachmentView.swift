@@ -6,11 +6,14 @@ import WaddleKit
 /// `<file/>` metadata once decrypted.
 struct EncryptedAttachmentView: View {
     @State private var model: EncryptedAttachmentModel
+    @Binding private var openRequested: Bool
     let kind: MessageAttachmentKind
     let isSticker: Bool
 
-    init(file: SharedFile, source: EncryptedFileSource, kind: MessageAttachmentKind, isSticker: Bool) {
+    init(file: SharedFile, source: EncryptedFileSource, kind: MessageAttachmentKind, isSticker: Bool,
+         openRequested: Binding<Bool>) {
         _model = State(initialValue: EncryptedAttachmentModel(file: file, source: source))
+        _openRequested = openRequested
         self.kind = kind
         self.isSticker = isSticker
     }
@@ -18,6 +21,11 @@ struct EncryptedAttachmentView: View {
     var body: some View {
         content
             .task { await model.loadImage() }
+            .onChange(of: openRequested, initial: true) { _, requested in
+                guard requested else { return }
+                openRequested = false
+                Task { await model.requestOpen() }
+            }
             .quickLookPreview($model.previewURL)
             .onChange(of: model.previewURL) { closedURL, currentURL in
                 if currentURL == nil, let closedURL {
