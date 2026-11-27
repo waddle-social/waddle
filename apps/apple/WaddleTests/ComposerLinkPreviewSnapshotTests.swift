@@ -82,7 +82,7 @@ final class ComposerLinkPreviewSnapshotTests: XCTestCase {
             let row = try XCTUnwrap(sample.coordinator.timelines.timeline(for: conversation).items.last)
             model.beginEdit(row)
         } else {
-            model.text = text
+            model.replaceText(ComposerTextReplacement(text))
         }
 
         sample.port.linkPreviewResult = .success(result)
