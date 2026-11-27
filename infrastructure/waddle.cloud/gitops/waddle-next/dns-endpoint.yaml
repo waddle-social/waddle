@@ -1,0 +1,14 @@
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: waddle-next
+  namespace: waddle-next
+  labels:
+    app.kubernetes.io/part-of: waddle-next
+spec:
+  endpoints:
+    - dnsName: next.apps.waddle.chat
+      recordTTL: 300
+      recordType: A
+      targets:
+        - 51.159.109.202
