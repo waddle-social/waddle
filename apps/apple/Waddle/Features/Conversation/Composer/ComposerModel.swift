@@ -14,11 +14,10 @@ final class ComposerModel {
     private(set) var references = RecordedDraftReferences()
     private(set) var attachments: [ComposerAttachment] = []
     var errorMessage: String?
+    var linkPreviews = ComposerLinkPreviewSubmission()
 
     /// The draft that was in progress when an edit started.
     @ObservationIgnored private var stashedDraft: (text: String, references: RecordedDraftReferences)?
-    /// The editable text the edit started from, to skip no-op corrections.
-    @ObservationIgnored private var editBaseline: EditableMessage?
     /// Bytes kept for retrying failed uploads.
     @ObservationIgnored private var payloads: [UUID: AttachmentPayload] = [:]
     @ObservationIgnored private var uploads: [UUID: Task<Void, Never>] = [:]
@@ -32,6 +31,7 @@ final class ComposerModel {
     /// Non-blank text or finished attachments, and nothing still
     /// uploading or failed.
     var canSend: Bool {
+        guard !linkPreviews.isPreparing else { return false }
         if isEditing { return hasText }
         guard attachments.allSatisfy({ $0.sharedFile != nil }) else { return false }
         return hasText || !attachments.isEmpty
@@ -50,21 +50,22 @@ final class ComposerModel {
     }
 
     func beginEdit(_ item: TimelineItem) {
+        guard !isDraftLocked else { return }
         if !isEditing {
             stashedDraft = (text, references)
         }
         let editable = EditableMessage(item: item)
         editing = item
         reply = nil
-        editBaseline = editable
+        linkPreviews.resetEdit()
         (text, references) = (editable.text, editable.recordedReferences)
     }
 
     func cancelEdit() {
+        linkPreviews.resetEdit()
         editing = nil
         (text, references) = stashedDraft ?? ("", .init())
         stashedDraft = nil
-        editBaseline = nil
     }
 
     // MARK: - Draft text
@@ -161,23 +162,14 @@ final class ComposerModel {
 
     /// Takes what the composer holds as a send or an edit and clears it at
     /// once, so a second Return before the round trip cannot resend.
-    func takeSubmission(thread: String?) -> ComposerSubmission? {
-        if let editing, let editBaseline {
-            guard hasText else { return nil }
-            let changed = editBaseline.hasChanges(text: text, references: references)
-            let draft = Draft(text: text, references: references.located(in: text))
-            cancelEdit()
-            guard changed else { return nil }
-            return .edit(editing, draft)
-        }
+    func takeSubmission(thread: String?, linkPreview payload: LinkPreviewPayload? = nil) -> ComposerSubmission? {
         guard canSend else { return nil }
-        let draft = Draft(
-            text: text,
-            references: references.located(in: text),
-            reply: reply,
-            thread: thread,
-            attachments: attachments.compactMap(\.sharedFile)
-        )
+        let draft = submissionDraft(thread: thread)
+        if let editing {
+            let edit = ComposerLinkPreviewEdit(item: editing, draft: draft, state: linkPreview.state)
+            cancelEdit()
+            return edit.shouldSend(payload) ? .edit(editing, draft) : nil
+        }
         clearDraft()
         return .send(draft)
     }
@@ -196,20 +188,6 @@ final class ComposerModel {
     func takeStickerSubmission(_ sticker: Sticker, from pack: StickerPack, thread: String?) -> ComposerSubmission {
         defer { reply = nil }
         return .sticker(sticker, pack, reply: reply, thread: thread)
-    }
-
-    func perform(_ submission: ComposerSubmission, session: SessionCoordinator, in conversation: ConversationID) async {
-        switch submission {
-        case let .send(draft):
-            await session.send(draft, in: conversation)
-        case let .sticker(sticker, pack, reply, thread):
-            await session.send(sticker, from: pack, in: conversation, reply: reply, thread: thread)
-        case let .edit(item, draft):
-            let succeeded = await session.edit(item, draft: draft)
-            if !succeeded {
-                errorMessage = "Couldn't edit the message. Try again."
-            }
-        }
     }
 
     private func clearDraft() {

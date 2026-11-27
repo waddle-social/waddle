@@ -9,6 +9,7 @@ final class FFIXmppPort: XmppPort {
     let client: WaddleClient
     /// The signed-in account, from the config the client was built with.
     let account: BareJID?
+    let linkPreviewMediaOrigin: URL?
     let signals: FFISessionSignals
     /// XEP-0363 service, discovered once; rediscovered while unknown.
     let uploadService = FFILocked<BareJID?>(nil)
@@ -17,16 +18,18 @@ final class FFIXmppPort: XmppPort {
     let storyHosts = FFILocked<[String: BareJID]>([:])
     private let continuation: AsyncStream<XmppEvent>.Continuation
 
-    init(config: WaddleConfig) {
+    init(config: WaddleConfig, linkPreviewMediaOrigin: String? = nil) {
         let (events, continuation) = AsyncStream<XmppEvent>.makeStream()
         let signals = FFISessionSignals()
+        let mediaOrigin = LinkPreviewMedia.origin(explicit: linkPreviewMediaOrigin, webSocket: config.serverUrl)
         self.events = events
         self.continuation = continuation
         self.signals = signals
         self.account = FFIInbound.jid(config.jid)?.bare
+        self.linkPreviewMediaOrigin = mediaOrigin
         self.client = WaddleClient(
             config: config,
-            listener: FFIEventListener(continuation: continuation, signals: signals)
+            listener: FFIEventListener(continuation: continuation, signals: signals, linkPreviewMediaOrigin: mediaOrigin)
         )
     }
 

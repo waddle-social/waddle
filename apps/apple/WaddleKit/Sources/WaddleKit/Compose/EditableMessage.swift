@@ -33,16 +33,6 @@ public struct EditableMessage: Hashable, Sendable {
         )
     }
 
-    /// Content changes include replacing a linked occurrence with identical plain text.
-    public func hasChanges(text: String, references: RecordedDraftReferences) -> Bool {
-        if text.trimmingCharacters(in: .whitespacesAndNewlines) != self.text.trimmingCharacters(in: .whitespacesAndNewlines) {
-            return true
-        }
-        var baseline = recordedReferences
-        baseline.relocate(from: self.text, applying: ComposerTextReplacement(text))
-        return Set(references.roomLinks) != Set(baseline.roomLinks)
-    }
-
     public var recordedReferences: RecordedDraftReferences {
         let scalars = Array(text.unicodeScalars)
         return RecordedDraftReferences(

@@ -6,10 +6,12 @@ import WaddleKit
 final class FFIEventListener: WaddleEventListener {
     private let continuation: AsyncStream<XmppEvent>.Continuation
     private let signals: FFISessionSignals
+    private let linkPreviewMediaOrigin: URL?
 
-    init(continuation: AsyncStream<XmppEvent>.Continuation, signals: FFISessionSignals) {
+    init(continuation: AsyncStream<XmppEvent>.Continuation, signals: FFISessionSignals, linkPreviewMediaOrigin: URL?) {
         self.continuation = continuation
         self.signals = signals
+        self.linkPreviewMediaOrigin = linkPreviewMediaOrigin
     }
 
     func onEvent(event: WaddleClientEvent) {
@@ -29,7 +31,7 @@ final class FFIEventListener: WaddleEventListener {
             return .disconnected
         case let .message(message):
             if let room = FFIInbound.roomConfigurationChange(message) { return .roomConfigurationChanged(room) }
-            return FFIInbound.wireMessage(message).map(XmppEvent.message)
+            return FFIInbound.wireMessage(message, mediaOrigin: linkPreviewMediaOrigin).map(XmppEvent.message)
         case let .presence(presence):
             return FFIInbound.wirePresence(presence).map(XmppEvent.presence)
         case .mamResult:

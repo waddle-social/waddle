@@ -82,6 +82,9 @@ final class FakePort: XmppPort {
     var heldPresenceModePublishes: Int { heldPresenceModeContinuations.count }
 
     var sent: [OutboundMessage] = []
+    var linkPreviewResult: Result<LinkPreviewLookup, PortError> = .success(.unsupported)
+    var linkPreviewRequests: [LinkPreviewRequest] = []
+    let linkPreviewLookups = HeldCalls()
     var sendOutcome: (OutboundMessage) -> SendOutcome = { .sent(stanzaID: $0.clientID) }
     var reactions: [(target: String, emojis: [String])] = []
     var corrections: [(target: String, body: String, options: OutboundOptions)] = []

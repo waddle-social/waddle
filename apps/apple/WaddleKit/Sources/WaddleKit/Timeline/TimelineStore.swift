@@ -143,6 +143,20 @@ public final class TimelineStore {
         _ = insert(item, tombstone: nil, isLocalEcho: true)
     }
 
+    /// Only the local row needs the provisional card after a live send.
+    /// Once a server copy arrives its stamped metadata takes precedence.
+    func setLinkPreviewOnLocalEcho(of message: OutboundMessage, preview: LinkPreview?) {
+        let conversation = message.conversation
+        guard var list = entries[conversation],
+              let index = list.firstIndex(where: { $0.isLocalEcho && $0.item.id == message.clientID })
+        else { return }
+        let previews = preview.map { [$0] } ?? []
+        guard list[index].item.message.linkPreviews != previews else { return }
+        list[index].item.message.linkPreviews = previews
+        entries[conversation] = list
+        publish(conversation)
+    }
+
     /// Removes a local echo that never went out (a failed send the user
     /// discards or retries under a new id).
     public func removeLocalEcho(id: String, in conversation: ConversationID) {
@@ -485,6 +499,7 @@ public final class TimelineStore {
             item.message.markupSpans = correction.markupSpans
             item.message.references = correction.references
             item.message.broadcastSpans = correction.broadcastSpans
+            item.message.linkPreviews = correction.linkPreviews
             // Offsets now follow the correction's wire body, whose fallback
             // (if any) replaces the original's.
             item.message.reply = item.message.reply.map {

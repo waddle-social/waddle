@@ -124,17 +124,19 @@ public struct CorrectedContent: Hashable, Sendable {
     /// include.
     public let replyFallback: Range<Int>?
     public let sharedFiles: [SharedFile]
+    public let linkPreviews: [LinkPreview]
     /// Room-assigned stanza-id of this accepted body revision, if present.
     public let sourceRevisionID: String?
     private(set) var mediaCorrection: MediaCorrection?
 
-    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], broadcastSpans: [BroadcastSpan] = [], replyFallback: Range<Int>?, sharedFiles: [SharedFile], sourceRevisionID: String? = nil) {
+    public init(body: String, markupSpans: [MarkupSpan], references: [Reference], broadcastSpans: [BroadcastSpan] = [], replyFallback: Range<Int>?, sharedFiles: [SharedFile], linkPreviews: [LinkPreview] = [], sourceRevisionID: String? = nil) {
         self.body = body
         self.markupSpans = markupSpans
         self.references = references
         self.broadcastSpans = broadcastSpans
         self.replyFallback = replyFallback
         self.sharedFiles = sharedFiles
+        self.linkPreviews = linkPreviews
         self.sourceRevisionID = sourceRevisionID
     }
 
@@ -147,6 +149,7 @@ public struct CorrectedContent: Hashable, Sendable {
             broadcastSpans: message.broadcastSpans,
             replyFallback: message.reply?.fallback,
             sharedFiles: message.sharedFiles,
+            linkPreviews: message.linkPreviews,
             sourceRevisionID: message.from.flatMap { message.identity.stanzaID(assignedBy: $0.bare) }
         )
         if let targetID = message.replacesID {
@@ -155,13 +158,14 @@ public struct CorrectedContent: Hashable, Sendable {
     }
 
     /// From a correction this client sends.
-    init(body wireBody: String, options: OutboundOptions) {
+    init(body wireBody: String, options: OutboundOptions, linkPreviews: [LinkPreview] = []) {
         self.init(
             body: ReplyFallback.strip(wireBody, range: options.reply?.fallback),
             markupSpans: options.markupSpans,
             references: options.references,
             replyFallback: options.reply?.fallback,
-            sharedFiles: options.sharedFiles
+            sharedFiles: options.sharedFiles,
+            linkPreviews: linkPreviews
         )
     }
 }

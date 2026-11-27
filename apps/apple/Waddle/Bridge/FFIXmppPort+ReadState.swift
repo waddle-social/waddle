@@ -10,7 +10,7 @@ extension FFIXmppPort {
         let page = conversation.isRoom
             ? await client.fetchRoomHistory(roomJid: jid, maxMessages: limit, beforeId: cursor)
             : await client.fetchDmHistory(peerJid: jid, maxMessages: limit, beforeId: cursor)
-        return try Self.checked(page)
+        return try checked(page)
     }
 
     func fetchThreadHistory(in room: BareJID, threadID: String, before cursor: String?, max: Int) async throws -> ArchivePage {
@@ -22,7 +22,7 @@ extension FFIXmppPort {
                 beforeId: cursor
             )
         }
-        return FFIInbound.archivePage(page)
+        return FFIInbound.archivePage(page, mediaOrigin: linkPreviewMediaOrigin)
     }
 
     func searchHistory(of conversation: ConversationID, query: String, max: Int) async throws -> ArchivePage {
@@ -31,18 +31,18 @@ extension FFIXmppPort {
         let page = conversation.isRoom
             ? await client.searchRoomHistory(roomJid: jid, query: query, maxMessages: limit)
             : await client.searchDmHistory(peerJid: jid, query: query, maxMessages: limit)
-        return try Self.checked(page)
+        return try checked(page)
     }
 
     /// The FFI reports a failed query (no session, IQ error, timeout) as an
     /// empty, incomplete page with no RSM cursor. A real empty result is
     /// always `complete='true'` (XEP-0313, Requesting pages), so that shape
     /// is a failure.
-    private static func checked(_ page: WaddleMamPage) throws -> ArchivePage {
+    private func checked(_ page: WaddleMamPage) throws -> ArchivePage {
         if page.messages.isEmpty, page.firstId == nil, !page.isComplete {
             throw PortError.failed
         }
-        return FFIInbound.archivePage(page)
+        return FFIInbound.archivePage(page, mediaOrigin: linkPreviewMediaOrigin)
     }
 }
 

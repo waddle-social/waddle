@@ -95,7 +95,7 @@ struct RemoteMediaConsentTests {
             return SharedFile(url: fileURL, mediaType: "image/png", encrypted: encrypted)
         }
         func preview(_ picture: String) -> LinkPreview {
-            LinkPreview(url: mediaURL("page"), title: nil, summary: nil, imageURL: mediaURL(picture), imageAlt: nil)
+            LinkPreview(url: mediaURL("page"), title: nil, summary: nil, imageURL: mediaURL(picture), imageAlt: nil, originalURL: nil)
         }
         var row = directRow()
         row.message.sharedFiles = [encryptedFile("one.enc")]

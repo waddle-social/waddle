@@ -97,6 +97,7 @@ public protocol ConnectionPort: AnyObject, Sendable {
 
 /// Conversation messaging verbs.
 public protocol MessagingPort: AnyObject, Sendable {
+    func lookupLinkPreview(_ request: LinkPreviewRequest) async throws -> LinkPreviewLookup
     func send(_ message: OutboundMessage) async -> SendOutcome
     func sendCorrection(of targetID: String, body: String, in conversation: ConversationID, options: OutboundOptions) async -> SendOutcome
     func sendReaction(to targetID: String, emojis: [String], in conversation: ConversationID) async -> Bool

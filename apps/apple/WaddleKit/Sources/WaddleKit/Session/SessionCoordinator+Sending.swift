@@ -1,17 +1,6 @@
 import Foundation
 
 extension SessionCoordinator {
-    /// Sends a draft. The row appears immediately as a local echo; its
-    /// delivery state lives in `deliveries` under the returned client id.
-    /// Every send goes through one FIFO queue that only drains once the
-    /// session has rejoined its rooms, so offline and reconnect-window sends
-    /// keep their order and never reach a room we are not in yet.
-    @discardableResult
-    public func send(_ draft: Draft, in conversation: ConversationID) async -> String? {
-        guard let composed = MessageComposer.compose(draft) else { return nil }
-        return await send(composed, preview: draft.text, in: conversation)
-    }
-
     /// Sends a sticker of one of the account's packs, through the same
     /// queue as any message.
     @discardableResult
@@ -27,11 +16,13 @@ extension SessionCoordinator {
     }
 
     /// `preview` is what the conversation list shows for a 1:1 send.
-    private func send(
+    func send(
         _ composed: (body: String, options: OutboundOptions),
         preview: String,
-        in conversation: ConversationID
+        in conversation: ConversationID,
+        onQueued: @MainActor @Sendable () -> Void = { /* the caller keeps no draft to clear */ }
     ) async -> String? {
+        guard !isStopped else { return nil }
         // A room the account left takes nothing from this device until it
         // is joined again; the room would refuse the message.
         if conversation.isRoom, directory.hasLeft(conversation.jid) { return nil }
@@ -56,6 +47,7 @@ extension SessionCoordinator {
         }
         stopTyping(in: conversation)
         enqueue(message)
+        onQueued()
         await flushOutboundQueue()
         return message.clientID
     }
@@ -112,7 +104,8 @@ extension SessionCoordinator {
             retryingOutboundIDs.remove(next.clientID)
             deliveries.began(next.clientID)
             let sendEpoch = connectionEpoch
-            let outcome = await port.send(next)
+            let attempt = takeOutboundAttempt(&next)
+            let outcome = await port.send(attempt)
             let remainsTracked = outboundQueue.contains { $0.clientID == next.clientID }
                 || failedOutbound[next.clientID] != nil
                 || sentOutbound[next.clientID] != nil
@@ -131,6 +124,7 @@ extension SessionCoordinator {
             // the send was suspended outranks the call's own result.
             let state = deliveries.state(of: next.clientID)
             if state == .acknowledged {
+                timelines.setLinkPreviewOnLocalEcho(of: next, preview: attempt.options.linkPreview?.preview)
                 sentMessageAcknowledged(next.clientID)
                 persistOutbox()
                 continue
@@ -175,6 +169,7 @@ extension SessionCoordinator {
                 return
             }
             if case .sent = outcome {
+                timelines.setLinkPreviewOnLocalEcho(of: next, preview: attempt.options.linkPreview?.preview)
                 outboundQueue.removeAll { $0.clientID == next.clientID }
                 rememberSent(next)
                 persistOutbox()
@@ -182,7 +177,7 @@ extension SessionCoordinator {
         }
     }
 
-    private var canFlushOutboundQueue: Bool {
+    var canFlushOutboundQueue: Bool {
         isSendReady
             && foregroundProbeTask == nil
             && !isConnectResetting
@@ -350,8 +345,9 @@ extension SessionCoordinator {
     /// sub-thread's parent is the original's, else the one known now. The
     /// draft's own reply, thread and attachments are ignored. A sticker is
     /// not text and cannot be corrected.
-    public func edit(_ item: TimelineItem, draft: Draft) async -> Bool {
-        guard item.isMine,
+    public func edit(_ item: TimelineItem, draft: Draft, linkPreview: LinkPreviewPayload? = nil) async -> Bool {
+        guard !isStopped,
+              item.isMine,
               item.tombstone == nil,
               !item.message.isSticker,
               let target = item.correctionTargetID,
@@ -366,9 +362,10 @@ extension SessionCoordinator {
                 parent: item.message.parentThread ?? threadParent(of: thread, in: item.conversation)
             )
         }
+        options.linkPreview = linkPreview?.ifFresh(at: now())
         let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: options)
         guard case let .sent(originID) = outcome else { return false }
-        let content = CorrectedContent(body: composed.body, options: composed.options)
+        let content = CorrectedContent(body: composed.body, options: options, linkPreviews: options.linkPreview.map { [$0.preview] } ?? [])
         // A room reflects the correction, and may reject it (for example
         // after a reconnect changed our occupancy); apply only in 1:1.
         if item.conversation.isRoom {

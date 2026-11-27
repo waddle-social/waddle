@@ -43,7 +43,7 @@ enum FFIOutbound {
             markupSpans: options.markupSpans.compactMap(markupSpan),
             references: options.references.compactMap(reference),
             sharedFiles: options.sharedFiles.map(sharedFile),
-            linkPreviewToken: nil,
+            linkPreviewToken: options.linkPreviewToken?.rawValue,
             requestDisplayedMarker: options.requestDisplayedMarker,
             chatStateActive: options.chatStateActive,
             mucPm: false,
