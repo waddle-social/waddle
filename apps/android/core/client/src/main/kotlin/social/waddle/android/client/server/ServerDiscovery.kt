@@ -35,7 +35,7 @@ class ServerDiscoveryException(val error: ServerDiscoveryError, cause: Throwable
 
 /**
  * Turns a typed address into the origin that serves the Waddle REST
- * auth API (`/api/auth/*`), which is also what hands back the XMPP
+ * auth API (the `/api/auth` routes), which is also what hands back the XMPP
  * WebSocket URL in the session — so one validated origin drives both
  * auth and the XMPP connection.
  *

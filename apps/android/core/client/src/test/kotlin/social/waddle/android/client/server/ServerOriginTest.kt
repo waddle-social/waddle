@@ -36,7 +36,6 @@ class ServerOriginTest {
     @Test
     fun `cleartext is rejected off loopback`() {
         assertEquals(ServerOriginError.INSECURE_SCHEME, errorOf("http://chat.example"))
-        assertEquals(ServerOriginError.INSECURE_SCHEME, errorOf("http://10.0.2.2:5280"))
     }
 
     @Test

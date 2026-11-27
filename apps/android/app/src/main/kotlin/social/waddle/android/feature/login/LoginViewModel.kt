@@ -20,9 +20,9 @@ import social.waddle.android.client.auth.DevicePollResult
 import social.waddle.android.client.auth.DeviceStartResponse
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.auth.isTransientDeviceAuthPollError
-import social.waddle.android.client.server.ServerOrigin
 import social.waddle.android.client.server.ServerDiscoveryError
 import social.waddle.android.client.server.ServerDiscoveryException
+import social.waddle.android.client.server.ServerOrigin
 import social.waddle.android.viewModelFactoryOf
 
 /** The login screen's phase machine. */
