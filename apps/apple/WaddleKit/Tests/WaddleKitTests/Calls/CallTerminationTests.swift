@@ -222,6 +222,36 @@ import Testing
         #expect(completions.count == 1)
     }
 
+    /// The stream is being reopened and its handle is not installed yet:
+    /// a hang-up sent now would go nowhere and clear the slot.
+    @Test func quittingWhileReconnectingHangsUpOnceTheConnectSettles() async throws {
+        let (coordinator, port) = await connectedSession(emitsDisconnectEvent: false)
+        #expect(await coordinator.calls.startCall(to: callPeer.bare, media: callAudio))
+        let sid = try #require(coordinator.calls.state.sid)
+        port.holdsConnects = true
+        port.emit(.disconnected)
+        await eventually { coordinator.connection != .online }
+        coordinator.resume()
+        await eventually { port.connectCount == 2 }
+        #expect(coordinator.calls.state.sid == sid)
+        let sendsWhileReconnecting = port.callSends.count
+
+        var completions = 0
+        #expect(coordinator.beginCallTermination(timeout: .seconds(30)) { completions += 1 })
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(port.callSends.count == sendsWhileReconnecting)
+        #expect(completions == 0)
+
+        port.holdsConnects = false
+        port.releaseConnects()
+        await eventually { port.callSends.last == .retract(callPeer.bare, sid) }
+        await eventually { port.disconnectCount == 1 }
+        #expect(completions == 0)
+        port.emit(.disconnected)
+        await eventually { completions > 0 }
+        #expect(completions == 1)
+    }
+
     private func connectedSession(emitsDisconnectEvent: Bool = true) async -> (SessionCoordinator, FakePort) {
         let port = FakePort()
         port.emitsDisconnectEvent = emitsDisconnectEvent

@@ -29,9 +29,11 @@ extension SessionCoordinator {
         RunLoop.main.add(timer, forMode: .common)
 
         Task {
-            // The listener can report connected before the FFI installs the
-            // handle needed to send the hang-up.
-            while connection == .online, isConnectInFlight, timer.isValid, ContinuousClock.now < deadline {
+            // A stream being opened has no handle to send through until its
+            // connect returns, whether we are reconnecting or the listener
+            // has already reported it connected. A hang-up sent before that
+            // goes nowhere and still clears the slot.
+            while isConnectInFlight, timer.isValid, ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(10))
             }
             guard timer.isValid, ContinuousClock.now < deadline else { return }

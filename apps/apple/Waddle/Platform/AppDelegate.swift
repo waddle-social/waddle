@@ -269,7 +269,7 @@ extension AppDelegate: UIApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_ application: UIApplication) {
+    func applicationWillTerminate(_: UIApplication) {
         var finished = false
         let shouldWait = appState?.session?.coordinator.beginCallTermination { finished = true } ?? false
         guard shouldWait else { return }
