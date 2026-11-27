@@ -9,6 +9,30 @@ public enum ComposerHardwareKey: Sendable {
 
 /// A presentation of the suggestions for the current draft and selection.
 public struct ComposerSuggestionsModel: Sendable {
+    public struct Draft: Sendable {
+        let text: String
+        let selection: ComposerScalarRange?
+        let isEditing: Bool
+
+        public init(text: String, selection: ComposerScalarRange?, isEditing: Bool) {
+            self.text = text
+            self.selection = selection
+            self.isEditing = isEditing
+        }
+    }
+
+    public struct Place: Sendable {
+        let conversation: ConversationID
+        let inChannel: Bool
+        let account: AccountIdentity
+
+        public init(conversation: ConversationID, inChannel: Bool, account: AccountIdentity) {
+            self.conversation = conversation
+            self.inChannel = inChannel
+            self.account = account
+        }
+    }
+
     public struct DirectoryQuery: Hashable, Sendable {
         public let room: BareJID
         public let text: String
@@ -43,13 +67,12 @@ public struct ComposerSuggestionsModel: Sendable {
     /// The occupants and the extensions are read only for the trigger that needs them: a composer
     /// with no list open must not come to depend on every room's presence.
     public static func present(
-        text: String, selection: ComposerScalarRange?, isEditing: Bool, conversation: ConversationID,
-        inChannel: Bool, occupants: @autoclosure () -> [Occupant], account: AccountIdentity,
+        draft: Draft, place: Place, occupants: @autoclosure () -> [Occupant],
         extensions: @autoclosure () -> [ExtensionCommand],
         directory: DirectoryResults?, navigation: ComposerSuggestionSelection.Navigation?
     ) -> Self {
-        let token = ComposerSuggestionTrigger.find(in: text, selection: selection)
-        let trigger = isEditing && token?.kind != .emoji ? nil : token
+        let token = ComposerSuggestionTrigger.find(in: draft.text, selection: draft.selection)
+        let trigger = draft.isEditing && token?.kind != .emoji ? nil : token
         var list = ComposerSuggestionSelection(navigation: navigation)
         guard let trigger, !list.isDismissed(trigger) else {
             list.update(trigger: trigger, items: [])
@@ -60,14 +83,14 @@ public struct ComposerSuggestionsModel: Sendable {
         var directoryQuery: DirectoryQuery?
         var slashResolves = false
         switch trigger.kind {
-        case .mention where conversation.isRoom:
+        case .mention where place.conversation.isRoom:
             if !trigger.query.isEmpty {
-                directoryQuery = DirectoryQuery(room: conversation.jid, text: trigger.query)
+                directoryQuery = DirectoryQuery(room: place.conversation.jid, text: trigger.query)
             }
             items = MentionCandidates.matching(
-                trigger.query, occupants: occupants(), ownNick: account.nick,
+                trigger.query, occupants: occupants(), ownNick: place.account.nick,
                 directoryUsers: directory?.query == directoryQuery ? directory?.users ?? [] : [],
-                ownJID: account.jid
+                ownJID: place.account.jid
             ).map(ComposerSuggestion.mention)
         case .mention:
             items = []
@@ -75,10 +98,12 @@ public struct ComposerSuggestionsModel: Sendable {
             items = EmojiShortcodes.search(trigger.query).map(ComposerSuggestion.emoji)
         case .slash:
             let extensions = extensions()
-            items = SlashCandidates.filter(prefix: trigger.query, extensions: extensions, inRoom: inChannel)
+            items = SlashCandidates.filter(prefix: trigger.query, extensions: extensions, inRoom: place.inChannel)
                 .prefix(ComposerSuggestion.maximumRows).map(ComposerSuggestion.slash)
-            if let command = SlashTrigger.parse(text) {
-                slashResolves = SlashCandidates.resolve(prefix: command.prefix, extensions: extensions, inRoom: inChannel) != nil
+            if let command = SlashTrigger.parse(draft.text) {
+                slashResolves = SlashCandidates.resolve(
+                    prefix: command.prefix, extensions: extensions, inRoom: place.inChannel
+                ) != nil
             }
         }
 

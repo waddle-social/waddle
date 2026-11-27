@@ -5,6 +5,10 @@ struct ComposerSuggestionsModelTests {
     private let room = ConversationID.room(BareJID(parsing: "general@rooms.waddle.test")!)
     private let peer = ConversationID.direct(BareJID(parsing: "friend@waddle.test")!)
     private let account = AccountIdentity(jid: BareJID(parsing: "me@waddle.test")!, nick: "me")
+    private var roomPlace: ComposerSuggestionsModel.Place {
+        .init(conversation: room, inChannel: true, account: account)
+    }
+
     private let poll = ExtensionCommand(
         serviceJID: "ext.waddle.test", node: "poll", name: "Poll", scope: .channel,
         composerPrefix: "poll", inlineField: nil, composerExecute: false
@@ -20,7 +24,12 @@ struct ComposerSuggestionsModelTests {
             Issue.record("Tab should complete the selected slash row")
             return
         }
-        #expect(pick.edit.text == (text == "/gif" ? "/giphy " : text == "/shrug hi" ? text : text + " "))
+        let expected = switch text {
+        case "/gif": "/giphy "
+        case "/shrug hi": text
+        default: text + " "
+        }
+        #expect(pick.edit.text == expected)
         #expect(pick.clearsError)
     }
 
@@ -38,7 +47,8 @@ struct ComposerSuggestionsModelTests {
     }
 
     @Test func onlyEmojiSuggestionsAreOfferedInEditsAndMentionsNeedARoom() {
-        let emoji = present(":joy", isEditing: true, conversation: peer)
+        let directPlace = ComposerSuggestionsModel.Place(conversation: peer, inChannel: false, account: account)
+        let emoji = present(":joy", isEditing: true, place: directPlace)
         #expect(emoji.list.items.first == .emoji(.init(name: "joy", glyph: "😀")))
         #expect(emoji.directoryQuery == nil)
         for text in ["@pri", "/sh"] {
@@ -46,10 +56,11 @@ struct ComposerSuggestionsModelTests {
             #expect(editing.list.items.isEmpty)
             #expect(editing.directoryQuery == nil)
         }
-        let direct = present("@pri", conversation: peer)
+        let direct = present("@pri", place: directPlace)
         #expect(direct.list.items.isEmpty)
         #expect(direct.directoryQuery == nil)
-        #expect(present("/po", inChannel: false).list.items.isEmpty)
+        let groupDM = ComposerSuggestionsModel.Place(conversation: room, inChannel: false, account: account)
+        #expect(present("/po", place: groupDM).list.items.isEmpty)
         #expect(present("/po").list.items == [.slash(.extension(poll))])
     }
 
@@ -87,8 +98,8 @@ struct ComposerSuggestionsModelTests {
         var extensionReads = 0
         func presentCounting(_ text: String) {
             _ = ComposerSuggestionsModel.present(
-                text: text, selection: nil, isEditing: false, conversation: room, inChannel: true,
-                occupants: { occupantReads += 1; return [] }(), account: account,
+                draft: .init(text: text, selection: nil, isEditing: false), place: roomPlace,
+                occupants: { occupantReads += 1; return [] }(),
                 extensions: { extensionReads += 1; return [poll] }(), directory: nil, navigation: nil
             )
         }
@@ -131,6 +142,30 @@ struct ComposerSuggestionsModelTests {
         #expect(!pick.clearsError)
     }
 
+    @Test(arguments: ["Smith", "Ali"])
+    func directoryHitsUseRoomNicksWithoutDuplicatingMatchingOccupants(queryText: String) throws {
+        let text = "@" + queryText
+        let alice = try #require(BareJID(parsing: "alice@waddle.test"))
+        let offline = try #require(BareJID(parsing: "offline@waddle.test"))
+        let query = try #require(present(text).directoryQuery)
+        let directory = ComposerSuggestionsModel.DirectoryResults(query: query, users: [
+            .init(jid: alice, username: "alice-account", displayName: "Alice Smith"),
+            .init(jid: offline, username: "Offline", displayName: "Alistair Smith"),
+        ])
+
+        let presentation = present(text, occupants: [occupant("Alice", jid: alice)], directory: directory)
+        #expect(presentation.list.items == [
+            .mention(.init(name: "Alice", target: .user(alice))),
+            .mention(.init(name: "Offline", target: .user(offline))),
+        ])
+        guard case let .pick(pick) = presentation.handle(.returnKey, in: text) else {
+            Issue.record("Return should take the selected mention")
+            return
+        }
+        #expect(pick.edit == ComposerTextEdit(text: "@Alice ", selection: 7..<7))
+        #expect(pick.recordedMention?.target == .user(alice))
+    }
+
     @Test func directoryResultsBelongToOneQueryAndRoomAndEscapeKeepsItClosed() throws {
         let initial = present("@pri")
         let query = try #require(initial.directoryQuery)
@@ -138,7 +173,10 @@ struct ComposerSuggestionsModelTests {
             query: query, users: [.init(jid: BareJID(parsing: "offline@waddle.test")!, username: "Offline", displayName: "Priya")]
         )
         #expect(present("@pr", directory: directory).list.items.isEmpty)
-        #expect(present("@pri", conversation: .room(BareJID(parsing: "other@rooms.waddle.test")!), directory: directory).list.items.isEmpty)
+        let otherRoom = ComposerSuggestionsModel.Place(
+            conversation: .room(BareJID(parsing: "other@rooms.waddle.test")!), inChannel: true, account: account
+        )
+        #expect(present("@pri", place: otherRoom, directory: directory).list.items.isEmpty)
         #expect(present("@", directory: directory).directoryQuery == nil)
         let open = present("@pri", directory: directory)
         guard case let .navigate(navigation) = open.handle(.escape, in: "@pri") else {
@@ -175,13 +213,14 @@ struct ComposerSuggestionsModelTests {
     }
 
     private func present(
-        _ text: String, selection: ComposerScalarRange? = nil, isEditing: Bool = false, conversation: ConversationID? = nil,
-        inChannel: Bool = true, occupants: [Occupant] = [], directory: ComposerSuggestionsModel.DirectoryResults? = nil,
+        _ text: String, selection: ComposerScalarRange? = nil, isEditing: Bool = false,
+        place: ComposerSuggestionsModel.Place? = nil, occupants: [Occupant] = [],
+        directory: ComposerSuggestionsModel.DirectoryResults? = nil,
         navigation: ComposerSuggestionSelection.Navigation? = nil
     ) -> ComposerSuggestionsModel {
         ComposerSuggestionsModel.present(
-            text: text, selection: selection, isEditing: isEditing, conversation: conversation ?? room,
-            inChannel: inChannel, occupants: occupants, account: account, extensions: [poll],
+            draft: .init(text: text, selection: selection, isEditing: isEditing), place: place ?? roomPlace,
+            occupants: occupants, extensions: [poll],
             directory: directory, navigation: navigation
         )
     }

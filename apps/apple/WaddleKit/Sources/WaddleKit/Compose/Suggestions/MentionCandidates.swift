@@ -38,10 +38,18 @@ public enum MentionCandidates {
             }
             .filter { labels.insert($0.name.lowercased()).inserted }
         let matchingPeople = people.filter { matches(query, $0.name) || matches(query, $0.jid?.localpart ?? "") }
-        let absent = MentionDirectorySearch
-            .additions(directoryUsers, listed: people.compactMap(\.jid), ownJID: ownJID, reservedNames: labels)
-            .map { MentionCandidate(name: $0.username, target: .user($0.jid)) }
-        return Array((broadcasts + matchingPeople + absent).prefix(ComposerSuggestion.maximumRows))
+        let peopleByJID = Dictionary(people.compactMap { person in
+            person.jid.map { ($0, person) }
+        }, uniquingKeysWith: { first, _ in first })
+        let directoryMatches = MentionDirectorySearch.additions(
+            directoryUsers, listed: matchingPeople.compactMap(\.jid), ownJID: ownJID
+        ) { user in
+            if let person = peopleByJID[user.jid] { return person.name }
+            return labels.contains(user.username.lowercased()) ? nil : user.username
+        }.map { user in
+            peopleByJID[user.jid] ?? MentionCandidate(name: user.username, target: .user(user.jid))
+        }
+        return Array((broadcasts + matchingPeople + directoryMatches).prefix(ComposerSuggestion.maximumRows))
     }
 
     private static let broadcastCandidates: [MentionCandidate] = [

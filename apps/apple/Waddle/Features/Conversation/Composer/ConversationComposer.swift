@@ -178,10 +178,10 @@ struct ConversationComposer: View {
 
     private var suggestionPresentation: ComposerSuggestionsModel {
         ComposerSuggestionsModel.present(
-            text: model.text, selection: model.text == selectionBase ? selection : nil, isEditing: model.isEditing,
-            conversation: conversation, inChannel: isChannel,
+            draft: .init(text: model.text, selection: model.text == selectionBase ? selection : nil, isEditing: model.isEditing),
+            place: .init(conversation: conversation, inChannel: isChannel, account: session.account),
             occupants: Array((session.presence.occupants[conversation.jid] ?? [:]).values),
-            account: session.account, extensions: session.extensionCommands, directory: suggestionDirectory.results,
+            extensions: session.extensionCommands, directory: suggestionDirectory.results,
             navigation: suggestionNavigation
         )
     }

@@ -20,7 +20,7 @@ final class ComposerSnapshotTests: XCTestCase {
                 .mention(.init(name: "here", target: .here)),
                 .mention(.init(name: "Jo", target: .user(SampleSession.jo))),
                 .mention(.init(name: "Priya", target: .user(SampleSession.priya))),
-            ], selectedIndex: 1, onPick: { _ in })),
+            ], selectedIndex: 1, onPick: { _ in /* drawn only */ })),
             width: Self.width
         )
     }
@@ -32,7 +32,7 @@ final class ComposerSnapshotTests: XCTestCase {
                 .slash(.builtin(.me)),
                 .slash(.builtin(.shrug)),
                 .slash(.builtin(.giphy)),
-            ], selectedIndex: 1, onPick: { _ in }),
+            ], selectedIndex: 1, onPick: { _ in /* drawn only */ }),
             width: Self.width
         )
     }
@@ -46,7 +46,7 @@ final class ComposerSnapshotTests: XCTestCase {
                     .emoji(.init(name: "face_with_tears_of_joy", glyph: "😂")),
                     .emoji(.init(name: "cat_with_tears_of_joy", glyph: "😹")),
                 ],
-                selectedIndex: 1, onPick: { _ in }
+                selectedIndex: 1, onPick: { _ in /* drawn only */ }
             ),
             width: Self.width
         )

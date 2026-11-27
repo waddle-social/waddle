@@ -88,7 +88,7 @@ struct ComposerTextView: UIViewRepresentable {
         }
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: ComposerUITextView, context: Context) -> CGSize? {
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: ComposerUITextView, context _: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
         let fitting = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         let lineHeight = (view.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
@@ -133,7 +133,7 @@ struct ComposerTextView: UIViewRepresentable {
             if !parent.isFocused { parent.isFocused = true }
         }
 
-        func textViewDidEndEditing(_ textView: UITextView) {
+        func textViewDidEndEditing(_: UITextView) {
             if parent.isFocused { parent.isFocused = false }
         }
 
@@ -163,7 +163,7 @@ struct ComposerTextView: UIViewRepresentable {
 
 /// The text view behind `ComposerTextView`.
 final class ComposerUITextView: UITextView {
-    var onPasteAttachments: () -> Void = {}
+    var onPasteAttachments: () -> Void = { /* The representable installs the handler on update. */ }
     var keyHandler: (ComposerHardwareKey) -> Bool = { _ in false }
     /// Presses whose begin the composer took, so their end is not passed
     /// on to a text view that never saw them begin.
