@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WaddleKit
 
-/// The Slack-style message composer: slash and mention suggestions,
+/// The Slack-style message composer: suggestions,
 /// notices, the reply or edit banner, then one card holding the
 /// formatting bar, the text field, pending attachments and the action row.
 struct ConversationComposer: View {
@@ -20,13 +20,10 @@ struct ConversationComposer: View {
     /// Whether the text field is being edited; the field keeps it in step
     /// with the system's focus.
     @State private var isFocused = false
-    /// Unicode-scalar selection in the draft; nil until the field reports
-    /// one.
-    @State private var selection: Range<Int>?
+    @State private var selection: ComposerScalarRange?
     /// The draft `selection` was measured against: what the field itself
-    /// last wrote, or the result of a formatting edit. Any other change to
-    /// the draft (a completed mention or command, a sent message) moves
-    /// the caret to the end instead of leaving it at a stale offset.
+    /// last wrote, or the result of a composer edit. An external change
+    /// to the draft, such as a send, moves the caret to the end.
     @State private var selectionBase = ""
     @State private var showsFormatting = false
     @State private var showsPhotoPicker = false
@@ -36,26 +33,25 @@ struct ConversationComposer: View {
     @State private var showsStickers = false
     @State private var linkPrompt = ComposerLinkPrompt()
     @State private var commands = ComposerCommandCenter()
-    /// XEP-0055 directory results for the `@query` being typed in a room.
-    @State private var mentionDirectory = MentionDirectoryResults()
+    @State private var suggestionDirectory = ComposerSuggestionDirectory()
+    @State private var suggestionNavigation: ComposerSuggestionSelection.Navigation?
     /// Counts sends, to play the send haptic.
     @State private var sendCount = 0
 
     var body: some View {
-        let slash = slashSuggestions
-        let mentions = slash == nil ? mentionSuggestions : nil
+        let presentation = suggestionPresentation
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
             // Suggestions and notices open away from the screen edge the
             // composer sits on: above it at the bottom, below it at the
             // top in the social order.
             if isTopPinned {
                 ComposerContextBanner(model: model)
-                card(slash: slash, mentions: mentions)
-                suggestionsAndNotices(slash: slash, mentions: mentions)
+                card
+                suggestionsAndNotices(presentation.list)
             } else {
-                suggestionsAndNotices(slash: slash, mentions: mentions)
+                suggestionsAndNotices(presentation.list)
                 ComposerContextBanner(model: model)
-                card(slash: slash, mentions: mentions)
+                card
             }
         }
         .padding(.horizontal, Theme.Spacing.m)
@@ -88,8 +84,12 @@ struct ConversationComposer: View {
         .task(id: commands.notice?.id) {
             await expireInfoNotice()
         }
-        .task(id: mentionSearchKey) {
-            await searchMentionDirectory(mentionSearchKey)
+        // Keep the cursor identity across result changes. The rows are derived above.
+        .onChange(of: presentation.list.navigation) { _, navigation in
+            if navigation != suggestionNavigation { suggestionNavigation = navigation }
+        }
+        .task(id: presentation.directoryQuery) {
+            await suggestionDirectory.search(presentation.directoryQuery, using: session)
         }
     }
 
@@ -97,10 +97,7 @@ struct ConversationComposer: View {
         app.preferences.messageOrder.isNewestFirst
     }
 
-    private func card(
-        slash: [SlashCandidate]?,
-        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
-    ) -> some View {
+    private var card: some View {
         ComposerCard(
             model: model,
             text: fieldText,
@@ -110,23 +107,15 @@ struct ConversationComposer: View {
             placeholder: placeholder,
             showsMention: conversation.isRoom,
             uploader: uploader,
-            actions: cardActions(slash: slash, mentions: mentions)
+            actions: cardActions
         )
     }
 
     @ViewBuilder
-    private func suggestionsAndNotices(
-        slash: [SlashCandidate]?,
-        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
-    ) -> some View {
-        if let slash, !slash.isEmpty {
-            ComposerSlashSuggestions(candidates: slash) { candidate in
-                complete(with: candidate)
-            }
-        }
-        if let mentions, !mentions.candidates.isEmpty {
-            ComposerMentionSuggestions(candidates: mentions.candidates) { candidate in
-                model.insertMention(candidate, replacing: mentions.query)
+    private func suggestionsAndNotices(_ list: ComposerSuggestionSelection) -> some View {
+        if let selected = list.selectedIndex, let trigger = list.trigger {
+            ComposerSuggestionList(items: list.items, selectedIndex: selected) { item in
+                if let pick = suggestionPresentation.pick(item, from: trigger, in: model.text) { apply(pick) }
             }
         }
         if let error = model.errorMessage {
@@ -167,13 +156,10 @@ struct ConversationComposer: View {
         isChannel ? conversation.jid : nil
     }
 
-    private func cardActions(
-        slash: [SlashCandidate]?,
-        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
-    ) -> ComposerActions {
+    private var cardActions: ComposerActions {
         ComposerActions(
             submit: submit,
-            acceptSuggestion: { key in acceptSuggestion(key, slash: slash, mentions: mentions) },
+            handleSuggestionKey: handleSuggestionKey,
             cancelContext: cancelContext,
             format: applyFormat,
             requestLink: { linkPrompt = ComposerLinkPrompt(isPresented: true) },
@@ -190,95 +176,29 @@ struct ConversationComposer: View {
 
     // MARK: - Suggestions
 
-    /// Slash commands while the command word is typed, not while editing.
-    private var slashSuggestions: [SlashCandidate]? {
-        guard !model.isEditing, let prefix = SlashPopover.prefix(in: model.text) else { return nil }
-        let candidates = SlashCandidates.filter(prefix: prefix, extensions: session.extensionCommands, inRoom: isChannel)
-        return Array(candidates.prefix(8))
-    }
-
-    /// Mention completion for the `@word` at the end of the draft, in rooms
-    /// only (1:1 has nobody else to address).
-    private var mentionSuggestions: (query: MentionQuery, candidates: [MentionCandidate])? {
-        guard conversation.isRoom, !model.isEditing, let query = MentionTokens.trailingQuery(in: model.text) else {
-            return nil
-        }
-        let occupants = Array((session.presence.occupants[conversation.jid] ?? [:]).values)
-        let key = mentionSearchKey
-        let directoryUsers = key != nil && mentionDirectory.key == key ? mentionDirectory.users : []
-        let candidates = MentionCandidates.matching(
-            query.text,
-            occupants: occupants,
-            ownNick: session.account.nick,
-            directoryUsers: directoryUsers,
-            ownJID: session.account.jid
+    private var suggestionPresentation: ComposerSuggestionsModel {
+        ComposerSuggestionsModel.present(
+            draft: .init(text: model.text, selection: model.text == selectionBase ? selection : nil, isEditing: model.isEditing),
+            place: .init(conversation: conversation, inChannel: isChannel, account: session.account),
+            occupants: Array((session.presence.occupants[conversation.jid] ?? [:]).values),
+            extensions: session.extensionCommands, directory: suggestionDirectory.results,
+            navigation: suggestionNavigation
         )
-        return (query, candidates)
     }
 
-    /// The room and non-empty `@query` to search the user directory for.
-    private var mentionSearchKey: MentionSearchKey? {
-        guard conversation.isRoom, !model.isEditing, let query = MentionTokens.trailingQuery(in: model.text) else {
-            return nil
+    private func handleSuggestionKey(_ key: ComposerHardwareKey) -> Bool {
+        switch suggestionPresentation.handle(key, in: model.text) {
+        case .pass: return false
+        case let .navigate(navigation): suggestionNavigation = navigation
+        case let .pick(pick): apply(pick)
         }
-        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        return MentionSearchKey(room: conversation.jid, query: text)
+        return true
     }
 
-    /// XEP-0055 search for people with no presence in the room, debounced:
-    /// `.task(id:)` cancels the previous run whenever the query changes, so
-    /// the latest query wins. A failed search leaves the occupants alone.
-    private func searchMentionDirectory(_ key: MentionSearchKey?) async {
-        guard let key else { return }
-        if let cached = session.cachedMentionableUsers(key.query, in: key.room) {
-            mentionDirectory = MentionDirectoryResults(key: key, users: cached)
-            return
-        }
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        guard !Task.isCancelled else { return }
-        do {
-            let users = try await session.searchMentionableUsers(key.query, in: key.room)
-            guard !Task.isCancelled else { return }
-            mentionDirectory = MentionDirectoryResults(key: key, users: users)
-        } catch {
-            // Directory search is best effort; occupants are still offered.
-        }
-    }
-
-    /// Tab accepts the first suggestion. Return does too, except on a
-    /// fully typed command, which Return runs.
-    private func acceptSuggestion(
-        _ key: ComposerSuggestionKey,
-        slash: [SlashCandidate]?,
-        mentions: (query: MentionQuery, candidates: [MentionCandidate])?
-    ) -> Bool {
-        if let slash, let first = slash.first {
-            if key == .returnKey, isResolvedCommand { return false }
-            complete(with: first)
-            return true
-        }
-        if let mentions, let first = mentions.candidates.first {
-            model.insertMention(first, replacing: mentions.query)
-            return true
-        }
-        return false
-    }
-
-    private var isResolvedCommand: Bool {
-        guard let trigger = SlashTrigger.parse(model.text) else { return false }
-        let resolution = SlashCandidates.resolve(
-            prefix: trigger.prefix,
-            extensions: session.extensionCommands,
-            inRoom: isChannel
-        )
-        return resolution != nil
-    }
-
-    private func complete(with candidate: SlashCandidate) {
-        model.text = SlashCompletion.complete(text: model.text, with: candidate)
-        model.errorMessage = nil
-        isFocused = true
+    private func apply(_ pick: ComposerSuggestionsModel.Pick) {
+        apply(pick.edit)
+        if let mention = pick.recordedMention { model.recordMention(mention) }
+        if pick.clearsError { model.errorMessage = nil }
     }
 
     // MARK: - Sending and slash commands
@@ -299,7 +219,9 @@ struct ConversationComposer: View {
         case let .run(action):
             perform(action)
         case let .complete(candidate):
-            complete(with: candidate)
+            model.text = SlashCompletion.complete(text: model.text, with: candidate)
+            model.errorMessage = nil
+            isFocused = true
         case .choose:
             model.errorMessage = "Choose a command from the list."
         case let .unknown(command):
@@ -358,7 +280,7 @@ struct ConversationComposer: View {
         Task { await model.perform(submission, session: session, in: conversation) }
     }
 
-    /// Escape leaves edit mode, else drops the reply.
+    /// Escape with the suggestion list closed leaves edit mode, else drops the reply.
     private func cancelContext() -> Bool {
         if model.isEditing {
             model.cancelEdit()
@@ -391,17 +313,14 @@ struct ConversationComposer: View {
 
     /// Puts `@` at the end so the mention list opens.
     private func startMention() {
-        model.text = ComposerInsertion.appendingToken("@", to: model.text)
-        isFocused = true
+        let text = ComposerInsertion.appendingToken("@", to: model.text)
+        let end = text.unicodeScalars.count
+        apply(ComposerTextEdit(text: text, selection: end..<end))
     }
 
-    /// Opens the command list: `/` alone, or `/ ` in front of the draft,
-    /// which completing a command keeps as its argument.
     private func startCommand() {
-        if SlashTrigger.parse(model.text) == nil {
-            model.text = model.text.isEmpty ? "/" : "/ " + model.text
-        }
-        isFocused = true
+        suggestionNavigation = nil
+        apply(SlashCompletion.start(in: model.text))
     }
 
     private func apply(_ edit: ComposerTextEdit) {
@@ -459,16 +378,4 @@ struct ConversationComposer: View {
         guard !Task.isCancelled, commands.notice?.id == notice.id else { return }
         commands.dismissNotice()
     }
-}
-
-/// The room and typed `@query` a directory search answers.
-private struct MentionSearchKey: Hashable {
-    let room: BareJID
-    let query: String
-}
-
-/// The latest directory results, shown only while their query is typed.
-private struct MentionDirectoryResults {
-    var key: MentionSearchKey?
-    var users: [UserSearchResult] = []
 }

@@ -1,15 +1,15 @@
-import Foundation
-
-/// Completing the typed `/prefix` to a picked candidate.
+/// Opening and completing a slash command while keeping its argument.
 public enum SlashCompletion {
-    /// Replaces the leading `/prefix` (and one following space, if any)
-    /// with `/name `, keeping the rest: `/ hello` + shrug gives
-    /// `/shrug hello`, `/sh` gives `/shrug `.
+    public static func start(in text: String) -> ComposerTextEdit {
+        if let command = SlashTrigger.parse(text) {
+            let end = command.wordRange.upperBound
+            return ComposerTextEdit(text: text, selection: end..<end)
+        }
+        return ComposerTextEdit(text: text.isEmpty ? "/" : "/ " + text, selection: 1..<1)
+    }
+
     public static func complete(text: String, with candidate: SlashCandidate) -> String {
-        let completed = "/" + candidate.name + " "
-        guard let trigger = SlashTrigger.parse(text) else { return completed }
-        let rest = text.unicodeScalars.dropFirst(1 + trigger.prefix.unicodeScalars.count)
-        let kept = rest.first == " " ? rest.dropFirst() : rest
-        return completed + String(Substring(kept))
+        let range = SlashTrigger.parse(text)?.wordRange ?? 0..<text.unicodeScalars.count
+        return ComposerSuggestion.slash(candidate).accept(in: text, replacing: range).text
     }
 }

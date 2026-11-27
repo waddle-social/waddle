@@ -22,6 +22,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "CryptoExtras", package: "swift-crypto"),
+            ],
+            resources: [
+                .copy("Compose/Suggestions/Resources/EmojiShortcodes.json"),
+                .copy("Compose/Suggestions/Resources/EmojiShortcodes-LICENSE.txt"),
             ]
         ),
         // Test-only: the scripted port and fixtures. The apps' screen tests

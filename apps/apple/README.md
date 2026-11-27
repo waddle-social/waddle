@@ -25,7 +25,8 @@ WaddleKit/                   UI-free core (Swift package; depends on swift-crypt
   Calls/                     the 1:1 call slot: XEP-0353 invitations, Jingle sessions
   Stores/                    presence, unread, inbox, typing, delivery, pins, community feed, events, sticker packs…
   Session/                   SessionCoordinator: event routing and actions
-  Compose/                   markdown → XEP-0394, mentions → XEP-0372
+  Compose/                   draft edits, slash commands, autocomplete and keyboard selection,
+                             markdown → XEP-0394, mentions → XEP-0372
 ```
 
 - **XMPP-native.** Chat data travels only over XMPP through the Rust core.
@@ -53,6 +54,12 @@ use (`design/src/preset.ts`).
 - **Tokens.** `Design/WaddleTokens.swift` is generated; never edit it. After
   changing the preset, run `bun scripts/generate-design-tokens.mjs`. Chat's
   `tokensCheck` task fails when the file is stale.
+- **Emoji shortcodes.** After updating chat's `emojilib` dependency, run
+  `bun apps/apple/scripts/generate-emoji-shortcodes.mjs` from the repo root.
+  It resolves the package from `chat/` and writes the ordered keyword table
+  `EmojiShortcodes.json` and the MIT license alongside it in WaddleKit's
+  `Compose/Suggestions/Resources/`. A worktree can pass the installed
+  `emojilib` directory from another checkout as the script's argument.
 - **Colours** follow the appearance: Night in dark, Daylight in light. Use
   `Theme.Colors`, not system colours.
 - **Type.** Three bundled variable fonts (`Resources/Fonts`), applied with

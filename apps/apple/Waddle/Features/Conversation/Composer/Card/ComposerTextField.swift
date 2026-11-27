@@ -1,28 +1,22 @@
 import SwiftUI
 import WaddleKit
 
-/// Which key asked to accept the first suggestion.
-enum ComposerSuggestionKey {
-    case tab
-    case returnKey
-}
-
 /// Multi-line field. Return sends on a hardware keyboard (the on-screen
 /// keyboard's Return adds a line), Shift or Option with Return adds a
-/// line, Tab or Return accepts the first suggestion, Escape cancels an
-/// edit or reply, and pasting files or images attaches them.
+/// line, Tab or Return accepts the selected suggestion, Escape closes the
+/// list or cancels an edit or reply, and pasting files or images attaches them.
 ///
 /// The field reports its selection (as Unicode scalar offsets) so
 /// formatting wraps the selected text.
 struct ComposerTextField: View {
     @Binding var text: String
-    @Binding var selection: Range<Int>?
+    @Binding var selection: ComposerScalarRange?
     let placeholder: String
     /// Kept in step with the system's focus both ways.
     @Binding var isFocused: Bool
     let onSubmit: () -> Void
-    /// Returns true when a suggestion was inserted.
-    let onAcceptSuggestion: (ComposerSuggestionKey) -> Bool
+    /// Returns true when an open suggestion list used the key.
+    let onSuggestionKey: (ComposerHardwareKey) -> Bool
     /// Returns true when an edit or reply was cancelled.
     let onCancel: () -> Bool
     /// A paste the field cannot take as text: a copied file, GIF or picture.
@@ -35,7 +29,7 @@ struct ComposerTextField: View {
             isFocused: $isFocused,
             placeholder: placeholder,
             onSubmit: onSubmit,
-            onAcceptSuggestion: onAcceptSuggestion,
+            onSuggestionKey: onSuggestionKey,
             onCancel: onCancel,
             onPasteAttachments: onPaste
         )

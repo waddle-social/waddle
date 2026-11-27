@@ -82,9 +82,8 @@ final class ComposerModel {
 
     // MARK: - Mentions
 
-    func insertMention(_ candidate: MentionCandidate, replacing query: MentionQuery) {
-        text = MentionTokens.completing(text, query: query, with: candidate.name)
-        mentions.append(RecordedMention(token: candidate.token, target: candidate.target))
+    func recordMention(_ mention: RecordedMention) {
+        mentions.append(mention)
     }
 
     // MARK: - Attachments

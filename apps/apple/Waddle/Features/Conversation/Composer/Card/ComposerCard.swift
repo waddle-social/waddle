@@ -9,7 +9,7 @@ struct ComposerCard: View {
     let model: ComposerModel
     /// The draft text; the composer notes what the field writes.
     @Binding var text: String
-    @Binding var selection: Range<Int>?
+    @Binding var selection: ComposerScalarRange?
     @Binding var showsFormatting: Bool
     @Binding var isFocused: Bool
     let placeholder: String
@@ -47,7 +47,7 @@ struct ComposerCard: View {
                     placeholder: model.isEditing ? "Edit message" : placeholder,
                     isFocused: $isFocused,
                     onSubmit: actions.submit,
-                    onAcceptSuggestion: actions.acceptSuggestion,
+                    onSuggestionKey: actions.handleSuggestionKey,
                     onCancel: actions.cancelContext,
                     onPaste: actions.paste
                 )

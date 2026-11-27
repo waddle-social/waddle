@@ -11,6 +11,8 @@ public struct SlashTrigger: Hashable, Sendable {
     public let prefix: String
     /// Everything after the first whitespace, leading whitespace trimmed.
     public let trailing: String
+    /// The leading slash and command word in the draft.
+    var wordRange: ComposerScalarRange { 0..<(1 + prefix.unicodeScalars.count) }
 
     public init(prefix: String, trailing: String) {
         self.prefix = prefix

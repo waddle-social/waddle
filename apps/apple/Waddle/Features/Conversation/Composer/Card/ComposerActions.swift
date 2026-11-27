@@ -5,8 +5,8 @@ import WaddleKit
 /// state; the card only lays the controls out.
 struct ComposerActions {
     let submit: () -> Void
-    /// Returns true when a suggestion was inserted.
-    let acceptSuggestion: (ComposerSuggestionKey) -> Bool
+    /// Returns true when an open suggestion list used the key.
+    let handleSuggestionKey: (ComposerHardwareKey) -> Bool
     /// Returns true when an edit or reply was cancelled.
     let cancelContext: () -> Bool
     let format: (ComposerFormat) -> Void

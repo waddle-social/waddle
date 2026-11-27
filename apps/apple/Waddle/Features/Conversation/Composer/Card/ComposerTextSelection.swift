@@ -1,4 +1,5 @@
 import Foundation
+import WaddleKit
 
 /// Converts between a text view's UTF-16 selection and the Unicode scalar
 /// offsets the WaddleKit formatting helpers use. Offsets never hold
@@ -7,7 +8,7 @@ import Foundation
 enum ComposerUTF16Selection {
     /// Scalar offsets of `range` in `text`; nil when `range` does not fall
     /// on scalar boundaries of `text`.
-    static func scalarRange(of range: NSRange, in text: String) -> Range<Int>? {
+    static func scalarRange(of range: NSRange, in text: String) -> ComposerScalarRange? {
         guard range.location != NSNotFound, let bounds = Range(range, in: text) else { return nil }
         let scalars = text.unicodeScalars
         guard let lower = bounds.lowerBound.samePosition(in: scalars),
@@ -19,7 +20,7 @@ enum ComposerUTF16Selection {
     }
 
     /// The UTF-16 range of scalar offsets `range`, clamped to `text`.
-    static func nsRange(for range: Range<Int>, in text: String) -> NSRange {
+    static func nsRange(for range: ComposerScalarRange, in text: String) -> NSRange {
         let scalars = text.unicodeScalars
         let count = scalars.count
         let lower = scalars.index(scalars.startIndex, offsetBy: min(max(range.lowerBound, 0), count))
