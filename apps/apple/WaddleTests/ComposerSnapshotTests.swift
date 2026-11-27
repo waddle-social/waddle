@@ -22,6 +22,17 @@ final class ComposerSnapshotTests: XCTestCase {
         )
     }
 
+    #if os(macOS)
+    func testSelectionFormattingBubble() throws {
+        let formatting = try XCTUnwrap(ComposerSelectionFormatting.inDraft("**hello**", selection: 2..<7))
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: ComposerFormattingBubbleContent(formatting: formatting, perform: { _ in /* drawn only */ }),
+            width: Self.width
+        )
+    }
+    #endif
+
     func testMentionSuggestions() {
         let sample = SampleSession()
         assertHuddleSnapshot(

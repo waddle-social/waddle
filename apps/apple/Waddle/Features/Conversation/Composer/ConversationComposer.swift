@@ -28,6 +28,7 @@ struct ConversationComposer: View {
     @State private var fieldEdits = ComposerFieldEdits()
     @State private var draftRevision = 0
     @State private var showsFormatting = false
+    @State private var formatRevision = 0
     @State private var showsPhotoPicker = false
     @State private var showsFileImporter = false
     @State private var photoSelection: [PhotosPickerItem] = []
@@ -42,18 +43,19 @@ struct ConversationComposer: View {
 
     var body: some View {
         let presentation = suggestionPresentation
+        let composerCard = card(showsSuggestions: presentation.list.selectedIndex != nil)
         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
             // Suggestions and notices open away from the screen edge the
             // composer sits on: above it at the bottom, below it at the
             // top in the social order.
             if isTopPinned {
                 ComposerContextBanner(model: model)
-                card
+                composerCard
                 suggestionsAndNotices(presentation.list)
             } else {
                 suggestionsAndNotices(presentation.list)
                 ComposerContextBanner(model: model)
-                card
+                composerCard
             }
         }
         .padding(.horizontal, Theme.Spacing.m)
@@ -99,8 +101,13 @@ struct ConversationComposer: View {
         app.preferences.messageOrder.isNewestFirst
     }
 
-    private var card: some View {
-        ComposerCard(
+    private func card(showsSuggestions: Bool) -> some View {
+        let actions = cardActions
+        var suppression: ComposerBubbleVisibility.Suppression = []
+        if showsSuggestions { suppression.insert(.suggestions) }
+        if linkPrompt.isPresented { suppression.insert(.linkPrompt) }
+        if showsFormatting { suppression.insert(.formattingBar) }
+        return ComposerCard(
             model: model,
             draft: fieldDraft,
             edits: fieldEdits,
@@ -109,8 +116,13 @@ struct ConversationComposer: View {
             isFocused: $isFocused,
             placeholder: placeholder,
             showsMention: conversation.isRoom,
+            selectionFormats: ComposerSelectionFormatCommands(
+                suppression: suppression, formatRevision: formatRevision, roomLinks: model.references.roomLinks
+            ) { action in
+                action.perform(onFormat: actions.keys.format, onLink: actions.requestLink)
+            },
             uploader: uploader,
-            actions: cardActions
+            actions: actions
         )
     }
 
@@ -302,7 +314,10 @@ struct ConversationComposer: View {
     // MARK: - Editing the draft
 
     private func applyFormat(_ format: ComposerFormat) {
-        apply(ComposerTextReplacement.applyingFormat(format, to: model.text, selection: currentSelection))
+        apply(ComposerFormatting.apply(
+            format, to: model.text, selection: currentSelection, roomLinks: model.references.roomLinks
+        ))
+        formatRevision += 1
     }
 
     private func insertEmoji(_ emoji: String) {

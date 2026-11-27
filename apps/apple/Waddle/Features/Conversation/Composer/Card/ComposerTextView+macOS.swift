@@ -23,6 +23,7 @@ struct ComposerTextView: NSViewRepresentable {
     let placeholder: String
     let onTextChange: (ComposerTextReplacement) -> Void
     let keys: ComposerKeyInput
+    let selectionFormats: ComposerSelectionFormatCommands
     let onPasteAttachments: () -> Void
 
     static let maxLines: CGFloat = 8
@@ -56,9 +57,11 @@ struct ComposerTextView: NSViewRepresentable {
         view.isVerticallyResizable = true
         view.isHorizontallyResizable = false
         view.autoresizingMask = [.width]
-        view.onFocusChange = context.coordinator.focusChanged(_:focused:)
+        let coordinator = context.coordinator
+        view.onFocusChange = { [weak coordinator] in coordinator?.focusChanged($0, focused: $1) }
+        view.formattingBubble = coordinator.formattingBubble
         view.string = text
-        context.coordinator.view = view
+        coordinator.view = view
 
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
@@ -73,11 +76,13 @@ struct ComposerTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let view = scrollView.documentView as? ComposerNSTextView else { return }
         let coordinator = context.coordinator
+        let formatApplied = coordinator.parent.selectionFormats.formatRevision != selectionFormats.formatRevision
         coordinator.parent = self
         view.setAccessibilityLabel(placeholder)
         view.onPasteAttachments = onPasteAttachments
         view.onFormat = keys.format
 
+        let draftChanged = coordinator.draft != draft || !view.string.utf16.elementsEqual(text.utf16)
         coordinator.isApplying = true
         let pending = edits.take(in: draft, from: view.string, to: text)
         if coordinator.draft == draft {
@@ -102,6 +107,10 @@ struct ComposerTextView: NSViewRepresentable {
             }
         }
         coordinator.isApplying = false
+        coordinator.formattingBubble.update(
+            suppression: selectionFormats.suppression, roomLinks: selectionFormats.roomLinks,
+            draftChanged: draftChanged, formatApplied: formatApplied
+        )
 
         // Focus moves after this update, so the text view's own focus
         // callbacks do not write state mid-update.
@@ -115,6 +124,10 @@ struct ComposerTextView: NSViewRepresentable {
                 if view.window?.firstResponder === view { view.window?.makeFirstResponder(nil) }
             }
         }
+    }
+
+    static func dismantleNSView(_: NSScrollView, coordinator: Coordinator) {
+        coordinator.formattingBubble.detach()
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView scrollView: NSScrollView, context: Context) -> CGSize? {
@@ -143,6 +156,11 @@ struct ComposerTextView: NSViewRepresentable {
         /// gone.
         let undoHistory = UndoManager()
         let measure = ComposerTextMeasure()
+        lazy var formattingBubble = ComposerFormattingBubble { [weak self] action, view in
+            guard let self, parent.text.utf16.elementsEqual(view.string.utf16) else { return }
+            report(view)
+            parent.selectionFormats.perform(action)
+        }
 
         init(parent: ComposerTextView) {
             self.parent = parent
@@ -189,10 +207,13 @@ struct ComposerTextView: NSViewRepresentable {
             pendingReplacement = nil
             parent.onTextChange(ComposerTextReplacement(view.string))
             report(view)
+            formattingBubble.selectionChanged()
+            formattingBubble.typed()
         }
 
         func textView(_ view: NSTextView, shouldChangeTextIn range: NSRange, replacementString _: String?) -> Bool {
             guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing else { return true }
+            formattingBubble.typed()
             pendingReplacement = ComposerUTF16Selection.scalarRange(of: range, in: view.string)
             return true
         }
@@ -200,6 +221,8 @@ struct ComposerTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing,
                   let view = notification.object as? NSTextView else { return }
+            formattingBubble.typed()
+            formattingBubble.markedTextChanged(view.hasMarkedText())
             let replaced = pendingReplacement
             pendingReplacement = nil
             parent.onTextChange(ComposerTextReplacement(view.string, replacing: replaced))
@@ -210,10 +233,12 @@ struct ComposerTextView: NSViewRepresentable {
             guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing,
                   let view = notification.object as? NSTextView else { return }
             report(view)
+            formattingBubble.selectionChanged()
         }
 
         func focusChanged(_ view: NSTextView, focused: Bool) {
             if focused { report(view) }
+            formattingBubble.focusChanged(focused)
             if parent.isFocused != focused { parent.isFocused = focused }
         }
 
@@ -259,9 +284,11 @@ struct ComposerTextView: NSViewRepresentable {
                 view.window?.selectPreviousKeyView(nil)
                 return true
             case #selector(NSResponder.cancelOperation(_:)):
+                if parent.keys.suggestion(.escape) { return true }
+                formattingBubble.escape()
                 // Escape otherwise opens the text view's completion list;
                 // pass it on so a sheet or panel can close instead.
-                if !parent.keys.suggestion(.escape), !parent.keys.cancel() {
+                if !parent.keys.cancel() {
                     view.nextResponder?.tryToPerform(selector, with: nil)
                 }
                 return true
@@ -278,6 +305,7 @@ final class ComposerNSTextView: NSTextView {
     var onPasteAttachments: (() -> Void)?
     var onFocusChange: ((NSTextView, Bool) -> Void)?
     var onFormat: ((ComposerFormat) -> Void)?
+    weak var formattingBubble: ComposerFormattingBubble?
     /// A text view does not retain the storage behind a container it is
     /// given.
     private let storage: NSTextStorage
@@ -296,6 +324,28 @@ final class ComposerNSTextView: NSTextView {
 
     required init?(coder _: NSCoder) {
         fatalError("ComposerNSTextView is created in code")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        formattingBubble?.attach(to: self)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        formattingBubble?.mouseTrackingBegan()
+        super.mouseDown(with: event)
+        formattingBubble?.mouseTrackingEnded()
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        formattingBubble?.markedTextChanged(true)
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        formattingBubble?.markedTextChanged(hasMarkedText())
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        formattingBubble?.markedTextChanged(hasMarkedText())
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

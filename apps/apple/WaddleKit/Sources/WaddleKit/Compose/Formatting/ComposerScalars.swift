@@ -10,6 +10,13 @@ enum ComposerScalars {
         return lower..<upper
     }
 
+    static func contentRange(_ scalars: ArraySlice<Unicode.Scalar>) -> Range<Int>? {
+        guard let first = scalars.firstIndex(where: { !$0.properties.isWhitespace }),
+              let last = scalars.lastIndex(where: { !$0.properties.isWhitespace })
+        else { return nil }
+        return first..<(last + 1)
+    }
+
     static func string(_ scalars: [Unicode.Scalar]) -> String {
         String(String.UnicodeScalarView(scalars))
     }

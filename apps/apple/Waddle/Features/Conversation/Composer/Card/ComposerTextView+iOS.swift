@@ -21,6 +21,7 @@ struct ComposerTextView: UIViewRepresentable {
     let placeholder: String
     let onTextChange: (ComposerTextReplacement) -> Void
     let keys: ComposerKeyInput
+    let selectionFormats: ComposerSelectionFormatCommands
     let onPasteAttachments: () -> Void
 
     static let maxLines: CGFloat = 8
@@ -228,7 +229,7 @@ struct ComposerTextView: UIViewRepresentable {
             if parent.isFocused { parent.isFocused = false }
         }
 
-        private func report(_ textView: UITextView) {
+        func report(_ textView: UITextView) {
             guard let range = ComposerUTF16Selection.scalarRange(of: textView.selectedRange, in: textView.text),
                   range != applied
             else { return }

@@ -14,6 +14,7 @@ struct ComposerCard: View {
     @Binding var isFocused: Bool
     let placeholder: String
     let showsMention: Bool
+    let selectionFormats: ComposerSelectionFormatCommands
     let uploader: AttachmentUploader
     let actions: ComposerActions
 
@@ -50,6 +51,7 @@ struct ComposerCard: View {
                     isFocused: $isFocused,
                     onTextChange: actions.changeText,
                     keys: actions.keys,
+                    selectionFormats: selectionFormats,
                     onPaste: actions.paste
                 )
                 .padding(.horizontal, Theme.Spacing.s)
