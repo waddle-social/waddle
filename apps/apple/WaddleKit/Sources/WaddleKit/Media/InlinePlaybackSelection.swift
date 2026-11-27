@@ -20,16 +20,36 @@ public struct InlinePlaybackSelection<Owner: Equatable> {
 
 /// The inline player's audio policy while a call may own the audio session.
 public struct InlinePlaybackSound {
-    private let callIsLive: Bool
-
-    public init(call: CallState) {
-        callIsLive = call.isLive
+    private enum CallMute {
+        case pending, imposed, overridden
     }
 
-    public var startsMuted: Bool { callIsLive }
-    public var configuresPlaybackCategory: Bool { !callIsLive }
+    private var liveCallID: String?
+    private var callMute = CallMute.pending
+    private var userMuted = false
 
-    public func pausesPlayback(wasCallLive: Bool, isPlaying: Bool) -> Bool {
-        !wasCallLive && callIsLive && isPlaying
+    public init() {}
+
+    public var isMuted: Bool { userMuted || callMute == .imposed }
+    public var configuresPlaybackCategory: Bool { liveCallID == nil }
+
+    /// Returns whether a newly live call interrupted playback.
+    public mutating func updateCall(_ call: CallState, isPlaying: Bool) -> Bool {
+        let callID = call.isLive ? call.sid : nil
+        guard callID != liveCallID else { return false }
+        liveCallID = callID
+        let shouldPause = callID != nil && isPlaying
+        callMute = shouldPause ? .imposed : .pending
+        return shouldPause
+    }
+
+    public mutating func preparePlayback(call: CallState) {
+        _ = updateCall(call, isPlaying: false)
+        if liveCallID != nil && callMute == .pending { callMute = .imposed }
+    }
+
+    public mutating func setMuted(_ muted: Bool) {
+        userMuted = muted
+        if !muted && liveCallID != nil { callMute = .overridden }
     }
 }

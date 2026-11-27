@@ -5,19 +5,35 @@ public enum MessageAttachmentKind: Hashable, Sendable {
     case image, video, audio, pdf, archive, other
 
     public init(_ file: SharedFile) {
-        let type = file.mediaType?.lowercased() ?? ""
+        if let type = file.mediaType?.lowercased(), !type.isEmpty {
+            if file.isImage {
+                self = .image
+            } else if type.hasPrefix("video/") {
+                self = .video
+            } else if type.hasPrefix("audio/") {
+                self = .audio
+            } else if type == "application/pdf" {
+                self = .pdf
+            } else if Self.archiveTypes.contains(type) {
+                self = .archive
+            } else {
+                self = .other
+            }
+            return
+        }
+
         let nameSuffix = file.name.map { ($0 as NSString).pathExtension.lowercased() } ?? ""
         let suffix = Self.knownExtensions.contains(nameSuffix) ? nameSuffix : file.url.pathExtension.lowercased()
-        // Keep the web's precedence when the type and chosen extension disagree.
-        if file.isImage || Self.imageExtensions.contains(suffix) || GifMedia.isGiphyMedia(file.url) {
+        let extensionlessGiphyImage = nameSuffix.isEmpty && suffix.isEmpty && GifMedia.isGiphyMedia(file.url)
+        if Self.imageExtensions.contains(suffix) || extensionlessGiphyImage {
             self = .image
-        } else if type.hasPrefix("video/") || Self.videoExtensions.contains(suffix) {
+        } else if Self.videoExtensions.contains(suffix) {
             self = .video
-        } else if type.hasPrefix("audio/") || Self.audioExtensions.contains(suffix) {
+        } else if Self.audioExtensions.contains(suffix) {
             self = .audio
-        } else if type == "application/pdf" || suffix == "pdf" {
+        } else if suffix == "pdf" {
             self = .pdf
-        } else if Self.archiveTypes.contains(type) || Self.archiveExtensions.contains(suffix) {
+        } else if Self.archiveExtensions.contains(suffix) {
             self = .archive
         } else {
             self = .other
@@ -35,7 +51,8 @@ public enum MessageAttachmentKind: Hashable, Sendable {
         }
     }
 
-    private static let imageExtensions = InlineImageBody.imageExtensions.union(["avif", "bmp", "svg"])
+    // Infer PNG, JPEG (.jpg and .jpeg), GIF, WebP and HEIC for the Apple image views.
+    private static let imageExtensions = InlineImageBody.imageExtensions.union(["heic"])
     private static let videoExtensions: Set = ["mp4", "webm", "mov", "m4v", "ogv"]
     private static let audioExtensions: Set = ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac"]
     private static let archiveExtensions: Set = ["zip", "gz", "tar", "7z", "rar"]

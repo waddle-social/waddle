@@ -24,8 +24,8 @@ struct InlineMediaPlayer: View {
             if let player { await playback.observe(player) }
         }
         .onDisappear { playback.stop() }
-        .onChange(of: session.calls.state.isLive) { wasLive, _ in
-            playback.updateCall(session.calls.state, wasLive: wasLive)
+        .onChange(of: session.calls.state) { _, call in
+            playback.updateCall(call)
         }
     }
 

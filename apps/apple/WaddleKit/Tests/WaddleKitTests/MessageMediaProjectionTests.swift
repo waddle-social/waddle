@@ -43,6 +43,24 @@ struct MessageMediaProjectionTests {
         #expect(shown.filter(\.hasInlineControls) == [.audio, .video, .pdf])
     }
 
+    @Test func giphyVideoAndTypelessSVGStayOutOfTheImageGallery() {
+        var row = directRow()
+        let url = URL(string: "https://media1.giphy.com/media/abcd/giphy.mp4")!
+        let declaredImages = [
+            SharedFile(url: mediaURL("opaque"), mediaType: "image/png"),
+            SharedFile(url: mediaURL("declared.svg"), mediaType: "image/svg+xml"),
+        ]
+        let nonImages = [
+            SharedFile(url: url, mediaType: "video/mp4", disposition: .inline),
+            SharedFile(url: mediaURL("diagram.svg"), disposition: .inline),
+        ]
+        row.message.sharedFiles = nonImages + declaredImages
+
+        let media = MessageMedia(item: row, decision: .allowed)
+        #expect(media.attachments.map(\.presentation) == [.video, .file, .image, .image])
+        #expect(MediaGallery.images(in: row, media: media).map(\.file) == declaredImages)
+    }
+
     @Test func withheldFilesLeaveExplicitDownloadCardsAvailable() {
         var row = directRow()
         let encrypted = EncryptedFileSource(

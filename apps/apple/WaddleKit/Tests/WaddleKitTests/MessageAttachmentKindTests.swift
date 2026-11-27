@@ -8,20 +8,33 @@ struct MessageAttachmentKindTests {
         ("VIDEO/MP4", "object", .video),
         ("Audio/MP4", "object", .audio),
         ("application/pdf", "object", .pdf),
-        ("application/octet-stream", "photo.AVIF?token=abc", .image),
-        ("audio/mp4", "clip.MP4#t=1", .video),
-        ("application/octet-stream", "sound.OGA?token=abc", .audio),
-        ("application/octet-stream", "handout.PDF", .pdf),
-        ("video/mp4", "cover.png", .image),
-        ("application/pdf", "voice.wav", .audio),
-        ("application/octet-stream", "bundle.zip", .archive),
+        ("application/octet-stream", "photo.PNG?token=abc", .other),
+        ("audio/mp4", "clip.MP4#t=1", .audio),
+        ("application/octet-stream", "sound.OGA?token=abc", .other),
+        ("application/octet-stream", "handout.PDF", .other),
+        ("video/mp4", "cover.png", .video),
+        ("application/pdf", "voice.wav", .pdf),
+        ("application/zip", "cover.png", .archive),
+        ("application/octet-stream", "bundle.zip", .other),
         ("text/plain", "notes.txt", .other),
     ])
-    func classifiesUsingWebPrecedence(type: String, path: String, expected: MessageAttachmentKind) {
+    func declaredTypeWinsOverTheExtension(type: String, path: String, expected: MessageAttachmentKind) {
         let url = URL(string: "https://files.waddle.test/\(path)")!
         let file = SharedFile(url: url, mediaType: type, disposition: .inline)
         #expect(MessageAttachmentKind(file) == expected)
         #expect(MessageAttachmentKind.inlineKind(for: file) == ([.archive, .other].contains(expected) ? nil : expected))
+    }
+
+    @Test(arguments: ["png", "jpg", "jpeg", "gif", "webp", "heic"])
+    func supportedImageExtensionsAreInferred(suffix: String) {
+        let file = SharedFile(url: URL(string: "https://files.waddle.test/photo.\(suffix)")!, disposition: .inline)
+        #expect(MessageAttachmentKind.inlineKind(for: file) == .image)
+    }
+
+    @Test(arguments: ["svg", "avif", "bmp"])
+    func otherImageExtensionsUseFileCards(suffix: String) {
+        let file = SharedFile(url: URL(string: "https://files.waddle.test/photo.\(suffix)")!, disposition: .inline)
+        #expect(MessageAttachmentKind.inlineKind(for: file) == nil)
     }
 
     @Test(arguments: [
@@ -43,6 +56,14 @@ struct MessageAttachmentKindTests {
     @Test func giphyIsAnImageEvenWithAnExtensionlessPath() {
         let file = SharedFile(url: URL(string: "https://media3.giphy.com/media/abcd")!, disposition: .inline)
         #expect(MessageAttachmentKind.inlineKind(for: file) == .image)
+    }
+
+    @Test func giphyMovieUsesTheVideoKindWithOrWithoutADeclaredType() {
+        let url = URL(string: "https://media1.giphy.com/media/abcd/giphy.mp4")!
+        for type in ["video/mp4", nil] {
+            let file = SharedFile(url: url, mediaType: type, disposition: .inline)
+            #expect(MessageAttachmentKind.inlineKind(for: file) == .video)
+        }
     }
 
     @Test func explicitDownloadsStayFileCardsExceptDeclaredImages() {

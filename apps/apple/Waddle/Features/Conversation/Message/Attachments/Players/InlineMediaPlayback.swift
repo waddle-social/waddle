@@ -19,6 +19,7 @@ final class InlineMediaPlayback {
     @ObservationIgnored private var endObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var transportObserver: NSKeyValueObservation?
     @ObservationIgnored private var didReachEnd = false
+    @ObservationIgnored private var sound = InlinePlaybackSound()
 
     private(set) var player: AVPlayer?
     private(set) var isPlaying = false
@@ -59,18 +60,20 @@ final class InlineMediaPlayback {
 
     func setMuted(_ muted: Bool) {
         guard let player else { return }
-        player.isMuted = muted
-        isMuted = muted
+        sound.setMuted(muted)
+        applyMute(to: player)
     }
 
-    func updateCall(_ call: CallState, wasLive: Bool) {
+    func updateCall(_ call: CallState) {
+        if let player { syncNativeMute(from: player) }
+        let status = player?.timeControlStatus ?? .paused
+        let shouldPause = sound.updateCall(call, isPlaying: status != .paused)
         guard let player else { return }
-        let sound = InlinePlaybackSound(call: call)
-        if sound.pausesPlayback(wasCallLive: wasLive, isPlaying: player.timeControlStatus != .paused) {
+        if shouldPause {
             player.pause()
             isPlaying = false
         }
-        if sound.startsMuted { setMuted(true) }
+        applyMute(to: player)
     }
 
     func stop() {
@@ -91,21 +94,31 @@ final class InlineMediaPlayback {
             if position.isFinite, elapsed != position { elapsed = position }
             let playing = observed.timeControlStatus != .paused
             if isPlaying != playing { isPlaying = playing }
-            if isMuted != observed.isMuted { isMuted = observed.isMuted }
+            syncNativeMute(from: observed)
             try? await Task.sleep(for: .milliseconds(250))
         }
     }
 
     private func prepareSound(for player: AVPlayer, call: CallState) {
-        let sound = InlinePlaybackSound(call: call)
+        syncNativeMute(from: player)
+        sound.preparePlayback(call: call)
         #if os(iOS)
         if sound.configuresPlaybackCategory {
             let session = AVAudioSession.sharedInstance()
             if session.category != .playback { try? session.setCategory(.playback) }
         }
         #endif
-        if sound.startsMuted { player.isMuted = true }
-        isMuted = player.isMuted
+        applyMute(to: player)
+    }
+
+    private func applyMute(to player: AVPlayer) {
+        let muted = sound.isMuted
+        if player.isMuted != muted { player.isMuted = muted }
+        if isMuted != muted { isMuted = muted }
+    }
+
+    private func syncNativeMute(from player: AVPlayer) {
+        if isMuted != player.isMuted { setMuted(player.isMuted) }
     }
 
     private func prepare(url: URL, currentCall: @escaping @MainActor () -> CallState) -> AVPlayer {
@@ -119,6 +132,7 @@ final class InlineMediaPlayback {
             player.seek(to: CMTime(seconds: elapsed, preferredTimescale: 600))
         }
         self.player = player
+        applyMute(to: player)
         // AVKit's transport can also resume playback directly.
         transportObserver = player.observe(\.timeControlStatus, options: [.old, .new]) { [weak self] player, change in
             guard change.oldValue == .paused, let status = change.newValue, status != .paused else { return }
