@@ -3,63 +3,63 @@ version = 4
 [runtimes."apps/android"]
 type = "nix"
 flake = "../.."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "apps/android/../../flake.lock"
 
 [runtimes."apps/linux"]
 type = "nix"
 flake = "../.."
 output = "linux"
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "apps/linux/../../flake.lock"
 
 [runtimes.chat]
 type = "nix"
 flake = ".."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "chat/../flake.lock"
 
 [runtimes.colony]
 type = "nix"
 flake = ".."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "colony/../flake.lock"
 
 [runtimes.design]
 type = "nix"
 flake = ".."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "design/../flake.lock"
 
 [runtimes."infrastructure/github"]
 type = "nix"
 flake = "../.."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "infrastructure/github/../../flake.lock"
 
 [runtimes."infrastructure/waddle.cloud"]
 type = "nix"
 flake = "../.."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "infrastructure/waddle.cloud/../../flake.lock"
 
 [runtimes.operator]
 type = "nix"
 flake = ".."
 output = "operator"
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "operator/../flake.lock"
 
 [runtimes.server]
 type = "nix"
 flake = ".."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "server/../flake.lock"
 
 [runtimes.website]
 type = "nix"
 flake = ".."
-digest = "sha256:c26a23cba2ec012a91266f1639ff35bd78671f903d8be6e0f49c2f1f320c05c5"
+digest = "sha256:7b2bada41fb8b01eb40e1d3822dfddb7a1d9c2b0c1692301fd53c94b8268f2b3"
 lockfile = "website/../flake.lock"
 
 [vcs.cuenv-skills]
