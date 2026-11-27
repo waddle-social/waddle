@@ -1,8 +1,9 @@
+use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{
     ConfigMap, PersistentVolumeClaim, Secret, Service, ServiceAccount,
@@ -13,10 +14,11 @@ use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::api::{Api, ApiResource, DynamicObject, Resource};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::events::{Recorder, Reporter};
-use kube::runtime::reflector::{ObjectRef, Store};
-use kube::runtime::watcher;
+use kube::runtime::reflector::store::Writer;
+use kube::runtime::reflector::{self, Lookup, ObjectRef, Store};
+use kube::runtime::{watcher, WatchStreamExt};
 use kube::Client;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use waddle_operator_crd::{
     AuthzBackendKind, PostgresSourceMode, SecretProviderMode, SpiceDbSourceMode,
     StorageBackendKind, WaddleServer, WaddleServerPhase, WaddleTenant,
@@ -148,11 +150,18 @@ pub async fn run_controller(
         "discovered cluster API capabilities"
     );
 
+    let (stop_tx, stop_rx) = watch::channel(false);
+
     let ns = args.namespace.as_deref();
     let waddle_api = scoped_api::<WaddleServer>(&client, ns);
-    let mut controller = Controller::new(waddle_api, watcher::Config::default());
-    let store = controller.store();
-    let ready_store = store.clone();
+    let (store, writer) = reflector::store::<WaddleServer>();
+    let waddle_stream = primary_watch_stream(
+        writer,
+        watcher::watcher(waddle_api, watcher::Config::default()),
+        Arc::clone(&health),
+        stop_rx.clone(),
+    );
+    let mut controller = Controller::for_stream(waddle_stream, store.clone());
 
     let managed_secret_selector = format!(
         "{}={}",
@@ -281,7 +290,6 @@ pub async fn run_controller(
     });
 
     let leadership_lost = Arc::new(AtomicBool::new(false));
-    let (stop_tx, stop_rx) = watch::channel(false);
     let lost_flag = Arc::clone(&leadership_lost);
     let health_monitor = Arc::clone(&health);
     let mut lost_rx = leader_guard.as_mut().and_then(LeaderGuard::take_lost_rx);
@@ -293,32 +301,18 @@ pub async fn run_controller(
                     if res.is_ok() {
                         lost_flag.store(true, Ordering::Release);
                     }
-                    health_monitor.set_ready(false);
                     let _ = stop_tx.send(true);
+                    health_monitor.set_ready(false);
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
-                    health_monitor.set_ready(false);
                     let _ = stop_tx.send(true);
+                    health_monitor.set_ready(false);
                 }
             }
         } else {
             wait_for_shutdown(&mut shutdown).await;
-            health_monitor.set_ready(false);
             let _ = stop_tx.send(true);
-        }
-    });
-
-    let (ready_cancel_tx, ready_cancel_rx) = oneshot::channel::<()>();
-    let ready_health = Arc::clone(&health);
-    let ready_task = tokio::spawn(async move {
-        tokio::select! {
-            sync_res = ready_store.wait_until_ready() => {
-                if sync_res.is_ok() {
-                    ready_health.set_ready(true);
-                    tracing::info!("primary WaddleServer reflector synced; marking operator ready");
-                }
-            }
-            _ = ready_cancel_rx => {}
+            health_monitor.set_ready(false);
         }
     });
 
@@ -348,8 +342,6 @@ pub async fn run_controller(
 
     tokio::join!(server_fut, tenant_fut);
 
-    let _ = ready_cancel_tx.send(());
-    let _ = ready_task.await;
     health.set_ready(false);
 
     let lost = leadership_lost.load(Ordering::Acquire);
@@ -364,6 +356,42 @@ pub async fn run_controller(
     }
 
     Ok(())
+}
+
+/// Drives the primary reflector stream and flips `/readyz` ready on the first
+/// `watcher::Event::InitDone` without calling `Store::wait_until_ready()`.
+///
+/// `kube_runtime::reflector::Store::wait_until_ready` is backed by a single-waker
+/// `oneshot::Receiver` inside `DelayedInit`, which `Controller::run`'s internal
+/// `applier` already awaits. Any second concurrent waiter overwrites the waker and
+/// starves either `/readyz` or reconciliation startup.
+fn primary_watch_stream<K, S>(
+    writer: Writer<K>,
+    watch_stream: S,
+    health: Arc<HealthState>,
+    stop_rx: watch::Receiver<bool>,
+) -> impl Stream<Item = watcher::Result<K>>
+where
+    K: Lookup + Clone + 'static,
+    K::DynamicType: Eq + Hash + Clone,
+    S: Stream<Item = watcher::Result<watcher::Event<K>>>,
+{
+    let synced_once = AtomicBool::new(false);
+    reflector::reflector(writer, watch_stream)
+        .inspect(move |event| {
+            if matches!(event, Ok(watcher::Event::InitDone))
+                && !synced_once.swap(true, Ordering::AcqRel)
+                && !*stop_rx.borrow()
+            {
+                health.set_ready(true);
+                if *stop_rx.borrow() {
+                    health.set_ready(false);
+                } else {
+                    tracing::info!("primary WaddleServer reflector synced; marking operator ready");
+                }
+            }
+        })
+        .applied_objects()
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -638,5 +666,160 @@ const fn map_from_crd_phase(phase: WaddleServerPhase) -> Phase {
         WaddleServerPhase::Degraded => Phase::Degraded,
         WaddleServerPhase::Failed => Phase::Failed,
         WaddleServerPhase::Terminating => Phase::Terminating,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures::channel::mpsc;
+    use futures::StreamExt;
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::runtime::reflector::{self, ObjectRef};
+    use kube::runtime::watcher;
+    use tokio::sync::watch;
+
+    use super::primary_watch_stream;
+    use crate::health::HealthState;
+    use crate::metrics::OperatorMetrics;
+
+    fn sample_config_map(name: &str) -> ConfigMap {
+        ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                namespace: Some("default".to_owned()),
+                ..ObjectMeta::default()
+            },
+            ..ConfigMap::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_watch_stream_marks_ready_on_init_done_without_starving_store_waiter() {
+        let (store, writer) = reflector::store::<ConfigMap>();
+        let health = Arc::new(HealthState::new(Arc::new(OperatorMetrics::new())));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+
+        let waiter_store = store.clone();
+        let waiter = tokio::spawn(async move { waiter_store.wait_until_ready().await });
+        tokio::task::yield_now().await;
+
+        let (tx, rx) = mpsc::unbounded::<watcher::Result<watcher::Event<ConfigMap>>>();
+        let mut stream = pin!(primary_watch_stream(
+            writer,
+            rx,
+            Arc::clone(&health),
+            stop_rx,
+        ));
+
+        let cm = sample_config_map("waddle-a");
+        assert!(tx.unbounded_send(Ok(watcher::Event::Init)).is_ok());
+        assert!(tx
+            .unbounded_send(Ok(watcher::Event::InitApply(cm.clone())))
+            .is_ok());
+
+        let first = stream.next().await;
+        assert!(
+            matches!(first, Some(Ok(ref obj)) if obj.metadata.name.as_deref() == Some("waddle-a"))
+        );
+        assert!(!health.is_ready());
+
+        assert!(tx.unbounded_send(Ok(watcher::Event::InitDone)).is_ok());
+        drop(tx);
+
+        assert!(stream.next().await.is_none());
+        assert!(health.is_ready());
+        assert!(store.get(&ObjectRef::from_obj(&cm)).is_some());
+
+        let waiter_res = tokio::time::timeout(Duration::from_secs(2), waiter).await;
+        assert!(matches!(waiter_res, Ok(Ok(Ok(())))));
+    }
+
+    #[tokio::test]
+    async fn primary_watch_stream_marks_ready_on_empty_initial_list() {
+        let (store, writer) = reflector::store::<ConfigMap>();
+        let health = Arc::new(HealthState::new(Arc::new(OperatorMetrics::new())));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+
+        let waiter_store = store.clone();
+        let waiter = tokio::spawn(async move { waiter_store.wait_until_ready().await });
+        tokio::task::yield_now().await;
+
+        let (tx, rx) = mpsc::unbounded::<watcher::Result<watcher::Event<ConfigMap>>>();
+        let stream = primary_watch_stream(writer, rx, Arc::clone(&health), stop_rx);
+
+        assert!(tx.unbounded_send(Ok(watcher::Event::Init)).is_ok());
+        assert!(tx.unbounded_send(Ok(watcher::Event::InitDone)).is_ok());
+        drop(tx);
+
+        let items: Vec<_> = stream.collect().await;
+        assert!(items.is_empty());
+        assert!(health.is_ready());
+
+        let waiter_res = tokio::time::timeout(Duration::from_secs(2), waiter).await;
+        assert!(matches!(waiter_res, Ok(Ok(Ok(())))));
+    }
+
+    #[tokio::test]
+    async fn primary_watch_stream_does_not_mark_ready_when_stopping() {
+        let (store, writer) = reflector::store::<ConfigMap>();
+        let health = Arc::new(HealthState::new(Arc::new(OperatorMetrics::new())));
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        assert!(stop_tx.send(true).is_ok());
+
+        let (tx, rx) = mpsc::unbounded::<watcher::Result<watcher::Event<ConfigMap>>>();
+        let stream = primary_watch_stream(writer, rx, Arc::clone(&health), stop_rx);
+
+        assert!(tx.unbounded_send(Ok(watcher::Event::Init)).is_ok());
+        assert!(tx.unbounded_send(Ok(watcher::Event::InitDone)).is_ok());
+        drop(tx);
+
+        let items: Vec<_> = stream.collect().await;
+        assert!(items.is_empty());
+        assert!(!health.is_ready());
+        assert!(store.wait_until_ready().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn primary_watch_stream_does_not_re_ready_on_relist_after_shutdown() {
+        let (_store, writer) = reflector::store::<ConfigMap>();
+        let health = Arc::new(HealthState::new(Arc::new(OperatorMetrics::new())));
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        let (tx, rx) = mpsc::unbounded::<watcher::Result<watcher::Event<ConfigMap>>>();
+        let mut stream = pin!(primary_watch_stream(
+            writer,
+            rx,
+            Arc::clone(&health),
+            stop_rx,
+        ));
+
+        let cm = sample_config_map("waddle-b");
+        assert!(tx.unbounded_send(Ok(watcher::Event::Init)).is_ok());
+        assert!(tx.unbounded_send(Ok(watcher::Event::InitDone)).is_ok());
+        assert!(tx
+            .unbounded_send(Ok(watcher::Event::Apply(cm.clone())))
+            .is_ok());
+
+        let applied = stream.next().await;
+        assert!(
+            matches!(applied, Some(Ok(ref obj)) if obj.metadata.name.as_deref() == Some("waddle-b"))
+        );
+        assert!(health.is_ready());
+
+        assert!(stop_tx.send(true).is_ok());
+        health.set_ready(false);
+
+        assert!(tx.unbounded_send(Ok(watcher::Event::Init)).is_ok());
+        assert!(tx.unbounded_send(Ok(watcher::Event::InitDone)).is_ok());
+        drop(tx);
+
+        assert!(stream.next().await.is_none());
+        assert!(!health.is_ready());
     }
 }
