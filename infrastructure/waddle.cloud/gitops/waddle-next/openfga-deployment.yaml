@@ -31,6 +31,35 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: openfga-migrate
+          image: openfga/openfga:v1.11.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - migrate
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: sqlite
+            - name: OPENFGA_DATASTORE_URI
+              value: "file:/var/lib/openfga/openfga.db?_journal_mode=WAL&_busy_timeout=5000"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/openfga
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: openfga
           image: openfga/openfga:v1.11.1
