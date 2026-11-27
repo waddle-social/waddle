@@ -8,44 +8,11 @@ struct ComposerFormattingBar: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(ComposerFormat.allCases, id: \.self) { format in
-                    ComposerIconButton(symbol: format.symbol, label: format.title) {
-                        onFormat(format)
-                    }
-                }
-                ComposerIconButton(symbol: "link", label: "Link", action: onLink)
+            ComposerFormattingButtons { action in
+                action.perform(onFormat: onFormat, onLink: onLink)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Formatting"))
-    }
-}
-
-private extension ComposerFormat {
-    var symbol: String {
-        switch self {
-        case .bold: return "bold"
-        case .italic: return "italic"
-        case .strikethrough: return "strikethrough"
-        case .orderedList: return "list.number"
-        case .bulletList: return "list.bullet"
-        case .code: return "chevron.left.forwardslash.chevron.right"
-        case .codeBlock: return "curlybraces"
-        case .quote: return "text.quote"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .bold: return "Bold"
-        case .italic: return "Italic"
-        case .strikethrough: return "Strikethrough"
-        case .orderedList: return "Numbered list"
-        case .bulletList: return "Bulleted list"
-        case .code: return "Code"
-        case .codeBlock: return "Code block"
-        case .quote: return "Quote"
-        }
     }
 }

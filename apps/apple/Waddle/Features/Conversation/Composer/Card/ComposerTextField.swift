@@ -15,6 +15,7 @@ struct ComposerTextField: View {
     @Binding var isFocused: Bool
     let onTextChange: (ComposerTextReplacement) -> Void
     let keys: ComposerKeyInput
+    let selectionFormats: ComposerSelectionFormatCommands
     /// A paste the field cannot take as text: a copied file, GIF or picture.
     let onPaste: () -> Void
 
@@ -28,6 +29,7 @@ struct ComposerTextField: View {
             placeholder: placeholder,
             onTextChange: onTextChange,
             keys: keys,
+            selectionFormats: selectionFormats,
             onPasteAttachments: onPaste
         )
         .overlay(alignment: .topLeading) {

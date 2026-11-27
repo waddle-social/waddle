@@ -5,7 +5,10 @@ import Testing
 
 struct ComposerFormattingTests {
     private func apply(_ format: ComposerFormat, _ text: String, _ selection: Range<Int>?) -> ComposerTextEdit {
-        ComposerFormatting.apply(format, to: text, selection: selection)
+        let edit = ComposerFormatting.apply(format, to: text, selection: selection)
+        // Compare the visible draft and selection. The reference test below
+        // exercises the full replacement, including the marker changes.
+        return ComposerTextEdit(text: edit.text, selection: edit.selection)
     }
 
     @Test func inlineStylesWrapTheSelectionAndKeepItSelected() {
@@ -79,6 +82,138 @@ struct ComposerFormattingTests {
             ComposerDraftChange(4..<4, "**"),
         ])
         #expect(change.edit.selection == 6..<8)
+    }
+
+    @Test(arguments: [
+        (ComposerFormat.bold, "**abc**", 2..<5),
+        (.italic, "*abc*", 1..<4),
+        (.strikethrough, "~~abc~~", 2..<5),
+        (.code, "`abc`", 1..<4),
+        (.quote, "> abc", 2..<5),
+        (.codeBlock, "```\nabc\n```", 4..<7),
+        (.orderedList, "1. abc", 3..<6),
+        (.bulletList, "- abc", 2..<5),
+    ])
+    func formatCanBeAppliedRemovedAndReapplied(format: ComposerFormat, formatted: String, inner: Range<Int>) {
+        let on = apply(format, "abc", 0..<3)
+        #expect(on.text == formatted)
+        #expect(on.selection == inner)
+
+        let off = apply(format, on.text, on.selection)
+        #expect(off.text == "abc")
+        #expect(off.selection == 0..<3)
+
+        let includingMarkers = apply(format, formatted, 0..<formatted.unicodeScalars.count)
+        #expect(includingMarkers.text == "abc")
+        #expect(includingMarkers.selection == 0..<3)
+
+        let again = apply(format, off.text, off.selection)
+        #expect(again.text == formatted)
+        #expect(again.selection == inner)
+    }
+
+    @Test(arguments: [ComposerFormat.bold, .italic, .strikethrough, .code])
+    func pressingAgainInsideAnEmptyPairRestoresTheCaret(format: ComposerFormat) {
+        let on = apply(format, "ab", 1..<1)
+        #expect(apply(format, on.text, on.selection) == ComposerTextEdit(text: "ab", selection: 1..<1))
+    }
+
+    @Test func aBoldDelimiterIsNotAnEmptyItalicPair() {
+        #expect(apply(.italic, "**b**", 1..<1) == ComposerTextEdit(text: "****b**", selection: 2..<2))
+    }
+
+    @Test func quoteRemovesOneLevelOnlyWhenAllTouchedLinesAreQuoted() {
+        let off = apply(.quote, "> > a\r\n> bc\r\nd", 4..<13)
+        #expect(off.text == "> a\r\nbc\r\nd")
+        #expect(off.selection == 2..<9)
+        #expect(apply(.quote, ">a\r\nb", 0..<5).text == "> >a\r\n> b")
+        #expect(apply(.quote, ">a", 1..<2).text == "a")
+    }
+
+    @Test(arguments: [ComposerFormat.quote, .codeBlock, .orderedList, .bulletList])
+    func lineFormattingRoundTripsCRLF(format: ComposerFormat) {
+        let original = "top\r\na\r\nbc\r\nend"
+        let selection = 5..<10
+        let on = apply(format, original, selection)
+        if format == .codeBlock {
+            #expect(on.text == "top\r\n```\na\r\nbc\n```\n\r\nend")
+            let sent = ComposerMarkdown.compose(on.text)
+            #expect(sent.body == "top\r\na\r\nbc\n\r\nend")
+            #expect(sent.spans == [MarkupSpan(kind: .codeBlock, start: 5, end: 10)])
+        } else {
+            #expect(!on.text.replacingOccurrences(of: "\r\n", with: "").contains("\n"))
+        }
+        let off = apply(format, on.text, on.selection)
+        #expect(off.text == original)
+        #expect(off.selection == selection)
+        #expect(apply(format, off.text, off.selection) == on)
+    }
+
+    @Test func unfencingPreservesSurroundingLineBreaksAndSelectsOnlyTheCode() {
+        let formatted = "top\r\n```swift\r\nabc\r\n```\r\nend"
+        for selection in [15..<18, 5..<23, 5..<25] {
+            #expect(apply(.codeBlock, formatted, selection) == ComposerTextEdit(text: "top\r\nabc\r\nend", selection: 5..<8))
+        }
+        #expect(apply(.codeBlock, "```\nabc\n```", 5..<6).text == "```\na\n```\nb\n```\nc\n```")
+    }
+
+    @Test func unfencingAMidlineWrapKeepsTheCodeOnItsOwnLine() {
+        let on = apply(.codeBlock, "run ls now", 4..<6)
+        let off = apply(.codeBlock, on.text, on.selection)
+        #expect(off == ComposerTextEdit(text: "run \nls\n now", selection: 5..<7))
+        #expect(apply(.codeBlock, off.text, off.selection) == on)
+    }
+
+    @Test(arguments: ComposerFormat.allCases)
+    func togglesRelocateMentionsAndRepeatedRoomLinkOccurrences(format: ComposerFormat) {
+        let first = bare("lab@rooms.example.test")
+        let second = bare("lab@rooms.other.test")
+        let original = "hi @Jo #lab now\r\n#lab"
+        var recorded = RecordedDraftReferences(
+            mentions: [.init(token: "@Jo", target: .user(bare("jo@example.test")))],
+            roomLinks: [.init(room: first, range: 7..<11), .init(room: second, range: 17..<21)]
+        )
+        // Inline formats style the whole first line; line formats only touch that line.
+        let on = ComposerFormatting.apply(format, to: original, selection: 0..<15)
+        recorded.relocate(from: original, applying: on.replacement)
+        let located = recorded.located(in: on.text)
+        #expect(located.mentions.map { String(on.text.unicodeScalars.dropFirst($0.range.lowerBound).prefix($0.range.count)) } == ["@Jo"])
+        #expect(located.roomLinks.map(\.room) == [first, second])
+        #expect(located.roomLinks.map { String(on.text.unicodeScalars.dropFirst($0.range.lowerBound).prefix($0.range.count)) } == ["#lab", "#lab"])
+
+        let off = ComposerFormatting.apply(format, to: on.text, selection: on.selection)
+        recorded.relocate(from: on.text, applying: off.replacement)
+        #expect(off.text == original)
+        #expect(recorded.located(in: off.text).mentions.map(\.range) == [3..<6])
+        #expect(recorded.roomLinks == [.init(room: first, range: 7..<11), .init(room: second, range: 17..<21)])
+    }
+
+    @Test func unwrappingInlineCodeRestoresAMentionOnItsMarkerBoundary() {
+        let mention = RecordedMention(token: "@Jo", target: .user(bare("jo@example.test")))
+        var recorded = RecordedDraftReferences(mentions: [mention])
+        let on = ComposerFormatting.apply(.code, to: "@Jo", selection: 0..<3)
+        recorded.relocate(from: "@Jo", applying: on.replacement)
+        #expect(recorded.mentions == [mention])
+        // Preserve the existing send-time token boundaries for formatted code.
+        #expect(recorded.located(in: on.text).mentions.isEmpty)
+        let off = ComposerFormatting.apply(.code, to: on.text, selection: on.selection)
+        recorded.relocate(from: on.text, applying: off.replacement)
+        #expect(recorded.located(in: off.text).mentions == [.init(target: mention.target, range: 0..<3)])
+    }
+
+    @Test func nativeBoldToggleRemovesOnlyTheMarkersAroundALiteralRoomLabel() {
+        let draft = "**#Team **Ops****"
+        let link = RoomLinkDraft(room: bare("ops@rooms.waddle.test"), range: 2..<15)
+        let edit = ComposerFormatting.apply(.bold, to: draft, selection: link.range, roomLinks: [link])
+        let changes = edit.replacement.nativeChanges(from: draft)
+
+        #expect(edit.text == "#Team **Ops**")
+        #expect(edit.selection == 0..<13)
+        #expect(changes.allSatisfy { $0.text.isEmpty })
+        #expect(changes.flatMap { Array($0.range) }.sorted() == [0, 1, 15, 16])
+        #expect(RoomLinks.relocate([link], from: draft, applying: edit.replacement) == [
+            RoomLinkDraft(room: link.room, range: 0..<13),
+        ])
     }
 }
 

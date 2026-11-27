@@ -33,18 +33,25 @@ public struct ComposedMarkdown: Hashable, Sendable {
 public enum ComposerMarkdown {
     /// Converts markdown in the trimmed `body` and rebases its references.
     public static func compose(_ body: String, references: DraftReferences = .init()) -> ComposedMarkdown {
-        let fences = extractFences(Array(body.unicodeScalars))
+        parse(ComposerDraftLines(Array(body.unicodeScalars)), references: references).message
+    }
+
+    static func parse(
+        _ draft: ComposerDraftLines, references: DraftReferences
+    ) -> (message: ComposedMarkdown, fences: [Removal], inline: InlinePass) {
+        let fences = extractFences(draft)
         let literal = references.literalRanges(after: fences.removals)
         let inline = applyInlineMarkers(fences.body, protected: fences.codeBlocks, literal: literal)
         let codeBlocks = fences.codeBlocks.map { $0.rebased(across: inline.removals) }
         let spans = codeBlocks.map { $0.span(.codeBlock) }
             + inline.spans
             + blockquoteSpans(inline.body, codeBlocks: codeBlocks)
-        return ComposedMarkdown(
+        let message = ComposedMarkdown(
             body: String(String.UnicodeScalarView(inline.body)),
             spans: sortedStably(spans),
             references: references.rebased(fences: fences.removals, inline: inline.removals, spans: spans)
         )
+        return (message, fences.removals, inline)
     }
 }
 
@@ -116,8 +123,8 @@ private struct FencePass {
     let removals: [Removal]
 }
 
-private func extractFences(_ body: Scalars) -> FencePass {
-    let draft = ComposerDraftLines(body)
+private func extractFences(_ draft: ComposerDraftLines) -> FencePass {
+    let body = draft.scalars
     let lines = draft.lines
     let dropped = Set(draft.codeBlocks.flatMap { [$0.opening, $0.closing] })
     var removals: [Removal] = []
