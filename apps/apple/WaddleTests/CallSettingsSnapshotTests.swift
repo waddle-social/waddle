@@ -14,13 +14,15 @@ final class CallSettingsSnapshotTests: XCTestCase {
 
     private func assertSettings(
         _ devices: CallDevices, kinds: [CallDeviceKind] = CallDeviceKind.allCases, width: CGFloat = CallSettingsView.width,
-        audioProcessing: CallAudioProcessing = CallAudioProcessing(), background: CallBackground = .off,
+        audioProcessing: CallAudioProcessing = CallAudioProcessing(), microphoneMode: CallMicrophoneMode = .standard,
+        background: CallBackground = .off,
         videoStats: [CallVideoStat]? = nil,
-        height: CGFloat = 620, testName: String = #function, line: UInt = #line
+        height: CGFloat = 760, testName: String = #function, line: UInt = #line
     ) async throws {
         try await assertScreenSnapshot(
             of: CallSettingsView(
-                devices: devices, kinds: kinds, audioProcessing: audioProcessing, background: background,
+                devices: devices, kinds: kinds, audioProcessing: audioProcessing, microphoneMode: microphoneMode,
+                background: background,
                 videoStats: videoStats, choose: { _, _ in /* drawn only */ }, done: { /* drawn only */ }
             ),
             size: CGSize(width: width, height: height), testName: testName, line: line
@@ -28,11 +30,14 @@ final class CallSettingsSnapshotTests: XCTestCase {
     }
 
     func testAChosenMicrophoneAndTheSystemsSpeakerAndCamera() async throws {
-        try await assertSettings(CallDevices(
-            microphones: CallDeviceList(devices: [Self.builtIn, Self.headset], preferred: Self.headset.id),
-            speakers: CallDeviceList(devices: [Self.speakers]),
-            cameras: CallDeviceList(devices: [Self.faceTime])
-        ))
+        try await assertSettings(
+            CallDevices(
+                microphones: CallDeviceList(devices: [Self.builtIn, Self.headset], preferred: Self.headset.id),
+                speakers: CallDeviceList(devices: [Self.speakers]),
+                cameras: CallDeviceList(devices: [Self.faceTime])
+            ),
+            audioProcessing: CallAudioProcessing(noiseSuppression: false), microphoneMode: .voiceIsolation
+        )
     }
 
     /// The chosen headset is unplugged and no camera is found.
@@ -42,7 +47,8 @@ final class CallSettingsSnapshotTests: XCTestCase {
                 microphones: CallDeviceList(devices: [Self.builtIn], preferred: Self.headset.id),
                 speakers: CallDeviceList(devices: [Self.speakers])
             ),
-            audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false), height: 600
+            audioProcessing: CallAudioProcessing(noiseSuppression: false, autoGainControl: false),
+            microphoneMode: .wideSpectrum, height: 760
         )
     }
 
@@ -74,15 +80,15 @@ final class CallSettingsSnapshotTests: XCTestCase {
             ]
         }
         _ = tracker.update(with: readings(second: 1))
-        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 760)
+        try await assertSettings(Self.devices, videoStats: tracker.update(with: readings(second: 2)), height: 900)
     }
 
     func testABlurredBackground() async throws {
-        try await assertSettings(Self.devices, background: .blur, height: 620)
+        try await assertSettings(Self.devices, background: .blur)
     }
 
     func testNoVideoToMeasure() async throws {
-        try await assertSettings(Self.devices, videoStats: [], height: 700)
+        try await assertSettings(Self.devices, videoStats: [], height: 840)
     }
 
     #if os(iOS)
@@ -93,7 +99,7 @@ final class CallSettingsSnapshotTests: XCTestCase {
             CallDevices(cameras: CallDeviceList(devices: [
                 CallDevice(id: "front", name: "Front Camera"), CallDevice(id: "back", name: "Back Camera"),
             ])),
-            kinds: [.camera], width: 375, height: 520
+            kinds: [.camera], width: 375, microphoneMode: .wideSpectrum, height: 660
         )
     }
     #endif
