@@ -36,6 +36,7 @@ struct WithheldMediaCard: View {
         switch item {
         case let .attachment(name), let .inlineImage(name): name
         case .linkPreviewImages: "Link preview pictures"
+        case .linkPreviewVideos: "Link preview videos"
         }
     }
 }

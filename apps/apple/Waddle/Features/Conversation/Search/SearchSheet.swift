@@ -138,7 +138,7 @@ struct ConversationSearchResultRow: View {
     }
 
     private var highlighted: AttributedString {
-        var text = AttributedString(MessageAccessibilityText.content(of: item))
+        var text = AttributedString(MessageAccessibilityText.content(of: item, attachments: item.message.sharedFiles))
         if !query.isEmpty, let range = text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) {
             text[range].inlinePresentationIntent = .stronglyEmphasized
             text[range].backgroundColor = Theme.Colors.goldSubtle

@@ -71,7 +71,7 @@ final class ComposerLinkPreviewSnapshotTests: XCTestCase {
             })
         }
         defer { model.linkPreview.reset() }
-        let text = "Here’s the guide: \(url)"
+        let text = "Guide: \(url)"
         if editing {
             var message = directMessage(
                 text, from: JID(bare: SampleSession.ana.jid, resource: nil)!,

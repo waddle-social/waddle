@@ -14,6 +14,7 @@ public struct MessageMedia: Sendable {
             case attachment(String)
             case inlineImage(String)
             case linkPreviewImages
+            case linkPreviewVideos
         }
 
         public let host: Host?
@@ -49,8 +50,12 @@ public struct MessageMedia: Sendable {
 
     public init(item: TimelineItem, decision: RemoteMediaDecision) {
         let inlineImage = Self.inlineImageURL(of: item)
-        let attachments = item.tombstone == nil ? item.message.sharedFiles : []
-        let previews = item.tombstone == nil ? item.message.linkPreviews : []
+        let links = MessageLinkPreviews(
+            previews: item.tombstone == nil ? item.message.linkPreviews : [],
+            files: item.tombstone == nil ? item.message.sharedFiles : []
+        )
+        let attachments = links.remainingFiles
+        let previews = links.previews
         guard case let .withheld(host) = decision else {
             inlineBody = inlineImage.map(InlineBody.image) ?? .text
             visibleAttachments = attachments
@@ -64,15 +69,11 @@ public struct MessageMedia: Sendable {
         var items = hiddenFiles.map { Withheld.Item.attachment($0.name ?? $0.url.absoluteString) }
         if let inlineImage { items.append(.inlineImage(inlineImage.absoluteString)) }
         if previews.contains(where: { $0.imageURL != nil }) { items.append(.linkPreviewImages) }
+        if previews.contains(where: { $0.playback != nil }) { items.append(.linkPreviewVideos) }
 
         inlineBody = inlineImage == nil ? .text : .withheld
         visibleAttachments = hiddenFiles.isEmpty ? attachments : attachments.filter { !Self.gatesAttachment($0) }
-        linkPreviews = previews.map { preview in
-            LinkPreview(
-                url: preview.url, title: preview.title, summary: preview.summary, imageURL: nil, imageAlt: nil,
-                originalURL: preview.originalURL
-            )
-        }
+        linkPreviews = previews.map { $0.withoutMedia() }
         stickerPackLocation = nil
         withheld = items.isEmpty ? nil : Withheld(host: host, items: items)
     }
@@ -100,11 +101,12 @@ public struct MessageMedia: Sendable {
         guard file.disposition == .inline else { return false }
         let type = file.mediaType?.lowercased() ?? ""
         return type.hasPrefix("video/") || type.hasPrefix("audio/") || type == "application/pdf"
+            || LinkPreviewVideo.isHLSMediaType(type)
             || inlineExtensions.contains(file.url.pathExtension.lowercased()) || GifMedia.isGiphyMedia(file.url)
     }
 
     private static let inlineExtensions = InlineImageBody.imageExtensions.union([
-        "avif", "bmp", "svg", "mp4", "webm", "mov", "m4v", "ogv", "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "pdf",
+        "avif", "bmp", "svg", "mp4", "webm", "mov", "m4v", "ogv", "m3u8", "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "pdf",
     ])
 }
 

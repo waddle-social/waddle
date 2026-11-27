@@ -5,11 +5,11 @@ import WaddleKit
 struct MessageRowAccessibility: ViewModifier {
     let label: String
     let actions: MessageAccessibilityActions
-    let withheld: MessageMedia.Withheld?
+    let media: MessageMedia
     let loadMedia: () -> Void
 
     func body(content: Content) -> some View {
-        if let withheld {
+        if let withheld = media.withheld {
             content.accessibilityRepresentation {
                 VStack(alignment: .leading) {
                     messageElement(Text(label))
@@ -17,13 +17,13 @@ struct MessageRowAccessibility: ViewModifier {
                 }
             }
         } else {
-            messageElement(content)
+            messageElement(content, children: media.linkPreviews.contains { $0.playback != nil } ? .contain : .ignore)
         }
     }
 
-    private func messageElement(_ content: some View) -> some View {
+    private func messageElement(_ content: some View, children: AccessibilityChildBehavior = .ignore) -> some View {
         content
-            .accessibilityElement(children: .ignore)
+            .accessibilityElement(children: children)
             .accessibilityLabel(Text(label))
             .modifier(actions)
     }
