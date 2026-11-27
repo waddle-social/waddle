@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -88,7 +89,8 @@ class AccountsGraphTest {
         assertEquals(a, graph.activeKey.value)
         assertEquals("ann@a.example", graph.currentSession.value?.jid)
         assertEquals("https://a.example", graph.sessionOrigin.value)
-        assertEquals("sess-b", runBlocking { graph.runtimes.value.values.first { it.key != a }.sessionPrefs.sessionId.first() })
+        val other = graph.runtimes.value.values.first { it.key != a }
+        assertEquals("sess-b", runBlocking { other.sessionPrefs.sessionId.first() })
     }
 
     @Test
@@ -104,9 +106,10 @@ class AccountsGraphTest {
         assertEquals("sess-1", runBlocking { runtimeA.sessionPrefs.sessionId.first() })
         assertEquals("sess-2", runBlocking { runtimeB.sessionPrefs.sessionId.first() })
         // Push instance names are scoped to the account, not just the JID.
-        assertNotSame(runtimeA.sessionManager.pushInstanceOf("ann@x.test"), runtimeB.sessionManager.pushInstanceOf("ann@x.test"))
+        val instanceA = runtimeA.sessionManager.pushInstanceOf("ann@x.test")
+        assertNotEquals(instanceA, runtimeB.sessionManager.pushInstanceOf("ann@x.test"))
         assertNull(graph.runtimeForPushInstance("waddle-0000000000000000"))
-        assertSame(runtimeA, graph.runtimeForPushInstance(runtimeA.sessionManager.pushInstanceOf("ann@x.test")))
+        assertSame(runtimeA, graph.runtimeForPushInstance(instanceA))
     }
 
     @Test
