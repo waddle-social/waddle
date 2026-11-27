@@ -14,7 +14,7 @@ enum MessageAttachmentKind: Hashable {
     init(_ file: SharedFile) {
         let type = file.mediaType?.lowercased() ?? ""
         let fileExtension = (file.name.map(Self.fileExtension(of:)) ?? file.url.pathExtension).lowercased()
-        if type.hasPrefix("image/") {
+        if file.isImage {
             self = .image
         } else if type.hasPrefix("video/") {
             self = .video

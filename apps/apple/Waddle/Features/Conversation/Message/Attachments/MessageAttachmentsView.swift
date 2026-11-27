@@ -4,48 +4,44 @@ import WaddleKit
 /// XEP-0447 files of a row: inline images, stickers and file cards, with
 /// XEP-0448 encrypted files decrypted first.
 struct MessageAttachmentsView: View {
-    let files: [SharedFile]
+    let attachments: [MessageMedia.Attachment]
     let isSticker: Bool
-    let openImage: (SharedFile) -> Void
+    let openImage: (MediaGallery.Source) -> Void
     /// Opens the pack a sticker is from; nil when it names none.
     var openStickerPack: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: WaddleTokens.Spacing.s1Half) {
-            ForEach(files, id: \.url) { file in
-                attachment(file)
+            ForEach(attachments) { attachment in
+                content(attachment)
             }
         }
     }
 
     @ViewBuilder
-    private func attachment(_ file: SharedFile) -> some View {
+    private func content(_ attachment: MessageMedia.Attachment) -> some View {
+        let file = attachment.file
         let kind = MessageAttachmentKind(file)
         if let source = file.encrypted {
             EncryptedAttachmentView(file: file, source: source, kind: kind, isSticker: isSticker)
         } else {
-            plainAttachment(file, kind: kind)
-        }
-    }
-
-    @ViewBuilder
-    private func plainAttachment(_ file: SharedFile, kind: MessageAttachmentKind) -> some View {
-        switch kind {
-        case .image where isSticker:
-            MessageStickerView(file: file, openPack: openStickerPack)
-        case .image:
-            MessageImageAttachment(file: file, open: openImage)
-        default:
-            MessageFileCard(file: file, kind: kind)
+            switch kind {
+            case .image where isSticker:
+                MessageStickerView(file: file, openPack: openStickerPack)
+            case .image:
+                MessageImageAttachment(file: file) { openImage(.attachment(attachment.id)) }
+            default:
+                MessageFileCard(file: file, kind: kind)
+            }
         }
     }
 }
 
-/// An inline image capped to the media width; tap opens an in-app preview.
+/// An inline image capped to the media width; tap opens the gallery.
 /// GIFs play; other images load with `AsyncImage`.
 struct MessageImageAttachment: View {
     let file: SharedFile
-    let open: (SharedFile) -> Void
+    let open: () -> Void
 
     static let maxHeight: CGFloat = 320
 
@@ -54,9 +50,7 @@ struct MessageImageAttachment: View {
     }
 
     var body: some View {
-        Button {
-            open(file)
-        } label: {
+        Button(action: open) {
             image
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
                 .contentShape(Rectangle())
@@ -64,7 +58,7 @@ struct MessageImageAttachment: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Text(file.description ?? file.displayName))
         .accessibilityAddTraits(.isImage)
-        .accessibilityHint(Text("Opens an image preview"))
+        .accessibilityHint(Text("Opens the image gallery"))
     }
 
     @ViewBuilder
@@ -280,80 +274,5 @@ struct MessageFileCardLabel: View {
                 .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
         )
         .contentShape(Rectangle())
-    }
-}
-
-/// Full-screen in-app preview for an image shared in a message.
-struct MessageImagePreviewView: View {
-    @Environment(\.dismiss) private var dismiss
-    let file: SharedFile
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            picture
-                .accessibilityLabel(Text(file.description ?? file.displayName))
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button("Close", systemImage: "xmark") {
-                        dismiss()
-                    }
-                    .labelStyle(.iconOnly)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(Theme.Spacing.m)
-                    .background(Theme.Colors.scrim, in: Circle())
-                }
-                Spacer()
-            }
-            .padding()
-        }
-        .preferredColorScheme(.dark)
-    }
-
-    @ViewBuilder
-    private var picture: some View {
-        if GifMedia.isGIF(mediaType: file.mediaType, url: file.url) {
-            RemoteImageDataView(url: file.url) { phase in
-                switch phase {
-                case let .success(data):
-                    AnimatedImageView(data: data, maxPixelSize: 1600)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .failure:
-                    failureView
-                case .empty:
-                    loadingView
-                }
-            }
-        } else {
-            AsyncImage(url: file.url) { phase in
-                switch phase {
-                case let .success(image):
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .failure:
-                    failureView
-                case .empty:
-                    loadingView
-                @unknown default:
-                    loadingView
-                }
-            }
-        }
-    }
-
-    private var failureView: some View {
-        ContentUnavailableView("Couldn't Load Image", systemImage: "photo.badge.exclamationmark")
-            .foregroundStyle(.white)
-    }
-
-    private var loadingView: some View {
-        ProgressView()
-            .tint(.white)
     }
 }

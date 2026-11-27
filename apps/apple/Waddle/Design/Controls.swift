@@ -203,20 +203,22 @@ struct HuddleIconButton: View {
     let label: String
     let symbol: String
     let action: () -> Void
+    private let side: CGFloat
     @Environment(\.isEnabled) private var isEnabled
     @ScaledMetric(relativeTo: .body) private var glyph: CGFloat = 15
 
-    init(_ label: String, symbol: String, action: @escaping () -> Void) {
+    init(_ label: String, symbol: String, side: CGFloat? = nil, action: @escaping () -> Void) {
         self.label = label
         self.symbol = symbol
         self.action = action
+        self.side = side ?? Self.defaultSide
     }
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: glyph, weight: .semibold))
-                .frame(minWidth: Self.side, minHeight: Self.side)
+                .frame(minWidth: side, minHeight: side)
                 .contentShape(Rectangle())
                 .opacity(isEnabled ? 1 : 0.5)
         }
@@ -225,7 +227,7 @@ struct HuddleIconButton: View {
         .help(label)
     }
 
-    private static var side: CGFloat {
+    private static var defaultSide: CGFloat {
         #if os(iOS)
         Theme.Size.minHitTarget
         #else
