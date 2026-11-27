@@ -283,7 +283,10 @@ async fn chunk_boundary_enforces_zero_max_and_max_plus_one_bytes() {
 }
 
 #[tokio::test]
-async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
+async fn wasi_narrow_boundary_rejects_filesystem_and_sockets_and_isolates_cli() {
+    use wasmtime_wasi::cli::WasiCliView as _;
+    use wasmtime_wasi::p2::bindings::cli::environment::Host as _;
+
     let runtime = WasmRuntime::try_new().expect("runtime");
     let tmp = std::env::temp_dir().join(format!("waddle-narrow-wasi-{}.wat", std::process::id()));
     std::fs::write(&tmp, "(component)").expect("write empty component");
@@ -291,7 +294,7 @@ async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
     let _ = std::fs::remove_file(&tmp);
 
     // Verify narrowed Linker<HostState> rejects components importing functions from
-    // undeclared `wasi:filesystem`, `wasi:sockets`, or `wasi:cli`.
+    // undeclared `wasi:filesystem` or `wasi:sockets`.
     for (label, wat) in [
         (
             "wasi:filesystem/preopens@0.2.0",
@@ -310,10 +313,10 @@ async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
             )"#,
         ),
         (
-            "wasi:cli/environment@0.2.0",
+            "wasi:sockets/ip-name-lookup@0.2.0",
             r#"(component
-                (import "wasi:cli/environment@0.2.0" (instance
-                    (export "get-environment" (func (result (list (tuple string string)))))
+                (import "wasi:sockets/ip-name-lookup@0.2.0" (instance
+                    (export "resolve-address-stream" (type (sub resource)))
                 ))
             )"#,
         ),
@@ -330,7 +333,8 @@ async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
         );
     }
 
-    // Verify declared WASI interfaces (`wasi:clocks`, `wasi:random`, `wasi:io`) succeed.
+    // Verify declared WASI interfaces (`wasi:clocks`, `wasi:random`, `wasi:io`, and
+    // isolated `wasi:cli` required by Rust's `wasm32-wasip2` std) succeed.
     let allowed_wat = r#"(component
         (import "wasi:clocks/monotonic-clock@0.2.0" (instance
             (export "now" (func (result u64)))
@@ -338,8 +342,14 @@ async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
         (import "wasi:random/random@0.2.0" (instance
             (export "get-random-u64" (func (result u64)))
         ))
+        (import "wasi:random/insecure-seed@0.2.0" (instance
+            (export "insecure-seed" (func (result (tuple u64 u64))))
+        ))
         (import "wasi:io/poll@0.2.0" (instance
             (export "pollable" (type (sub resource)))
+        ))
+        (import "wasi:cli/environment@0.2.0" (instance
+            (export "get-environment" (func (result (list (tuple string string)))))
         ))
     )"#;
     let allowed_comp = Component::new(runtime.engine(), allowed_wat).expect("allowed wat");
@@ -350,7 +360,23 @@ async fn wasi_narrow_boundary_rejects_filesystem_sockets_and_cli_imports() {
         .await;
     assert!(
         inst.is_ok(),
-        "narrow WASI linker must still allow clocks/random/io: {inst:?}"
+        "narrow WASI linker must allow clocks/random/io and isolated cli: {inst:?}"
+    );
+
+    // Verify `wasi:cli/environment` exposes zero host env vars, args, or cwd.
+    let mut state = HostState::default();
+    let mut cli = state.cli();
+    assert!(
+        cli.get_environment().expect("get_environment").is_empty(),
+        "guest must never inherit host environment variables"
+    );
+    assert!(
+        cli.get_arguments().expect("get_arguments").is_empty(),
+        "guest must never inherit host argv"
+    );
+    assert!(
+        cli.initial_cwd().expect("initial_cwd").is_none(),
+        "guest must never inherit host cwd"
     );
 }
 

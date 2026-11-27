@@ -20,7 +20,7 @@ import observer_release as observer
 
 
 SERVER = Path(__file__).resolve().parents[1]
-OLD_MANIFEST = b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.waddle.extension.wasm.v1+wasm","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2,"data":"e30="},"layers":[{"mediaType":"application/wasm","digest":"sha256:1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df","size":446651,"annotations":{"org.opencontainers.image.title":"target/wasm32-wasip2/release/jev_judgments.wasm"}}],"annotations":{"org.opencontainers.image.created":"2026-10-18T21:17:44Z"}}'
+OLD_MANIFEST = b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.waddle.extension.wasm.v1+wasm","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2,"data":"e30="},"layers":[{"mediaType":"application/wasm","digest":"sha256:93e896a1346fe87954e3f09ed9b6ea55c0a973ef62fa8ed6d70b2a909636b5f1","size":256876,"annotations":{"org.opencontainers.image.title":"jev_judgments.wasm"}}],"annotations":{"org.opencontainers.image.created":"2026-11-27T08:37:58Z"}}'
 
 
 class ObserverReleaseTests(unittest.TestCase):
@@ -84,8 +84,8 @@ class ObserverReleaseTests(unittest.TestCase):
         path.write_bytes(OLD_MANIFEST)
         layer = observer.manifest_layer(path, release)
         self.assertEqual(release['generation'], 3)
-        self.assertEqual(layer['digest'], 'sha256:1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df')
-        self.assertEqual(layer['size'], 446651)
+        self.assertEqual(layer['digest'], 'sha256:93e896a1346fe87954e3f09ed9b6ea55c0a973ef62fa8ed6d70b2a909636b5f1')
+        self.assertEqual(layer['size'], 256876)
 
     def test_fetch_returns_only_fully_verified_bytes(self) -> None:
         # A hostile archive-style annotation cannot affect the flat output path.
@@ -218,7 +218,7 @@ class ObserverReleaseTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SERVER / 'scripts/observer_release.py'), 'digest'], capture_output=True,
                                 text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, 'sha256:c37619841f9da5861887651779337fe8467f41910566267063b8b596dee379dc\n')
+        self.assertEqual(result.stdout, 'sha256:6989e00f6a7372809440246f9efaa28a5cd5c09083dcc920d414f5672b1dcb85\n')
         self.assertEqual(result.stderr, '')
 
     def test_fetch_cli_emits_no_partial_bytes_or_registry_secrets_on_failure(self) -> None:
