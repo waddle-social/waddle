@@ -5,6 +5,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use waddle_server::db::{
     Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationLedgerError, MigrationRunner,
+    BASELINE_VERSION,
 };
 
 struct Fixture {
@@ -141,7 +142,10 @@ async fn postgres_clean_legacy_and_foreign_ledger_rows() {
         matches!(
             refused,
             Err(DatabaseError::MigrationLedger(
-                MigrationLedgerError::UnknownVersion { version: 2000, .. }
+                MigrationLedgerError::UnknownVersion {
+                    version: BASELINE_VERSION,
+                    ..
+                }
             ))
         ),
         "unexpected runner result: {refused:?}"
