@@ -3,7 +3,7 @@
 //! compatible with `waddle_broker_core::trace_verifier` (`PlacementLeaseMonitor.p`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -226,7 +226,10 @@ impl PlacementTraceEmitter {
             event,
         };
         if let Ok(line) = serde_json::to_string(&record) {
-            let mut guard = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = self
+                .lines
+                .lock()
+                .expect("placement trace emitter lock poisoned");
             guard.push(line);
         }
     }
@@ -302,7 +305,10 @@ impl PlacementTraceEmitter {
     }
 
     pub fn to_jsonl(&self) -> String {
-        let guard = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .lines
+            .lock()
+            .expect("placement trace emitter lock poisoned");
         guard.join("\n")
     }
 }

@@ -9147,6 +9147,7 @@ dependencies = [
  "turso",
  "uuid",
  "waddle-broker-core",
+ "waddle-ws-test-support",
  "x509-parser 0.18.1",
 ]
 
