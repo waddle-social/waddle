@@ -159,11 +159,20 @@ pub async fn handle_iq_with_conn_state(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> ResponseBatch {
-    let spaces_domain = state.deps.service_domains.spaces.clone();
-    let community_domain = state.deps.service_domains.community.clone();
-    let upload_domain = state.deps.service_domains.upload.clone();
-    let extensions_domain = state.deps.service_domains.extensions.clone();
-    let push_domain = state.deps.service_domains.push.clone();
+    let tenant_service_domains = if domain == state.deps.auth_state.xmpp_domain {
+        state.deps.service_domains.clone()
+    } else {
+        crate::server::routes::websocket::XmppServiceDomains::new(
+            domain,
+            muc_domain,
+            &format!("spaces.{domain}"),
+        )
+    };
+    let spaces_domain = tenant_service_domains.spaces.clone();
+    let community_domain = tenant_service_domains.community.clone();
+    let upload_domain = tenant_service_domains.upload.clone();
+    let extensions_domain = tenant_service_domains.extensions.clone();
+    let push_domain = tenant_service_domains.push.clone();
 
     // RFC 7622 §3.2: `node@domain.` and `node@domain` are one address. Every
     // handler below compares `to` with served addresses as text and answers

@@ -7,6 +7,7 @@ use super::AuthStage;
 use super::AuthState;
 use super::DbActor;
 
+use super::ResolvedTenant;
 use super::Router;
 use super::{get, post};
 use super::{header, StatusCode};
@@ -17,8 +18,8 @@ use super::{row_value, ValueExt};
 use super::{DateTime, Duration, Utc};
 use super::{DbExecute, DbQueryOne};
 use super::{Deserialize, Serialize};
+use super::{Extension, Query, State};
 use super::{IntoResponse, Json, Redirect, Response};
-use super::{Query, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingAuthorization {
@@ -355,11 +356,16 @@ pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl
     (StatusCode::OK, Json(state.providers.list()))
 }
 
-#[instrument(skip(state, query))]
+#[instrument(skip(state, tenant, query))]
 pub async fn start_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Query(query): Query<super::StartQuery>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
+    let trusted_origins = state
+        .trusted_web_origins
+        .with_tenant_base(&tenant.public_base_url);
     let provider = match state.providers.get(&query.provider) {
         Some(p) => p,
         None => {
@@ -380,10 +386,7 @@ pub async fn start_handler(
                 };
             // Refuse an untrusted return URL before the provider round
             // trip; the callback checks it again before minting a session.
-            if let Err(err) = state
-                .trusted_web_origins
-                .resolve_return_url(query.next.as_deref())
-            {
+            if let Err(err) = trusted_origins.resolve_return_url(query.next.as_deref()) {
                 record_auth_failure(&provider.id, None, AuthFailure::AuthorizationMalformed);
                 return auth_error_to_response(AuthError::InvalidRequest(err.to_string()))
                     .into_response();
@@ -414,7 +417,10 @@ pub async fn start_handler(
         }
     };
 
-    match state.start_authorization(provider, flow).await {
+    match state
+        .start_authorization_for_tenant(provider, flow, &tenant)
+        .await
+    {
         Ok(url) => {
             record_auth_success(AuthStage::OidcAuthorization);
             Redirect::temporary(&url).into_response()
@@ -426,9 +432,11 @@ pub async fn start_handler(
 #[instrument(skip_all)]
 pub async fn session_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Query(query): Query<super::SessionQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
     let session_id = query
         .session_id
         .or_else(|| AuthState::extract_session_cookie(&headers));
@@ -439,10 +447,20 @@ pub async fn session_handler(
 
     match state.session_manager.get_session(&session_id).await {
         Ok(Some(session)) => {
+            if !state.session_matches_tenant(&tenant, &session.user_jid) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(super::ErrorResponse::new(
+                        "tenant_mismatch",
+                        "Session does not belong to this tenant",
+                    )),
+                )
+                    .into_response();
+            }
             let is_expired = session.is_expired();
             let expires_at = session.expires_at.map(|v| v.to_rfc3339());
-            let jid = localpart_to_jid(&session.xmpp_localpart, &state.xmpp_domain)
-                .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, state.xmpp_domain));
+            let jid = localpart_to_jid(&session.xmpp_localpart, tenant.xmpp_domain.as_str())
+                .unwrap_or_else(|_| session.user_jid.clone());
             let avatar_url = match load_avatar_url(
                 &state.session_manager.actor_ref(),
                 &session.user_jid,
@@ -460,8 +478,8 @@ pub async fn session_handler(
                     avatar_url,
                     xmpp_localpart: session.xmpp_localpart,
                     jid,
-                    xmpp_websocket_url: state.websocket_url(),
-                    link_preview_media_origin: state.base_url.clone(),
+                    xmpp_websocket_url: tenant.public_ws_url.as_str().to_owned(),
+                    link_preview_media_origin: tenant.base_url_str(),
                     is_expired,
                     expires_at,
                 }),
@@ -476,15 +494,35 @@ pub async fn session_handler(
 #[instrument(skip_all)]
 pub async fn logout_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     headers: axum::http::HeaderMap,
     body: Option<Json<super::LogoutRequest>>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
     let requested = body.and_then(|Json(payload)| payload.session_id);
     let session_id = requested.or_else(|| AuthState::extract_session_cookie(&headers));
 
     if let Some(session_id) = session_id {
-        if let Err(err) = state.session_manager.delete_session(&session_id).await {
-            warn!(error = %err, "Failed to delete session on logout");
+        match state.session_manager.get_session(&session_id).await {
+            Ok(Some(session)) => {
+                if !state.session_matches_tenant(&tenant, &session.user_jid) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(super::ErrorResponse::new(
+                            "tenant_mismatch",
+                            "Session does not belong to this tenant",
+                        )),
+                    )
+                        .into_response();
+                }
+                if let Err(err) = state.session_manager.delete_session(&session_id).await {
+                    warn!(error = %err, "Failed to delete session on logout");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(error = %err, "Failed to inspect session before logout");
+            }
         }
     }
 
@@ -492,7 +530,7 @@ pub async fn logout_handler(
     resp.headers_mut().append(
         header::SET_COOKIE,
         state
-            .session_cookie_header(None, 0)
+            .session_cookie_header_for_tenant(&tenant, None, 0)
             .parse()
             .expect("valid cookie"),
     );

@@ -6,9 +6,10 @@ use waddle_xmpp::identity::{parse_localpart, IdentityError};
 use crate::db::actor::{DbActor, DbQuery};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::{
-    AuthzIdError, AuthzUserJid, CheckPermission, Object, ObjectType, Permission, PermissionActor,
-    PermissionError, Relation, Subject, Tuple, WriteTuple,
+    AuthzIdError, AuthzUserJid, CheckPermission, ForTenant, Object, ObjectType, Permission,
+    PermissionActor, PermissionError, Relation, Subject, Tuple, WriteTuple,
 };
+use waddle_broker_core::identity::TenantId;
 
 pub const DEPLOYMENT_SERVER_ID: &str = "deployment";
 const OWNER_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
@@ -62,13 +63,19 @@ impl BootstrapMembershipConfig {
         self
     }
 
-    #[cfg(test)]
-    pub fn new(owner_localparts: Vec<String>) -> Self {
+    /// Construct a deployment membership configuration with an explicit list
+    /// of canonical owner localparts (e.g. from a per-tenant manifest).
+    pub fn with_owners(owner_localparts: Vec<String>) -> Self {
         Self {
             server_id: DEPLOYMENT_SERVER_ID.to_string(),
             owner_localparts,
             account_domain: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new(owner_localparts: Vec<String>) -> Self {
+        Self::with_owners(owner_localparts)
     }
 
     /// Whether the account with exactly this stored localpart is a
@@ -140,8 +147,9 @@ fn owner_entries(value: &str) -> impl Iterator<Item = &str> {
         .filter(|entry| !entry.is_empty())
 }
 
-pub async fn provision_user_membership(
+pub async fn provision_user_membership_for_tenant(
     permission_actor: &ActorRef<PermissionActor>,
+    tenant_id: Option<&TenantId>,
     config: &BootstrapMembershipConfig,
     user_jid: &str,
     xmpp_localpart: &str,
@@ -156,7 +164,7 @@ pub async fn provision_user_membership(
     if config.owner_subject(user_jid, xmpp_localpart) {
         let object = Object::new(ObjectType::Server, config.server_id.as_str());
         let tuple = Tuple::new(object, Relation::new("owner"), subject);
-        write_tuple_if_absent(permission_actor, tuple).await?;
+        write_tuple_if_absent_for_tenant(permission_actor, tenant_id, tuple).await?;
 
         debug!(
             user_jid = %user_jid,
@@ -169,7 +177,7 @@ pub async fn provision_user_membership(
 
     let object = Object::new(ObjectType::Server, config.server_id.as_str());
     let tuple = Tuple::new(object, Relation::new("member"), subject);
-    write_tuple_if_absent(permission_actor, tuple).await?;
+    write_tuple_if_absent_for_tenant(permission_actor, tenant_id, tuple).await?;
 
     debug!(
         user_jid = %user_jid,
@@ -178,6 +186,63 @@ pub async fn provision_user_membership(
         "Provisioned bootstrap membership"
     );
     Ok(())
+}
+
+pub async fn provision_user_membership(
+    permission_actor: &ActorRef<PermissionActor>,
+    config: &BootstrapMembershipConfig,
+    user_jid: &str,
+    xmpp_localpart: &str,
+) -> Result<(), String> {
+    provision_user_membership_for_tenant(permission_actor, None, config, user_jid, xmpp_localpart)
+        .await
+}
+
+pub async fn reconcile_user_membership_for_tenant(
+    permission_actor: &ActorRef<PermissionActor>,
+    tenant_id: &TenantId,
+    config: &BootstrapMembershipConfig,
+    user_jid: &str,
+    xmpp_localpart: &str,
+) -> Result<(), String> {
+    if config.owner_subject(user_jid, xmpp_localpart) {
+        return provision_user_membership_for_tenant(
+            permission_actor,
+            Some(tenant_id),
+            config,
+            user_jid,
+            xmpp_localpart,
+        )
+        .await;
+    }
+
+    let subject = Subject::user(user_jid);
+    let object = Object::new(ObjectType::Server, config.server_id.as_str());
+    for permission in [Permission::Owner, Permission::Admin, Permission::Member] {
+        let response = permission_actor
+            .ask(ForTenant::new(
+                tenant_id.clone(),
+                CheckPermission {
+                    subject: subject.clone(),
+                    permission,
+                    object: object.clone(),
+                },
+            ))
+            .await
+            .map_err(|err| format!("failed checking membership: {err}"))?;
+        if response.allowed {
+            return Ok(());
+        }
+    }
+
+    provision_user_membership_for_tenant(
+        permission_actor,
+        Some(tenant_id),
+        config,
+        user_jid,
+        xmpp_localpart,
+    )
+    .await
 }
 
 pub async fn reconcile_user_membership(
@@ -209,11 +274,10 @@ pub async fn reconcile_user_membership(
     provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await
 }
 
-async fn write_tuple_if_absent(
-    permission_actor: &ActorRef<PermissionActor>,
-    tuple: Tuple,
+fn map_write_tuple_result<M>(
+    result: Result<(), SendError<M, PermissionError>>,
 ) -> Result<(), String> {
-    match permission_actor.ask(WriteTuple { tuple }).await {
+    match result {
         Ok(()) => Ok(()),
         Err(SendError::ActorNotRunning(_)) => {
             Err("permission actor is not running while writing membership tuple".to_string())
@@ -226,6 +290,21 @@ async fn write_tuple_if_absent(
         Err(err) => Err(format!(
             "permission actor failed writing membership tuple: {err}"
         )),
+    }
+}
+
+async fn write_tuple_if_absent_for_tenant(
+    permission_actor: &ActorRef<PermissionActor>,
+    tenant_id: Option<&TenantId>,
+    tuple: Tuple,
+) -> Result<(), String> {
+    match tenant_id {
+        Some(tenant_id) => map_write_tuple_result(
+            permission_actor
+                .ask(ForTenant::new(tenant_id.clone(), WriteTuple { tuple }))
+                .await,
+        ),
+        None => map_write_tuple_result(permission_actor.ask(WriteTuple { tuple }).await),
     }
 }
 

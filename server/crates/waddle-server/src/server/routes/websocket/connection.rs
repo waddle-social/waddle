@@ -154,6 +154,11 @@ async fn xmpp_websocket_handler(
     {
         barrier.arrive().await;
     }
+    let tenant = request
+        .extensions()
+        .get::<crate::server::tenant_routing::ResolvedTenant>()
+        .cloned()
+        .unwrap_or_else(|| state.deps.app_state.tenant_resolver.fallback_tenant());
     let ws = match WebSocketUpgrade::from_request(request, &state).await {
         Ok(ws) => ws,
         Err(rejection) => return rejection.into_response(),
@@ -198,6 +203,7 @@ async fn xmpp_websocket_handler(
             let waiter = LiveWebSocketConnection {
                 socket: Box::new(socket),
                 state,
+                tenant,
                 admission,
                 _connection_guard: connection_guard,
             }
@@ -365,6 +371,8 @@ struct LiveWebSocketConnection {
     // drain guard below are released.
     socket: Box<WebSocket>,
     state: Arc<WebSocketState>,
+    /// Tenant resolved from the HTTP `Host` header at WebSocket upgrade.
+    tenant: crate::server::tenant_routing::ResolvedTenant,
     // Keep capacity reserved through connection cleanup and release it before
     // the drain guard, after the physical socket and connection state drop.
     admission: LegacySocketAdmission,
@@ -854,9 +862,14 @@ impl LiveWebSocketConnection {
             }
         };
         let _ = transport.set(transport_observer.clone());
-        let domain = self.state.deps.auth_state.xmpp_domain.clone();
+        let domain = self.tenant.xmpp_domain.as_str().to_owned();
         let shutdown_token = self.state.deps.shutdown.stop_token();
-        info!(domain = %domain, "XMPP WebSocket connection established");
+        info!(
+            domain = %domain,
+            tenant_id = %self.tenant.tenant_id,
+            host = %self.tenant.canonical_host,
+            "XMPP WebSocket connection established"
+        );
 
         // The outbound channel receives messages routed from other
         // connections; `LiveSocketState` documents how its two halves are
@@ -865,7 +878,8 @@ impl LiveWebSocketConnection {
             SocketOutboundEndpoint::channel_with_socket_receiver(OUTBOUND_CHANNEL_SIZE);
 
         // Track connection state
-        let mut conn = WsConnState::new_for_connection_ref(self.admission.connection_ref().clone());
+        let mut conn = WsConnState::new_for_connection_ref(self.admission.connection_ref().clone())
+            .with_tenant(self.tenant.clone());
         let live_resume_control = conn.live_resume_control.clone();
         let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
         let ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())

@@ -3,7 +3,8 @@
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::localpart_to_jid;
-use axum::extract::{Form, Query, State};
+use crate::server::tenant_routing::ResolvedTenant;
+use axum::extract::{Extension, Form, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
@@ -137,11 +138,13 @@ fn generate_user_code() -> String {
     format!("{}-{}", letters, numbers)
 }
 
-#[instrument(skip(state, request))]
+#[instrument(skip(state, tenant, request))]
 pub async fn device_start_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Json(request): Json<DeviceStartRequest>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
     if state.providers.get(&request.provider).is_none() {
         record_auth_failure("unknown", None, AuthFailure::DeviceInvalidClient);
         return (
@@ -206,7 +209,7 @@ pub async fn device_start_handler(
     let user_code = auth.user_code.clone();
     let expires_in = (auth.expires_at - Utc::now()).num_seconds() as u32;
 
-    let verification_uri = format!("{}/api/auth/device/verify", state.base_url);
+    let verification_uri = format!("{}/api/auth/device/verify", tenant.base_url_str());
 
     (
         StatusCode::OK,
@@ -222,11 +225,13 @@ pub async fn device_start_handler(
         .into_response()
 }
 
-#[instrument(skip(state, request))]
+#[instrument(skip(state, tenant, request))]
 pub async fn device_poll_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Json(request): Json<DevicePollRequest>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
     let auth = match state.auth_handshake.get_device(&request.device_code).await {
         Ok(Some(v)) => v,
         Ok(None) => {
@@ -300,12 +305,26 @@ pub async fn device_poll_handler(
 
             match state.session_manager.get_session(&session_id).await {
                 Ok(Some(session)) => {
-                    let xmpp_host = std::env::var("WADDLE_XMPP_DOMAIN")
-                        .unwrap_or_else(|_| "localhost".to_string());
-                    let websocket_url = state.websocket_url();
+                    if !state.session_matches_tenant(&tenant, &session.user_jid) {
+                        record_auth_failure(
+                            &auth.provider_id,
+                            None,
+                            AuthFailure::DeviceInvalidGrant,
+                        );
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(ErrorResponse::new(
+                                "tenant_mismatch",
+                                "Device authorization session does not belong to this tenant",
+                            )),
+                        )
+                            .into_response();
+                    }
+                    let xmpp_host = tenant.xmpp_domain.as_str().to_owned();
+                    let websocket_url = tenant.public_ws_url.as_str().to_owned();
 
                     let jid = localpart_to_jid(&session.xmpp_localpart, &xmpp_host)
-                        .unwrap_or_else(|_| format!("{}@{}", session.xmpp_localpart, xmpp_host));
+                        .unwrap_or_else(|_| session.user_jid.clone());
 
                     (
                         StatusCode::OK,
@@ -361,11 +380,13 @@ pub async fn device_verify_page_handler(
     Html(html)
 }
 
-#[instrument(skip(state, request))]
+#[instrument(skip(state, tenant, request))]
 pub async fn device_verify_submit_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Form(request): Form<VerifySubmitRequest>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
     let normalized = request.user_code.trim().to_uppercase();
 
     let mut auth = match state
@@ -455,7 +476,7 @@ pub async fn device_verify_submit_handler(
     };
 
     match state
-        .start_authorization(provider, PendingFlow::Device { device_code })
+        .start_authorization_for_tenant(provider, PendingFlow::Device { device_code }, &tenant)
         .await
     {
         Ok(url) => {

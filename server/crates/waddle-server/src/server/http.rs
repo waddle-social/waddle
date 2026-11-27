@@ -50,7 +50,8 @@ use crate::server::extension_host_adapter;
 use crate::server::extension_host_tools::DeferredExtensionHostTools;
 use crate::server::extension_inference_host::DeferredExtensionInferenceHost;
 use crate::server::health::{
-    configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
+    configure_cors_with_resolver, detailed_health_handler, health_handler, metrics_handler,
+    readiness_handler,
 };
 use crate::server::liveness::spawn_runtime_progress_heartbeat;
 use crate::server::profile_publish_route::TestSeamAuth;
@@ -909,6 +910,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         ));
     }
 
+    let tenant_resolver = Arc::clone(&websocket_state.deps.app_state.tenant_resolver);
     // Always merge common routes required by XMPP, auth, upload, and operations.
     let app_router = app_router
         // Merge XMPP over WebSocket endpoint
@@ -918,13 +920,17 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         // Merge upload routes for XEP-0363 HTTP File Upload
         .merge(upload_router)
         .layer(middleware::from_fn_with_state(
+            Arc::clone(&tenant_resolver),
+            crate::server::tenant_routing::resolve_tenant_host,
+        ))
+        .layer(middleware::from_fn_with_state(
             Arc::clone(&websocket_state.deps.app_state),
             admission_gate,
         ));
     let router = router
         .merge(app_router)
         .layer(CompressionLayer::new())
-        .layer(configure_cors())
+        .layer(configure_cors_with_resolver(tenant_resolver))
         // These two observability layers stay outside CORS so preflight
         // responses are measured and receive the same span attributes as
         // requests that reach a route handler.

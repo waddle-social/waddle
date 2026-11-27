@@ -2054,6 +2054,9 @@ pub(crate) struct WsConnState {
     /// on disconnect synchronously drops each [`StreamingInferenceSession`],
     /// firing `cancel_sync()` -> `InferenceStream::Drop` -> upstream egress cancel.
     pub(crate) active_inference_sessions: Vec<super::frame_backstop::StreamingInferenceSession>,
+    /// Tenant resolved from the HTTP `Host` header during WebSocket upgrade,
+    /// pinned for the entire lifetime of this XMPP connection.
+    pub(crate) tenant: Option<crate::server::tenant_routing::ResolvedTenant>,
 }
 
 impl WsConnState {
@@ -2138,7 +2141,16 @@ impl WsConnState {
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
             active_inference_sessions: Vec::new(),
+            tenant: None,
         }
+    }
+
+    pub(crate) fn with_tenant(
+        mut self,
+        tenant: crate::server::tenant_routing::ResolvedTenant,
+    ) -> Self {
+        self.tenant = Some(tenant);
+        self
     }
 
     pub(super) fn retire_binding_ref(&mut self) {

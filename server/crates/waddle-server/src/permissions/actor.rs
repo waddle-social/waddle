@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use kameo::actor::Spawn;
@@ -20,6 +20,7 @@ use waddle_broker_core::permission::{
 use crate::config::{AuthzBackendKind, OpenFgaConsistencySetting, ServerConfig};
 use crate::db::actor::DbActor;
 use crate::db::Database;
+use crate::server::tenant_routing::TenantHostResolver;
 
 use super::host_grant::{
     EnrolledScopes, Enrollment, HostGrantStore, IssuancePolicy, ListedWitness, ProjectionIntent,
@@ -45,6 +46,8 @@ trait ActorPermissionBackend: Send + Sync {
         None
     }
 
+    fn attach_tenant_resolver(&self, _resolver: Arc<TenantHostResolver>) {}
+
     async fn check(
         &self,
         subject: &Subject,
@@ -52,19 +55,61 @@ trait ActorPermissionBackend: Send + Sync {
         object: &Object,
     ) -> Result<CheckResponse, PermissionError>;
 
+    async fn check_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError> {
+        self.check(subject, permission, object).await
+    }
+
     async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError>;
 
+    async fn write_tuple_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        tuple: Tuple,
+    ) -> Result<(), PermissionError> {
+        self.write_tuple(tuple).await
+    }
+
     async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError>;
+
+    async fn delete_tuple_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        tuple: &Tuple,
+    ) -> Result<(), PermissionError> {
+        self.delete_tuple(tuple).await
+    }
 
     async fn replace_exclusive_relation(
         &self,
         msg: ReplaceExclusiveRelation,
     ) -> Result<(), PermissionError>;
 
+    async fn replace_exclusive_relation_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        self.replace_exclusive_relation(msg).await
+    }
+
     async fn swap_exclusive_relation(
         &self,
         msg: SwapExclusiveRelation,
     ) -> Result<ExclusiveRelationSwap, PermissionError>;
+
+    async fn swap_exclusive_relation_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        self.swap_exclusive_relation(msg).await
+    }
 
     async fn list_relations(
         &self,
@@ -72,11 +117,29 @@ trait ActorPermissionBackend: Send + Sync {
         object: &Object,
     ) -> Result<Vec<String>, PermissionError>;
 
+    async fn list_relations_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError> {
+        self.list_relations(subject, object).await
+    }
+
     async fn list_subjects(
         &self,
         object: &Object,
         relation: &str,
     ) -> Result<Vec<Subject>, PermissionError>;
+
+    async fn list_subjects_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        self.list_subjects(object, relation).await
+    }
 
     async fn lookup_resources(
         &self,
@@ -85,12 +148,33 @@ trait ActorPermissionBackend: Send + Sync {
         object_type: ObjectType,
     ) -> Result<Vec<Object>, PermissionError>;
 
+    async fn lookup_resources_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError> {
+        self.lookup_resources(subject, permission, object_type)
+            .await
+    }
+
     async fn lookup_subjects(
         &self,
         object: &Object,
         permission: &str,
         subject_type: SubjectType,
     ) -> Result<Vec<Subject>, PermissionError>;
+
+    async fn lookup_subjects_for_tenant(
+        &self,
+        _tenant_id: &TenantId,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError> {
+        self.lookup_subjects(object, permission, subject_type).await
+    }
 
     async fn clear_cache(&self) {}
 
@@ -307,6 +391,27 @@ struct TenantPermissionBackendAdapter {
     backend_name: &'static str,
     tenant_id: TenantId,
     backend: Arc<dyn PermissionBackend>,
+    tenant_resolver: OnceLock<Arc<TenantHostResolver>>,
+}
+
+impl TenantPermissionBackendAdapter {
+    fn resolve_tenant(&self, subject: Option<&Subject>, object: Option<&Object>) -> TenantId {
+        if let Some(resolver) = self.tenant_resolver.get() {
+            if resolver.is_multi_tenant() {
+                if let Some(subj) = subject.filter(|s| s.subject_type == SubjectType::User) {
+                    if let Some(tid) = resolver.infer_tenant_id_from_jid(&subj.id) {
+                        return tid;
+                    }
+                }
+                if let Some(obj) = object {
+                    if let Some(tid) = resolver.infer_tenant_id_from_jid(&obj.id) {
+                        return tid;
+                    }
+                }
+            }
+        }
+        self.tenant_id.clone()
+    }
 }
 
 fn to_authz_object_type(object_type: ObjectType) -> AuthzObjectType {
@@ -409,8 +514,24 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         Some(&self.backend)
     }
 
+    fn attach_tenant_resolver(&self, resolver: Arc<TenantHostResolver>) {
+        let _ = self.tenant_resolver.set(resolver);
+    }
+
     async fn check(
         &self,
+        subject: &Subject,
+        permission: &str,
+        object: &Object,
+    ) -> Result<CheckResponse, PermissionError> {
+        let tenant = self.resolve_tenant(Some(subject), Some(object));
+        self.check_for_tenant(&tenant, subject, permission, object)
+            .await
+    }
+
+    async fn check_for_tenant(
+        &self,
+        tenant_id: &TenantId,
         subject: &Subject,
         permission: &str,
         object: &Object,
@@ -418,7 +539,7 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         let decision = self
             .backend
             .check(&CoreCheckRequest {
-                tenant_id: self.tenant_id.clone(),
+                tenant_id: tenant_id.clone(),
                 object: to_authz_object(object),
                 permission: AuthzRelation::new(permission),
                 subject: to_authz_subject(subject),
@@ -433,31 +554,59 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
     }
 
     async fn write_tuple(&self, tuple: Tuple) -> Result<(), PermissionError> {
+        let tenant = self.resolve_tenant(Some(&tuple.subject), Some(&tuple.object));
+        self.write_tuple_for_tenant(&tenant, tuple).await
+    }
+
+    async fn write_tuple_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        tuple: Tuple,
+    ) -> Result<(), PermissionError> {
         let authz_tuple = AuthzTuple {
             object: to_authz_object(&tuple.object),
             relation: AuthzRelation::new(tuple.relation.name),
             subject: to_authz_subject(&tuple.subject),
         };
         self.backend
-            .write_tuples(&self.tenant_id, AuthzModule::Chat, &[authz_tuple])
+            .write_tuples(tenant_id, AuthzModule::Chat, &[authz_tuple])
             .await
             .map_err(map_backend_error)
     }
 
     async fn delete_tuple(&self, tuple: &Tuple) -> Result<(), PermissionError> {
+        let tenant = self.resolve_tenant(Some(&tuple.subject), Some(&tuple.object));
+        self.delete_tuple_for_tenant(&tenant, tuple).await
+    }
+
+    async fn delete_tuple_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        tuple: &Tuple,
+    ) -> Result<(), PermissionError> {
         let authz_tuple = AuthzTuple {
             object: to_authz_object(&tuple.object),
             relation: AuthzRelation::new(tuple.relation.name.clone()),
             subject: to_authz_subject(&tuple.subject),
         };
         self.backend
-            .delete_tuples(&self.tenant_id, AuthzModule::Chat, &[authz_tuple])
+            .delete_tuples(tenant_id, AuthzModule::Chat, &[authz_tuple])
             .await
             .map_err(map_backend_error)
     }
 
     async fn replace_exclusive_relation(
         &self,
+        msg: ReplaceExclusiveRelation,
+    ) -> Result<(), PermissionError> {
+        let tenant = self.resolve_tenant(Some(&msg.subject), Some(&msg.object));
+        self.replace_exclusive_relation_for_tenant(&tenant, msg)
+            .await
+    }
+
+    async fn replace_exclusive_relation_for_tenant(
+        &self,
+        tenant_id: &TenantId,
         msg: ReplaceExclusiveRelation,
     ) -> Result<(), PermissionError> {
         let obj = to_authz_object(&msg.object);
@@ -473,7 +622,7 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
             .collect();
         if !to_delete.is_empty() {
             self.backend
-                .delete_tuples(&self.tenant_id, AuthzModule::Chat, &to_delete)
+                .delete_tuples(tenant_id, AuthzModule::Chat, &to_delete)
                 .await
                 .map_err(map_backend_error)?;
         }
@@ -484,7 +633,7 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
                 subject: subj,
             };
             self.backend
-                .write_tuples(&self.tenant_id, AuthzModule::Chat, &[new_tuple])
+                .write_tuples(tenant_id, AuthzModule::Chat, &[new_tuple])
                 .await
                 .map_err(map_backend_error)?;
         }
@@ -495,11 +644,20 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         &self,
         msg: SwapExclusiveRelation,
     ) -> Result<ExclusiveRelationSwap, PermissionError> {
+        let tenant = self.resolve_tenant(Some(&msg.subject), Some(&msg.object));
+        self.swap_exclusive_relation_for_tenant(&tenant, msg).await
+    }
+
+    async fn swap_exclusive_relation_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        msg: SwapExclusiveRelation,
+    ) -> Result<ExclusiveRelationSwap, PermissionError> {
         let obj = to_authz_object(&msg.object);
         let subj = to_authz_subject(&msg.subject);
         let existing = self
             .backend
-            .read_tuples(&self.tenant_id, &obj, None)
+            .read_tuples(tenant_id, &obj, None)
             .await
             .map_err(map_backend_error)?;
         let held: Vec<String> = existing
@@ -516,12 +674,15 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         if !expected_match {
             return Ok(ExclusiveRelationSwap::Mismatch);
         }
-        self.replace_exclusive_relation(ReplaceExclusiveRelation {
-            object: msg.object,
-            subject: msg.subject,
-            family: msg.family,
-            replacement: msg.replacement,
-        })
+        self.replace_exclusive_relation_for_tenant(
+            tenant_id,
+            ReplaceExclusiveRelation {
+                object: msg.object,
+                subject: msg.subject,
+                family: msg.family,
+                replacement: msg.replacement,
+            },
+        )
         .await?;
         Ok(ExclusiveRelationSwap::Swapped)
     }
@@ -531,11 +692,22 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         subject: &Subject,
         object: &Object,
     ) -> Result<Vec<String>, PermissionError> {
+        let tenant = self.resolve_tenant(Some(subject), Some(object));
+        self.list_relations_for_tenant(&tenant, subject, object)
+            .await
+    }
+
+    async fn list_relations_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        subject: &Subject,
+        object: &Object,
+    ) -> Result<Vec<String>, PermissionError> {
         let obj = to_authz_object(object);
         let subj = to_authz_subject(subject);
         let tuples = self
             .backend
-            .read_tuples(&self.tenant_id, &obj, None)
+            .read_tuples(tenant_id, &obj, None)
             .await
             .map_err(map_backend_error)?;
         Ok(tuples
@@ -550,11 +722,22 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         object: &Object,
         relation: &str,
     ) -> Result<Vec<Subject>, PermissionError> {
+        let tenant = self.resolve_tenant(None, Some(object));
+        self.list_subjects_for_tenant(&tenant, object, relation)
+            .await
+    }
+
+    async fn list_subjects_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        object: &Object,
+        relation: &str,
+    ) -> Result<Vec<Subject>, PermissionError> {
         let obj = to_authz_object(object);
         let rel = AuthzRelation::new(relation);
         let tuples = self
             .backend
-            .read_tuples(&self.tenant_id, &obj, Some(&rel))
+            .read_tuples(tenant_id, &obj, Some(&rel))
             .await
             .map_err(map_backend_error)?;
         tuples
@@ -569,10 +752,22 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         permission: &str,
         object_type: ObjectType,
     ) -> Result<Vec<Object>, PermissionError> {
+        let tenant = self.resolve_tenant(Some(subject), None);
+        self.lookup_resources_for_tenant(&tenant, subject, permission, object_type)
+            .await
+    }
+
+    async fn lookup_resources_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        subject: &Subject,
+        permission: &str,
+        object_type: ObjectType,
+    ) -> Result<Vec<Object>, PermissionError> {
         let objects = self
             .backend
             .list_objects(
-                &self.tenant_id,
+                tenant_id,
                 &to_authz_subject(subject),
                 &AuthzRelation::new(permission),
                 to_authz_object_type(object_type),
@@ -588,10 +783,22 @@ impl ActorPermissionBackend for TenantPermissionBackendAdapter {
         permission: &str,
         subject_type: SubjectType,
     ) -> Result<Vec<Subject>, PermissionError> {
+        let tenant = self.resolve_tenant(None, Some(object));
+        self.lookup_subjects_for_tenant(&tenant, object, permission, subject_type)
+            .await
+    }
+
+    async fn lookup_subjects_for_tenant(
+        &self,
+        tenant_id: &TenantId,
+        object: &Object,
+        permission: &str,
+        subject_type: SubjectType,
+    ) -> Result<Vec<Subject>, PermissionError> {
         let subjects = self
             .backend
             .list_users(
-                &self.tenant_id,
+                tenant_id,
                 &to_authz_object(object),
                 &AuthzRelation::new(permission),
                 to_authz_subject_type(subject_type),
@@ -682,6 +889,10 @@ pub struct PermissionActor {
     /// ([`Self::with_privileged_issuance`]); an actor without one, as the
     /// suites build, asks nothing.
     privileged_issuance: Option<IssuancePolicy>,
+    /// Active multi-tenant resolver shared with HTTP/WS routing so privileged
+    /// issuance and bare tuple operations dynamically recognize every served
+    /// tenant domain (including hot-reloaded `/etc/waddle/tenants` entries).
+    tenant_resolver: Option<Arc<TenantHostResolver>>,
 }
 
 /// Whether `relation` on `object` is a privileged or room-moderation
@@ -724,6 +935,7 @@ impl PermissionActor {
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
+            tenant_resolver: None,
         }
     }
 
@@ -748,10 +960,12 @@ impl PermissionActor {
                 backend_name,
                 tenant_id,
                 backend,
+                tenant_resolver: OnceLock::new(),
             }),
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
+            tenant_resolver: None,
         }
     }
 
@@ -909,7 +1123,17 @@ impl PermissionActor {
             host_grants: None,
             enrolled: EnrolledScopes::default(),
             privileged_issuance: None,
+            tenant_resolver: None,
         }
+    }
+
+    /// Attach the live multi-tenant [`TenantHostResolver`] so privileged
+    /// issuance admits accounts on every active tenant domain and bare tuple
+    /// operations route to each tenant's OpenFGA store.
+    pub fn with_tenant_resolver(mut self, resolver: Arc<TenantHostResolver>) -> Self {
+        self.backend.attach_tenant_resolver(Arc::clone(&resolver));
+        self.tenant_resolver = Some(resolver);
+        self
     }
 
     /// Decide issuance of the privileged relations
@@ -944,10 +1168,13 @@ impl PermissionActor {
         {
             return Ok(());
         }
-        let admitted = subject
-            .id
-            .parse::<jid::BareJid>()
-            .is_ok_and(|account| policy.admits_privileged_subject(&account));
+        let admitted = subject.id.parse::<jid::BareJid>().is_ok_and(|account| {
+            policy.admits_privileged_subject(&account)
+                || self
+                    .tenant_resolver
+                    .as_ref()
+                    .is_some_and(|r| r.contains_tenant_domain(account.domain().as_str()))
+        });
         if admitted {
             Ok(())
         } else {
@@ -1636,6 +1863,238 @@ impl kameo::message::Message<LookupSubjects> for PermissionActor {
             return Ok(Vec::new());
         }
         self.lookup_subjects(&msg.object, msg.permission.as_str(), msg.subject_type)
+            .await
+    }
+}
+
+/// Attach the live multi-tenant [`TenantHostResolver`] to a running
+/// [`PermissionActor`] during startup bootstrap before HTTP/WS traffic begins.
+pub struct AttachTenantResolver(pub Arc<TenantHostResolver>);
+
+impl kameo::message::Message<AttachTenantResolver> for PermissionActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: AttachTenantResolver,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.backend.attach_tenant_resolver(Arc::clone(&msg.0));
+        self.tenant_resolver = Some(msg.0);
+    }
+}
+
+/// Route a permission actor message to a specific tenant's authorization store
+/// (e.g. a tenant's dedicated OpenFGA store in multi-tenant mode).
+pub struct ForTenant<M> {
+    pub tenant_id: TenantId,
+    pub message: M,
+}
+
+impl<M> ForTenant<M> {
+    pub fn new(tenant_id: TenantId, message: M) -> Self {
+        Self { tenant_id, message }
+    }
+}
+
+impl kameo::message::Message<ForTenant<CheckPermission>> for PermissionActor {
+    type Reply = Result<CheckResponse, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<CheckPermission>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.message.object).await? {
+            return Ok(CheckResponse {
+                allowed: false,
+                reason: None,
+            });
+        }
+        self.backend
+            .check_for_tenant(
+                &msg.tenant_id,
+                &msg.message.subject,
+                msg.message.permission.as_str(),
+                &msg.message.object,
+            )
+            .await
+    }
+}
+
+impl kameo::message::Message<ForTenant<WriteTuple>> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<WriteTuple>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.message.tuple.object, &msg.message.tuple.subject)
+            .await?;
+        self.refuse_untrusted_privilege(
+            &msg.message.tuple.object,
+            Some(&msg.message.tuple.relation),
+            &msg.message.tuple.subject,
+        )?;
+        self.backend
+            .write_tuple_for_tenant(&msg.tenant_id, msg.message.tuple)
+            .await?;
+        self.clear_cache().await;
+        Ok(())
+    }
+}
+
+impl kameo::message::Message<ForTenant<DeleteTuple>> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<DeleteTuple>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.message.tuple.object, &msg.message.tuple.subject)
+            .await?;
+        self.backend
+            .delete_tuple_for_tenant(&msg.tenant_id, &msg.message.tuple)
+            .await?;
+        self.clear_cache().await;
+        Ok(())
+    }
+}
+
+impl kameo::message::Message<ForTenant<ReplaceExclusiveRelation>> for PermissionActor {
+    type Reply = Result<(), PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<ReplaceExclusiveRelation>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.message.object, &msg.message.subject)
+            .await?;
+        self.refuse_untrusted_privilege(
+            &msg.message.object,
+            msg.message.replacement.as_ref(),
+            &msg.message.subject,
+        )?;
+        self.backend
+            .replace_exclusive_relation_for_tenant(&msg.tenant_id, msg.message)
+            .await?;
+        self.clear_cache().await;
+        Ok(())
+    }
+}
+
+impl kameo::message::Message<ForTenant<SwapExclusiveRelation>> for PermissionActor {
+    type Reply = Result<ExclusiveRelationSwap, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<SwapExclusiveRelation>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refuse_enrolled_scope(&msg.message.object, &msg.message.subject)
+            .await?;
+        self.refuse_untrusted_privilege(
+            &msg.message.object,
+            msg.message.replacement.as_ref(),
+            &msg.message.subject,
+        )?;
+        let outcome = self
+            .backend
+            .swap_exclusive_relation_for_tenant(&msg.tenant_id, msg.message)
+            .await?;
+        self.clear_cache().await;
+        Ok(outcome)
+    }
+}
+
+impl kameo::message::Message<ForTenant<ListRelations>> for PermissionActor {
+    type Reply = Result<Vec<Relation>, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<ListRelations>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.message.object).await? {
+            return Ok(Vec::new());
+        }
+        let relations = self
+            .backend
+            .list_relations_for_tenant(&msg.tenant_id, &msg.message.subject, &msg.message.object)
+            .await?;
+        Ok(relations.into_iter().map(Relation::new).collect())
+    }
+}
+
+impl kameo::message::Message<ForTenant<ListSubjects>> for PermissionActor {
+    type Reply = Result<Vec<Subject>, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<ListSubjects>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.message.object).await? {
+            return Ok(Vec::new());
+        }
+        self.backend
+            .list_subjects_for_tenant(
+                &msg.tenant_id,
+                &msg.message.object,
+                &msg.message.relation.name,
+            )
+            .await
+    }
+}
+
+impl kameo::message::Message<ForTenant<LookupResources>> for PermissionActor {
+    type Reply = Result<Vec<Object>, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<LookupResources>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let resources = self
+            .backend
+            .lookup_resources_for_tenant(
+                &msg.tenant_id,
+                &msg.message.subject,
+                msg.message.permission.as_str(),
+                msg.message.object_type,
+            )
+            .await?;
+        let mut answered = Vec::with_capacity(resources.len());
+        for resource in resources {
+            if self.legacy_read_answers(&resource).await? {
+                answered.push(resource);
+            }
+        }
+        Ok(answered)
+    }
+}
+
+impl kameo::message::Message<ForTenant<LookupSubjects>> for PermissionActor {
+    type Reply = Result<Vec<Subject>, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ForTenant<LookupSubjects>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if !self.legacy_read_answers(&msg.message.object).await? {
+            return Ok(Vec::new());
+        }
+        self.backend
+            .lookup_subjects_for_tenant(
+                &msg.tenant_id,
+                &msg.message.object,
+                msg.message.permission.as_str(),
+                msg.message.subject_type,
+            )
             .await
     }
 }

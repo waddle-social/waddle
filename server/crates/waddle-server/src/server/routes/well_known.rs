@@ -4,7 +4,7 @@
 //! - /.well-known/host-meta (XEP-0156) - XMPP connection discovery
 //! - /.well-known/host-meta.json - JSON variant
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -12,6 +12,7 @@ use axum::Router;
 use std::sync::Arc;
 
 use super::auth::AuthState;
+use crate::server::tenant_routing::ResolvedTenant;
 
 const XMPP_ALT_CONNECTIONS_WEBSOCKET_REL: &str = "urn:xmpp:alt-connections:websocket";
 
@@ -27,8 +28,15 @@ pub fn router(auth_state: Arc<AuthState>) -> Router {
 ///
 /// Returns XRD document for XMPP service discovery (XEP-0156).
 /// Used by XMPP clients to discover WebSocket/BOSH endpoints.
-async fn host_meta_xml_handler(State(state): State<Arc<AuthState>>) -> Response {
-    let xml = host_meta_xml(&state.public_xmpp_websocket_url);
+async fn host_meta_xml_handler(
+    State(state): State<Arc<AuthState>>,
+    resolved: Option<Extension<ResolvedTenant>>,
+) -> Response {
+    let ws_url = resolved
+        .as_ref()
+        .map(|Extension(tenant)| &tenant.public_ws_url)
+        .unwrap_or(&state.public_xmpp_websocket_url);
+    let xml = host_meta_xml(ws_url);
 
     (
         StatusCode::OK,
@@ -64,8 +72,15 @@ fn host_meta_xml(websocket_url: &url::Url) -> String {
 /// GET /.well-known/host-meta.json
 ///
 /// Returns JSON variant of host-meta for XMPP service discovery.
-async fn host_meta_json_handler(State(state): State<Arc<AuthState>>) -> Response {
-    let json = host_meta_json(&state.public_xmpp_websocket_url);
+async fn host_meta_json_handler(
+    State(state): State<Arc<AuthState>>,
+    resolved: Option<Extension<ResolvedTenant>>,
+) -> Response {
+    let ws_url = resolved
+        .as_ref()
+        .map(|Extension(tenant)| &tenant.public_ws_url)
+        .unwrap_or(&state.public_xmpp_websocket_url);
+    let json = host_meta_json(ws_url);
 
     (
         StatusCode::OK,

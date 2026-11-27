@@ -19,12 +19,15 @@ use crate::db::actor::DbActor;
 use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::PermissionActor;
-use crate::server::bootstrap_membership::{reconcile_user_membership, BootstrapMembershipConfig};
+use crate::server::bootstrap_membership::{
+    reconcile_user_membership_for_tenant, BootstrapMembershipConfig,
+};
 use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
+use crate::server::tenant_routing::{ResolvedTenant, TenantHostResolver};
 use crate::server::AppState;
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, post};

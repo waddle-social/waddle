@@ -17,6 +17,11 @@ spec:
   authProvidersSecretRef:
     name: waddle-runtime-secrets
     key: WADDLE_AUTH_PROVIDERS_JSON
+  ingress:
+    mode: Disabled
+    hostnames:
+      - waddle.social
+      - next.apps.waddle.chat
   quotas:
     maxConcurrentConnections: 2000
     maxRooms: 1000

@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::fmt;
+use std::net::IpAddr;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{CustomResource, KubeSchema};
@@ -7,7 +9,151 @@ use serde::{Deserialize, Serialize};
 
 use crate::dependencies::{LocalObjectRef, SecretKeyRef};
 use crate::identifiers::{ResourceName, XmppDomain};
+use crate::server_config::IngressSpec;
 use crate::waddle_server::conditions_schema;
+
+/// Always-enforced built-in reserved single-label subdomains under `managedBaseDomain`.
+pub const BUILTIN_RESERVED_SUBDOMAINS: &[&str] = &[
+    "xmpp",
+    "sfu",
+    "turn",
+    "teleport",
+    "www",
+    "api",
+    "admin",
+    "auth",
+    "colony",
+    "mail",
+    "ns1",
+    "ns2",
+    "status",
+    "docs",
+    "apps",
+    "next",
+    "muc",
+    "spaces",
+    "upload",
+    "extensions",
+    "push",
+    "community",
+    "chat",
+];
+
+/// Ingress routing mode for a `WaddleTenant`.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TenantIngressMode {
+    /// Automatically select `ManagedSubdomain` when hostnames sit under the server's
+    /// `managedBaseDomain`, or `CustomDomain` otherwise.
+    #[default]
+    Auto,
+    /// Route under the server's managed wildcard domain (`<slug>.<managedBaseDomain>`).
+    ManagedSubdomain,
+    /// Route a customer-owned domain with per-tenant `Certificate`, `ReferenceGrant`, and
+    /// `Gateway` listener.
+    CustomDomain,
+    /// Do not manage Gateway, DNS, or TLS resources (hostnames are still projected to the server).
+    Disabled,
+}
+
+/// Domain routing and ingress configuration for a `WaddleTenant`.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantIngressSpec {
+    /// Ingress reconciliation mode (`Auto`, `ManagedSubdomain`, `CustomDomain`, or `Disabled`).
+    #[serde(default)]
+    pub mode: TenantIngressMode,
+    /// Explicit lower-case FQDNs served for this tenant (defaults to `[spec.tenantId]` when empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[x_kube(
+        validation = r#"self.all(h, size(h) > 0 && size(h) <= 253 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))"#
+    )]
+    pub hostnames: Vec<String>,
+}
+
+/// Concrete ingress routing mode resolved after evaluating tenant and server ingress configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedIngressMode {
+    /// No Gateway, DNS, or TLS resources are managed by the operator for this tenant.
+    Disabled,
+    /// Managed wildcard subdomain routing (`HTTPRoute`s + `DNSEndpoint`, zero `Gateway` mutation).
+    ManagedSubdomain,
+    /// Bring-your-own custom domain routing (`Certificate`, `ReferenceGrant`, per-tenant `Gateway` SSA, `HTTPRoute`s).
+    CustomDomain,
+}
+
+/// Validated ingress plan derived from [`WaddleTenantSpec`] and the hosting server's [`IngressSpec`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTenantIngress {
+    /// Effective ingress mode to reconcile.
+    pub mode: ResolvedIngressMode,
+    /// Canonical hostnames projected for this tenant.
+    pub hostnames: Vec<String>,
+}
+
+/// Validation failure when resolving tenant ingress against the hosting `WaddleServer`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TenantIngressError {
+    /// Hostname is not a valid lower-case FQDN (e.g. IP literal, wildcard, uppercase, or single label).
+    #[error("ingress hostname '{hostname}' must be a valid lower-case FQDN (no wildcards, ports, or IP literals)")]
+    InvalidHostname {
+        /// Offending hostname.
+        hostname: String,
+    },
+    /// Server ingress does not configure `managedBaseDomain` while tenant requested `ManagedSubdomain`.
+    #[error(
+        "spec.ingress.mode=ManagedSubdomain requires WaddleServer spec.ingress.managedBaseDomain"
+    )]
+    ManagedBaseDomainNotConfigured,
+    /// Tenant attempted to claim the apex `managedBaseDomain` (e.g. `waddle.social`) for managed/BYO routing.
+    #[error("hostname '{hostname}' matches apex managedBaseDomain '{base_domain}'; set spec.ingress.mode=Disabled for static apex routing")]
+    ApexManagedBaseDomainForbidden {
+        /// Offending hostname.
+        hostname: String,
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+    /// Tenant requested a multi-label subdomain beneath `managedBaseDomain` (e.g. `a.b.waddle.social`).
+    #[error(
+        "hostname '{hostname}' under '{base_domain}' must be a single label (<slug>.{base_domain})"
+    )]
+    MultiLabelManagedSubdomain {
+        /// Offending hostname.
+        hostname: String,
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+    /// Subdomain label is reserved by built-in platform rules or `WaddleServer.spec.ingress.reservedSubdomains`.
+    #[error("subdomain '{subdomain}' under '{base_domain}' is reserved")]
+    ReservedSubdomain {
+        /// Reserved single-label subdomain.
+        subdomain: String,
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+    /// `ManagedSubdomain` mode received a hostname outside `managedBaseDomain`.
+    #[error("hostname '{hostname}' is not a subdomain of managedBaseDomain '{base_domain}'")]
+    HostnameNotUnderManagedBaseDomain {
+        /// Offending hostname.
+        hostname: String,
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+    /// `CustomDomain` mode received a hostname under `managedBaseDomain`.
+    #[error("hostname '{hostname}' is under managedBaseDomain '{base_domain}'; use ManagedSubdomain mode")]
+    CustomDomainUnderManagedBaseDomain {
+        /// Offending hostname.
+        hostname: String,
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+    /// `Auto` mode received a mix of managed subdomains and custom domains on the same tenant.
+    #[error("spec.ingress.mode=Auto cannot mix managed subdomains under '{base_domain}' with custom domains")]
+    MixedIngressHostnameModes {
+        /// Server `managedBaseDomain`.
+        base_domain: String,
+    },
+}
 
 /// Placement mode for a `WaddleTenant` across Waddle server cells.
 #[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,6 +265,32 @@ pub struct WaddleTenantSpec {
     /// Optional per-tenant extension and inference provider allowlists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<TenantExtensionsSpec>,
+
+    /// Optional per-tenant domain routing and Gateway API / TLS ingress configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<TenantIngressSpec>,
+}
+
+impl WaddleTenantSpec {
+    /// Returns the effective ingress mode (`Auto` when `spec.ingress` is omitted).
+    #[must_use]
+    pub fn effective_ingress_mode(&self) -> TenantIngressMode {
+        self.ingress
+            .as_ref()
+            .map_or(TenantIngressMode::Auto, |i| i.mode)
+    }
+
+    /// Returns the effective hostnames routed to this tenant (`[spec.tenantId]` when
+    /// `spec.ingress.hostnames` is omitted or empty).
+    #[must_use]
+    pub fn effective_hostnames(&self) -> Vec<String> {
+        if let Some(ingress) = &self.ingress {
+            if !ingress.hostnames.is_empty() {
+                return ingress.hostnames.clone();
+            }
+        }
+        vec![self.tenant_id.clone()]
+    }
 }
 
 /// Lifecycle phase reported in `WaddleTenant.status.phase`.
@@ -169,6 +341,9 @@ pub struct WaddleTenantStatus {
     /// Current placement lease epoch assigned to this tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_epoch: Option<u64>,
+    /// Effective hostnames projected and routed for this tenant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
     /// Standard Kubernetes status conditions keyed by `type`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(schema_with = "conditions_schema")]
@@ -187,6 +362,10 @@ pub enum TenantValidationViolation {
     InvalidAuthProvidersSecretRef,
     /// One or more `owners` entries were empty or whitespace-only.
     EmptyOwnerEntry,
+    /// One or more `ingress.hostnames` entries failed canonical lower-case FQDN validation.
+    InvalidIngressHostname,
+    /// `ingress.hostnames` contains duplicate entries.
+    DuplicateIngressHostname,
 }
 
 impl fmt::Display for TenantValidationViolation {
@@ -212,6 +391,18 @@ impl fmt::Display for TenantValidationViolation {
                 write!(
                     f,
                     "spec.owners entries must not be empty or whitespace-only"
+                )
+            }
+            Self::InvalidIngressHostname => {
+                write!(
+                    f,
+                    "spec.ingress.hostnames entries must be valid lower-case RFC-1123 FQDNs"
+                )
+            }
+            Self::DuplicateIngressHostname => {
+                write!(
+                    f,
+                    "spec.ingress.hostnames must not contain duplicate entries"
                 )
             }
         }
@@ -272,12 +463,168 @@ pub fn validate_tenant_spec(spec: &WaddleTenantSpec) -> Result<XmppDomain, Tenan
         violations.push(TenantValidationViolation::EmptyOwnerEntry);
     }
 
+    if let Some(ingress) = &spec.ingress {
+        let mut seen = BTreeSet::new();
+        let mut has_invalid = false;
+        let mut has_dup = false;
+        for host in &ingress.hostnames {
+            if host != host.trim()
+                || XmppDomain::try_new(host).is_err()
+                || host.parse::<IpAddr>().is_ok()
+            {
+                has_invalid = true;
+            }
+            if !seen.insert(host.as_str()) {
+                has_dup = true;
+            }
+        }
+        if has_invalid {
+            violations.push(TenantValidationViolation::InvalidIngressHostname);
+        }
+        if has_dup {
+            violations.push(TenantValidationViolation::DuplicateIngressHostname);
+        }
+    }
+
     if !violations.is_empty() {
         return Err(TenantValidationReport { violations });
     }
 
     Ok(domain
         .unwrap_or_else(|| XmppDomain::try_new("localhost").unwrap_or_else(|_| unreachable!())))
+}
+
+/// Validates and resolves a tenant's ingress mode and hostnames against its hosting
+/// `WaddleServer`'s [`IngressSpec`].
+///
+/// Enforces lowercase FQDN syntax, rejects apex `managedBaseDomain`, rejects multi-label
+/// subdomains under `managedBaseDomain`, and enforces both [`BUILTIN_RESERVED_SUBDOMAINS`]
+/// and `server_ingress.reserved_subdomains`.
+///
+/// # Errors
+/// Returns [`TenantIngressError`] if any hostname violates managed-base, reserved-subdomain,
+/// or mode invariants.
+pub fn validate_tenant_ingress_against_server(
+    spec: &WaddleTenantSpec,
+    server_ingress: &IngressSpec,
+) -> Result<ResolvedTenantIngress, TenantIngressError> {
+    let hostnames = spec.effective_hostnames();
+    let requested_mode = spec.effective_ingress_mode();
+
+    if !server_ingress.enabled || requested_mode == TenantIngressMode::Disabled {
+        return Ok(ResolvedTenantIngress {
+            mode: ResolvedIngressMode::Disabled,
+            hostnames,
+        });
+    }
+
+    let managed_base = server_ingress
+        .managed_base_domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut reserved: BTreeSet<&str> = BUILTIN_RESERVED_SUBDOMAINS.iter().copied().collect();
+    for extra in &server_ingress.reserved_subdomains {
+        let trimmed = extra.trim();
+        if !trimmed.is_empty() {
+            reserved.insert(trimmed);
+        }
+    }
+
+    let mut saw_managed = false;
+    let mut saw_custom = false;
+
+    for host in &hostnames {
+        if host != host.trim()
+            || !host.contains('.')
+            || host.parse::<IpAddr>().is_ok()
+            || XmppDomain::try_new(host).is_err()
+        {
+            return Err(TenantIngressError::InvalidHostname {
+                hostname: host.clone(),
+            });
+        }
+
+        if let Some(base) = managed_base {
+            if host == base {
+                return Err(TenantIngressError::ApexManagedBaseDomainForbidden {
+                    hostname: host.clone(),
+                    base_domain: base.to_owned(),
+                });
+            }
+            let suffix = format!(".{base}");
+            if let Some(prefix) = host.strip_suffix(&suffix) {
+                if prefix.contains('.') {
+                    return Err(TenantIngressError::MultiLabelManagedSubdomain {
+                        hostname: host.clone(),
+                        base_domain: base.to_owned(),
+                    });
+                }
+                if reserved.contains(prefix) {
+                    return Err(TenantIngressError::ReservedSubdomain {
+                        subdomain: prefix.to_owned(),
+                        base_domain: base.to_owned(),
+                    });
+                }
+                saw_managed = true;
+                continue;
+            }
+        }
+
+        saw_custom = true;
+    }
+
+    let resolved_mode = match requested_mode {
+        TenantIngressMode::Disabled => ResolvedIngressMode::Disabled,
+        TenantIngressMode::ManagedSubdomain => {
+            let Some(base) = managed_base else {
+                return Err(TenantIngressError::ManagedBaseDomainNotConfigured);
+            };
+            if saw_custom {
+                let offending = hostnames
+                    .iter()
+                    .find(|h| !h.ends_with(&format!(".{base}")))
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(TenantIngressError::HostnameNotUnderManagedBaseDomain {
+                    hostname: offending,
+                    base_domain: base.to_owned(),
+                });
+            }
+            ResolvedIngressMode::ManagedSubdomain
+        }
+        TenantIngressMode::CustomDomain => {
+            if saw_managed {
+                let base = managed_base.unwrap_or_default();
+                let offending = hostnames
+                    .iter()
+                    .find(|h| h.ends_with(&format!(".{base}")))
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(TenantIngressError::CustomDomainUnderManagedBaseDomain {
+                    hostname: offending,
+                    base_domain: base.to_owned(),
+                });
+            }
+            ResolvedIngressMode::CustomDomain
+        }
+        TenantIngressMode::Auto => match (saw_managed, saw_custom) {
+            (true, false) => ResolvedIngressMode::ManagedSubdomain,
+            (false, true) => ResolvedIngressMode::CustomDomain,
+            (true, true) => {
+                return Err(TenantIngressError::MixedIngressHostnameModes {
+                    base_domain: managed_base.unwrap_or_default().to_owned(),
+                });
+            }
+            (false, false) => ResolvedIngressMode::Disabled,
+        },
+    };
+
+    Ok(ResolvedTenantIngress {
+        mode: resolved_mode,
+        hostnames,
+    })
 }
 
 #[cfg(test)]
@@ -312,6 +659,7 @@ mod tests {
                 approved_models: vec!["anthropic/claude-sonnet-4".to_owned()],
                 zdr_required: true,
             }),
+            ingress: None,
         }
     }
 
@@ -408,5 +756,147 @@ mod tests {
         assert!(report
             .violations()
             .contains(&TenantValidationViolation::InvalidAuthProvidersSecretRef));
+    }
+
+    fn enabled_server_ingress() -> IngressSpec {
+        IngressSpec {
+            enabled: true,
+            gateway_ref: Some(crate::server_config::GatewayRefSpec {
+                name: "waddle-gateway".to_owned(),
+                namespace: "default".to_owned(),
+            }),
+            managed_base_domain: Some("waddle.social".to_owned()),
+            managed_wildcard_https_section: Some("https-waddle-tenants".to_owned()),
+            managed_wildcard_http_section: Some("http-waddle-tenants".to_owned()),
+            byo_http_section: Some("http-byo-tenants".to_owned()),
+            target_ips: vec!["51.159.109.202".to_owned()],
+            tls_cluster_issuer: Some("letsencrypt-production".to_owned()),
+            reserved_subdomains: vec!["billing".to_owned()],
+            ..IngressSpec::default()
+        }
+    }
+
+    #[test]
+    fn tenant_ingress_validation_handles_managed_custom_disabled_and_rejects_reserved_and_apex() {
+        let server = enabled_server_ingress();
+
+        // Disabled mode allows apex + preview hostnames to be projected without routing mutations.
+        let mut disabled = sample_tenant_spec();
+        disabled.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::Disabled,
+            hostnames: vec![
+                "waddle.social".to_owned(),
+                "next.apps.waddle.chat".to_owned(),
+            ],
+        });
+        let resolved =
+            validate_tenant_ingress_against_server(&disabled, &server).expect("disabled valid");
+        assert_eq!(resolved.mode, ResolvedIngressMode::Disabled);
+        assert_eq!(
+            resolved.hostnames,
+            vec!["waddle.social", "next.apps.waddle.chat"]
+        );
+
+        // Managed subdomain resolves cleanly.
+        let mut managed = sample_tenant_spec();
+        managed.tenant_id = "example.waddle.social".to_owned();
+        managed.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::ManagedSubdomain,
+            hostnames: Vec::new(),
+        });
+        let resolved =
+            validate_tenant_ingress_against_server(&managed, &server).expect("managed valid");
+        assert_eq!(resolved.mode, ResolvedIngressMode::ManagedSubdomain);
+        assert_eq!(resolved.hostnames, vec!["example.waddle.social"]);
+
+        // Custom domain resolves cleanly (both explicit and Auto).
+        let mut custom = sample_tenant_spec();
+        custom.tenant_id = "waddle.rawkode.chat".to_owned();
+        custom.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::CustomDomain,
+            hostnames: Vec::new(),
+        });
+        let resolved =
+            validate_tenant_ingress_against_server(&custom, &server).expect("custom valid");
+        assert_eq!(resolved.mode, ResolvedIngressMode::CustomDomain);
+        assert_eq!(resolved.hostnames, vec!["waddle.rawkode.chat"]);
+
+        // Apex managedBaseDomain is rejected for ManagedSubdomain and Auto.
+        let mut apex = sample_tenant_spec();
+        apex.tenant_id = "waddle.social".to_owned();
+        apex.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::ManagedSubdomain,
+            hostnames: Vec::new(),
+        });
+        assert!(matches!(
+            validate_tenant_ingress_against_server(&apex, &server),
+            Err(TenantIngressError::ApexManagedBaseDomainForbidden { .. })
+        ));
+
+        // Multi-label subdomain under managedBaseDomain is rejected.
+        let mut multi = sample_tenant_spec();
+        multi.tenant_id = "foo.teleport.waddle.social".to_owned();
+        multi.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::Auto,
+            hostnames: Vec::new(),
+        });
+        assert!(matches!(
+            validate_tenant_ingress_against_server(&multi, &server),
+            Err(TenantIngressError::MultiLabelManagedSubdomain { .. })
+        ));
+
+        // Every built-in reserved subdomain and server-configured reserved subdomain is rejected.
+        for label in BUILTIN_RESERVED_SUBDOMAINS
+            .iter()
+            .copied()
+            .chain(std::iter::once("billing"))
+        {
+            let mut res = sample_tenant_spec();
+            res.tenant_id = format!("{label}.waddle.social");
+            res.ingress = Some(TenantIngressSpec {
+                mode: TenantIngressMode::ManagedSubdomain,
+                hostnames: Vec::new(),
+            });
+            assert!(
+                matches!(
+                    validate_tenant_ingress_against_server(&res, &server),
+                    Err(TenantIngressError::ReservedSubdomain { .. })
+                ),
+                "reserved subdomain {label}.waddle.social must be rejected"
+            );
+        }
+
+        // CustomDomain under managedBaseDomain is rejected.
+        let mut custom_under_base = sample_tenant_spec();
+        custom_under_base.tenant_id = "example.waddle.social".to_owned();
+        custom_under_base.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::CustomDomain,
+            hostnames: Vec::new(),
+        });
+        assert!(matches!(
+            validate_tenant_ingress_against_server(&custom_under_base, &server),
+            Err(TenantIngressError::CustomDomainUnderManagedBaseDomain { .. })
+        ));
+    }
+
+    #[test]
+    fn tenant_cel_rejects_wildcard_and_uppercase_ingress_hostnames() {
+        let mut wildcard = sample_tenant_spec();
+        wildcard.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::CustomDomain,
+            hostnames: vec!["*.rawkode.chat".to_owned()],
+        });
+        assert!(WaddleTenant::new("bad-wild", wildcard)
+            .validate_cel()
+            .is_err());
+
+        let mut upper = sample_tenant_spec();
+        upper.ingress = Some(TenantIngressSpec {
+            mode: TenantIngressMode::CustomDomain,
+            hostnames: vec!["Waddle.Rawkode.Chat".to_owned()],
+        });
+        assert!(WaddleTenant::new("bad-upper-host", upper)
+            .validate_cel()
+            .is_err());
     }
 }

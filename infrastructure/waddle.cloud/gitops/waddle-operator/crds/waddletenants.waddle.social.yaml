@@ -86,6 +86,27 @@ spec:
                     description: Require Zero Data Retention (ZDR) endpoints for inference requests.
                     type: boolean
                 type: object
+              ingress:
+                description: Optional per-tenant domain routing and Gateway API / TLS ingress configuration.
+                nullable: true
+                properties:
+                  hostnames:
+                    description: Explicit lower-case FQDNs served for this tenant (defaults to `[spec.tenantId]` when empty).
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-validations:
+                    - rule: self.all(h, size(h) > 0 && size(h) <= 253 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))
+                  mode:
+                    default: Auto
+                    description: Ingress reconciliation mode (`Auto`, `ManagedSubdomain`, `CustomDomain`, or `Disabled`).
+                    enum:
+                    - Auto
+                    - ManagedSubdomain
+                    - CustomDomain
+                    - Disabled
+                    type: string
+                type: object
               owners:
                 description: Localparts granted initial tenant owner privileges.
                 items:
@@ -180,6 +201,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              hostnames:
+                description: Effective hostnames projected and routed for this tenant.
+                items:
+                  type: string
+                type: array
               leaseEpoch:
                 description: Current placement lease epoch assigned to this tenant.
                 format: uint64

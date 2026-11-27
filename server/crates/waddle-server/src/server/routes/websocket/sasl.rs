@@ -28,7 +28,7 @@ use waddle_xmpp_core::xep0388_inline::{
 /// (XEP-0493), which is how a client that sent an empty token learns where
 /// to authorize.
 fn oauth_failure(
-    state: &WebSocketState,
+    base_url: &str,
     sasl2: bool,
     status: OAuthBearerStatus,
     failure: OAuthSaslFailure,
@@ -37,7 +37,7 @@ fn oauth_failure(
 ) -> Vec<Element> {
     waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
     *authenticated_session = None;
-    let discovery_url = discovery_url(&state.deps.auth_state.base_url);
+    let discovery_url = discovery_url(base_url);
     let json = OAuthBearerError::new(status, &discovery_url).to_json_bytes();
     if sasl2 {
         use waddle_xmpp_core::xep0388::{Sasl2Challenge, Sasl2Data};
@@ -83,20 +83,32 @@ use super::{
     WebSocketState, BASE64_STANDARD,
 };
 
+pub(super) struct OAuthBearerContext<'a> {
+    pub(super) domain: &'a str,
+    pub(super) base_url: &'a str,
+    pub(super) stream_from: Option<&'a BareJid>,
+    pub(super) sasl2: bool,
+}
+
 /// Handle SASL OAUTHBEARER authentication.
 pub(super) async fn handle_sasl_oauthbearer(
     b64_data: &str,
+    ctx: OAuthBearerContext<'_>,
     state: &WebSocketState,
-    stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
-    sasl2: bool,
 ) -> Vec<Element> {
+    let OAuthBearerContext {
+        domain,
+        base_url,
+        stream_from,
+        sasl2,
+    } = ctx;
     // Every failure of the exchange ends as RFC 7628 §3.2.2 requires.
     macro_rules! fail {
         ($status:expr, $failure:expr) => {
             oauth_failure(
-                state,
+                base_url,
                 sasl2,
                 $status,
                 $failure,
@@ -163,22 +175,31 @@ pub(super) async fn handle_sasl_oauthbearer(
                     )
                 }
             };
-            let bare_jid_str =
-                match localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
-                {
-                    Ok(jid) => jid,
-                    Err(e) => {
-                        warn!(
-                            localpart = %session.xmpp_localpart,
-                            error = %e,
-                            "SASL OAUTHBEARER: failed to build JID from session localpart",
-                        );
-                        return fail!(
-                            OAuthBearerStatus::ServerError,
-                            OAuthSaslFailure::NotAuthorized
-                        );
-                    }
-                };
+            if principal.domain().as_str() != domain {
+                warn!(
+                    session_domain = %principal.domain(),
+                    connection_domain = %domain,
+                    "SASL OAUTHBEARER: rejecting cross-tenant session token"
+                );
+                return fail!(
+                    OAuthBearerStatus::InvalidToken,
+                    OAuthSaslFailure::NotAuthorized
+                );
+            }
+            let bare_jid_str = match localpart_to_jid(&session.xmpp_localpart, domain) {
+                Ok(jid) => jid,
+                Err(e) => {
+                    warn!(
+                        localpart = %session.xmpp_localpart,
+                        error = %e,
+                        "SASL OAUTHBEARER: failed to build JID from session localpart",
+                    );
+                    return fail!(
+                        OAuthBearerStatus::ServerError,
+                        OAuthSaslFailure::NotAuthorized
+                    );
+                }
+            };
 
             let derived = match bare_jid_str.parse::<BareJid>() {
                 Ok(derived) => derived,

@@ -111,7 +111,7 @@ CREATE TABLE auth_identities (
     raw_claims_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_login_at TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT 'default',
-    UNIQUE(issuer, subject),
+    UNIQUE(tenant_id, issuer, subject),
     FOREIGN KEY (user_jid) REFERENCES users(jid) ON DELETE CASCADE
 );
 
@@ -1261,14 +1261,19 @@ CREATE TABLE user_avatar_source (
 
 CREATE TABLE users (
     jid TEXT PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    xmpp_localpart TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
+    xmpp_localpart TEXT NOT NULL,
     display_name TEXT,
     avatar_url TEXT,
     primary_email TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-, localpart_key TEXT, account_id TEXT, tenant_id TEXT NOT NULL DEFAULT 'default');
+    updated_at TEXT NOT NULL,
+    localpart_key TEXT,
+    account_id TEXT,
+    tenant_id TEXT NOT NULL DEFAULT 'default',
+    UNIQUE(tenant_id, username),
+    UNIQUE(tenant_id, xmpp_localpart)
+);
 
 CREATE TABLE vcard_storage (
     jid TEXT PRIMARY KEY,

@@ -175,6 +175,9 @@ async fn handle_k8s_request(
         if path.ends_with("/endpointslices") {
             return handle_endpointslice_list(&g, &path, query);
         }
+        if path.ends_with("/waddletenants") {
+            return handle_waddletenant_list(&g, &path);
+        }
         return handle_resource_get(&mut g, &path);
     }
 
@@ -188,7 +191,7 @@ async fn handle_k8s_request(
     match method {
         Method::POST => handle_resource_post(&mut g, &path, payload),
         Method::PUT => handle_resource_put(&mut g, path, payload),
-        Method::PATCH => handle_resource_patch(&mut g, path, payload),
+        Method::PATCH => handle_resource_patch(&mut g, path, query, payload),
         Method::DELETE => handle_resource_delete(&mut g, &path),
         _ => json_response(StatusCode::METHOD_NOT_ALLOWED, json!({})),
     }
@@ -268,6 +271,25 @@ fn handle_endpointslice_list(g: &MockClusterInner, path: &str, query: &str) -> R
         json!({
             "apiVersion": "discovery.k8s.io/v1",
             "kind": "EndpointSliceList",
+            "metadata": { "resourceVersion": "1" },
+            "items": items
+        }),
+    )
+}
+
+fn handle_waddletenant_list(g: &MockClusterInner, path: &str) -> Response {
+    let prefix = format!("{path}/");
+    let items: Vec<Value> = g
+        .resources
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix))
+        .map(|(_, v)| v.clone())
+        .collect();
+    json_response(
+        StatusCode::OK,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleTenantList",
             "metadata": { "resourceVersion": "1" },
             "items": items
         }),
@@ -354,9 +376,31 @@ fn handle_resource_put(g: &mut MockClusterInner, path: String, payload: Value) -
     json_response(StatusCode::OK, stored)
 }
 
-fn handle_resource_patch(g: &mut MockClusterInner, path: String, payload: Value) -> Response {
+fn handle_resource_patch(
+    g: &mut MockClusterInner,
+    path: String,
+    query: &str,
+    payload: Value,
+) -> Response {
     if let Some(parent_path) = path.strip_suffix("/status") {
         return handle_status_patch(g, parent_path, &payload);
+    }
+
+    if path.contains("/gateways/") {
+        if let Some(prev) = g.resources.get(&path).cloned() {
+            let field_manager = query
+                .split('&')
+                .find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == "fieldManager"))
+                .map(|(_, v)| v.to_owned())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let mut merged = merge_gateway_ssa(&prev, &payload, &field_manager);
+            let rv = next_rv(g);
+            if let Some(meta) = merged.get_mut("metadata").and_then(Value::as_object_mut) {
+                meta.insert("resourceVersion".to_owned(), Value::String(rv));
+            }
+            g.resources.insert(path, merged.clone());
+            return json_response(StatusCode::OK, merged);
+        }
     }
 
     let url_name = path.rsplit('/').next().unwrap_or("");
@@ -424,6 +468,78 @@ fn handle_resource_patch(g: &mut MockClusterInner, path: String, payload: Value)
     }
     g.resources.insert(path, stored.clone());
     json_response(StatusCode::OK, stored)
+}
+
+fn merge_gateway_ssa(prev: &Value, payload: &Value, field_manager: &str) -> Value {
+    use std::collections::BTreeSet;
+
+    let mut merged = prev.clone();
+    let new_listeners = payload["spec"]["listeners"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let new_names: BTreeSet<String> = new_listeners
+        .iter()
+        .filter_map(|l| l.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+
+    // Find listener names previously owned by this fieldManager.
+    let mut prev_owned = BTreeSet::new();
+    if let Some(entries) = prev["metadata"]["managedFields"].as_array() {
+        for entry in entries {
+            if entry["manager"].as_str() == Some(field_manager) {
+                if let Some(lmap) = entry["fieldsV1"]["f:spec"]["f:listeners"].as_object() {
+                    for key in lmap.keys() {
+                        if let Some(raw) = key.strip_prefix("k:") {
+                            if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                                if let Some(n) = parsed["name"].as_str() {
+                                    prev_owned.insert(n.to_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut listeners: Vec<Value> = prev["spec"]["listeners"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| {
+            let name = l["name"].as_str().unwrap_or("");
+            // Drop listeners previously owned by this manager if omitted from new patch, or being replaced.
+            !(prev_owned.contains(name) || new_names.contains(name))
+        })
+        .collect();
+    listeners.extend(new_listeners);
+    merged["spec"]["listeners"] = Value::Array(listeners);
+
+    // Update managedFields entry for this field_manager.
+    let mut managed_fields = prev["metadata"]["managedFields"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    managed_fields.retain(|e| e["manager"].as_str() != Some(field_manager));
+    if !new_names.is_empty() {
+        let mut lmap = serde_json::Map::new();
+        for name in &new_names {
+            lmap.insert(format!("k:{{\"name\":\"{name}\"}}"), json!({}));
+        }
+        managed_fields.push(json!({
+            "manager": field_manager,
+            "operation": "Apply",
+            "fieldsV1": {
+                "f:spec": {
+                    "f:listeners": Value::Object(lmap)
+                }
+            }
+        }));
+    }
+    merged["metadata"]["managedFields"] = Value::Array(managed_fields);
+    merged
 }
 
 fn handle_status_patch(g: &mut MockClusterInner, parent_path: &str, payload: &Value) -> Response {
@@ -2103,5 +2219,401 @@ async fn turso_openfga_broker_server_and_waddle_tenant_full_lifecycle() {
     assert!(
         agg_after["data"].get("waddle.social.json").is_none(),
         "deleted tenant entry must be removed from server aggregated tenants ConfigMap"
+    );
+}
+
+fn seed_ready_ingress_server_and_gateway(cluster: &MockCluster, ns: &str, server_name: &str) {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    cluster.put(
+        &format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddleservers/{server_name}"),
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleServer",
+            "metadata": {
+                "name": server_name,
+                "namespace": ns,
+                "uid": "11111111-aaaa-4bbb-8ccc-000000000010",
+                "generation": 1
+            },
+            "spec": {
+                "replicas": 1,
+                "updateStrategy": "Recreate",
+                "baseUrl": "https://next.apps.waddle.chat",
+                "xmpp": { "domain": "waddle.social" },
+                "storage": {
+                    "backend": "Turso",
+                    "turso": { "dataDir": "/var/lib/waddle/tenants", "reservedFds": 256 }
+                },
+                "authz": {
+                    "backend": "OpenFga",
+                    "openfga": {
+                        "serviceName": "openfga",
+                        "port": 8080,
+                        "scheme": "http",
+                        "authSecretRef": { "name": "openfga-auth", "key": "api-token" }
+                    }
+                },
+                "secrets": {
+                    "mode": "ExternalSecrets",
+                    "externalSecrets": {
+                        "externalSecretName": "waddle-runtime-secrets",
+                        "apiVersion": "V1"
+                    }
+                },
+                "ingress": {
+                    "enabled": true,
+                    "gatewayRef": { "name": "waddle-gateway", "namespace": "default" },
+                    "managedBaseDomain": "waddle.social",
+                    "managedWildcardHttpsSection": "https-waddle-tenants",
+                    "managedWildcardHttpSection": "http-waddle-tenants",
+                    "byoHttpSection": "http-byo-tenants",
+                    "targetIps": ["51.159.109.202"],
+                    "tlsClusterIssuer": "letsencrypt-production"
+                }
+            },
+            "status": {
+                "phase": "Ready",
+                "observedGeneration": 1,
+                "replicas": 1,
+                "readyReplicas": 1,
+                "updatedReplicas": 1,
+                "readySummary": "1/1"
+            }
+        }),
+    );
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/openfga-auth"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "openfga-auth", "namespace": ns },
+            "data": { "api-token": b64.encode("openfga-secret-token") }
+        }),
+    );
+    cluster.put(
+        "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/waddle-gateway",
+        json!({
+            "apiVersion": "gateway.networking.k8s.io/v1",
+            "kind": "Gateway",
+            "metadata": {
+                "name": "waddle-gateway",
+                "namespace": "default",
+                "managedFields": [{
+                    "manager": "kustomize-controller",
+                    "operation": "Apply",
+                    "fieldsV1": {
+                        "f:spec": {
+                            "f:listeners": {
+                                "k:{\"name\":\"https-xmpp\"}": {},
+                                "k:{\"name\":\"https-waddle-tenants\"}": {},
+                                "k:{\"name\":\"http-waddle-tenants\"}": {},
+                                "k:{\"name\":\"http-byo-tenants\"}": {}
+                            }
+                        }
+                    }
+                }]
+            },
+            "spec": {
+                "gatewayClassName": "cilium",
+                "listeners": [
+                    { "name": "https-xmpp", "protocol": "HTTPS", "port": 443, "hostname": "xmpp.waddle.social" },
+                    { "name": "https-waddle-tenants", "protocol": "HTTPS", "port": 443, "hostname": "*.waddle.social" },
+                    { "name": "http-waddle-tenants", "protocol": "HTTP", "port": 80, "hostname": "*.waddle.social" },
+                    { "name": "http-byo-tenants", "protocol": "HTTP", "port": 80 }
+                ]
+            }
+        }),
+    );
+}
+
+#[tokio::test]
+async fn tenant_managed_subdomain_and_byo_custom_domain_ingress_lifecycle_and_safety() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cluster = MockCluster::start().await;
+    let ns = "waddle-next";
+    let server_name = "waddle";
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    seed_ready_ingress_server_and_gateway(&cluster, ns, server_name);
+    let (mock_openfga_url, _) = start_mock_openfga_server().await;
+    let tenant_ctx = Arc::new(TenantControllerContext {
+        client: cluster.client(),
+        metrics: Arc::new(OperatorMetrics::new()),
+        recorder: None,
+        leadership: LeadershipFence::always_active(),
+        openfga_endpoint_override: Some(mock_openfga_url),
+    });
+
+    // 1. ManagedSubdomain tenant (example.waddle.social): HTTPRoutes + DNSEndpoint, ZERO Gateway mutation.
+    let managed_cr = "example-waddle-social";
+    let managed_path =
+        format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddletenants/{managed_cr}");
+    cluster.put(
+        &managed_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleTenant",
+            "metadata": {
+                "name": managed_cr,
+                "namespace": ns,
+                "uid": "uid-managed-1",
+                "generation": 1
+            },
+            "spec": {
+                "serverRef": { "name": server_name },
+                "tenantId": "example.waddle.social",
+                "ingress": { "mode": "ManagedSubdomain" }
+            }
+        }),
+    );
+
+    cluster.clear_mutations();
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, managed_cr)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("managed tenant reconcile");
+    let wt_managed = cluster.get_tenant(ns, managed_cr);
+    let st_managed = wt_managed.status.as_ref().expect("status");
+    assert_eq!(st_managed.phase, WaddleTenantPhase::Ready);
+    assert_eq!(st_managed.hostnames, vec!["example.waddle.social"]);
+    assert!(
+        !cluster
+            .mutations()
+            .iter()
+            .any(|(_, p)| p.contains("/gateways/")),
+        "ManagedSubdomain MUST NOT mutate Gateway"
+    );
+    let managed_https = cluster
+        .get(&format!(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/{ns}/httproutes/waddle-tenant-{managed_cr}-https"
+        ))
+        .expect("managed https route");
+    assert_eq!(
+        managed_https["spec"]["parentRefs"][0]["sectionName"],
+        "https-waddle-tenants"
+    );
+    let managed_dns = cluster
+        .get(&format!(
+            "/apis/externaldns.k8s.io/v1alpha1/namespaces/{ns}/dnsendpoints/waddle-tenant-{managed_cr}"
+        ))
+        .expect("managed dnsendpoint");
+    assert_eq!(
+        managed_dns["spec"]["endpoints"][0]["dnsName"],
+        "example.waddle.social"
+    );
+    assert_eq!(
+        managed_dns["spec"]["endpoints"][0]["targets"],
+        json!(["51.159.109.202"])
+    );
+
+    // 2. CustomDomain (BYO) tenant (waddle.rawkode.chat): gated on Certificate Ready + exact-Secret ReferenceGrant.
+    let byo_cr = "waddle-rawkode-chat";
+    let byo_path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddletenants/{byo_cr}");
+    cluster.put(
+        &byo_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleTenant",
+            "metadata": {
+                "name": byo_cr,
+                "namespace": ns,
+                "uid": "uid-byo-1",
+                "generation": 1
+            },
+            "spec": {
+                "serverRef": { "name": server_name },
+                "tenantId": "waddle.rawkode.chat",
+                "ingress": { "mode": "CustomDomain" }
+            }
+        }),
+    );
+
+    cluster.clear_mutations();
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, byo_cr)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("byo pass 1 waiting for cert");
+    let wt_byo_p1 = cluster.get_tenant(ns, byo_cr);
+    assert_eq!(
+        wt_byo_p1.status.as_ref().expect("st").phase,
+        WaddleTenantPhase::Provisioning
+    );
+    assert!(
+        !cluster
+            .mutations()
+            .iter()
+            .any(|(_, p)| p.contains("/gateways/")),
+        "BYO tenant MUST NOT patch Gateway before Certificate is Ready"
+    );
+    assert!(
+        cluster
+            .get(&format!(
+                "/apis/gateway.networking.k8s.io/v1/namespaces/{ns}/httproutes/waddle-tenant-{byo_cr}-https"
+            ))
+            .is_none(),
+        "BYO HTTPS route must wait for Certificate Ready"
+    );
+    let cert_path =
+        format!("/apis/cert-manager.io/v1/namespaces/{ns}/certificates/waddle-tenant-{byo_cr}-tls");
+    let grant_path = format!(
+        "/apis/gateway.networking.k8s.io/v1beta1/namespaces/{ns}/referencegrants/waddle-tenant-{byo_cr}-tls-grant"
+    );
+    assert!(cluster.get(&cert_path).is_some(), "Certificate created");
+    let grant = cluster.get(&grant_path).expect("ReferenceGrant created");
+    assert_eq!(
+        grant["spec"]["to"][0]["name"],
+        format!("waddle-tenant-{byo_cr}-tls"),
+        "ReferenceGrant MUST pin exact Secret name"
+    );
+
+    // Mark Certificate Ready=True and populate TLS Secret.
+    let mut cert = cluster.get(&cert_path).expect("cert");
+    cert["status"] = json!({
+        "conditions": [{ "type": "Ready", "status": "True", "reason": "Ready" }]
+    });
+    cluster.put(&cert_path, cert);
+    cluster.put(
+        &format!("/api/v1/namespaces/{ns}/secrets/waddle-tenant-{byo_cr}-tls"),
+        json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": format!("waddle-tenant-{byo_cr}-tls"), "namespace": ns },
+            "data": {
+                "tls.crt": b64.encode("CERT-PEM"),
+                "tls.key": b64.encode("KEY-PEM")
+            }
+        }),
+    );
+
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, byo_cr)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("byo pass 2 ready");
+    let wt_byo_ready = cluster.get_tenant(ns, byo_cr);
+    assert_eq!(
+        wt_byo_ready.status.as_ref().expect("st").phase,
+        WaddleTenantPhase::Ready
+    );
+    let gw_after = cluster
+        .get("/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/waddle-gateway")
+        .expect("gateway");
+    let listener_names: Vec<&str> = gw_after["spec"]["listeners"]
+        .as_array()
+        .expect("listeners")
+        .iter()
+        .filter_map(|l| l["name"].as_str())
+        .collect();
+    let expected_byo_listener =
+        waddle_operator::tenant_ingress::byo_listener_name("waddle.rawkode.chat");
+    assert!(listener_names.contains(&"https-xmpp"));
+    assert!(listener_names.contains(&"https-waddle-tenants"));
+    assert!(listener_names.contains(&expected_byo_listener.as_str()));
+    assert!(
+        cluster
+            .get(&format!(
+                "/apis/externaldns.k8s.io/v1alpha1/namespaces/{ns}/dnsendpoints/waddle-tenant-{byo_cr}"
+            ))
+            .is_none(),
+        "BYO tenant MUST NOT create DNSEndpoint"
+    );
+    let byo_https = cluster
+        .get(&format!(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/{ns}/httproutes/waddle-tenant-{byo_cr}-https"
+        ))
+        .expect("byo https route");
+    assert_eq!(
+        byo_https["spec"]["parentRefs"][0]["sectionName"],
+        expected_byo_listener
+    );
+    let byo_redirect = cluster
+        .get(&format!(
+            "/apis/gateway.networking.k8s.io/v1/namespaces/{ns}/httproutes/waddle-tenant-{byo_cr}-http-redirect"
+        ))
+        .expect("byo redirect route");
+    assert_eq!(
+        byo_redirect["spec"]["parentRefs"][0]["sectionName"],
+        "http-byo-tenants"
+    );
+
+    // 3. Duplicate hostname conflict across sibling WaddleTenants -> Degraded/HostnameConflict.
+    let dup_cr = "dup-example";
+    let dup_path = format!("/apis/waddle.social/v1alpha1/namespaces/{ns}/waddletenants/{dup_cr}");
+    cluster.put(
+        &dup_path,
+        json!({
+            "apiVersion": "waddle.social/v1alpha1",
+            "kind": "WaddleTenant",
+            "metadata": {
+                "name": dup_cr,
+                "namespace": ns,
+                "uid": "uid-dup-1",
+                "generation": 1
+            },
+            "spec": {
+                "serverRef": { "name": server_name },
+                "tenantId": "other.example.org",
+                "ingress": {
+                    "mode": "ManagedSubdomain",
+                    "hostnames": ["example.waddle.social"]
+                }
+            }
+        }),
+    );
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, dup_cr)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("duplicate tenant degraded");
+    let st_dup = cluster.get_tenant(ns, dup_cr).status.expect("dup status");
+    assert_eq!(st_dup.phase, WaddleTenantPhase::Degraded);
+    assert!(st_dup
+        .conditions
+        .iter()
+        .any(|c| c.type_ == "IngressReady" && c.reason == "HostnameConflict"));
+
+    // 4. Deleting BYO tenant removes ONLY its Gateway listener + ingress resources while keeping static listeners intact.
+    let mut deleting_byo = cluster.get(&byo_path).expect("byo");
+    deleting_byo["metadata"]["deletionTimestamp"] = json!("2026-11-27T22:20:00Z");
+    cluster.put(&byo_path, deleting_byo);
+
+    reconcile_tenant(
+        Arc::new(cluster.get_tenant(ns, byo_cr)),
+        Arc::clone(&tenant_ctx),
+    )
+    .await
+    .expect("byo deletion cleanup");
+    let gw_cleaned = cluster
+        .get("/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/waddle-gateway")
+        .expect("gateway");
+    let cleaned_names: Vec<&str> = gw_cleaned["spec"]["listeners"]
+        .as_array()
+        .expect("listeners")
+        .iter()
+        .filter_map(|l| l["name"].as_str())
+        .collect();
+    assert!(
+        !cleaned_names.contains(&expected_byo_listener.as_str()),
+        "deleted BYO listener must be removed from Gateway"
+    );
+    assert!(
+        cleaned_names.contains(&"https-xmpp") && cleaned_names.contains(&"https-waddle-tenants"),
+        "Flux static listeners MUST survive BYO tenant deletion"
+    );
+    assert!(cluster.get(&cert_path).is_none(), "Certificate deleted");
+    assert!(cluster.get(&grant_path).is_none(), "ReferenceGrant deleted");
+    assert!(
+        cluster
+            .get(&format!(
+                "/apis/gateway.networking.k8s.io/v1/namespaces/{ns}/httproutes/waddle-tenant-{byo_cr}-https"
+            ))
+            .is_none(),
+        "BYO HTTPS route deleted"
     );
 }

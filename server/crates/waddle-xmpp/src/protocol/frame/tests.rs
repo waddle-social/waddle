@@ -9,8 +9,22 @@ fn parses_open_frame() {
         r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" version="1.0" to="waddle.social"/>"#;
     assert!(matches!(
         parse_frame(xml),
-        Ok(InboundFrame::Open { from: None })
+        Ok(InboundFrame::Open {
+            from: None,
+            to: Some(ref to),
+        }) if to.as_str() == "waddle.social"
     ));
+}
+
+#[test]
+fn open_to_rejects_node_qualified_or_malformed_values() {
+    for to in ["", "alice@waddle.social", "WADDLE.SOCIAL", "bad domain"] {
+        let xml = format!("<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='{to}'/>");
+        assert!(
+            matches!(parse_frame(&xml), Err(ParseError::InvalidOpenTo)),
+            "{to:?}"
+        );
+    }
 }
 
 #[test]
@@ -22,7 +36,10 @@ fn open_from_is_a_canonical_bare_jid() {
     ] {
         let xml = format!("<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='{from}'/>");
         match parse_frame(&xml).expect("valid stream open") {
-            InboundFrame::Open { from: Some(from) } => {
+            InboundFrame::Open {
+                from: Some(from),
+                to: None,
+            } => {
                 assert_eq!(from.to_string(), "alice@example.com")
             }
             other => panic!("unexpected frame: {other:?}"),
@@ -107,7 +124,10 @@ fn parses_close_frame() {
 fn parses_prefixed_framing_and_sasl_only_in_their_namespaces() {
     assert!(matches!(
         parse_frame("<f:open xmlns:f='urn:ietf:params:xml:ns:xmpp-framing'/>"),
-        Ok(InboundFrame::Open { from: None })
+        Ok(InboundFrame::Open {
+            from: None,
+            to: None,
+        })
     ));
     assert!(matches!(
         parse_frame("<f:close xmlns:f='urn:ietf:params:xml:ns:xmpp-framing'/>"),

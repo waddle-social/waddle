@@ -255,6 +255,14 @@ pub async fn run_controller(
             watcher::Config::default(),
             move |ws| map_server_to_tenants(&ws, &tenant_store),
         );
+    if capabilities.has_cert_manager {
+        let cert_ar = external_crds::api_resource_certificate();
+        tenant_controller = tenant_controller.owns_with(
+            scoped_dynamic_api(&client, ns, &cert_ar),
+            cert_ar,
+            watcher::Config::default(),
+        );
+    }
 
     let (_, holder_id) = resolve_lease_identity(&args);
     let recorder = Recorder::new(

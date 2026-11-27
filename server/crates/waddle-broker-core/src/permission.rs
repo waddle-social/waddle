@@ -181,5 +181,15 @@ pub trait PermissionBackend: Send + Sync {
         tenant: &TenantId,
     ) -> Result<TenantAuthzStoreRef, PermissionBackendError>;
 
+    /// Register a pre-provisioned tenant authorization store reference (e.g., from
+    /// hot-reloaded `WaddleTenant` manifests). Backends that do not track external
+    /// store references may keep the default no-op implementation.
+    fn register_tenant_store_ref(
+        &self,
+        _store_ref: TenantAuthzStoreRef,
+    ) -> Result<(), PermissionBackendError> {
+        Ok(())
+    }
+
     async fn delete_tenant_store(&self, tenant: &TenantId) -> Result<(), PermissionBackendError>;
 }

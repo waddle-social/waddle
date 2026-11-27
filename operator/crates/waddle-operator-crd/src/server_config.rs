@@ -393,7 +393,20 @@ impl Default for WsKeepaliveSpec {
     }
 }
 
-/// Durable ingress authority transaction settings (`WADDLE_INGRESS_*`).
+/// Reference to a Kubernetes Gateway API `Gateway` resource.
+#[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayRefSpec {
+    /// `Gateway` object name (e.g. `waddle-gateway`).
+    #[x_kube(validation = "size(self) > 0")]
+    pub name: String,
+    /// Namespace containing the `Gateway` (e.g. `default`).
+    #[x_kube(validation = "size(self) > 0")]
+    pub namespace: String,
+}
+
+/// Durable ingress authority transaction settings (`WADDLE_INGRESS_*`) and optional
+/// per-tenant Gateway API / DNS / TLS routing configuration.
 #[derive(KubeSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngressSpec {
@@ -403,6 +416,34 @@ pub struct IngressSpec {
     /// Ingress DB retry attempts (`1..=32`, default `5`).
     #[serde(default = "default_ingress_retry_attempts")]
     pub retry_attempts: u32,
+    /// Enable operator-managed per-tenant Gateway API, DNS, and TLS reconciliation.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target Gateway API `Gateway` used for tenant `HTTPRoute`s and BYO listeners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ref: Option<GatewayRefSpec>,
+    /// Managed wildcard base DNS domain for `ManagedSubdomain` tenants (e.g. `waddle.social`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_base_domain: Option<String>,
+    /// Static HTTPS wildcard listener `sectionName` on `gatewayRef` for managed subdomains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_wildcard_https_section: Option<String>,
+    /// Static HTTP wildcard listener `sectionName` on `gatewayRef` for managed subdomain redirects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_wildcard_http_section: Option<String>,
+    /// Static HTTP catch-all listener `sectionName` on `gatewayRef` for BYO HTTP-01 and redirects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byo_http_section: Option<String>,
+    /// Static target IP addresses written into `DNSEndpoint` for `ManagedSubdomain` tenants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_ips: Vec<String>,
+    /// `cert-manager` `ClusterIssuer` name used for `CustomDomain` tenant `Certificate`s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cluster_issuer: Option<String>,
+    /// Additional reserved single-label subdomains under `managedBaseDomain` (merged with
+    /// the always-enforced built-in reserved floor).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_subdomains: Vec<String>,
 }
 
 impl Default for IngressSpec {
@@ -410,6 +451,15 @@ impl Default for IngressSpec {
         Self {
             pool_size: default_ingress_pool_size(),
             retry_attempts: default_ingress_retry_attempts(),
+            enabled: false,
+            gateway_ref: None,
+            managed_base_domain: None,
+            managed_wildcard_https_section: None,
+            managed_wildcard_http_section: None,
+            byo_http_section: None,
+            target_ips: Vec::new(),
+            tls_cluster_issuer: None,
+            reserved_subdomains: Vec::new(),
         }
     }
 }

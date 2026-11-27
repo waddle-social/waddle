@@ -162,6 +162,9 @@ pub struct AppState {
     /// Multi-tenant Turso [`crate::db::tenant_registry::ServerTenantRegistry`]
     /// initialized when `WADDLE_DB_DRIVER=turso` or `WADDLE_TURSO_DATA_DIR` is set.
     pub tenant_registry: Option<Arc<crate::db::tenant_registry::ServerTenantRegistry>>,
+    /// Strict `Host`-derived multi-tenant resolver shared across HTTP, CORS, and
+    /// WebSocket handlers.
+    pub tenant_resolver: Arc<crate::server::tenant_routing::TenantHostResolver>,
     /// Startup broker credential custody service, published once the
     /// extension inference host is wired.
     broker_custody: OnceLock<Arc<waddle_broker::custody::BrokerCustodyService>>,
@@ -279,6 +282,37 @@ impl AppState {
         } = deps;
         let host_grants =
             crate::permissions::host_grant::HostGrantGate::new(db_pool.global().clone());
+        let fallback_domain = muc_domain
+            .as_str()
+            .strip_prefix("muc.")
+            .and_then(|d| <DomainPart as std::str::FromStr>::from_str(d).ok())
+            .unwrap_or_else(|| {
+                <DomainPart as std::str::FromStr>::from_str("localhost").expect("localhost domain")
+            });
+        let fallback_tenant_id = waddle_broker_core::identity::TenantId::parse(
+            fallback_domain.as_str(),
+        )
+        .unwrap_or_else(|_| {
+            waddle_broker_core::identity::TenantId::parse("localhost").expect("localhost tenant id")
+        });
+        let fallback_base = url::Url::parse(&format!("http://{}", fallback_domain.as_str()))
+            .expect("valid fallback base URL");
+        let fallback_ws = url::Url::parse(&format!("ws://{}/ws", fallback_domain.as_str()))
+            .expect("valid fallback ws URL");
+        let tenant_resolver = Arc::new(
+            crate::server::tenant_routing::TenantHostResolver::single_tenant(
+                crate::server::tenant_routing::ResolvedTenant {
+                    tenant_id: fallback_tenant_id,
+                    canonical_host: fallback_domain.as_str().to_owned(),
+                    public_base_url: fallback_base,
+                    public_ws_url: fallback_ws,
+                    xmpp_domain: fallback_domain,
+                    muc_domain: muc_domain.clone(),
+                    spaces_jid: spaces_jid.clone(),
+                    owners: Vec::new(),
+                },
+            ),
+        );
         Self {
             db_pool,
             blob_storage,
@@ -315,6 +349,7 @@ impl AppState {
             account_authority: OnceLock::new(),
             broker_permission_backend: None,
             tenant_registry: None,
+            tenant_resolver,
             broker_custody: OnceLock::new(),
         }
     }

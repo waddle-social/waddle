@@ -42,9 +42,12 @@ pub struct DiscoveredCapabilities {
     pub has_spicedb: bool,
     /// Preferred served version of `external-secrets.io` `ExternalSecret`.
     pub eso_version: Option<DiscoveredEsoVersion>,
+    /// Whether `cert-manager.io/v1` `Certificate` is served.
+    pub has_cert_manager: bool,
 }
 
-/// Discovers installed dependency CRDs (`postgresql.cnpg.io`, `authzed.com`, `external-secrets.io`).
+/// Discovers installed dependency CRDs (`postgresql.cnpg.io`, `authzed.com`, `external-secrets.io`,
+/// `cert-manager.io`).
 ///
 /// Missing groups are treated gracefully as absent capabilities so the controller can run even
 /// when optional CRDs are not installed yet.
@@ -58,11 +61,13 @@ pub async fn discover_capabilities(client: &Client) -> DiscoveredCapabilities {
     } else {
         None
     };
+    let has_cert_manager = has_group_version(client, "cert-manager.io", "v1").await;
 
     DiscoveredCapabilities {
         has_cnpg,
         has_spicedb,
         eso_version,
+        has_cert_manager,
     }
 }
 
@@ -107,6 +112,18 @@ pub fn api_resource_eso(version: DiscoveredEsoVersion) -> ApiResource {
         api_version: version.api_version().to_owned(),
         kind: "ExternalSecret".to_owned(),
         plural: "externalsecrets".to_owned(),
+    }
+}
+
+/// Dynamic [`ApiResource`] descriptor for `cert-manager.io/v1` `Certificate`.
+#[must_use]
+pub fn api_resource_certificate() -> ApiResource {
+    ApiResource {
+        group: "cert-manager.io".to_owned(),
+        version: "v1".to_owned(),
+        api_version: "cert-manager.io/v1".to_owned(),
+        kind: "Certificate".to_owned(),
+        plural: "certificates".to_owned(),
     }
 }
 

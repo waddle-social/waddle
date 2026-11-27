@@ -1,0 +1,35 @@
+apiVersion: waddle.social/v1alpha1
+kind: WaddleTenant
+metadata:
+  name: waddle-rawkode-chat
+  namespace: waddle-next
+  labels:
+    app.kubernetes.io/part-of: waddle-next
+spec:
+  serverRef:
+    name: waddle
+  tenantId: waddle.rawkode.chat
+  placementMode: SharedPool
+  owners:
+    - rawkode
+  authProvidersSecretRef:
+    name: waddle-runtime-secrets
+    key: WADDLE_AUTH_PROVIDERS_JSON
+  ingress:
+    mode: CustomDomain
+  quotas:
+    maxConcurrentConnections: 2000
+    maxRooms: 1000
+    maxStorageBytes: 10737418240
+    maxInferenceSpendMicrocents: 100000000
+  extensions:
+    enabledPlugins:
+      - ai-chatbot
+      - jev-judgments
+    approvedProviders:
+      - openrouter
+    approvedModels:
+      - anthropic/claude-sonnet-4
+      - anthropic/claude-haiku-4.5
+      - openai/gpt-4o-mini
+    zdrRequired: true

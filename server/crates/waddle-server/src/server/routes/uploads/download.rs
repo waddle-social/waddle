@@ -1,6 +1,7 @@
 use super::{
     debug, error, get_upload_slot, header, info, instrument, upload_error_to_response, warn, Arc,
-    HeaderMap, IntoResponse, Path, State, StatusCode, UploadError, UploadState,
+    Extension, HeaderMap, IntoResponse, Path, ResolvedTenant, State, StatusCode, UploadError,
+    UploadState,
 };
 
 /// GET /api/files/{slot_id}/{filename}
@@ -9,9 +10,10 @@ use super::{
 /// - Exist in the database
 /// - Have status 'uploaded'
 /// - Have a valid storage_key
-#[instrument(skip(state))]
+#[instrument(skip(state, tenant))]
 pub(super) async fn download_handler(
     State(state): State<Arc<UploadState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Path((slot_id, filename)): Path<(String, String)>,
 ) -> impl IntoResponse {
     debug!(
@@ -35,6 +37,20 @@ pub(super) async fn download_handler(
             return upload_error_to_response(UploadError::Database(err)).into_response();
         }
     };
+
+    if let Some(Extension(tenant)) = tenant {
+        if !tenant.owns_jid_str(&slot.requester_jid) {
+            warn!(
+                slot_id = %slot_id,
+                tenant = %tenant.tenant_id,
+                "Rejecting cross-tenant file download"
+            );
+            return upload_error_to_response(UploadError::Forbidden(
+                "File does not belong to this tenant".to_string(),
+            ))
+            .into_response();
+        }
+    }
 
     // Verify status is uploaded
     if slot.status != "uploaded" {

@@ -12,7 +12,7 @@
 use crate::identity::{enforce_stanza_addresses, parse_bare_jid, IdentityError};
 use crate::ns::SASL;
 use crate::Stanza;
-use jid::BareJid;
+use jid::{BareJid, DomainPart};
 use std::str::FromStr;
 use thiserror::Error;
 use waddle_xmpp_core::xep0388::{Sasl2Authenticate, Sasl2Response, NS_SASL2};
@@ -36,7 +36,10 @@ pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum InboundFrame {
     /// RFC 7395 `<open>` stream header.
-    Open { from: Option<BareJid> },
+    Open {
+        from: Option<BareJid>,
+        to: Option<DomainPart>,
+    },
     /// RFC 7395 `<close>` stream termination.
     Close,
     /// SASL `<auth>` initial client message.
@@ -108,6 +111,9 @@ pub enum ParseError {
     /// An RFC 7395 stream open carried an invalid client `from` JID.
     #[error("invalid stream-open from address")]
     InvalidOpenFrom,
+    /// An RFC 7395 stream open carried an invalid target `to` domain.
+    #[error("invalid stream-open to domain")]
+    InvalidOpenTo,
     /// An RFC 7395 stream open was not well-formed XML.
     #[error("malformed stream-open XML")]
     InvalidOpenXml,
@@ -297,8 +303,18 @@ fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
             Ok(jid)
         })
         .transpose()?;
+    let to = element
+        .attr("to")
+        .map(|value| {
+            let jid = parse_bare_jid(value).map_err(|_| ParseError::InvalidOpenTo)?;
+            if jid.node().is_some() {
+                return Err(ParseError::InvalidOpenTo);
+            }
+            Ok(jid.domain().to_owned())
+        })
+        .transpose()?;
     Ok(ParsedFrame {
-        frame: InboundFrame::Open { from },
+        frame: InboundFrame::Open { from, to },
         message_stanza_lang: None,
     })
 }

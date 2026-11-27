@@ -7,13 +7,14 @@ use super::Bytes;
 #[cfg(test)]
 use super::Database;
 use super::IntoResponse;
+use super::ResolvedTenant;
 use super::Serialize;
 use super::{error, info, instrument, warn};
 use super::{get, put};
 use super::{header, HeaderMap, StatusCode};
 use super::{row_value, ValueExt};
 use super::{DbActor, DbExecute, DbQueryOne};
-use super::{DefaultBodyLimit, Path, State};
+use super::{DefaultBodyLimit, Extension, Path, State};
 use super::{Json, Router};
 
 pub(in crate::server::routes::uploads) const DEFAULT_MAX_UPLOAD_SIZE: u64 = 10 * 1024 * 1024;
@@ -137,6 +138,8 @@ pub enum UploadError {
     Database(String),
     /// File not found
     FileNotFound(String),
+    /// Cross-tenant access denied
+    Forbidden(String),
 }
 
 /// Convert UploadError to HTTP response
@@ -188,12 +191,17 @@ pub(in crate::server::routes::uploads) fn upload_error_to_response(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("file_not_found", &msg)),
         ),
+        UploadError::Forbidden(msg) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new("tenant_mismatch", &msg)),
+        ),
     }
 }
 
 /// Upload slot information from database
 #[derive(Debug)]
 pub(in crate::server::routes::uploads) struct UploadSlotInfo {
+    pub(in crate::server::routes::uploads) requester_jid: String,
     pub(in crate::server::routes::uploads) filename: String,
     pub(in crate::server::routes::uploads) size_bytes: i64,
     pub(in crate::server::routes::uploads) content_type: String,
@@ -208,7 +216,7 @@ pub(in crate::server::routes::uploads) async fn get_upload_slot(
     slot_id: &str,
 ) -> Result<Option<UploadSlotInfo>, String> {
     let query = r#"
-        SELECT id, filename, size_bytes, content_type, status, storage_key, expires_at
+        SELECT id, requester_jid, filename, size_bytes, content_type, status, storage_key, expires_at
         FROM upload_slots
         WHERE id = ?
     "#;
@@ -223,11 +231,14 @@ pub(in crate::server::routes::uploads) async fn get_upload_slot(
 
     match row {
         Some(row) => {
-            let filename = row_value(&row, 1)
+            let requester_jid = row_value(&row, 1)
+                .and_then(ValueExt::as_string)
+                .map_err(|e| format!("Failed to get requester_jid: {}", e))?;
+            let filename = row_value(&row, 2)
                 .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get filename: {}", e))?;
             let size_bytes =
-                match row_value(&row, 2).map_err(|e| format!("Failed to get size_bytes: {}", e))? {
+                match row_value(&row, 3).map_err(|e| format!("Failed to get size_bytes: {}", e))? {
                     crate::db::Value::Integer(value) => *value,
                     other => {
                         return Err(format!(
@@ -236,20 +247,21 @@ pub(in crate::server::routes::uploads) async fn get_upload_slot(
                         ));
                     }
                 };
-            let content_type = row_value(&row, 3)
+            let content_type = row_value(&row, 4)
                 .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get content_type: {}", e))?;
-            let status = row_value(&row, 4)
+            let status = row_value(&row, 5)
                 .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get status: {}", e))?;
-            let storage_key = row_value(&row, 5)
+            let storage_key = row_value(&row, 6)
                 .and_then(ValueExt::as_optional_string)
                 .map_err(|e| format!("Failed to get storage_key: {}", e))?;
-            let expires_at = row_value(&row, 6)
+            let expires_at = row_value(&row, 7)
                 .and_then(ValueExt::as_string)
                 .map_err(|e| format!("Failed to get expires_at: {}", e))?;
 
             Ok(Some(UploadSlotInfo {
+                requester_jid,
                 filename,
                 size_bytes,
                 content_type,
@@ -307,9 +319,10 @@ pub(in crate::server::routes::uploads) fn is_slot_expired(expires_at: &str) -> b
 /// - Have status 'pending'
 /// - Not be expired
 /// - Match the Content-Length header with expected size
-#[instrument(skip(state, headers, body))]
+#[instrument(skip(state, tenant, headers, body))]
 pub async fn upload_handler(
     State(state): State<Arc<UploadState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Path(slot_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -332,6 +345,20 @@ pub async fn upload_handler(
             return upload_error_to_response(UploadError::Database(err)).into_response();
         }
     };
+
+    if let Some(Extension(tenant)) = tenant {
+        if !tenant.owns_jid_str(&slot.requester_jid) {
+            warn!(
+                slot_id = %slot_id,
+                tenant = %tenant.tenant_id,
+                "Rejecting cross-tenant upload slot PUT"
+            );
+            return upload_error_to_response(UploadError::Forbidden(
+                "Upload slot does not belong to this tenant".to_string(),
+            ))
+            .into_response();
+        }
+    }
 
     // Check slot status
     if slot.status == "uploaded" {
