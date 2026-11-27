@@ -163,6 +163,12 @@ struct ComposerMarkdownTests {
         #expect(result.spans.isEmpty)
     }
 
+    @Test func closedFenceKeepsCRLFInTheCodeAndItsOffsets() {
+        let result = ComposerMarkdown.compose("hi\r\n```\r\ncode\r\n ``` \r\nbye")
+        #expect(result.body == "hi\r\ncode\r\nbye")
+        #expect(spans(result) == [Span(.codeBlock, 4, 9)])
+    }
+
     @Test func inlineMarkersInsideFencesAreLiteral() {
         let result = ComposerMarkdown.compose("```\n**not bold**\n```")
         #expect(result.body == "**not bold**")

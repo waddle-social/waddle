@@ -16,15 +16,13 @@ import WaddleKit
 /// Grows from one line to `maxLines`, then scrolls.
 struct ComposerTextView: NSViewRepresentable {
     let text: String
+    let draft: ComposerFieldEdits.Draft
+    let edits: ComposerFieldEdits
     @Binding var selection: ComposerScalarRange?
     @Binding var isFocused: Bool
     let placeholder: String
     let onTextChange: (ComposerTextReplacement) -> Void
-    let onSubmit: () -> Void
-    /// Returns true when an open suggestion list used the key.
-    let onSuggestionKey: (ComposerHardwareKey) -> Bool
-    /// Returns true when an edit or reply was cancelled.
-    let onCancel: () -> Bool
+    let keys: ComposerKeyInput
     let onPasteAttachments: () -> Void
 
     static let maxLines: CGFloat = 8
@@ -60,6 +58,7 @@ struct ComposerTextView: NSViewRepresentable {
         view.autoresizingMask = [.width]
         view.onFocusChange = context.coordinator.focusChanged(_:focused:)
         view.string = text
+        context.coordinator.view = view
 
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
@@ -77,15 +76,19 @@ struct ComposerTextView: NSViewRepresentable {
         coordinator.parent = self
         view.setAccessibilityLabel(placeholder)
         view.onPasteAttachments = onPasteAttachments
+        view.onFormat = keys.format
 
         coordinator.isApplying = true
-        if view.string != text {
-            // The composer replaced the draft (a send, a completion, a
-            // formatting edit): the field's caret and undo history no
-            // longer describe it.
+        let pending = edits.take(in: draft, from: view.string, to: text)
+        if coordinator.draft == draft {
+            for edit in pending { coordinator.apply(edit, to: view) }
+        }
+        if coordinator.draft != draft || !view.string.utf16.elementsEqual(text.utf16) {
+            coordinator.draft = draft
+            view.breakUndoCoalescing()
+            coordinator.undoHistory.removeAllActions()
             view.string = text
             coordinator.pendingReplacement = nil
-            coordinator.undoHistory.removeAllActions()
             coordinator.applied = nil
             if selection == nil {
                 view.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
@@ -126,6 +129,8 @@ struct ComposerTextView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
+        var draft: ComposerFieldEdits.Draft
+        weak var view: ComposerNSTextView?
         /// The offsets last passed between the field and the composer in
         /// either direction; a `selection` equal to it is an echo.
         var applied: ComposerScalarRange?
@@ -141,19 +146,60 @@ struct ComposerTextView: NSViewRepresentable {
 
         init(parent: ComposerTextView) {
             self.parent = parent
+            draft = parent.draft
+            super.init()
+            for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
+                NotificationCenter.default.addObserver(self, selector: #selector(undoDidFinish(_:)), name: name, object: undoHistory)
+            }
         }
 
         func undoManager(for _: NSTextView) -> UndoManager? {
             undoHistory
         }
 
+        func apply(_ edit: ComposerFieldEdits.Edit, to view: ComposerNSTextView) {
+            let changes = edit.replacement.nativeChanges(from: edit.original)
+            let selection = ComposerUTF16Selection.nsRange(for: edit.selection, in: edit.replacement.text)
+            guard !changes.isEmpty else {
+                view.setSelectedRange(selection)
+                return
+            }
+            // AppKit validates the ranges in document order. Replace from the
+            // end so every range still points into the original draft.
+            let ranges = changes.reversed().map { ComposerUTF16Selection.nsRange(for: $0.range, in: edit.original) }
+            let before = view.selectedRange()
+            view.breakUndoCoalescing()
+            undoHistory.groupComposerEdit {
+                undoHistory.registerComposerSelection(applyOnUndo: true) { [weak view] in view?.setSelectedRange(before) }
+                if view.shouldChangeText(inRanges: ranges.map(NSValue.init(range:)),
+                                         replacementStrings: changes.reversed().map(\.text)) {
+                    for (range, change) in zip(ranges.reversed(), changes) {
+                        view.replaceCharacters(in: range, with: change.text)
+                    }
+                    view.didChangeText()
+                    view.setSelectedRange(selection)
+                }
+                undoHistory.registerComposerSelection(applyOnUndo: false) { [weak view] in view?.setSelectedRange(selection) }
+            }
+            view.breakUndoCoalescing()
+        }
+
+        @objc private func undoDidFinish(_: Notification) {
+            guard !isApplying, let view else { return }
+            pendingReplacement = nil
+            parent.onTextChange(ComposerTextReplacement(view.string))
+            report(view)
+        }
+
         func textView(_ view: NSTextView, shouldChangeTextIn range: NSRange, replacementString _: String?) -> Bool {
+            guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing else { return true }
             pendingReplacement = ComposerUTF16Selection.scalarRange(of: range, in: view.string)
             return true
         }
 
         func textDidChange(_ notification: Notification) {
-            guard !isApplying, let view = notification.object as? NSTextView else { return }
+            guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing,
+                  let view = notification.object as? NSTextView else { return }
             let replaced = pendingReplacement
             pendingReplacement = nil
             parent.onTextChange(ComposerTextReplacement(view.string, replacing: replaced))
@@ -161,7 +207,8 @@ struct ComposerTextView: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
-            guard !isApplying, let view = notification.object as? NSTextView else { return }
+            guard !isApplying, !undoHistory.isUndoing, !undoHistory.isRedoing,
+                  let view = notification.object as? NSTextView else { return }
             report(view)
         }
 
@@ -181,29 +228,32 @@ struct ComposerTextView: NSViewRepresentable {
         /// Keys, as the text system's commands; returns true when the
         /// composer took the command.
         func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
-            // An input method composing text owns its keys.
-            guard !view.hasMarkedText() else { return false }
             let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
             let unmodified = modifiers.isDisjoint(with: [.shift, .control, .option, .command])
+            if selector == #selector(NSResponder.insertNewline(_:)), unmodified {
+                let selection = ComposerUTF16Selection.scalarRange(of: view.selectedRange(), in: view.string)
+                return parent.keys.returnKey(view.string, selection, view.hasMarkedText(), .hardware)
+            }
+            // An input method composing text owns its keys.
+            guard !view.hasMarkedText() else { return false }
             switch selector {
             case #selector(NSResponder.moveUp(_:)):
-                return unmodified && parent.onSuggestionKey(.up)
+                return unmodified && parent.keys.suggestion(.up)
             case #selector(NSResponder.moveDown(_:)):
-                return unmodified && parent.onSuggestionKey(.down)
+                return unmodified && parent.keys.suggestion(.down)
             case #selector(NSResponder.insertNewline(_:)):
                 if !modifiers.isDisjoint(with: [.shift, .option]) {
                     view.insertNewlineIgnoringFieldEditor(nil)
                     return true
                 }
-                if unmodified, parent.onSuggestionKey(.returnKey) { return true }
-                parent.onSubmit()
+                parent.keys.submit()
                 return true
             case #selector(NSResponder.insertLineBreak(_:)):
                 // A line separator would reach the message as U+2028.
                 view.insertNewlineIgnoringFieldEditor(nil)
                 return true
             case #selector(NSResponder.insertTab(_:)):
-                if !parent.onSuggestionKey(.tab) { view.window?.selectNextKeyView(nil) }
+                if !parent.keys.suggestion(.tab) { view.window?.selectNextKeyView(nil) }
                 return true
             case #selector(NSResponder.insertBacktab(_:)):
                 view.window?.selectPreviousKeyView(nil)
@@ -211,7 +261,7 @@ struct ComposerTextView: NSViewRepresentable {
             case #selector(NSResponder.cancelOperation(_:)):
                 // Escape otherwise opens the text view's completion list;
                 // pass it on so a sheet or panel can close instead.
-                if !parent.onSuggestionKey(.escape), !parent.onCancel() {
+                if !parent.keys.suggestion(.escape), !parent.keys.cancel() {
                     view.nextResponder?.tryToPerform(selector, with: nil)
                 }
                 return true
@@ -227,6 +277,7 @@ struct ComposerTextView: NSViewRepresentable {
 final class ComposerNSTextView: NSTextView {
     var onPasteAttachments: (() -> Void)?
     var onFocusChange: ((NSTextView, Bool) -> Void)?
+    var onFormat: ((ComposerFormat) -> Void)?
     /// A text view does not retain the storage behind a container it is
     /// given.
     private let storage: NSTextStorage
@@ -245,6 +296,16 @@ final class ComposerNSTextView: NSTextView {
 
     required init?(coder _: NSCoder) {
         fatalError("ComposerNSTextView is created in code")
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        if window?.firstResponder === self, !hasMarkedText(), modifiers == [.command, .shift],
+           let onFormat, let format = ComposerFormat.listShortcut(for: .ansi(event.keyCode)) {
+            onFormat(format)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     /// Text only: a dropped file or picture goes past the field to the

@@ -6,11 +6,7 @@ import WaddleKit
 struct ComposerActions {
     let submit: () -> Void
     let changeText: (ComposerTextReplacement) -> Void
-    /// Returns true when an open suggestion list used the key.
-    let handleSuggestionKey: (ComposerHardwareKey) -> Bool
-    /// Returns true when an edit or reply was cancelled.
-    let cancelContext: () -> Bool
-    let format: (ComposerFormat) -> Void
+    let keys: ComposerKeyInput
     let requestLink: () -> Void
     let insertEmoji: (String) -> Void
     let startMention: () -> Void

@@ -14,6 +14,8 @@ public enum ComposerFormatting {
         case .bold: return wrap(scalars, range, marker: "**")
         case .italic: return wrap(scalars, range, marker: "*")
         case .strikethrough: return wrap(scalars, range, marker: "~~")
+        case .orderedList: return ComposerLists.toggle(.ordered, in: scalars, selection: range)
+        case .bulletList: return ComposerLists.toggle(.bullet, in: scalars, selection: range)
         case .code: return wrap(scalars, range, marker: "`")
         case .codeBlock: return fence(scalars, range)
         case .quote: return quote(scalars, range)
@@ -38,7 +40,8 @@ public enum ComposerFormatting {
         let shift = marker.count
         return ComposerTextEdit(
             text: ComposerScalars.string(result),
-            selection: (range.lowerBound + shift)..<(range.upperBound + shift)
+            selection: (range.lowerBound + shift)..<(range.upperBound + shift),
+            changes: markers(around: range, opening: text, closing: text)
         )
     }
 
@@ -52,12 +55,25 @@ public enum ComposerFormatting {
         let result = Array(scalars[..<range.lowerBound]) + opening + selected + closing
             + Array(scalars[range.upperBound...])
         let start = range.lowerBound + opening.count
-        return ComposerTextEdit(text: ComposerScalars.string(result), selection: start..<(start + selected.count))
+        return ComposerTextEdit(
+            text: ComposerScalars.string(result),
+            selection: start..<(start + selected.count),
+            changes: markers(around: range, opening: ComposerScalars.string(opening), closing: ComposerScalars.string(closing))
+        )
+    }
+
+    private static func markers(around range: ComposerScalarRange, opening: String, closing: String) -> [ComposerDraftChange] {
+        if range.isEmpty { return [ComposerDraftChange(range, opening + closing)] }
+        return [
+            ComposerDraftChange(range.lowerBound..<range.lowerBound, opening),
+            ComposerDraftChange(range.upperBound..<range.upperBound, closing),
+        ]
     }
 
     /// Prefixes every line the selection touches with `> `.
     private static func quote(_ scalars: [Unicode.Scalar], _ range: Range<Int>) -> ComposerTextEdit {
-        let starts = lineStarts(scalars, touching: range)
+        let draft = ComposerDraftLines(scalars)
+        let starts = draft.touched(by: range).map { draft.lines[$0].content.lowerBound }
         let marker = Array("> ".unicodeScalars)
         var result = scalars
         for start in starts.reversed() {
@@ -65,16 +81,10 @@ public enum ComposerFormatting {
         }
         let lower = range.lowerBound + marker.count
         let upper = range.upperBound + marker.count * starts.count
-        return ComposerTextEdit(text: ComposerScalars.string(result), selection: lower..<upper)
-    }
-
-    /// Offsets where each line the range touches begins. A selection that
-    /// ends right after a newline does not touch the following line.
-    private static func lineStarts(_ scalars: [Unicode.Scalar], touching range: Range<Int>) -> [Int] {
-        let first = scalars[..<range.lowerBound].lastIndex(of: "\n").map { $0 + 1 } ?? 0
-        let endsAfterNewline = range.upperBound > range.lowerBound && scalars[range.upperBound - 1] == "\n"
-        let end = endsAfterNewline ? range.upperBound - 1 : range.upperBound
-        let later = (first..<max(first, end)).filter { scalars[$0] == "\n" }.map { $0 + 1 }
-        return [first] + later
+        return ComposerTextEdit(
+            text: ComposerScalars.string(result),
+            selection: lower..<upper,
+            changes: starts.map { ComposerDraftChange($0..<$0, "> ") }
+        )
     }
 }
