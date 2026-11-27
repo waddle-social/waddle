@@ -1,40 +1,7 @@
 import Foundation
 import WaddleKit
 
-/// How a XEP-0447 shared file renders in a row, from its plaintext
-/// metadata (for XEP-0448 files, once decrypted).
-enum MessageAttachmentKind: Hashable {
-    case image
-    case video
-    case audio
-    case pdf
-    case archive
-    case other
-
-    init(_ file: SharedFile) {
-        let type = file.mediaType?.lowercased() ?? ""
-        let fileExtension = (file.name.map(Self.fileExtension(of:)) ?? file.url.pathExtension).lowercased()
-        if file.isImage {
-            self = .image
-        } else if type.hasPrefix("video/") {
-            self = .video
-        } else if type.hasPrefix("audio/") {
-            self = .audio
-        } else if type == "application/pdf" || fileExtension == "pdf" {
-            self = .pdf
-        } else if ["application/zip", "application/gzip", "application/x-tar", "application/x-7z-compressed"].contains(type)
-            || ["zip", "gz", "tar", "7z", "rar"].contains(fileExtension) {
-            self = .archive
-        } else {
-            self = .other
-        }
-    }
-
-    private static func fileExtension(of name: String) -> String {
-        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
-        return String(name[name.index(after: dot)...])
-    }
-
+extension MessageAttachmentKind {
     var symbolName: String {
         switch self {
         case .image: return "photo"
@@ -56,6 +23,12 @@ enum MessageAttachmentKind: Hashable {
         case .archive: return "Archive"
         case .other: return "File"
         }
+    }
+
+    /// The kind and, when known, the file's formatted size.
+    func detail(size: Int?) -> String {
+        guard let size else { return noun }
+        return "\(noun) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))"
     }
 }
 

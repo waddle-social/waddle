@@ -64,7 +64,7 @@ struct DecryptedFileCard: View {
             MessageFileCardLabel(
                 symbol: kind.symbolName,
                 title: file.displayName,
-                detail: MessageFileCard.detail(for: file, kind: kind),
+                detail: kind.detail(size: file.size),
                 trailingSymbol: "lock.open"
             )
         }

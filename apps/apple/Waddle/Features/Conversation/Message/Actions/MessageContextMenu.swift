@@ -14,6 +14,8 @@ struct MessageContextMenu: View {
     let session: SessionCoordinator
     let actions: MessageActionModel
     let perform: (MessageAction) -> Void
+    let openURL: OpenURLAction
+    let openEncryptedAttachment: (MessageMedia.Attachment.ID) -> Void
 
     var body: some View {
         if item.tombstone == nil {
@@ -39,6 +41,7 @@ struct MessageContextMenu: View {
                     Label("Copy text", systemImage: "doc.on.doc")
                 }
             }
+            attachmentOpenActions(media: media, openURL: openURL, openEncryptedAttachment: openEncryptedAttachment)
             if let pack = media.stickerPackLocation {
                 Button {
                     actions.showStickerPack(pack)
@@ -130,6 +133,7 @@ struct MessageAccessibilityActions: ViewModifier {
     let hasSubThreadLink: Bool
     let openProfile: () -> Void
     let openImage: (MediaGallery.Source) -> Void
+    let openEncryptedAttachment: (MessageMedia.Attachment.ID) -> Void
     let roomActions: [MessageRoomLinks.Action]
     let openRoom: (BareJID) -> Void
 
@@ -172,9 +176,7 @@ struct MessageAccessibilityActions: ViewModifier {
             ForEach(MediaGallery.images(in: item, media: media)) { image in
                 Button("Open image \(image.accessibilityName)") { openImage(image.id.source) }
             }
-            if let file = media.visibleAttachments.first, file.encrypted == nil, !file.isImage {
-                Button("Open attachment") { openURL(file.url) }
-            }
+            attachmentOpenActions(media: media, openURL: openURL, openEncryptedAttachment: openEncryptedAttachment)
             if let preview = media.linkPreviews.first {
                 Button("Open link") { openURL(preview.url) }
             }
@@ -184,6 +186,29 @@ struct MessageAccessibilityActions: ViewModifier {
             if session.deliveries.state(of: item.id) == .failed {
                 Button("Retry sending") { Task { await session.retry(clientID: item.id) } }
                 Button("Discard") { session.discard(clientID: item.id, in: item.conversation) }
+            }
+        }
+    }
+}
+
+/// Makes every visible attachment available from the row's menus.
+@MainActor
+private func attachmentOpenActions(
+    media: MessageMedia, openURL: OpenURLAction, openEncryptedAttachment: @escaping (MessageMedia.Attachment.ID) -> Void
+) -> some View {
+    let attachments = media.attachments
+    return ForEach(attachments) { attachment in
+        Button {
+            if case .encrypted = attachment.presentation {
+                openEncryptedAttachment(attachment.id)
+            } else {
+                openURL(attachment.file.url)
+            }
+        } label: {
+            if attachments.count > 1, !attachment.file.displayName.isEmpty {
+                Text("Open attachment \(attachment.file.displayName)")
+            } else {
+                Text("Open attachment")
             }
         }
     }

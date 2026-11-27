@@ -31,6 +31,7 @@ final class EncryptedAttachmentModel {
     let file: SharedFile
     let source: EncryptedFileSource
     private(set) var phase: Phase
+    @ObservationIgnored private var openWhenLoaded = false
     /// The plaintext file Quick Look is showing.
     var previewURL: URL?
 
@@ -48,18 +49,30 @@ final class EncryptedAttachmentModel {
 
     func loadImage() async {
         guard Self.loadsAutomatically(file), case .loading = phase else { return }
+        defer { openWhenLoaded = false }
         do {
             let data = try await Self.fetchAndDecrypt(file: file, source: source, limit: Self.automaticDownloadLimit)
             phase = .decrypted(DecryptedAttachment(data: data, image: Image(data: data)))
+            if openWhenLoaded { openPreview() }
         } catch EncryptedFileDownloadError.tooLarge {
             // Bigger than it declared: offer it as a file to open instead.
             phase = .idle
+            if openWhenLoaded { await openFile() }
         } catch {
             // A cancelled load (the row scrolled away) stays `.loading` so
             // the next appearance starts over.
             if !Task.isCancelled {
                 phase = .failed
             }
+        }
+    }
+
+    /// Opens the file from the row menu, including an image already loading for display.
+    func requestOpen() async {
+        switch phase {
+        case .idle, .failed: await openFile()
+        case .decrypted: openPreview()
+        case .loading: openWhenLoaded = true
         }
     }
 
@@ -73,6 +86,7 @@ final class EncryptedAttachmentModel {
             return
         }
         phase = .loading
+        defer { openWhenLoaded = false }
         do {
             let data = try await Self.fetchAndDecrypt(file: file, source: source, limit: EncryptedFileDecryptor.maximumCiphertextSize)
             previewURL = try DecryptedFileStore.write(data, for: file)

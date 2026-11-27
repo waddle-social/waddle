@@ -1,12 +1,13 @@
 import SwiftUI
 import WaddleKit
 
-/// Give the withheld notice and Load media button their own VoiceOver elements.
+/// Preserve the message's actions and expose controls that need their own focus.
 struct MessageRowAccessibility: ViewModifier {
     let label: String
     let actions: MessageAccessibilityActions
     let media: MessageMedia
     let loadMedia: () -> Void
+    let hasInlineControls: Bool
 
     func body(content: Content) -> some View {
         if let withheld = media.withheld {
@@ -16,6 +17,11 @@ struct MessageRowAccessibility: ViewModifier {
                     WithheldMediaCard(media: withheld, load: loadMedia)
                 }
             }
+        } else if hasInlineControls {
+            content
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(Text(label))
+                .modifier(actions)
         } else {
             messageElement(content, children: media.linkPreviews.contains { $0.playback != nil } ? .contain : .ignore)
         }
