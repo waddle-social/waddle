@@ -8,18 +8,19 @@ use waddle_broker_core::permission::{
     PermissionBackendError,
 };
 use waddle_server::permissions::{
-    decode_tenant_scoped_id, encode_tenant_scoped_id, AuthzCallerRole,
-    TenantSpiceDbPermissionBackend, AUTHZ_SCHEMA_VERSION, SPICEDB_SCHEMA,
+    builtin_authz_schema, decode_tenant_scoped_id, encode_tenant_scoped_id, AuthzCallerRole,
+    TenantSpiceDbPermissionBackend, AUTHZ_SCHEMA_VERSION,
 };
 
 #[tokio::test]
 async fn spicedb_tenant_scoping_and_schema_v3_isolation() {
     assert_eq!(AUTHZ_SCHEMA_VERSION, 3);
-    assert!(SPICEDB_SCHEMA.contains("relation version_3: waddle_authz_schema"));
-    assert!(SPICEDB_SCHEMA.contains("definition tenant_credential"));
-    assert!(SPICEDB_SCHEMA.contains("definition user_credential"));
-    assert!(SPICEDB_SCHEMA.contains("definition installed_extension"));
-    assert!(SPICEDB_SCHEMA.contains("definition room_inference_policy"));
+    let schema = builtin_authz_schema();
+    assert!(schema.contains("relation version_3: waddle_authz_schema"));
+    assert!(schema.contains("definition tenant_credential"));
+    assert!(schema.contains("definition user_credential"));
+    assert!(schema.contains("definition installed_extension"));
+    assert!(schema.contains("definition room_inference_policy"));
 
     let acme = TenantId::parse("acme.example").expect("acme");
     let globex = TenantId::parse("globex.example").expect("globex");

@@ -22,8 +22,11 @@ use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, Exten
 use std::sync::mpsc;
 use std::time::Duration;
 use waddle_broker_core::quotas::TenantMemoryTracker;
+use wasmtime_wasi::cli::{WasiCli, WasiCliView as _};
 use wasmtime_wasi::clocks::{WasiClocks, WasiClocksView as _};
-use wasmtime_wasi::p2::bindings::{clocks as wasi_clocks, random as wasi_random};
+use wasmtime_wasi::p2::bindings::{
+    cli as wasi_cli, clocks as wasi_clocks, io as wasi_io, random as wasi_random,
+};
 use wasmtime_wasi::random::WasiRandom;
 use wasmtime_wasi::WasiView;
 
@@ -638,20 +641,38 @@ impl wasmtime::component::HasData for HasIo {
     type Data<'a> = &'a mut wasmtime::component::ResourceTable;
 }
 
-/// Narrow WASI linking: exposes ONLY `wasi:clocks`, `wasi:io`, and `wasi:random`.
-/// Deliberately omits `wasi:filesystem`, `wasi:sockets`, and `wasi:cli`.
+/// Narrow WASI linking: exposes `wasi:io`, `wasi:clocks`, `wasi:random`, and
+/// the isolated `wasi:cli` stdio/empty-environment/exit interfaces imported by
+/// Rust's `wasm32-wasip2` standard library (`WasiCtxBuilder::new()` leaves env,
+/// args, and cwd empty and binds stdin/stdout/stderr to closed/discard sinks so
+/// nothing leaks to or from the host).
+/// Deliberately omits `wasi:filesystem` and `wasi:sockets`.
 fn add_narrow_wasi_to_linker(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
-    use wasmtime_wasi::p2::bindings::io;
-
-    io::error::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
-    io::poll::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
-    io::streams::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    wasi_io::error::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    wasi_io::poll::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
+    wasi_io::streams::add_to_linker::<HostState, HasIo>(linker, |t| t.ctx().table)?;
     wasi_clocks::wall_clock::add_to_linker::<HostState, WasiClocks>(linker, HostState::clocks)?;
     wasi_clocks::monotonic_clock::add_to_linker::<HostState, WasiClocks>(
         linker,
         HostState::clocks,
     )?;
     wasi_random::random::add_to_linker::<HostState, WasiRandom>(linker, |t| t.ctx().ctx.random())?;
+    wasi_random::insecure::add_to_linker::<HostState, WasiRandom>(linker, |t| {
+        t.ctx().ctx.random()
+    })?;
+    wasi_random::insecure_seed::add_to_linker::<HostState, WasiRandom>(linker, |t| {
+        t.ctx().ctx.random()
+    })?;
+    wasi_cli::exit::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::environment::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::stdin::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::stdout::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::stderr::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::terminal_input::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::terminal_output::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::terminal_stdin::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::terminal_stdout::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
+    wasi_cli::terminal_stderr::add_to_linker::<HostState, WasiCli>(linker, HostState::cli)?;
     Ok(())
 }
 

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -266,7 +266,7 @@ impl BrokerEgressClient {
         let mut guard = self
             .semaphores
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+            .expect("egress semaphore map lock poisoned");
         guard
             .entry(key)
             .or_insert_with(|| Arc::new(Semaphore::new(profile.caps.max_concurrent_requests)))

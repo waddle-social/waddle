@@ -30,6 +30,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27"
+waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 
 [lints]
 workspace = true

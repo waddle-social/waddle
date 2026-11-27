@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{PoisonError, RwLock};
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +52,10 @@ where
     }
 
     pub fn insert(&self, tenant_id: TenantId, key: K, value: V) -> Option<V> {
-        let mut guard = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self
+            .entries
+            .write()
+            .expect("tenant scoped cache lock poisoned");
         guard.insert(TenantKey::new(tenant_id, key), value)
     }
 
@@ -61,7 +64,10 @@ where
         K: Clone,
         V: Clone,
     {
-        let guard = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .entries
+            .read()
+            .expect("tenant scoped cache lock poisoned");
         guard
             .get(&TenantKey::new(tenant_id.clone(), key.clone()))
             .cloned()
@@ -71,7 +77,10 @@ where
     where
         K: Clone,
     {
-        let guard = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .entries
+            .read()
+            .expect("tenant scoped cache lock poisoned");
         let lookup = TenantKey::new(tenant_id.clone(), key.clone());
         f(guard.get(&lookup))
     }
@@ -80,7 +89,10 @@ where
     where
         V: Clone,
     {
-        let mut guard = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self
+            .entries
+            .write()
+            .expect("tenant scoped cache lock poisoned");
         guard
             .entry(TenantKey::new(tenant_id, key))
             .or_insert_with(init)
@@ -91,7 +103,10 @@ where
     where
         K: Clone,
     {
-        let mut guard = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self
+            .entries
+            .write()
+            .expect("tenant scoped cache lock poisoned");
         guard.remove(&TenantKey::new(tenant_id.clone(), key.clone()))
     }
 
@@ -99,26 +114,38 @@ where
     where
         K: Clone,
     {
-        let guard = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .entries
+            .read()
+            .expect("tenant scoped cache lock poisoned");
         guard.contains_key(&TenantKey::new(tenant_id.clone(), key.clone()))
     }
 
     /// Evict all cached entries belonging strictly to `tenant_id` (used on tenant
     /// quiesce, lease loss, or deletion) without affecting any sibling tenant.
     pub fn clear_tenant(&self, tenant_id: &TenantId) -> usize {
-        let mut guard = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self
+            .entries
+            .write()
+            .expect("tenant scoped cache lock poisoned");
         let before = guard.len();
         guard.retain(|k, _| &k.tenant_id != tenant_id);
         before.saturating_sub(guard.len())
     }
 
     pub fn len_for_tenant(&self, tenant_id: &TenantId) -> usize {
-        let guard = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .entries
+            .read()
+            .expect("tenant scoped cache lock poisoned");
         guard.keys().filter(|k| &k.tenant_id == tenant_id).count()
     }
 
     pub fn total_len(&self) -> usize {
-        let guard = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let guard = self
+            .entries
+            .read()
+            .expect("tenant scoped cache lock poisoned");
         guard.len()
     }
 }

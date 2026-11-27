@@ -578,7 +578,7 @@ async fn postgres_compat_placement_lease_store_passes_all_seven_scenarios() {
 
 #[tokio::test]
 async fn live_postgres_placement_lease_store_when_env_configured() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let pool = sqlx::PgPool::connect(&url)

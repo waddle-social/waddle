@@ -204,6 +204,8 @@ async fn postgres_known_terminal_observer_outcomes_still_settle() {
 }
 
 async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixture) {
+    // 1. An expired pre-start lease (`leased`, never `started`) retries with a fresh
+    //    lease token, fences the stale token, and commits publication + receipt atomically.
     let (observer, now) = seed(&fixture).await;
     let subscription = subscription(&observer);
     let mut tx = fixture.uow.begin().await.expect("claim");
@@ -216,18 +218,13 @@ async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixtur
         payloads: vec![payload()],
         usage: None,
     });
-    let mut tx = fixture.uow.begin().await.expect("start");
+    let mut tx = fixture.uow.begin().await.expect("before expiry");
     assert!(!Repo::finish(&mut tx, &first, &result, now)
         .await
         .expect("must start first"));
     assert!(!Repo::start(&mut tx, &first, now + 180_000)
         .await
         .expect("expired reservation"));
-    assert!(Repo::start(&mut tx, &first, now).await.expect("start"));
-    assert!(!Repo::start(&mut tx, &first, now).await.expect("start once"));
-    tx.commit().await.expect("start commit");
-
-    let mut tx = fixture.uow.begin().await.expect("before expiry");
     assert!(Repo::claim(&mut tx, &subscription, now + 179_999)
         .await
         .expect("claim")
@@ -236,26 +233,8 @@ async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixtur
         .await
         .expect("due")
         .is_empty());
-    for failure in [
-        ObservationFailure::TemporaryFailure,
-        ObservationFailure::DeadlineExceeded,
-        ObservationFailure::RuntimeFailure,
-    ] {
-        assert!(!Repo::finish(
-            &mut tx,
-            &first,
-            &RoomObservationOutcome::UnresolvedFailure(failure),
-            now + 1
-        )
-        .await
-        .expect("ambiguous"));
-    }
-    tx.commit().await.expect("uncertain commit");
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    assert_eq!(fixture.count("extension_room_publications").await, 0);
+    tx.commit().await.expect("before expiry commit");
 
-    // A crash after start is bounded by the lease. Replacement changes the
-    // token before guest entry, so a late result from the first run is fenced.
     let mut tx = fixture.uow.begin().await.expect("expired recovery");
     assert_eq!(
         Repo::due_rooms(&mut tx, &observer, None, now + 180_000, 10)
@@ -286,6 +265,9 @@ async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixtur
     assert!(Repo::start(&mut tx, &retry, now + 180_000)
         .await
         .expect("retry start"));
+    assert!(!Repo::start(&mut tx, &retry, now + 180_000)
+        .await
+        .expect("start once"));
     tx.commit().await.expect("retry commit");
 
     // Publication and receipt still share one transaction.
@@ -306,6 +288,52 @@ async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixtur
     tx.commit().await.expect("finish commit");
     assert_eq!(fixture.count("extension_room_publications").await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+
+    // 2. Unresolved failures after `start()` quarantine immediately as terminal
+    //    `unknown_after_send` without re-dispatching.
+    for (stanza, failure) in [
+        ("unresolved-temp", ObservationFailure::TemporaryFailure),
+        ("unresolved-deadline", ObservationFailure::DeadlineExceeded),
+        ("unresolved-runtime", ObservationFailure::RuntimeFailure),
+    ] {
+        let (observer, at) = seed_with_stanza(&fixture, stanza).await;
+        let sub = super::subscription(&observer);
+        let mut tx = fixture.uow.begin().await.expect("unresolved claim");
+        let started = Repo::claim(&mut tx, &sub, at)
+            .await
+            .expect("claim")
+            .expect("work");
+        assert!(Repo::start(&mut tx, &started, at).await.expect("start"));
+        assert!(Repo::finish(
+            &mut tx,
+            &started,
+            &RoomObservationOutcome::UnresolvedFailure(failure),
+            at + 1
+        )
+        .await
+        .expect("unresolved quarantines"));
+        assert!(!Repo::finish(
+            &mut tx,
+            &started,
+            &RoomObservationOutcome::UnresolvedFailure(failure),
+            at + 2
+        )
+        .await
+        .expect("quarantined once"));
+        assert!(Repo::claim(&mut tx, &sub, at + 180_000)
+            .await
+            .expect("no re-dispatch after quarantine")
+            .is_none());
+        tx.commit().await.expect("quarantine commit");
+    }
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'terminal' AND terminal_category = 'unknown_after_send' AND body = ''")
+            .await,
+        3
+    );
+    assert_eq!(fixture.count("extension_room_publications").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
     fixture.close().await;
 }
 
@@ -436,75 +464,72 @@ async fn node_rotation_fences_observation_reservations_and_results() {
         .expect("rotated owner"));
     assert!(Repo::claim(&mut tx, &subscription, now + 1_000_000)
         .await
-        .expect("started retry after rotation")
-        .is_some());
-    tx.commit().await.expect("stale commit");
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+        .expect("expired started work after rotation quarantines")
+        .is_none());
+    tx.commit().await.expect("quarantine commit");
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'terminal' AND terminal_category = 'unknown_after_send' AND body = ''")
+            .await,
+        1
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }
 
 async fn unknown_started_outcome_remains_retryable_after_twenty_attempts(fixture: IngressFixture) {
     let (observer, now) = seed(&fixture).await;
     let subscription = subscription(&observer);
-    let mut last = None;
-    for index in 0..20 {
-        let at = now + index * 180_000;
-        let mut tx = fixture.uow.begin().await.expect("attempt");
-        let work = Repo::claim(&mut tx, &subscription, at)
-            .await
-            .expect("claim")
-            .expect("work");
-        assert_eq!(i64::from(work.attempt), index + 1);
-        assert!(Repo::start(&mut tx, &work, at).await.expect("start"));
-        tx.commit().await.expect("start commit");
-        last = Some(work);
-    }
-    let mut tx = fixture.uow.begin().await.expect("unknown recovery");
-    let retry = Repo::claim(&mut tx, &subscription, now + 20 * 180_000)
+    let mut tx = fixture.uow.begin().await.expect("attempt");
+    let first = Repo::claim(&mut tx, &subscription, now)
         .await
-        .expect("unknown remains retryable")
-        .expect("twenty-first attempt");
-    assert_eq!(retry.attempt, 21);
-    let last = last.expect("last work");
-    assert_ne!(retry.lease, last.lease);
-    assert_eq!(retry.message_key, last.message_key);
+        .expect("claim")
+        .expect("work");
+    assert_eq!(first.attempt, 1);
+    assert!(Repo::start(&mut tx, &first, now).await.expect("start"));
+    tx.commit().await.expect("start commit");
+
+    // Once a started attempt expires with an unknown outcome, claim() immediately
+    // quarantines it as terminal `unknown_after_send` instead of re-dispatching.
+    let mut tx = fixture.uow.begin().await.expect("quarantine recovery");
+    assert!(Repo::claim(&mut tx, &subscription, now + 180_000)
+        .await
+        .expect("quarantine expired started work")
+        .is_none());
     let result = RoomObservationOutcome::Completed(RoomObservationResult {
         payloads: vec![payload()],
         usage: None,
     });
-    assert!(!Repo::finish(&mut tx, &last, &result, now + 20 * 180_000)
+    assert!(!Repo::finish(&mut tx, &first, &result, now + 180_000)
         .await
         .expect("late result"));
-    assert!(Repo::start(&mut tx, &retry, now + 20 * 180_000)
-        .await
-        .expect("retry start"));
-    // A later pre-invocation refusal cannot erase an earlier unknown send.
-    assert!(Repo::finish(
+    assert!(!Repo::finish(
         &mut tx,
-        &retry,
+        &first,
         &RoomObservationOutcome::NotInvoked,
-        now + 20 * 180_000
+        now + 180_000
     )
     .await
-    .expect("known noninvocation retains earlier uncertainty"));
-    assert!(
-        Repo::claim(&mut tx, &subscription, now + 20 * 180_000 + 60_000)
-            .await
-            .expect("retry after backoff")
-            .is_some()
-    );
-    tx.commit().await.expect("retry commit");
+    .expect("late not-invoked"));
+    assert!(Repo::claim(&mut tx, &subscription, now + 20 * 180_000)
+        .await
+        .expect("quarantined work stays terminal")
+        .is_none());
+    tx.commit().await.expect("quarantine commit");
     assert_eq!(
         fixture
-            .count("extension_room_observation_work WHERE status = 'terminal'")
+            .count("extension_room_observation_work WHERE status = 'terminal' AND terminal_category = 'unknown_after_send' AND body = ''")
             .await,
-        0
+        1
     );
     assert_eq!(
-        fixture.count("extension_room_observation_receipts").await,
-        0
+        fixture
+            .count("extension_room_observation_receipts WHERE category = 'unknown_after_send'")
+            .await,
+        1
     );
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }
