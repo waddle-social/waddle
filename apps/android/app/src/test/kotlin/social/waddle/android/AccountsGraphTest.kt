@@ -160,7 +160,7 @@ class AccountsGraphTest {
         signIn("https://b.example", "bob@b.example", "sess-b")
         val a = accountKey("https://a.example", "ann@a.example")
 
-        val tiles = runBlocking { graph.accountTiles.first { it.size == 2 } }
+        val tiles = runBlocking { graph.accountTiles.first { it.size == 2 && it.last().selected } }
 
         assertEquals(listOf("a.example", "b.example"), tiles.map { it.label })
         assertEquals(listOf(false, true), tiles.map { it.selected })

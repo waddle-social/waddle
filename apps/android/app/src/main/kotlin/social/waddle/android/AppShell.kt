@@ -84,15 +84,6 @@ fun AppShell(
             is WaddleAppState.Error -> RestoreErrorScreen(
                 detail = state.message,
                 onRetry = graph::restore,
-<<<<<<< HEAD
-=======
-            )
-            WaddleAppState.Ready -> ReadyShell(
-                pendingConversationJid = pendingConversationJid,
-                onConversationConsumed = onConversationConsumed,
-                pendingCallAnswer = pendingCallAnswer,
-                onCallAnswerConsumed = onCallAnswerConsumed,
->>>>>>> origin/main
             )
             WaddleAppState.Ready -> if (adding) {
                 LoginHost(adding = true)

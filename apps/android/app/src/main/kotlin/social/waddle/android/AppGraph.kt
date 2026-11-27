@@ -14,10 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-<<<<<<< HEAD
 import kotlinx.coroutines.flow.Flow
-=======
->>>>>>> origin/main
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -217,7 +214,6 @@ class AppGraph(
     val activeKey: StateFlow<String?> = _activeKey.asStateFlow()
 
     private val registryLoaded = MutableStateFlow(false)
-<<<<<<< HEAD
     private val _addingAccount = MutableStateFlow(false)
 
     /** The person is adding another account: the sign-in screen shows over the signed-in shell. */
@@ -275,8 +271,6 @@ class AppGraph(
             ) { connection, counts, paused -> tile(connection, counts.values.sum(), paused) }
         }
     }
-=======
->>>>>>> origin/main
     private val lastUsed = HashMap<String, Long>()
 
     private val runtimeEnvironment = AccountRuntimeEnvironment(
@@ -592,10 +586,7 @@ class AppGraph(
         accountRegistry.upsertAndSelect(account)
         runtime.signIn(session, origin)
         synchronized(accountsLock) { selectLocked(account.key) }
-<<<<<<< HEAD
         _addingAccount.value = false
-=======
->>>>>>> origin/main
     }
 
     /**
@@ -631,14 +622,10 @@ class AppGraph(
         accountRegistry.remove(runtime.key)
         next?.let { accountRegistry.select(it) }
         accountStores.remove(runtime.key)
-<<<<<<< HEAD
         if (next == null) {
             _addingAccount.value = false
             encryptedAttachmentOpener.clearCache()
         }
-=======
-        if (next == null) encryptedAttachmentOpener.clearCache()
->>>>>>> origin/main
     }
 
     /** FCM rotated the device token: every account registers it. */
@@ -671,7 +658,6 @@ class AppGraph(
     }
 }
 
-<<<<<<< HEAD
 /** One account in the switcher. */
 data class AccountTile(
     val key: String,
@@ -686,8 +672,6 @@ data class AccountTile(
     val selected: Boolean,
 )
 
-=======
->>>>>>> origin/main
 /**
  * A [StateFlow] that follows whichever flow [select] picks from the current
  * [active] runtime, with a synchronous `value`: a reader right after the
