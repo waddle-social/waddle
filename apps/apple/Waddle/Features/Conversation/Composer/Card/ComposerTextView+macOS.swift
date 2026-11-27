@@ -238,7 +238,7 @@ final class ComposerNSTextView: NSTextView {
     }
 
     /// Text only: a dropped file or picture goes past the field to the
-    /// composer's drop target, which attaches it.
+    /// conversation's drop target, which attaches it.
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] {
         [.string]
     }

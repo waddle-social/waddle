@@ -64,20 +64,23 @@ struct ComposerAttachmentIntake {
         }
         var taken = false
         for provider in providers {
+            // The provider must start loading before the drop handler returns.
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 taken = true
-                Task {
-                    guard let url = await Self.fileURL(from: provider) else { return }
-                    attachFiles([url])
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, url.isFileURL else { return }
+                    Task { @MainActor in attachFiles([url]) }
                 }
             } else if let type = Self.imageType(of: provider) {
                 taken = true
-                Task {
-                    guard let data = await Self.data(of: type, from: provider) else {
-                        model.errorMessage = "Couldn't read that image."
-                        return
+                _ = provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                    Task { @MainActor in
+                        guard let data else {
+                            model.errorMessage = "Couldn't read that image."
+                            return
+                        }
+                        await attachImage(data, mediaType: type.preferredMIMEType, fileExtension: type.preferredFilenameExtension)
                     }
-                    await attachImage(data, mediaType: type.preferredMIMEType, fileExtension: type.preferredFilenameExtension)
                 }
             }
         }
@@ -91,23 +94,6 @@ struct ComposerAttachmentIntake {
         return provider.registeredTypeIdentifiers.lazy
             .compactMap { UTType($0) }
             .first { $0.conforms(to: .image) }
-    }
-
-    // Nonisolated: the providers call back off the main thread.
-    private nonisolated static func fileURL(from provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                continuation.resume(returning: url.flatMap { $0.isFileURL ? $0 : nil })
-            }
-        }
-    }
-
-    private nonisolated static func data(of type: UTType, from provider: NSItemProvider) async -> Data? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
-                continuation.resume(returning: data)
-            }
-        }
     }
 
     /// Library and pasted images go through the photo path, which strips

@@ -86,6 +86,7 @@ private struct ConversationContent: View {
                     composerStack(placeholder: header.composerPlaceholder)
                 }
             }
+            .modifier(ConversationDropTarget(composer: composer))
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: session.connection)
             .navigationTitle(header.title)
             #if os(iOS)

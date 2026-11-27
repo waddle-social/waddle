@@ -1,16 +1,12 @@
 import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// The photo picker, file importer and drop target that feed the
-/// composer's attachments.
+/// The photo picker and file importer that feed the composer's attachments.
 struct ComposerAttachmentPickers: ViewModifier {
     @Binding var showsPhotoPicker: Bool
     @Binding var showsFileImporter: Bool
     @Binding var photoSelection: [PhotosPickerItem]
     let intake: ComposerAttachmentIntake
-    @State private var isDropTargeted = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
@@ -27,40 +23,10 @@ struct ComposerAttachmentPickers: ViewModifier {
                     intake.attachFiles(urls)
                 }
             }
-            .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { providers in
-                intake.attachDropped(providers)
-            }
-            .overlay {
-                if isDropTargeted {
-                    ComposerDropHighlight()
-                        .transition(.opacity)
-                }
-            }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isDropTargeted)
             .onChange(of: photoSelection) { _, items in
                 guard !items.isEmpty else { return }
                 photoSelection = []
                 intake.attachPhotos(items)
             }
-    }
-}
-
-/// Shown over the composer while a file or picture is dragged over it.
-private struct ComposerDropHighlight: View {
-    var body: some View {
-        RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-            .strokeBorder(Theme.Colors.actionText, style: StrokeStyle(lineWidth: WaddleTokens.BorderWidth.strong, dash: [6, 4]))
-            .background(
-                RoundedRectangle(cornerRadius: ComposerMetrics.cardRadius, style: .continuous)
-                    .fill(Theme.Colors.actionSubtle)
-            )
-            .overlay {
-                Label("Drop to attach", systemImage: "paperclip")
-                    .huddleText(Theme.Typography.label)
-                    .foregroundStyle(Theme.Colors.actionText)
-            }
-            .padding(Theme.Spacing.xs)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
     }
 }
