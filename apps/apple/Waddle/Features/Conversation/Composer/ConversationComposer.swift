@@ -100,7 +100,6 @@ struct ConversationComposer: View {
     private var card: some View {
         ComposerCard(
             model: model,
-            text: fieldText,
             selection: $selection,
             showsFormatting: $showsFormatting,
             isFocused: $isFocused,
@@ -126,15 +125,9 @@ struct ConversationComposer: View {
         }
     }
 
-    /// The draft as the field edits it, noting what the field wrote.
-    private var fieldText: Binding<String> {
-        Binding(
-            get: { model.text },
-            set: { newValue in
-                selectionBase = newValue
-                model.text = newValue
-            }
-        )
+    private func fieldDidChange(_ replacement: ComposerTextReplacement) {
+        selectionBase = replacement.text
+        model.replaceText(replacement)
     }
 
     private var uploader: AttachmentUploader {
@@ -159,6 +152,7 @@ struct ConversationComposer: View {
     private var cardActions: ComposerActions {
         ComposerActions(
             submit: submit,
+            changeText: fieldDidChange,
             handleSuggestionKey: handleSuggestionKey,
             cancelContext: cancelContext,
             format: applyFormat,
@@ -176,13 +170,20 @@ struct ConversationComposer: View {
 
     // MARK: - Suggestions
 
+    private var currentSelection: ComposerScalarRange? {
+        model.text == selectionBase ? selection : nil
+    }
+
     private var suggestionPresentation: ComposerSuggestionsModel {
         ComposerSuggestionsModel.present(
-            draft: .init(text: model.text, selection: model.text == selectionBase ? selection : nil, isEditing: model.isEditing),
+            draft: .init(
+                text: model.text, selection: currentSelection,
+                isEditing: model.isEditing, roomLinks: model.references.roomLinks
+            ),
             place: .init(conversation: conversation, inChannel: isChannel, account: session.account),
             occupants: Array((session.presence.occupants[conversation.jid] ?? [:]).values),
             extensions: session.extensionCommands, directory: suggestionDirectory.results,
-            navigation: suggestionNavigation
+            navigation: suggestionNavigation, rooms: session.directory.channels
         )
     }
 
@@ -196,14 +197,15 @@ struct ConversationComposer: View {
     }
 
     private func apply(_ pick: ComposerSuggestionsModel.Pick) {
-        apply(pick.edit)
-        if let mention = pick.recordedMention { model.recordMention(mention) }
-        if pick.clearsError { model.errorMessage = nil }
+        model.accept(pick)
+        focus(after: pick.edit)
     }
 
     // MARK: - Sending and slash commands
 
     private func submit() {
+        // An open list takes Send before anything else, in an edit too, as it takes Return.
+        if let pick = suggestionPresentation.pickForSubmit(in: model.text) { return apply(pick) }
         guard !model.isEditing else {
             sendDraft()
             return
@@ -219,7 +221,7 @@ struct ConversationComposer: View {
         case let .run(action):
             perform(action)
         case let .complete(candidate):
-            model.text = SlashCompletion.complete(text: model.text, with: candidate)
+            model.replaceText(ComposerTextReplacement(SlashCompletion.complete(text: model.text, with: candidate)))
             model.errorMessage = nil
             isFocused = true
         case .choose:
@@ -233,7 +235,7 @@ struct ConversationComposer: View {
         model.errorMessage = nil
         switch action {
         case let .send(body):
-            model.text = body
+            model.replaceText(ComposerTextReplacement(body))
             sendDraft()
         case let .searchGIFs(query):
             model.clearText()
@@ -296,11 +298,11 @@ struct ConversationComposer: View {
     // MARK: - Editing the draft
 
     private func applyFormat(_ format: ComposerFormat) {
-        apply(ComposerFormatting.apply(format, to: model.text, selection: selection))
+        apply(ComposerTextReplacement.applyingFormat(format, to: model.text, selection: currentSelection))
     }
 
     private func insertEmoji(_ emoji: String) {
-        apply(ComposerInsertion.replacingSelection(with: emoji, in: model.text, selection: selection))
+        replaceSelection(with: emoji)
     }
 
     private func insertLink(_ input: String) {
@@ -308,24 +310,39 @@ struct ConversationComposer: View {
             model.errorMessage = "That doesn't look like a web address."
             return
         }
-        apply(ComposerInsertion.insertingLink(url, into: model.text, selection: selection))
+        let selection = currentSelection
+        let point = selection?.upperBound ?? model.text.unicodeScalars.count
+        apply(ComposerInsertion.insertingLink(url, into: model.text, selection: selection), replacing: point..<point)
     }
 
     /// Puts `@` at the end so the mention list opens.
     private func startMention() {
+        let point = model.text.unicodeScalars.count
         let text = ComposerInsertion.appendingToken("@", to: model.text)
         let end = text.unicodeScalars.count
-        apply(ComposerTextEdit(text: text, selection: end..<end))
+        apply(ComposerTextEdit(text: text, selection: end..<end), replacing: point..<point)
     }
 
     private func startCommand() {
         suggestionNavigation = nil
-        apply(SlashCompletion.start(in: model.text))
+        apply(SlashCompletion.start(in: model.text), replacing: 0..<0)
     }
 
-    private func apply(_ edit: ComposerTextEdit) {
+    private func replaceSelection(with text: String) {
+        apply(ComposerTextReplacement.replacingSelection(with: text, in: model.text, selection: currentSelection))
+    }
+
+    private func apply(_ edit: ComposerTextEdit, replacing range: ComposerScalarRange) {
+        apply((edit, ComposerTextReplacement(edit.text, replacing: range)))
+    }
+
+    private func apply(_ change: (edit: ComposerTextEdit, replacement: ComposerTextReplacement)) {
+        model.replaceText(change.replacement)
+        focus(after: change.edit)
+    }
+
+    private func focus(after edit: ComposerTextEdit) {
         selectionBase = edit.text
-        model.text = edit.text
         selection = edit.selection
         isFocused = true
     }
@@ -344,7 +361,7 @@ struct ConversationComposer: View {
         switch ComposerPasteboard.read() {
         case let .text(string):
             guard let string, !string.isEmpty else { return }
-            apply(ComposerInsertion.replacingSelection(with: string, in: model.text, selection: selection))
+            replaceSelection(with: string)
         case let .attachments(contents, text):
             guard !model.isEditing else {
                 model.errorMessage = "Attachments can't be added while editing a message."
@@ -352,7 +369,7 @@ struct ConversationComposer: View {
             }
             intake.attachPasted(contents)
             if let text {
-                apply(ComposerInsertion.replacingSelection(with: text, in: model.text, selection: selection))
+                replaceSelection(with: text)
             }
         }
     }

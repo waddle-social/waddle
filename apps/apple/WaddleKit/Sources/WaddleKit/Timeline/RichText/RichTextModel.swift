@@ -1,30 +1,43 @@
 import Foundation
 
 /// How strongly a XEP-0372 mention is highlighted.
-enum RichMentionKind: Hashable, Sendable {
+public enum RichMentionKind: Hashable, Sendable {
     case someone
     /// Addresses the signed-in account, directly or by broadcast.
     case me
 }
 
 /// An inline style over a run of text.
-enum RichInlineStyle: Hashable, Sendable {
+public enum RichInlineStyle: Hashable, Sendable {
     case bold
     case italic
     case strikethrough
     case code
     case link(URL)
+    case roomLink(BareJID)
     case mention(RichMentionKind)
+
+    var isLink: Bool {
+        switch self {
+        case .link, .roomLink: true
+        default: false
+        }
+    }
 }
 
 /// A run of text with one constant set of styles.
-struct RichSegment: Hashable, Sendable {
-    let text: String
-    let styles: Set<RichInlineStyle>
+public struct RichSegment: Hashable, Sendable {
+    public let text: String
+    public let styles: Set<RichInlineStyle>
+
+    public init(text: String, styles: Set<RichInlineStyle>) {
+        self.text = text
+        self.styles = styles
+    }
 }
 
 /// A block of the rendered body.
-enum RichBlock: Hashable, Sendable {
+public enum RichBlock: Hashable, Sendable {
     case paragraph([RichSegment])
     /// A XEP-0394 blockquote with its `>` markers removed.
     case quote([RichSegment])
@@ -40,7 +53,12 @@ struct RichStyledRange: Hashable, Sendable {
 
 /// A link found by a detector, in Unicode scalar offsets over the text it
 /// was given.
-struct RichDetectedLink: Hashable, Sendable {
+public struct RichDetectedLink: Hashable, Sendable {
     let range: Range<Int>
     let url: URL
+
+    public init(range: Range<Int>, url: URL) {
+        self.range = range
+        self.url = url
+    }
 }

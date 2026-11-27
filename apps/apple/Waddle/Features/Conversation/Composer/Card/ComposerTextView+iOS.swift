@@ -13,10 +13,11 @@ import WaddleKit
 ///
 /// Grows from one line to `maxLines`, then scrolls.
 struct ComposerTextView: UIViewRepresentable {
-    @Binding var text: String
+    let text: String
     @Binding var selection: ComposerScalarRange?
     @Binding var isFocused: Bool
     let placeholder: String
+    let onTextChange: (ComposerTextReplacement) -> Void
     let onSubmit: () -> Void
     /// Returns true when an open suggestion list used the key.
     let onSuggestionKey: (ComposerHardwareKey) -> Bool
@@ -63,6 +64,7 @@ struct ComposerTextView: UIViewRepresentable {
             // The composer replaced the draft (a send, a completion, a
             // formatting edit): the field's caret no longer describes it.
             view.text = text
+            coordinator.pendingReplacement = nil
             coordinator.applied = nil
             if selection == nil {
                 view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
@@ -112,14 +114,22 @@ struct ComposerTextView: UIViewRepresentable {
         /// Set while `updateUIView` writes into the view, whose change
         /// callbacks then describe the composer's own edit.
         var isApplying = false
+        var pendingReplacement: ComposerScalarRange?
 
         init(parent: ComposerTextView) {
             self.parent = parent
         }
 
+        func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText _: String) -> Bool {
+            pendingReplacement = ComposerUTF16Selection.scalarRange(of: range, in: view.text)
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
             guard !isApplying else { return }
-            parent.text = textView.text
+            let replaced = pendingReplacement
+            pendingReplacement = nil
+            parent.onTextChange(ComposerTextReplacement(textView.text, replacing: replaced))
             report(textView)
         }
 

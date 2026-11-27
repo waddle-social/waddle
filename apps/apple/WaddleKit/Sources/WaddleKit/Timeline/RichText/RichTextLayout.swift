@@ -1,44 +1,20 @@
 import Foundation
-import WaddleKit
-
-/// What the body renderer needs from a row.
-struct RichTextInput {
-    /// `TimelineItem.body`: fallback stripped, corrections applied.
-    let displayedBody: String
-    /// `WireMessage.body`, which the span and reference offsets count over
-    /// unless the row was corrected.
-    let wireBody: String?
-    /// The reply fallback the offsets include (the correction's, once
-    /// corrected).
-    let fallback: Range<Int>?
-    /// A XEP-0308 correction replaced body, spans and references; the
-    /// offsets then count over the correction's wire body.
-    let isEdited: Bool
-    let spans: [MarkupSpan]
-    let references: [Reference]
-    /// XEP-0513 `@everyone` / `@here` ranges over the same wire body.
-    let broadcastSpans: [BroadcastSpan]
-    let ownNick: String
-    /// Classifies a reference as a mention; nil for non-mentions.
-    let mentionKind: (Reference) -> RichMentionKind?
-    /// Leading displayed-body scalars not rendered: the XEP-0245 "/me "
-    /// prefix of an action line. Offsets still count over the full body.
-    let hiddenPrefix: Int
-}
 
 /// Turns a displayed body plus its XEP-0394 spans and XEP-0372 references
 /// into blocks of styled runs. Pure; the view maps runs to attributes.
-enum RichTextLayout {
-    static func blocks(
-        for input: RichTextInput,
-        detectLinks: (String) -> [RichDetectedLink]
+public enum RichTextLayout {
+    public static func blocks(
+        for item: TimelineItem,
+        account: AccountIdentity,
+        detectLinks: (String) -> [RichDetectedLink] = { _ in [] }
     ) -> [RichBlock] {
-        let scalars = Array(input.displayedBody.unicodeScalars)
-        let styled = styledRanges(for: input, detectLinks: detectLinks)
-        let hidden = min(max(input.hiddenPrefix, 0), scalars.count)
+        guard item.tombstone == nil else { return [] }
+        let scalars = Array(item.body.unicodeScalars)
+        let styled = styledRanges(for: item, account: account, detectLinks: detectLinks)
+        let hidden = MeAction.hiddenScalarCount(ofBody: item.body)
         var blocks: [RichBlock] = []
         var cursor = hidden
-        for block in nonOverlapping(styled.blocks) {
+        for block in styled.blocks {
             guard let range = MeAction.visibleRange(block.range, hiding: hidden) else { continue }
             if range.lowerBound > cursor {
                 blocks += paragraph(scalars, cursor..<range.lowerBound, inline: styled.inline, detectLinks: detectLinks)
@@ -66,45 +42,50 @@ enum RichTextLayout {
 
     /// Spans and references rebased onto the displayed body. Offsets that
     /// cannot be rebased are dropped rather than styling the wrong text.
-    private static func styledRanges(for input: RichTextInput, detectLinks: (String) -> [RichDetectedLink]) -> (inline: [RichStyledRange], blocks: [BlockRange]) {
+    private static func styledRanges(
+        for item: TimelineItem, account: AccountIdentity, detectLinks: (String) -> [RichDetectedLink]
+    ) -> (inline: [RichStyledRange], blocks: [BlockRange]) {
         var inline: [RichStyledRange] = []
         var blocks: [BlockRange] = []
-        if let mapping = mapping(for: input) {
-            for span in input.spans {
+        if let mapping = WireBodyMapping(item: item) {
+            for span in item.message.markupSpans {
                 guard let range = mapping.displayedRange(ofWire: span.start, span.end) else { continue }
                 switch span.kind {
                 case .bold: inline.append(RichStyledRange(style: .bold, range: range))
                 case .italic: inline.append(RichStyledRange(style: .italic, range: range))
                 case .strikethrough: inline.append(RichStyledRange(style: .strikethrough, range: range))
                 case .code: inline.append(RichStyledRange(style: .code, range: range))
-                case let .link(url): inline.append(RichStyledRange(style: .link(url), range: range))
+                case let .link(url):
+                    if !MessageRoomLinks.isPrivateURL(url) {
+                        inline.append(RichStyledRange(style: .link(url), range: range))
+                    }
                 case .codeBlock: blocks.append(BlockRange(kind: .code, range: range))
                 case .blockquote: blocks.append(BlockRange(kind: .quote, range: range))
                 }
             }
-            for reference in input.references {
-                guard let range = mapping.displayedRange(ofWire: reference.begin, reference.end) else { continue }
-                if let kind = input.mentionKind(reference) {
+            blocks = nonOverlapping(blocks)
+            let references = item.message.references.compactMap { reference in
+                mapping.displayedRange(ofWire: reference.begin, reference.end).map { (reference, $0) }
+            }
+            for (reference, range) in references {
+                if let kind = MentionHighlight.kind(of: reference, account: account, in: item.conversation) {
                     inline.append(RichStyledRange(style: .mention(kind), range: range))
                 } else if let url = webURL(reference) {
                     inline.append(RichStyledRange(style: .link(url), range: range))
                 }
             }
             // `@everyone` / `@here` address the signed-in account too.
-            for broadcast in input.broadcastSpans {
+            for broadcast in item.message.broadcastSpans {
                 guard let range = mapping.displayedRange(ofWire: broadcast.start, broadcast.end) else { continue }
                 inline.append(RichStyledRange(style: .mention(.me), range: range))
             }
+            appendRoomLinks(references, wireLength: mapping.wireLength, blocks: blocks, to: &inline)
         }
         // XEP-0372 references remain authoritative. This fallback only adds
         // presentation emphasis to an exact own-nick token in visible text.
         // It never changes mention notifications or unread state.
-        let visibleScalars = Array(input.displayedBody.unicodeScalars)
-        let visibleText = RichTextSegmenter.string(visibleScalars[...])
-        let links = inline.compactMap { styled -> Range<Int>? in
-            if case .link = styled.style { return styled.range }
-            return nil
-        } + detectLinks(visibleText).map(\.range)
+        let visibleText = item.body
+        let links = inline.filter { $0.style.isLink }.map(\.range) + detectLinks(visibleText).map(\.range)
         let referencedMentions = inline.compactMap { styled -> Range<Int>? in
             if case .mention = styled.style { return styled.range }
             return nil
@@ -114,7 +95,7 @@ enum RichTextLayout {
             return nil
         }
         let codeRanges = inline.filter { $0.style == .code }.map(\.range) + codeBlockRanges
-        for range in MentionTokens.ownNickRanges(input.ownNick, in: visibleText) {
+        for range in MentionTokens.ownNickRanges(account.nick, in: visibleText) {
             guard !codeRanges.contains(where: { $0.overlaps(range) }),
                   !links.contains(where: { $0.overlaps(range) }),
                   !referencedMentions.contains(where: { $0.overlaps(range) }) else { continue }
@@ -123,12 +104,23 @@ enum RichTextLayout {
         return (inline, blocks)
     }
 
-    private static func mapping(for input: RichTextInput) -> WireBodyMapping? {
-        if input.isEdited {
-            return WireBodyMapping(correctedBody: input.displayedBody, fallback: input.fallback)
+    /// A room reference must describe one tappable range. Code, mentions
+    /// and links rendered over that range take priority.
+    private static func appendRoomLinks(
+        _ references: [(Reference, Range<Int>)], wireLength: Int, blocks: [BlockRange], to inline: inout [RichStyledRange]
+    ) {
+        var occupied = blocks.filter { $0.kind == .code }.map(\.range) + inline.compactMap { styled in
+            switch styled.style {
+            case .code, .mention, .link: styled.range
+            default: nil
+            }
         }
-        guard let wireBody = input.wireBody else { return nil }
-        return WireBodyMapping(wireBody: wireBody, fallback: input.fallback, displayedBody: input.displayedBody)
+        for (reference, range) in references {
+            guard reference.end <= wireLength, let room = RoomLinks.room(from: reference),
+                  !occupied.contains(where: { $0.overlaps(range) }) else { continue }
+            inline.append(RichStyledRange(style: .roomLink(room), range: range))
+            occupied.append(range)
+        }
     }
 
     /// A XEP-0372 `data` reference to a web page renders as a link.
@@ -191,14 +183,10 @@ enum RichTextLayout {
         detectLinks: (String) -> [RichDetectedLink]
     ) -> [RichSegment] {
         let text = RichTextSegmenter.string(scalars[...])
-        let blocked = styles.filter { styled in
-            switch styled.style {
-            case .code, .link: return true
-            default: return false
-            }
-        }
+        let blocked = styles.filter { $0.style == .code || $0.style.isLink }
         let detected = detectLinks(text).filter { link in
-            !link.range.isEmpty
+            !MessageRoomLinks.isPrivateURL(link.url)
+                && !link.range.isEmpty
                 && link.range.upperBound <= scalars.count
                 && !blocked.contains { $0.range.overlaps(link.range) }
         }

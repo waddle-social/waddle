@@ -52,13 +52,30 @@ final class ComposerSnapshotTests: XCTestCase {
         )
     }
 
+    func testRoomSuggestions() {
+        let rooms = [
+            Channel(roomJID: SampleSession.design, name: "design"),
+            Channel(roomJID: BareJID(parsing: "design@rooms.other.test")!, name: "design"),
+            Channel(roomJID: SampleSession.designCritique, name: "design-critique"),
+        ]
+        assertHuddleSnapshot(
+            precision: 0.97,
+            of: ComposerSuggestionList(
+                items: RoomLinks.search(RoomLinks.candidates(from: rooms), for: "").map(ComposerSuggestion.room),
+                selectedIndex: 1,
+                onPick: { _ in /* drawn only */ }
+            ),
+            width: Self.width
+        )
+    }
+
     func testSlashSuggestionsAboveComposer() async throws {
         let sample = SampleSession()
         let messageOrder = sample.app.preferences.messageOrder
         sample.app.preferences.messageOrder = .chat
         defer { sample.app.preferences.messageOrder = messageOrder }
         let model = ComposerModel()
-        model.text = "/sh"
+        model.replaceText(ComposerTextReplacement("/sh"))
         let conversation = ConversationID.room(SampleSession.general)
         let composer = ConversationComposer(
             model: model, conversation: conversation, thread: nil, placeholder: "Message #general"

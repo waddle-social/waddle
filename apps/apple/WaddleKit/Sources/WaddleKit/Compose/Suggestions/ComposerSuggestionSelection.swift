@@ -51,7 +51,7 @@ public struct ComposerSuggestionSelection: Equatable, Sendable {
             return
         }
         let index = navigation?.cursor.map { cursor in
-            items.firstIndex(of: cursor.item) ?? min(cursor.index, items.count - 1)
+            items.firstIndex { $0.matchesSelection(cursor.item) } ?? min(cursor.index, items.count - 1)
         } ?? 0
         select(index, for: trigger)
     }

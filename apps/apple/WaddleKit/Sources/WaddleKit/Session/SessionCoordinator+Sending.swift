@@ -345,7 +345,7 @@ extension SessionCoordinator {
 
     /// XEP-0308 correction of one of our own messages. The correction
     /// re-sends the whole message, as the XEP requires: the draft's text
-    /// and mentions (markup and references are recomputed against the new
+    /// and references (markup and ranges are recomputed against the new
     /// body) with the original's reply, thread and attachments; a
     /// sub-thread's parent is the original's, else the one known now. The
     /// draft's own reply, thread and attachments are ignored. A sticker is
@@ -410,7 +410,7 @@ extension SessionCoordinator {
         }
         return Draft(
             text: draft.text,
-            mentions: draft.mentions,
+            references: draft.references,
             reply: reply,
             thread: item.message.thread,
             attachments: item.message.sharedFiles

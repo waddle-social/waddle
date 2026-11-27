@@ -11,6 +11,8 @@ public struct WireBodyMapping: Equatable, Sendable {
     let leadingTrim: Int
     /// Scalar count of the displayed body.
     let displayedLength: Int
+    /// Scalar count of the body used by wire ranges.
+    let wireLength: Int
 
     /// Nil when `displayedBody` is not derived from `wireBody` (a XEP-0308
     /// correction replaced it), so the wire offsets no longer apply.
@@ -35,6 +37,7 @@ public struct WireBodyMapping: Equatable, Sendable {
         self.removed = removed
         self.leadingTrim = leading
         self.displayedLength = remainderCount - leading - trailing
+        self.wireLength = scalars.count
     }
 
     /// A XEP-0308 correction keeps only its display body and fallback
@@ -49,6 +52,7 @@ public struct WireBodyMapping: Equatable, Sendable {
         }
         leadingTrim = 0
         displayedLength = correctedBody.unicodeScalars.count
+        wireLength = displayedLength + min(removed.count, Int.max - displayedLength)
     }
 
     /// The mapping for a row's current offsets: the correction's once

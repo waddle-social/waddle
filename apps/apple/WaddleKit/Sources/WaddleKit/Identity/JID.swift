@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// A bare XMPP address (`local@domain` or `domain`), RFC 7622 §3.
 ///
@@ -47,12 +52,31 @@ public struct BareJID: Hashable, Sendable, Comparable, CustomStringConvertible {
 
     private static func isValidLocalpart(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 1023
-            && !value.contains(where: { "\"&'/:<>@".contains($0) || $0.isWhitespace })
+            && !value.unicodeScalars.contains { "\"&'/:<>@".unicodeScalars.contains($0) || $0.properties.isWhitespace }
     }
 
     private static func isValidDomain(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 1023
             && !value.contains(where: { "@/".contains($0) || $0.isWhitespace })
+    }
+
+    /// Join URIs accept ASCII DNS names and bracketed IPv6 literals.
+    /// Raw JIDs also allow domains that need other handling on the wire.
+    var hasURIHost: Bool {
+        let host = domain[...]
+        if host.first == "[", host.last == "]" {
+            let literal = host.dropFirst().dropLast()
+            guard literal.utf8.allSatisfy({ "0123456789abcdefABCDEF:.".utf8.contains($0) }) else { return false }
+            var address = in6_addr()
+            return inet_pton(AF_INET6, String(literal), &address) == 1
+        }
+        let name = host.last == "." ? host.dropLast() : host
+        return !name.isEmpty && name.utf8.count <= 253 && name.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+            !$0.isEmpty && $0.utf8.count <= 63 && $0.first != "-" && $0.last != "-"
+                && $0.utf8.allSatisfy { byte in
+                    (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || byte == 45
+                }
+        }
     }
 }
 

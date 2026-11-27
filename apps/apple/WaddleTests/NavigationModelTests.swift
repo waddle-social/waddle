@@ -7,6 +7,28 @@ final class NavigationModelTests: XCTestCase {
     private let lobby = ConversationID.room(BareJID(parsing: "lobby@muc.waddle.test")!)
     private let design = ConversationID.room(BareJID(parsing: "design@muc.waddle.test")!)
 
+    func testRoomLinkUsesTheExactAddressAndOpensOnlyKnownRooms() throws {
+        let navigation = NavigationModel()
+        let address = try XCTUnwrap(BareJID(parsing: "café+build@[::1]"))
+        let channel = Channel(roomJID: address, name: "Build")
+        let links = MessageRoomLinks(
+            blocks: [.paragraph([RichSegment(text: "#Build", styles: [.roomLink(address)])])],
+            channels: [channel]
+        )
+        let url = try XCTUnwrap(links.url(for: address))
+        guard case let .room(room) = links.destination(for: url) else {
+            return XCTFail("The rendered link should open its room")
+        }
+
+        navigation.open(lobby)
+        MessageRoomLinks.open(room, using: navigation, channels: [channel.with(hasLeft: true)])
+        XCTAssertEqual(navigation.selection, lobby)
+        MessageRoomLinks.open(room, using: navigation, channels: [channel])
+        XCTAssertEqual(navigation.selection, .room(address))
+        XCTAssertEqual(navigation.tab, .home)
+        XCTAssertEqual(navigation.homePath, [.conversation(.room(address))])
+    }
+
     func testARoomLeftOnAnotherDeviceIsMovedOffWhileOthersStay() {
         let navigation = NavigationModel()
         navigation.open(design)

@@ -13,11 +13,13 @@ public struct ComposerSuggestionsModel: Sendable {
         let text: String
         let selection: ComposerScalarRange?
         let isEditing: Bool
+        let roomLinks: [RoomLinkDraft]
 
-        public init(text: String, selection: ComposerScalarRange?, isEditing: Bool) {
+        public init(text: String, selection: ComposerScalarRange?, isEditing: Bool, roomLinks: [RoomLinkDraft] = []) {
             self.text = text
             self.selection = selection
             self.isEditing = isEditing
+            self.roomLinks = roomLinks
         }
     }
 
@@ -50,7 +52,8 @@ public struct ComposerSuggestionsModel: Sendable {
 
     public struct Pick: Equatable, Sendable {
         public let edit: ComposerTextEdit
-        public let recordedMention: RecordedMention?
+        public let replacementRange: ComposerScalarRange
+        public let reference: RecordedDraftReference?
         public let clearsError: Bool
     }
 
@@ -64,14 +67,25 @@ public struct ComposerSuggestionsModel: Sendable {
     public let directoryQuery: DirectoryQuery?
     private let slashResolves: Bool
 
-    /// The occupants and the extensions are read only for the trigger that needs them: a composer
-    /// with no list open must not come to depend on every room's presence.
+    /// Read each list's data only for the trigger that needs it.
     public static func present(
         draft: Draft, place: Place, occupants: @autoclosure () -> [Occupant],
         extensions: @autoclosure () -> [ExtensionCommand],
-        directory: DirectoryResults?, navigation: ComposerSuggestionSelection.Navigation?
+        directory: DirectoryResults?, navigation: ComposerSuggestionSelection.Navigation?,
+        rooms: @autoclosure () -> [Channel] = []
     ) -> Self {
-        let token = ComposerSuggestionTrigger.find(in: draft.text, selection: draft.selection)
+        var token = ComposerSuggestionTrigger.find(
+            in: draft.text, selection: draft.selection, roomLinks: draft.roomLinks, includesRooms: !draft.isEditing
+        )
+        var matchingRooms: [RoomLinks.Candidate] = []
+        if let roomTrigger = token, roomTrigger.kind == .room {
+            matchingRooms = RoomLinks.search(RoomLinks.candidates(from: rooms()), for: roomTrigger.query)
+            if matchingRooms.isEmpty {
+                token = ComposerSuggestionTrigger.find(
+                    in: draft.text, selection: draft.selection, roomLinks: [], includesRooms: false
+                )
+            }
+        }
         let trigger = draft.isEditing && token?.kind != .emoji ? nil : token
         var list = ComposerSuggestionSelection(navigation: navigation)
         guard let trigger, !list.isDismissed(trigger) else {
@@ -94,6 +108,8 @@ public struct ComposerSuggestionsModel: Sendable {
             ).map(ComposerSuggestion.mention)
         case .mention:
             items = []
+        case .room:
+            items = matchingRooms.map(ComposerSuggestion.room)
         case .emoji:
             items = EmojiShortcodes.search(trigger.query).map(ComposerSuggestion.emoji)
         case .slash:
@@ -118,21 +134,32 @@ public struct ComposerSuggestionsModel: Sendable {
         case .up: list.move(.up)
         case .down: list.move(.down)
         case .escape: list.dismiss()
-        case .returnKey where slashResolves: return .pass
-        case .tab, .returnKey:
+        case .returnKey:
+            return pickForSubmit(in: text).map(KeyAction.pick) ?? .pass
+        case .tab:
             return .pick(Self.makePick(item, trigger: trigger, text: text))
         }
         return .navigate(list.navigation)
     }
 
-    /// A pointer event can arrive after its trigger or result has gone away.
-    public func pick(_ item: ComposerSuggestion, from trigger: ComposerSuggestionTrigger, in text: String) -> Pick? {
-        guard list.trigger == trigger, list.items.contains(item) else { return nil }
+    /// Send and Return complete the highlighted row unless slash dispatch
+    /// already has an exact command to run.
+    public func pickForSubmit(in text: String) -> Pick? {
+        guard !slashResolves, let item = list.selected, let trigger = list.trigger else { return nil }
         return Self.makePick(item, trigger: trigger, text: text)
     }
 
+    /// A pointer event can arrive after its trigger or result has gone away.
+    public func pick(_ item: ComposerSuggestion, from trigger: ComposerSuggestionTrigger, in text: String) -> Pick? {
+        guard list.trigger == trigger, let visible = list.items.first(where: { $0.matchesSelection(item) }) else { return nil }
+        return Self.makePick(visible, trigger: trigger, text: text)
+    }
+
     private static func makePick(_ item: ComposerSuggestion, trigger: ComposerSuggestionTrigger, text: String) -> Pick {
-        Pick(edit: item.accept(in: text, replacing: trigger.replacementRange),
-             recordedMention: item.recordedMention, clearsError: item.kind == .slash)
+        let range = trigger.replacementRange
+        let reference = item.recordedMention.map(RecordedDraftReference.mention)
+            ?? item.roomLink(at: range.lowerBound).map(RecordedDraftReference.roomLink)
+        return Pick(edit: item.accept(in: text, replacing: range), replacementRange: range,
+                    reference: reference, clearsError: item.kind == .slash)
     }
 }

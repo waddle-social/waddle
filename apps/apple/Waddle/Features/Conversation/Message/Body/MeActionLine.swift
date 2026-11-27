@@ -1,4 +1,5 @@
 import Foundation
+import WaddleKit
 
 /// A XEP-0245 action line, "* Author action": the whole line in italics
 /// with the author in bold. The action keeps its own markup, mentions and
