@@ -234,26 +234,6 @@ public struct SharedFile: Hashable, Sendable, Codable {
     }
 }
 
-/// Server-attached `urn:waddle:link-preview:0` card.
-public struct LinkPreview: Hashable, Sendable {
-    public let url: URL
-    /// The URL identified in the message, before the resolver canonicalized it.
-    public let originalURL: String?
-    public let title: String?
-    public let summary: String?
-    public let imageURL: URL?
-    public let imageAlt: String?
-
-    public init(url: URL, title: String?, summary: String?, imageURL: URL?, imageAlt: String?, originalURL: String?) {
-        self.url = url
-        self.originalURL = originalURL
-        self.title = title
-        self.summary = summary
-        self.imageURL = imageURL
-        self.imageAlt = imageAlt
-    }
-}
-
 /// `urn:waddle:pin:0` pin preview.
 public struct PinPreview: Hashable, Sendable {
     public let author: JID?

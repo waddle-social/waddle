@@ -115,8 +115,19 @@ extension FFIInbound {
             summary: preview.description,
             imageURL: image,
             imageAlt: image == nil ? nil : preview.image?.alt,
-            originalURL: preview.originalUrl
+            originalURL: preview.originalUrl,
+            playback: linkPreviewPlayback(preview)
         )
+    }
+
+    private static func linkPreviewPlayback(_ preview: WaddleLinkPreview) -> LinkPreviewPlayback? {
+        let video = preview.video.flatMap { source in
+            url(source.url).flatMap { LinkPreviewVideo(url: $0, mediaType: source.mediaType) }
+        }
+        let embed = preview.playerEmbed.flatMap { source in
+            url(source.url).flatMap { LinkPreviewEmbed(url: $0, width: source.width, height: source.height) }
+        }
+        return LinkPreviewPlayback(video: video, embed: embed)
     }
 
     static func linkPreviewImage(_ image: WaddleLinkPreviewImage?, mediaOrigin: URL?) -> URL? {

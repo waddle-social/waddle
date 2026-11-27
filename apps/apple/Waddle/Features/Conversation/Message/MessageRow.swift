@@ -133,7 +133,7 @@ private struct MessageRowContent: View {
         }
         .modifier(MessageRowAccessibility(
             label: MessageAccessibilityText.label(
-                for: item, authorName: author.name, thread: entry.thread, insideThread: actions.isThread,
+                for: item, media: media, authorName: author.name, thread: entry.thread, insideThread: actions.isThread,
                 time: item.sentAt.formatted(date: .omitted, time: .shortened)
             ),
             actions: MessageAccessibilityActions(
@@ -143,7 +143,7 @@ private struct MessageRowContent: View {
                 openProfile: { openProfile(author) }, openImage: openImage,
                 roomActions: presentation?.roomLinks.actions ?? [], openRoom: openRoom
             ),
-            withheld: media.withheld, loadMedia: loadMedia
+            media: media, loadMedia: loadMedia
         ))
     }
 
@@ -256,6 +256,7 @@ private struct MessageRowContent: View {
 /// link cards, reactions, the attached reply card and delivery state.
 private struct MessageRowBody: View {
     @Environment(MessageActionModel.self) private var actions
+    @Environment(SessionCoordinator.self) private var session
     let entry: TimelineFeedEntry
     let presentation: MessageBodyPresentation?
     let showsThreadChip: Bool
@@ -327,8 +328,9 @@ private struct MessageRowBody: View {
                 }
             )
         }
-        ForEach(media.linkPreviews, id: \.url) { preview in
-            MessageLinkPreviewCard(preview: preview)
+        ForEach(Array(media.linkPreviews.enumerated()), id: \.offset) { _, preview in
+            MessageLinkPreviewCard(preview: preview) { session.calls.state.isLive }
+                .id(preview)
         }
         if !item.reactions.isEmpty {
             MessageReactionsBar(item: item)

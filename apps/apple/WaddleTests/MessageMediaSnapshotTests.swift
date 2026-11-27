@@ -21,12 +21,24 @@ final class MessageMediaSnapshotTests: XCTestCase {
         assertMessage(body: "Here is a photo from the match.", files: [Self.file("rink.jpg", mediaType: "image/jpeg")])
     }
 
-    private func assertMessage(body: String = "", files: [SharedFile], testName: String = #function, line: UInt = #line) {
+    func testWithheldVideoLink() throws {
+        let page = URL(string: "https://vimeo.com/123")!
+        let embed = try XCTUnwrap(LinkPreviewEmbed(url: URL(string: "https://player.vimeo.com/video/123")!))
+        let preview = LinkPreview(
+            url: page, title: "Highlights", summary: "Saturday's match",
+            imageURL: nil, imageAlt: nil, originalURL: page.absoluteString, playback: .embed(embed)
+        )
+        assertMessage(files: [], previews: [preview])
+    }
+
+    private func assertMessage(
+        body: String = "", files: [SharedFile], previews: [LinkPreview] = [], testName: String = #function, line: UInt = #line
+    ) {
         let sample = SampleSession()
         let from = JID(parsing: "kai@away.example/mobile")!
         let conversation = ConversationID.direct(from.bare)
         let message = WireMessage(
-            type: .chat, from: from, to: nil, identity: MessageIdentity(), body: body, sharedFiles: files
+            type: .chat, from: from, to: nil, identity: MessageIdentity(), body: body, sharedFiles: files, linkPreviews: previews
         )
         let item = TimelineItem(id: "sample-media", conversation: conversation, isMine: false, message: message, body: body)
         let entry = TimelineFeedEntry(

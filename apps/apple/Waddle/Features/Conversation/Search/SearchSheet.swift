@@ -113,6 +113,7 @@ struct SearchSheet: View {
 
 /// Author, date and the matching text with the query emphasized.
 struct ConversationSearchResultRow: View {
+    @Environment(SessionCoordinator.self) private var session
     let item: TimelineItem
     let query: String
 
@@ -138,7 +139,8 @@ struct ConversationSearchResultRow: View {
     }
 
     private var highlighted: AttributedString {
-        var text = AttributedString(MessageAccessibilityText.content(of: item))
+        let media = MessageMedia(item: item, decision: session.remoteMediaDecision(for: item))
+        var text = AttributedString(MessageAccessibilityText.content(of: item, media: media))
         if !query.isEmpty, let range = text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) {
             text[range].inlinePresentationIntent = .stronglyEmphasized
             text[range].backgroundColor = Theme.Colors.goldSubtle

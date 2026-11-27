@@ -8,13 +8,14 @@ enum MessageAccessibilityText {
     /// summarises the sub-thread rooted at it.
     static func label(
         for item: TimelineItem,
+        media: MessageMedia,
         authorName: String,
         thread: ThreadSummary?,
         insideThread: Bool = false,
         time: String
     ) -> String {
         var parts = [authorName, time]
-        parts.append(content(of: item))
+        parts.append(content(of: item, media: media))
         if item.isEdited, item.tombstone == nil {
             parts.append("Edited")
         }
@@ -36,7 +37,7 @@ enum MessageAccessibilityText {
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
-    static func content(of item: TimelineItem) -> String {
+    static func content(of item: TimelineItem, media: MessageMedia) -> String {
         switch item.tombstone {
         case .retracted:
             return "This message was deleted"
@@ -55,7 +56,7 @@ enum MessageAccessibilityText {
             let author = MessageAuthor.resolve(item, occupant: nil).name
             parts.append(MeAction.presentation(ofBody: body, actor: author) ?? body)
         }
-        for file in item.message.sharedFiles {
+        for file in media.visibleAttachments {
             let kind = MessageAttachmentKind(file)
             let label = "\(kind.noun), \(file.displayName)"
             parts.append(file.encrypted == nil ? label : "\(label), encrypted")

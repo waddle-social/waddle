@@ -4,7 +4,7 @@ import Foundation
 /// whether it can load with the row or needs its own download tap.
 struct MediaURLDigest: Hashable, Sendable {
     private enum Surface: UInt8 {
-        case attachment, download, inlineImage, previewImage
+        case attachment, download, inlineImage, previewImage, previewVideo, previewEmbed
     }
 
     private let value: Data
@@ -38,6 +38,11 @@ struct MediaURLDigest: Hashable, Sendable {
         }
         for preview in previews {
             if let url = preview.imageURL { append(url, as: .previewImage) }
+            switch preview.playback {
+            case let .video(video): append(video.url, as: .previewVideo)
+            case let .embed(embed): append(embed.url, as: .previewEmbed)
+            case nil: break
+            }
         }
         value = DigestCheck.digest(of: data, using: .sha256)
     }
