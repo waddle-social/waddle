@@ -16,7 +16,7 @@ enum RowPreview {
         if let action = action(of: item) {
             return collapsed(action)
         }
-        if let imageURL = MessageContent.inlineImageURL(of: item) {
+        if let imageURL = MessageMedia.inlineImageURL(of: item) {
             return GifMedia.isGIF(mediaType: nil, url: imageURL) ? "GIF" : "Photo"
         }
         let text = item.body.trimmingCharacters(in: .whitespacesAndNewlines)

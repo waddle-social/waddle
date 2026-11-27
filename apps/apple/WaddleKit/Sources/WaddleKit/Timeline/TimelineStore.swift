@@ -481,6 +481,7 @@ public final class TimelineStore {
         if let correction = state.correction {
             item.body = correction.body
             item.isEdited = true
+            item.mediaCorrection = correction.mediaCorrection
             item.message.markupSpans = correction.markupSpans
             item.message.references = correction.references
             item.message.broadcastSpans = correction.broadcastSpans

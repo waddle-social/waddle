@@ -126,6 +126,7 @@ public struct CorrectedContent: Hashable, Sendable {
     public let sharedFiles: [SharedFile]
     /// Room-assigned stanza-id of this accepted body revision, if present.
     public let sourceRevisionID: String?
+    private(set) var mediaCorrection: MediaCorrection?
 
     public init(body: String, markupSpans: [MarkupSpan], references: [Reference], broadcastSpans: [BroadcastSpan] = [], replyFallback: Range<Int>?, sharedFiles: [SharedFile], sourceRevisionID: String? = nil) {
         self.body = body
@@ -148,6 +149,9 @@ public struct CorrectedContent: Hashable, Sendable {
             sharedFiles: message.sharedFiles,
             sourceRevisionID: message.from.flatMap { message.identity.stanzaID(assignedBy: $0.bare) }
         )
+        if let targetID = message.replacesID {
+            mediaCorrection = MediaCorrection(author: message.authorRealJID, originID: message.identity.originID, targetID: targetID)
+        }
     }
 
     /// From a correction this client sends.
@@ -160,4 +164,10 @@ public struct CorrectedContent: Hashable, Sendable {
             sharedFiles: options.sharedFiles
         )
     }
+}
+
+struct MediaCorrection: Hashable, Sendable {
+    let author: BareJID?
+    let originID: String?
+    let targetID: String
 }

@@ -367,12 +367,16 @@ extension SessionCoordinator {
             )
         }
         let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: options)
-        guard case .sent = outcome else { return false }
+        guard case let .sent(originID) = outcome else { return false }
+        let content = CorrectedContent(body: composed.body, options: composed.options)
         // A room reflects the correction, and may reject it (for example
         // after a reconnect changed our occupancy); apply only in 1:1.
-        guard !item.conversation.isRoom else { return true }
+        if item.conversation.isRoom {
+            recordRoomMediaCorrection(originID, targetID: target, replacing: item, content: content)
+            return true
+        }
         timelines.applyLocalMutation(
-            .correction(targetID: target, from: from, content: CorrectedContent(body: composed.body, options: composed.options)),
+            .correction(targetID: target, from: from, content: content),
             in: item.conversation
         )
         return true

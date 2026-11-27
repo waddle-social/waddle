@@ -76,13 +76,6 @@ enum MessageContent {
         return item.body
     }
 
-    /// The image a body shows in place of its text: the body is a single
-    /// image URL and the row shares no files, as on web.
-    static func inlineImageURL(of item: TimelineItem) -> URL? {
-        guard item.message.sharedFiles.isEmpty else { return nil }
-        return InlineImageBody.url(in: item.body)
-    }
-
     /// The inline image of a body as a file, so it renders and previews
     /// like a shared image.
     static func inlineImageFile(_ url: URL) -> SharedFile {
