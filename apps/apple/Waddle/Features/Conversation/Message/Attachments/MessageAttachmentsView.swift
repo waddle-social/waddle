@@ -1,12 +1,12 @@
 import SwiftUI
 import WaddleKit
 
-/// XEP-0447 files of a row: inline images, stickers and file cards, with
-/// XEP-0448 encrypted files decrypted first.
+/// XEP-0447 files and XEP-0448 encrypted files from the row's media projection.
 struct MessageAttachmentsView: View {
     let attachments: [MessageMedia.Attachment]
     let isSticker: Bool
     let openImage: (MediaGallery.Source) -> Void
+    @Binding var attachmentToOpen: MessageMedia.Attachment.ID?
     /// Opens the pack a sticker is from; nil when it names none.
     var openStickerPack: (() -> Void)?
 
@@ -21,18 +21,27 @@ struct MessageAttachmentsView: View {
     @ViewBuilder
     private func content(_ attachment: MessageMedia.Attachment) -> some View {
         let file = attachment.file
-        let kind = MessageAttachmentKind(file)
-        if let source = file.encrypted {
-            EncryptedAttachmentView(file: file, source: source, kind: kind, isSticker: isSticker)
-        } else {
-            switch kind {
-            case .image where isSticker:
-                MessageStickerView(file: file, openPack: openStickerPack)
-            case .image:
-                MessageImageAttachment(file: file) { openImage(.attachment(attachment.id)) }
-            default:
-                MessageFileCard(file: file, kind: kind)
-            }
+        switch attachment.presentation {
+        case let .encrypted(source):
+            EncryptedAttachmentView(
+                file: file, source: source, kind: MessageAttachmentKind(file), isSticker: isSticker,
+                openRequested: Binding(
+                    get: { attachmentToOpen == attachment.id },
+                    set: { if !$0, attachmentToOpen == attachment.id { attachmentToOpen = nil } }
+                )
+            )
+        case .image where isSticker:
+            MessageStickerView(file: file, openPack: openStickerPack)
+        case .image:
+            MessageImageAttachment(file: file) { openImage(.attachment(attachment.id)) }
+        case .audio:
+            InlineMediaPlayer(file: file, medium: .audio)
+        case .video:
+            InlineMediaPlayer(file: file, medium: .video)
+        case .pdf:
+            PDFAttachmentView(file: file)
+        case .file:
+            MessageFileCard(file: file, kind: MessageAttachmentKind(file))
         }
     }
 }
@@ -197,7 +206,7 @@ struct MessageStickerView: View {
     }
 }
 
-/// Video, audio, PDF and other files: icon, name, size; tap opens.
+/// A file offered as an explicit download.
 struct MessageFileCard: View {
     @Environment(\.openURL) private var openURL
     let file: SharedFile
@@ -210,22 +219,12 @@ struct MessageFileCard: View {
             MessageFileCardLabel(
                 symbol: kind.symbolName,
                 title: file.displayName,
-                detail: detail,
+                detail: kind.detail(size: file.size),
                 trailingSymbol: "arrow.down.circle"
             )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text("\(kind.noun), \(file.displayName)"))
-    }
-
-    private var detail: String {
-        Self.detail(for: file, kind: kind)
-    }
-
-    /// "PDF · 1.2 MB", or the kind alone when the size is unknown.
-    static func detail(for file: SharedFile, kind: MessageAttachmentKind) -> String {
-        guard let size = file.size else { return kind.noun }
-        return "\(kind.noun) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))"
     }
 }
 

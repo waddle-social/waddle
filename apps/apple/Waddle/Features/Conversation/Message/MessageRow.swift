@@ -34,11 +34,13 @@ private struct MessageRowContent: View {
     @Environment(AppState.self) private var app
     @Environment(NavigationModel.self) private var navigation
     @Environment(MessageActionModel.self) private var actions
+    @Environment(\.openURL) private var openURL
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The pointer is over the row (iPad with a pointer too; touch never
     /// hovers). The row's only hover state.
     @State private var isHovering = false
     @State private var bodyLayout = MessageBodyPresentationMemo()
+    @State private var attachmentToOpen: MessageMedia.Attachment.ID?
     private var placement = ConversationInspectorPlacement()
 
     let entry: TimelineFeedEntry
@@ -89,7 +91,7 @@ private struct MessageRowContent: View {
                     media: media,
                     loadMedia: loadMedia,
                     openThread: openThread,
-                    openImage: openImage, openRoom: openRoom
+                    openImage: openImage, openRoom: openRoom, attachmentToOpen: $attachmentToOpen
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,7 +131,10 @@ private struct MessageRowContent: View {
             actions.endTextSelection(of: item.presentationID)
         }
         .contextMenu {
-            MessageContextMenu(item: item, media: media, available: available, session: session, actions: actions, perform: perform)
+            MessageContextMenu(
+                item: item, media: media, available: available, session: session, actions: actions, perform: perform,
+                openURL: openURL, openEncryptedAttachment: openEncryptedAttachment
+            )
         }
         .modifier(MessageRowAccessibility(
             label: MessageAccessibilityText.label(
@@ -140,11 +145,16 @@ private struct MessageRowContent: View {
                 item: item, media: media, available: available, perform: perform, opensThreadOnActivate: opensThreadOnTap,
                 authorName: author.name, openThread: openThread,
                 hasSubThreadLink: entry.replyCount > 0 && item.threadTarget(inside: actions.thread) != nil,
-                openProfile: { openProfile(author) }, openImage: openImage,
+                openProfile: { openProfile(author) }, openImage: openImage, openEncryptedAttachment: openEncryptedAttachment,
                 roomActions: presentation?.roomLinks.actions ?? [], openRoom: openRoom
             ),
-            media: media, loadMedia: loadMedia
+            media: media, loadMedia: loadMedia,
+            hasInlineControls: media.attachments.contains { $0.presentation.hasInlineControls }
         ))
+    }
+
+    private func openEncryptedAttachment(_ id: MessageMedia.Attachment.ID) {
+        attachmentToOpen = id
     }
 
     private var actionContext: MessageActionContext {
@@ -265,6 +275,7 @@ private struct MessageRowBody: View {
     let openThread: () -> Void
     let openImage: (MediaGallery.Source) -> Void
     let openRoom: (BareJID) -> Void
+    @Binding var attachmentToOpen: MessageMedia.Attachment.ID?
 
     private var item: TimelineItem { entry.item }
 
@@ -323,6 +334,7 @@ private struct MessageRowBody: View {
                 attachments: media.attachments,
                 isSticker: item.message.isSticker,
                 openImage: openImage,
+                attachmentToOpen: $attachmentToOpen,
                 openStickerPack: media.stickerPackLocation.map { pack in
                     { actions.showStickerPack(pack) }
                 }

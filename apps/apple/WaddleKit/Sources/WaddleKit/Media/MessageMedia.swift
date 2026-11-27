@@ -35,6 +35,30 @@ public struct MessageMedia: Sendable {
 
         public let id: ID
         public let file: SharedFile
+
+        /// The card the Apple timeline presents for a visible attachment.
+        public enum Presentation: Equatable, Sendable {
+            case image, audio, video, pdf, file
+            case encrypted(EncryptedFileSource)
+
+            public var hasInlineControls: Bool {
+                switch self {
+                case .audio, .video, .pdf: true
+                default: false
+                }
+            }
+        }
+
+        public var presentation: Presentation {
+            if let source = file.encrypted { return .encrypted(source) }
+            switch MessageAttachmentKind.inlineKind(for: file) {
+            case .image: return .image
+            case .audio where file.inlineMediaURL != nil && !file.usesUnsupportedPlayerContainer: return .audio
+            case .video where file.inlineMediaURL != nil && !file.usesUnsupportedPlayerContainer: return .video
+            case .pdf where file.inlineMediaURL != nil: return .pdf
+            default: return .file
+            }
+        }
     }
 
     /// A row can repeat a file. Keep the two taps distinct while preserving
@@ -66,7 +90,8 @@ public struct MessageMedia: Sendable {
         }
 
         let hiddenFiles = attachments.filter(Self.gatesAttachment)
-        var items = hiddenFiles.map { Withheld.Item.attachment($0.name ?? $0.url.absoluteString) }
+        let hiddenImages = hiddenFiles.filter { MessageAttachmentKind.inlineKind(for: $0) == .image }
+        var items = hiddenImages.map { Withheld.Item.attachment($0.name ?? $0.url.absoluteString) }
         if let inlineImage { items.append(.inlineImage(inlineImage.absoluteString)) }
         if previews.contains(where: { $0.imageURL != nil }) { items.append(.linkPreviewImages) }
         if previews.contains(where: { $0.playback != nil }) { items.append(.linkPreviewVideos) }
@@ -75,7 +100,7 @@ public struct MessageMedia: Sendable {
         visibleAttachments = hiddenFiles.isEmpty ? attachments : attachments.filter { !Self.gatesAttachment($0) }
         linkPreviews = previews.map { $0.withoutMedia() }
         stickerPackLocation = nil
-        withheld = items.isEmpty ? nil : Withheld(host: host, items: items)
+        withheld = hiddenFiles.isEmpty && items.isEmpty ? nil : Withheld(host: host, items: items)
     }
 
     /// Also used by text summaries that describe an inline image without loading it.
@@ -94,20 +119,12 @@ public struct MessageMedia: Sendable {
         return StickerPackLocation(owner: sender, node: reference.node, packID: reference.packID)
     }
 
-    // The web withholds inline image/video/audio/PDF files (message-attachments.ts).
-    // Apple also renders an image MIME type regardless of disposition.
     static func gatesAttachment(_ file: SharedFile) -> Bool {
-        if file.isImage { return true }
+        if MessageAttachmentKind.inlineKind(for: file) != nil { return true }
+        // A stream has no player of its own: a link card plays it, so it waits like the card's video.
         guard file.disposition == .inline else { return false }
-        let type = file.mediaType?.lowercased() ?? ""
-        return type.hasPrefix("video/") || type.hasPrefix("audio/") || type == "application/pdf"
-            || LinkPreviewVideo.isHLSMediaType(type)
-            || inlineExtensions.contains(file.url.pathExtension.lowercased()) || GifMedia.isGiphyMedia(file.url)
+        return LinkPreviewVideo.isHLSMediaType(file.mediaType?.lowercased() ?? "") || file.url.pathExtension.lowercased() == "m3u8"
     }
-
-    private static let inlineExtensions = InlineImageBody.imageExtensions.union([
-        "avif", "bmp", "svg", "mp4", "webm", "mov", "m4v", "ogv", "m3u8", "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "pdf",
-    ])
 }
 
 public enum MessageContent {

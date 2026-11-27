@@ -98,7 +98,8 @@ struct MessageLinkPreviewMediaTests {
         ]
         let withheld = MessageMedia(item: row, decision: .withheld(host: Host("remote.test")))
         #expect(withheld.visibleAttachments.isEmpty)
-        #expect(withheld.withheld?.items == [.attachment("Live feed"), .attachment("Playlist")])
+        // Only images are named in the notice; other withheld files show the prompt alone.
+        #expect(withheld.withheld?.items == [])
     }
 
     private func preview(_ url: URL, image: URL? = nil, playback: LinkPreviewPlayback? = nil) -> LinkPreview {

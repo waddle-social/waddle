@@ -126,4 +126,15 @@ struct RemoteMediaConsentTests {
         #expect(session.remoteMediaDecision(for: row) == .withheld(host: Host("remote.test")))
     }
 
+    @Test(arguments: ["mp3", "mov", "pdf"])
+    func changingAnInlineMediaURLRequiresConsentAgain(suffix: String) {
+        let session = SessionCoordinator(account: me, port: FakePort())
+        var row = directRow()
+        row.message.sharedFiles = [SharedFile(url: mediaURL("first.\(suffix)"), disposition: .inline)]
+        session.loadRemoteMedia(for: row)
+        #expect(session.remoteMediaDecision(for: row) == .allowed)
+
+        row.message.sharedFiles = [SharedFile(url: mediaURL("second.\(suffix)"), disposition: .inline)]
+        #expect(session.remoteMediaDecision(for: row) == .withheld(host: Host("remote.test")))
+    }
 }

@@ -5,6 +5,62 @@ import Testing
 
 @MainActor
 struct MessageMediaProjectionTests {
+    @Test(arguments: [
+        ("voice.ogg", "opaque", nil),
+        (nil, "voice.OGA", "audio/mpeg"),
+        ("clip.OGV", "opaque", "video/mp4"),
+        (nil, "clip.webm", nil),
+        (nil, "opaque", "Audio/Ogg; codecs=opus"),
+        (nil, "opaque", "video/ogg"),
+        (nil, "opaque", "application/ogg"),
+        (nil, "opaque", "audio/webm"),
+        (nil, "opaque", "video/webm"),
+    ] as [(String?, String, String?)])
+    func unsupportedAppleContainersUseFileCards(name: String?, path: String, type: String?) throws {
+        var row = directRow()
+        row.message.sharedFiles = [SharedFile(url: mediaURL(path), name: name, mediaType: type, disposition: .inline)]
+        let attachment = try #require(MessageMedia(item: row, decision: .allowed).attachments.first)
+        #expect(attachment.presentation == .file)
+        #expect(!attachment.presentation.hasInlineControls)
+    }
+
+    @Test func projectsTheVisibleAttachmentPresentation() {
+        var row = directRow()
+        let encrypted = EncryptedFileSource(
+            cipher: .aes256GCM, keyBase64: "", ivBase64: "", digests: FileDigests(), sources: [mediaURL("payload.enc")]
+        )
+        row.message.sharedFiles = [
+            SharedFile(url: mediaURL("opaque"), name: "voice.mp3", disposition: .inline),
+            SharedFile(url: mediaURL("clip.mov"), disposition: .inline),
+            SharedFile(url: mediaURL("opaque"), name: "report.pdf", disposition: .inline),
+            SharedFile(url: mediaURL("photo.png"), disposition: .inline),
+            SharedFile(url: mediaURL("download.mp4")),
+            SharedFile(url: URL(string: "http://remote.test/clip.mp4")!, disposition: .inline),
+            SharedFile(url: mediaURL("encrypted.mp3"), disposition: .inline, encrypted: encrypted),
+        ]
+        let shown = MessageMedia(item: row, decision: .allowed).attachments.map(\.presentation)
+        #expect(shown == [.audio, .video, .pdf, .image, .file, .file, .encrypted(encrypted)])
+        #expect(shown.filter(\.hasInlineControls) == [.audio, .video, .pdf])
+    }
+
+    @Test func giphyVideoAndTypelessSVGStayOutOfTheImageGallery() {
+        var row = directRow()
+        let url = URL(string: "https://media1.giphy.com/media/abcd/giphy.mp4")!
+        let declaredImages = [
+            SharedFile(url: mediaURL("opaque"), mediaType: "image/png"),
+            SharedFile(url: mediaURL("declared.svg"), mediaType: "image/svg+xml"),
+        ]
+        let nonImages = [
+            SharedFile(url: url, mediaType: "video/mp4", disposition: .inline),
+            SharedFile(url: mediaURL("diagram.svg"), disposition: .inline),
+        ]
+        row.message.sharedFiles = nonImages + declaredImages
+
+        let media = MessageMedia(item: row, decision: .allowed)
+        #expect(media.attachments.map(\.presentation) == [.video, .file, .image, .image])
+        #expect(MediaGallery.images(in: row, media: media).map(\.file) == declaredImages)
+    }
+
     @Test func withheldFilesLeaveExplicitDownloadCardsAvailable() {
         var row = directRow()
         let encrypted = EncryptedFileSource(
@@ -28,8 +84,6 @@ struct MessageMediaProjectionTests {
         #expect(presented.visibleAttachments == downloads)
         #expect(presented.withheld?.items == [
             .attachment(mediaURL("sticker.gif").absoluteString), .attachment("photo.png"),
-            .attachment(mediaURL("movie.webm").absoluteString), .attachment(mediaURL("voice.ogg").absoluteString),
-            .attachment(mediaURL("book.pdf").absoluteString),
         ])
         #expect(MessageMedia(item: row, decision: .allowed).visibleAttachments == row.message.sharedFiles)
     }
@@ -74,7 +128,7 @@ struct MessageMediaProjectionTests {
         #expect(MediaGallery.images(in: row, media: withheld).isEmpty)
         #expect(withheld.stickerPackLocation == nil)
         #expect(withheld.linkPreviews.compactMap(\.imageURL).isEmpty)
-        #expect(withheld.withheld?.items.count == 3)
+        #expect(withheld.withheld?.items == [.attachment(mediaURL("sticker.gif").absoluteString), .linkPreviewImages])
 
         let allowed = MessageMedia(item: row, decision: .allowed)
         #expect(allowed.stickerPackLocation != nil)
@@ -82,4 +136,15 @@ struct MessageMediaProjectionTests {
         #expect(allowed.linkPreviews == row.message.linkPreviews)
     }
 
+    @Test func withheldPlayersAndPDFsExposeOnlyTheConsentPrompt() {
+        var row = directRow()
+        row.message.sharedFiles = ["Recording.mp3", "Clip.mov", "Agenda.pdf"].map {
+            SharedFile(url: mediaURL($0), name: $0, disposition: .inline)
+        }
+
+        let withheld = MessageMedia(item: row, decision: .withheld(host: Host("remote.test")))
+        #expect(withheld.attachments.isEmpty)
+        #expect(withheld.withheld?.items == [])
+        #expect(MessageMedia(item: row, decision: .allowed).visibleAttachments == row.message.sharedFiles)
+    }
 }
