@@ -81,9 +81,10 @@ struct ComposerInsertionTests {
         #expect(ComposerInsertion.appendingToken("@", to: "hi\n") == "hi\n@")
     }
 
-    @Test func appendedMentionTokenStartsAMentionQuery() {
+    @Test func appendingAtSignOpensTheEmptyMentionList() {
         let text = ComposerInsertion.appendingToken("@", to: "hey")
-        #expect(MentionTokens.trailingQuery(in: text)?.text == "")
+        #expect(ComposerSuggestionTrigger.find(in: text)?.kind == .mention)
+        #expect(ComposerSuggestionTrigger.find(in: text)?.query == "")
     }
 
     @Test func linksArePaddedWithSpaces() throws {

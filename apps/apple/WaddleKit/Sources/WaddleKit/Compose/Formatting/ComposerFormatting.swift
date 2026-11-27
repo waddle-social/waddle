@@ -1,14 +1,13 @@
 import Foundation
 
 /// Applies formatting-bar styles to a plain-text draft as the markdown
-/// markers `ComposerMarkdown` understands. Selections are Unicode-scalar
-/// ranges; a nil selection means the field reports none (before iOS 18 /
-/// macOS 15) and the style applies to the whole draft.
+/// markers `ComposerMarkdown` understands. A nil selection applies the style
+/// to the whole draft.
 public enum ComposerFormatting {
     /// Wraps the selection in the style's markers, keeping the wrapped
     /// text selected. An empty selection inserts an empty marker pair with
     /// the caret between the markers.
-    public static func apply(_ format: ComposerFormat, to text: String, selection: Range<Int>?) -> ComposerTextEdit {
+    public static func apply(_ format: ComposerFormat, to text: String, selection: ComposerScalarRange?) -> ComposerTextEdit {
         let scalars = Array(text.unicodeScalars)
         let range = ComposerScalars.clamp(selection ?? contentRange(scalars), count: scalars.count)
         switch format {

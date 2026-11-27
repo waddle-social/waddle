@@ -1,13 +1,5 @@
 import Foundation
 
-/// The `@word` being typed at the end of the draft.
-public struct MentionQuery: Hashable, Sendable {
-    /// Scalar offset of the `@`.
-    public let start: Int
-    /// What follows the `@`.
-    public let text: String
-}
-
 /// A mention the user picked, re-located in the final text on send.
 public struct RecordedMention: Hashable, Sendable {
     /// `@nick`, as inserted.
@@ -34,25 +26,6 @@ public enum MentionTokens {
         return occurrences(of: tokenScalars, in: scalars).filter {
             ownNickBoundary(after: $0.upperBound, in: scalars)
         }
-    }
-
-    /// The trailing `@word` when the draft ends inside one. The composer
-    /// has no caret position on every OS it supports, so completion works
-    /// on the word being typed at the end.
-    public static func trailingQuery(in text: String) -> MentionQuery? {
-        let scalars = Array(text.unicodeScalars)
-        let tokenStart = (scalars.lastIndex(where: isSpace) ?? -1) + 1
-        guard tokenStart < scalars.count, scalars[tokenStart] == "@" else { return nil }
-        let query = scalars[(tokenStart + 1)...]
-        guard query.count <= 64, !query.contains("@") else { return nil }
-        return MentionQuery(start: tokenStart, text: string(query))
-    }
-
-    /// Replaces the query with `@name ` and returns the new text.
-    public static func completing(_ text: String, query: MentionQuery, with name: String) -> String {
-        let scalars = Array(text.unicodeScalars)
-        let prefix = string(scalars[..<min(query.start, scalars.count)])
-        return prefix + "@" + name + " "
     }
 
     /// Finds every recorded token still present as a whole word and returns
@@ -98,12 +71,6 @@ public enum MentionTokens {
             }
         }
         return ranges
-    }
-
-    private static func string(_ scalars: ArraySlice<Unicode.Scalar>) -> String {
-        var view = String.UnicodeScalarView()
-        view.append(contentsOf: scalars)
-        return String(view)
     }
 
     private static func isSpace(_ scalar: Unicode.Scalar) -> Bool {

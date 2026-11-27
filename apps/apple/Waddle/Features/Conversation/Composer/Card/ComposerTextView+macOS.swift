@@ -1,268 +1,27 @@
-#if os(iOS)
-import SwiftUI
-import UIKit
-
-/// The iOS composer field: a `UITextView`, because SwiftUI's text field
-/// pastes text only. A paste of a copied file, GIF or picture (the edit
-/// menu's Paste, or Cmd-V) goes to `onPasteAttachments`; any other paste
-/// is the text view's own. On a hardware keyboard, Return sends, Shift- or
-/// Option-Return adds a line, Tab or Return accepts the first suggestion
-/// and Escape cancels an edit or reply, as on the Mac. The on-screen
-/// keyboard's Return adds a line.
-///
-/// Grows from one line to `maxLines`, then scrolls. Reports its
-/// selection as Unicode scalar offsets, like the Mac field.
-struct ComposerTextView: UIViewRepresentable {
-    @Binding var text: String
-    @Binding var selection: Range<Int>?
-    @Binding var isFocused: Bool
-    let placeholder: String
-    let onSubmit: () -> Void
-    /// Returns true when a suggestion was inserted.
-    let onAcceptSuggestion: (ComposerSuggestionKey) -> Bool
-    /// Returns true when an edit or reply was cancelled.
-    let onCancel: () -> Bool
-    let onPasteAttachments: () -> Void
-
-    static let maxLines: CGFloat = 8
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIView(context: Context) -> ComposerUITextView {
-        let view = ComposerUITextView()
-        view.delegate = context.coordinator
-        // The message style, scaled with Dynamic Type from the body size.
-        let message = Theme.Typography.message
-        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(
-            for: HuddleFonts.font(message.font, size: message.size, weight: message.weight) as UIFont
-        )
-        view.adjustsFontForContentSizeCategory = true
-        view.textColor = UIColor(Theme.Colors.fg)
-        view.tintColor = UIColor(Theme.Colors.actionText)
-        view.backgroundColor = .clear
-        view.textContainerInset = .zero
-        view.textContainer.lineFragmentPadding = 0
-        view.isScrollEnabled = false
-        view.showsVerticalScrollIndicator = false
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        view.text = text
-        return view
-    }
-
-    func updateUIView(_ view: ComposerUITextView, context: Context) {
-        let coordinator = context.coordinator
-        coordinator.parent = self
-        view.accessibilityLabel = placeholder
-        view.keyHandler = coordinator.handle(_:)
-        view.onPasteAttachments = onPasteAttachments
-
-        coordinator.isApplying = true
-        if view.text != text {
-            // The composer replaced the draft (a send, a completion, a
-            // formatting edit): the field's caret no longer describes it.
-            view.text = text
-            coordinator.applied = nil
-            if selection == nil {
-                view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
-            }
-        }
-        if let selection, selection != coordinator.applied {
-            coordinator.applied = selection
-            let range = ComposerUTF16Selection.nsRange(for: selection, in: text)
-            if view.selectedRange != range {
-                view.selectedRange = range
-            }
-        }
-        coordinator.isApplying = false
-
-        // Focus moves after this update, so the text view's own focus
-        // callbacks do not write state mid-update.
-        if isFocused, !view.isFirstResponder {
-            DispatchQueue.main.async {
-                if view.window != nil { view.becomeFirstResponder() }
-            }
-        } else if !isFocused, view.isFirstResponder {
-            DispatchQueue.main.async { view.resignFirstResponder() }
-        }
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView view: ComposerUITextView, context: Context) -> CGSize? {
-        guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
-        let fitting = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        let lineHeight = (view.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
-        let maxHeight = ceil(lineHeight * Self.maxLines)
-        let scrolls = fitting.height > maxHeight + 0.5
-        if view.isScrollEnabled != scrolls {
-            DispatchQueue.main.async {
-                view.isScrollEnabled = scrolls
-                if scrolls { view.scrollRangeToVisible(view.selectedRange) }
-            }
-        }
-        return CGSize(width: width, height: min(max(fitting.height, ceil(lineHeight)), maxHeight))
-    }
-
-    @MainActor
-    final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: ComposerTextView
-        /// The offsets last passed between the field and the composer in
-        /// either direction; a `selection` equal to it is an echo.
-        var applied: Range<Int>?
-        /// Set while `updateUIView` writes into the view, whose change
-        /// callbacks then describe the composer's own edit.
-        var isApplying = false
-
-        init(parent: ComposerTextView) {
-            self.parent = parent
-        }
-
-        func textViewDidChange(_ textView: UITextView) {
-            guard !isApplying else { return }
-            parent.text = textView.text
-            report(textView)
-        }
-
-        func textViewDidChangeSelection(_ textView: UITextView) {
-            guard !isApplying else { return }
-            report(textView)
-        }
-
-        func textViewDidBeginEditing(_ textView: UITextView) {
-            if !parent.isFocused { parent.isFocused = true }
-        }
-
-        func textViewDidEndEditing(_ textView: UITextView) {
-            if parent.isFocused { parent.isFocused = false }
-        }
-
-        private func report(_ textView: UITextView) {
-            guard let range = ComposerUTF16Selection.scalarRange(of: textView.selectedRange, in: textView.text),
-                  range != applied
-            else { return }
-            applied = range
-            parent.selection = range
-        }
-
-        /// Hardware keys; returns true when the key was used.
-        func handle(_ key: ComposerHardwareKey) -> Bool {
-            switch key {
-            case .returnKey:
-                if parent.onAcceptSuggestion(.returnKey) { return true }
-                parent.onSubmit()
-                return true
-            case .tab:
-                return parent.onAcceptSuggestion(.tab)
-            case .escape:
-                return parent.onCancel()
-            }
-        }
-    }
-}
-
-/// Keys the composer takes from a hardware keyboard.
-enum ComposerHardwareKey {
-    case returnKey
-    case tab
-    case escape
-}
-
-/// The text view behind `ComposerTextView`.
-final class ComposerUITextView: UITextView {
-    var onPasteAttachments: () -> Void = {}
-    var keyHandler: (ComposerHardwareKey) -> Bool = { _ in false }
-    /// Presses whose begin the composer took, so their end is not passed
-    /// on to a text view that never saw them begin.
-    private var takenPresses: Set<UIPress> = []
-
-    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        // Offer Paste for a copied picture or file too; the check reads
-        // only the pasteboard's types, which asks the person nothing.
-        if action == #selector(paste(_:)), ComposerPasteboard.holdsAttachments {
-            return true
-        }
-        return super.canPerformAction(action, withSender: sender)
-    }
-
-    override func paste(_ sender: Any?) {
-        if ComposerPasteboard.holdsAttachments {
-            onPasteAttachments()
-        } else {
-            super.paste(sender)
-        }
-    }
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var passed = presses
-        for press in presses {
-            guard let key = Self.composerKey(for: press), markedTextRange == nil, keyHandler(key) else { continue }
-            takenPresses.insert(press)
-            passed.remove(press)
-        }
-        if !passed.isEmpty {
-            super.pressesBegan(passed, with: event)
-        }
-    }
-
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        let passed = release(presses)
-        if !passed.isEmpty {
-            super.pressesEnded(passed, with: event)
-        }
-    }
-
-    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        let passed = release(presses)
-        if !passed.isEmpty {
-            super.pressesCancelled(passed, with: event)
-        }
-    }
-
-    private func release(_ presses: Set<UIPress>) -> Set<UIPress> {
-        let taken = presses.intersection(takenPresses)
-        takenPresses.subtract(taken)
-        return presses.subtracting(taken)
-    }
-
-    /// Return, Tab and Escape with no modifiers. Shift- and Option-Return
-    /// stay with the text view, which inserts a line.
-    private static func composerKey(for press: UIPress) -> ComposerHardwareKey? {
-        guard let key = press.key else { return nil }
-        let modifiers = key.modifierFlags.intersection([.shift, .control, .alternate, .command])
-        guard modifiers.isEmpty else { return nil }
-        switch key.keyCode {
-        case .keyboardReturnOrEnter, .keypadEnter: return .returnKey
-        case .keyboardTab: return .tab
-        case .keyboardEscape: return .escape
-        default: return nil
-        }
-    }
-}
-
-#elseif os(macOS)
+#if os(macOS)
 import AppKit
 import SwiftUI
+import WaddleKit
 
 /// The Mac composer field: an `NSTextView`. SwiftUI's text field reports
 /// its text and its selection separately, and a render between the two
 /// handed the field the previous keystroke's caret, so the next character
 /// landed in front of the last one; a text view's edit and selection are
 /// read together from the view itself. Return sends, Shift- or
-/// Option-Return adds a line, Tab or Return accepts the first suggestion
-/// and Escape cancels an edit or reply, as on iOS. A paste of a copied
+/// Option-Return adds a line, Up/Down select a suggestion, Tab or Return accepts it,
+/// and Escape closes the list or cancels an edit or reply, as on iOS. A paste of a copied
 /// file, GIF or picture (the Edit menu's Paste, or Cmd-V) goes to
 /// `onPasteAttachments`; any other paste is the text view's own.
 ///
-/// Grows from one line to `maxLines`, then scrolls. Reports its
-/// selection as Unicode scalar offsets, like the iOS field.
+/// Grows from one line to `maxLines`, then scrolls.
 struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
-    @Binding var selection: Range<Int>?
+    @Binding var selection: ComposerScalarRange?
     @Binding var isFocused: Bool
     let placeholder: String
     let onSubmit: () -> Void
-    /// Returns true when a suggestion was inserted.
-    let onAcceptSuggestion: (ComposerSuggestionKey) -> Bool
+    /// Returns true when an open suggestion list used the key.
+    let onSuggestionKey: (ComposerHardwareKey) -> Bool
     /// Returns true when an edit or reply was cancelled.
     let onCancel: () -> Bool
     let onPasteAttachments: () -> Void
@@ -298,7 +57,7 @@ struct ComposerTextView: NSViewRepresentable {
         view.isVerticallyResizable = true
         view.isHorizontallyResizable = false
         view.autoresizingMask = [.width]
-        view.onFocusChange = context.coordinator.focusChanged(_:)
+        view.onFocusChange = context.coordinator.focusChanged(_:focused:)
         view.string = text
 
         let scrollView = NSScrollView()
@@ -367,7 +126,7 @@ struct ComposerTextView: NSViewRepresentable {
         var parent: ComposerTextView
         /// The offsets last passed between the field and the composer in
         /// either direction; a `selection` equal to it is an echo.
-        var applied: Range<Int>?
+        var applied: ComposerScalarRange?
         /// Set while `updateNSView` writes into the view, whose change
         /// callbacks then describe the composer's own edit.
         var isApplying = false
@@ -396,7 +155,8 @@ struct ComposerTextView: NSViewRepresentable {
             report(view)
         }
 
-        func focusChanged(_ focused: Bool) {
+        func focusChanged(_ view: NSTextView, focused: Bool) {
+            if focused { report(view) }
             if parent.isFocused != focused { parent.isFocused = focused }
         }
 
@@ -413,14 +173,19 @@ struct ComposerTextView: NSViewRepresentable {
         func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
             // An input method composing text owns its keys.
             guard !view.hasMarkedText() else { return false }
+            let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
+            let unmodified = modifiers.isDisjoint(with: [.shift, .control, .option, .command])
             switch selector {
+            case #selector(NSResponder.moveUp(_:)):
+                return unmodified && parent.onSuggestionKey(.up)
+            case #selector(NSResponder.moveDown(_:)):
+                return unmodified && parent.onSuggestionKey(.down)
             case #selector(NSResponder.insertNewline(_:)):
-                let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
                 if !modifiers.isDisjoint(with: [.shift, .option]) {
                     view.insertNewlineIgnoringFieldEditor(nil)
                     return true
                 }
-                if parent.onAcceptSuggestion(.returnKey) { return true }
+                if unmodified, parent.onSuggestionKey(.returnKey) { return true }
                 parent.onSubmit()
                 return true
             case #selector(NSResponder.insertLineBreak(_:)):
@@ -428,7 +193,7 @@ struct ComposerTextView: NSViewRepresentable {
                 view.insertNewlineIgnoringFieldEditor(nil)
                 return true
             case #selector(NSResponder.insertTab(_:)):
-                if !parent.onAcceptSuggestion(.tab) { view.window?.selectNextKeyView(nil) }
+                if !parent.onSuggestionKey(.tab) { view.window?.selectNextKeyView(nil) }
                 return true
             case #selector(NSResponder.insertBacktab(_:)):
                 view.window?.selectPreviousKeyView(nil)
@@ -436,7 +201,7 @@ struct ComposerTextView: NSViewRepresentable {
             case #selector(NSResponder.cancelOperation(_:)):
                 // Escape otherwise opens the text view's completion list;
                 // pass it on so a sheet or panel can close instead.
-                if !parent.onCancel() {
+                if !parent.onSuggestionKey(.escape), !parent.onCancel() {
                     view.nextResponder?.tryToPerform(selector, with: nil)
                 }
                 return true
@@ -451,7 +216,7 @@ struct ComposerTextView: NSViewRepresentable {
 /// `ComposerTextMeasure` sizes the field with the same layout.
 final class ComposerNSTextView: NSTextView {
     var onPasteAttachments: (() -> Void)?
-    var onFocusChange: ((Bool) -> Void)?
+    var onFocusChange: ((NSTextView, Bool) -> Void)?
     /// A text view does not retain the storage behind a container it is
     /// given.
     private let storage: NSTextStorage
@@ -497,13 +262,13 @@ final class ComposerNSTextView: NSTextView {
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
-        if became { onFocusChange?(true) }
+        if became { onFocusChange?(self, true) }
         return became
     }
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
-        if resigned { onFocusChange?(false) }
+        if resigned { onFocusChange?(self, false) }
         return resigned
     }
 }

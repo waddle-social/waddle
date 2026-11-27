@@ -55,18 +55,3 @@ struct SlashSubmitDecisionTests {
         #expect(decide("/poll Lunch?", inRoom: false) == .unknown(command: "poll"))
     }
 }
-
-struct SlashPopoverTests {
-    @Test func showsWhileTheCommandWordIsTyped() {
-        #expect(SlashPopover.prefix(in: "/") == "")
-        #expect(SlashPopover.prefix(in: "/sh") == "sh")
-        #expect(SlashPopover.prefix(in: "/ hello") == "")
-    }
-
-    @Test func hidesOnceTheCommandIsChosenOrForPlainText() {
-        #expect(SlashPopover.prefix(in: "/shrug ") == nil)
-        #expect(SlashPopover.prefix(in: "/shrug hi") == nil)
-        #expect(SlashPopover.prefix(in: "hello") == nil)
-        #expect(SlashPopover.prefix(in: "/1") == nil)
-    }
-}

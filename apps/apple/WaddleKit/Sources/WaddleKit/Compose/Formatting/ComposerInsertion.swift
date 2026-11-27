@@ -1,10 +1,12 @@
 import Foundation
 
 /// Inserting emoji, mention triggers and links into a plain-text draft.
-/// Selections are Unicode-scalar ranges; nil means the end of the draft.
+/// A nil selection means the end of the draft.
 public enum ComposerInsertion {
     /// Replaces the selection with `insertion`, caret after it.
-    public static func replacingSelection(with insertion: String, in text: String, selection: Range<Int>?) -> ComposerTextEdit {
+    public static func replacingSelection(
+        with insertion: String, in text: String, selection: ComposerScalarRange?
+    ) -> ComposerTextEdit {
         let scalars = Array(text.unicodeScalars)
         let range = ComposerScalars.clamp(selection, count: scalars.count)
         let inserted = Array(insertion.unicodeScalars)
@@ -24,7 +26,7 @@ public enum ComposerInsertion {
 
     /// Inserts `url` after the selection, separated from the surrounding
     /// text by spaces so receivers auto-link it.
-    public static func insertingLink(_ url: URL, into text: String, selection: Range<Int>?) -> ComposerTextEdit {
+    public static func insertingLink(_ url: URL, into text: String, selection: ComposerScalarRange?) -> ComposerTextEdit {
         let scalars = Array(text.unicodeScalars)
         let point = ComposerScalars.clamp(selection, count: scalars.count).upperBound
         let needsLeading = point > 0 && !ComposerScalars.isWhitespace(scalars[point - 1])

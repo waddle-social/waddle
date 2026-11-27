@@ -41,14 +41,22 @@ public struct MentionDirectorySearch: Sendable {
 
     /// The directory results the `@` popover adds after the occupants it
     /// already lists: in server order, without our own account, anyone
-    /// already listed, or duplicates.
+    /// already listed, or duplicate JIDs and names. A rejected hit does
+    /// not reserve its name or address.
     public static func additions(
         _ found: [UserSearchResult],
         listed: some Sequence<BareJID>,
-        ownJID: BareJID?
+        ownJID: BareJID?,
+        reservedNames: Set<String> = []
     ) -> [UserSearchResult] {
         var excluded = Set(listed)
         if let ownJID { excluded.insert(ownJID) }
-        return found.filter { excluded.insert($0.jid).inserted }
+        var names = reservedNames
+        return found.filter { user in
+            let name = user.username.lowercased()
+            guard !names.contains(name), excluded.insert(user.jid).inserted else { return false }
+            names.insert(name)
+            return true
+        }
     }
 }
