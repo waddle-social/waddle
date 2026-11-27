@@ -102,6 +102,19 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
      */
     val fcmTokenDeletionPending: Flow<Boolean> = dataStore.data.map { it[KEY_FCM_TOKEN_DELETION_PENDING] ?: false }
 
+    /**
+     * The server origin the person chose on the login screen; `null` means
+     * the build's default. Lives here, not in the session store, so
+     * signing out does not forget which server to sign back in to.
+     */
+    val serverUrl: Flow<String?> = dataStore.data.map { it[KEY_SERVER_URL] }
+
+    suspend fun setServerUrl(origin: String?) {
+        dataStore.edit { prefs ->
+            if (origin == null) prefs.remove(KEY_SERVER_URL) else prefs[KEY_SERVER_URL] = origin
+        }
+    }
+
     suspend fun setPushTransport(choice: PushTransportChoice) {
         dataStore.edit { it[KEY_PUSH_TRANSPORT] = choice.storageValue }
     }
@@ -153,6 +166,7 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
     }
 
     private companion object {
+        val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_TIMELINE_DIRECTION = stringPreferencesKey("timeline_direction")
         val KEY_NOTIFICATIONS = booleanPreferencesKey("notifications_enabled")

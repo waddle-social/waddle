@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.client.auth.AuthProvider
@@ -19,6 +20,9 @@ import social.waddle.android.client.auth.DevicePollResult
 import social.waddle.android.client.auth.DeviceStartResponse
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.auth.isTransientDeviceAuthPollError
+import social.waddle.android.client.server.ServerOrigin
+import social.waddle.android.client.server.ServerDiscoveryError
+import social.waddle.android.client.server.ServerDiscoveryException
 import social.waddle.android.viewModelFactoryOf
 
 /** The login screen's phase machine. */
@@ -36,6 +40,20 @@ sealed interface LoginUiState {
     data class Failed(val reason: LoginFailureReason, val detail: String?) : LoginUiState
 }
 
+/**
+ * The "server" row under the provider list: which server sign-in talks
+ * to, and the inline editor for pointing it elsewhere.
+ */
+data class ServerUiState(
+    /** Display label (host[:port]) of the server in use. */
+    val label: String = "",
+    val isCustom: Boolean = false,
+    val editing: Boolean = false,
+    /** Discovery probe in flight. */
+    val checking: Boolean = false,
+    val error: ServerDiscoveryError? = null,
+)
+
 enum class LoginFailureReason {
     PROVIDERS_UNAVAILABLE,
     START_FAILED,
@@ -51,6 +69,7 @@ enum class LoginFailureReason {
  */
 class LoginViewModel(
     private val gateway: LoginAuthGateway,
+    private val servers: LoginServerGateway,
     private val signIn: suspend (WaddleSessionInfo) -> Unit,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow<LoginUiState>(LoginUiState.LoadingProviders)
@@ -61,8 +80,12 @@ class LoginViewModel(
     /** One-shot verification URLs the screen opens in a Custom Tab. */
     val openVerificationUrl: Flow<String> = openUrl.receiveAsFlow()
 
+    private val _server = MutableStateFlow(serverStateOf(servers.current.value))
+    val server: StateFlow<ServerUiState> = _server.asStateFlow()
+
     private var cachedProviders: List<AuthProvider> = emptyList()
     private var flowJob: Job? = null
+    private var serverJob: Job? = null
 
     init {
         loadProviders()
@@ -88,6 +111,59 @@ class LoginViewModel(
         flowJob?.cancel()
         flowJob = viewModelScope.launch { runDeviceFlow(providerId) }
     }
+
+    fun editServer() {
+        _server.update { it.copy(editing = true, error = null) }
+    }
+
+    fun cancelServerEdit() {
+        serverJob?.cancel()
+        _server.update { it.copy(editing = false, checking = false, error = null) }
+    }
+
+    /** Back to the build's default server. */
+    fun useDefaultServer() {
+        serverJob?.cancel()
+        serverJob = viewModelScope.launch { applyServer(servers.default) }
+    }
+
+    /**
+     * Validate [input] (and follow host-meta delegation) before it is
+     * persisted: a server that does not answer as Waddle never replaces
+     * the working one.
+     */
+    fun submitServer(input: String) {
+        serverJob?.cancel()
+        serverJob = viewModelScope.launch {
+            _server.update { it.copy(checking = true, error = null) }
+            servers.resolve(input).fold(
+                onSuccess = { origin -> applyServer(origin) },
+                onFailure = { failure ->
+                    val error = (failure as? ServerDiscoveryException)?.error
+                        ?: ServerDiscoveryError.UNREACHABLE
+                    _server.update { it.copy(checking = false, error = error) }
+                },
+            )
+        }
+    }
+
+    private suspend fun applyServer(origin: String) {
+        val changed = origin != servers.current.value
+        try {
+            servers.select(origin)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            // DataStore write failure: keep the working server, let them retry.
+            _server.update { it.copy(checking = false, error = ServerDiscoveryError.UNREACHABLE) }
+            return
+        }
+        _server.value = serverStateOf(origin)
+        if (changed) loadProviders()
+    }
+
+    private fun serverStateOf(origin: String) =
+        ServerUiState(label = ServerOrigin.display(origin), isCustom = origin != servers.default)
 
     /** Abort a running device flow and return to the provider list. */
     fun cancel() {
@@ -178,6 +254,7 @@ class LoginViewModel(
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             LoginViewModel(
                 gateway = graph.loginGateway(),
+                servers = SelectionLoginServerGateway(graph.serverSelection, graph.serverDiscovery),
                 signIn = graph::signIn,
             )
         }

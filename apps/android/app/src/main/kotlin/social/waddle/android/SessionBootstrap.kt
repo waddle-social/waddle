@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SessionBootstrap(
     private val sessionPrefs: SessionPrefs,
     private val authApi: WaddleAuthApi,
+    /** Loads the persisted server choice so the restore asks the right server. */
+    private val loadServer: suspend () -> Unit = {},
     private val signIn: suspend (WaddleSessionInfo) -> Unit,
     private val signOutLocally: suspend () -> Unit,
     managerAppState: StateFlow<WaddleAppState>,
@@ -100,6 +102,7 @@ class SessionBootstrap(
         // retryable Error screen.
         try {
             restoreFailure.value = null
+            loadServer()
             val sessionId = sessionPrefs.sessionId.first()
             _splashHold.value = false
             if (sessionId == null) {

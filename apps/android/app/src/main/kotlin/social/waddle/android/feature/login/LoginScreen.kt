@@ -19,23 +19,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -45,9 +55,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.auth.AuthProvider
+import social.waddle.android.client.server.ServerDiscoveryError
 import social.waddle.android.theme.MonoFamily
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.HuddleFieldShape
 import social.waddle.android.ui.Wordmark
+import social.waddle.android.ui.huddleFieldColors
 import social.waddle.android.ui.huddle.PillButton
 import social.waddle.android.ui.huddle.PillTone
 
@@ -60,6 +73,7 @@ fun LoginScreen() {
     val graph = LocalAppGraph.current
     val viewModel: LoginViewModel = viewModel(factory = LoginViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val server by viewModel.server.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     LaunchedEffect(viewModel) {
@@ -77,6 +91,13 @@ fun LoginScreen() {
         onSelectProvider = viewModel::selectProvider,
         onCancel = viewModel::cancel,
         onDismissError = viewModel::dismissError,
+        server = server,
+        serverActions = ServerActions(
+            onEdit = viewModel::editServer,
+            onCancel = viewModel::cancelServerEdit,
+            onSubmit = viewModel::submitServer,
+            onUseDefault = viewModel::useDefaultServer,
+        ),
     )
 }
 
@@ -90,6 +111,9 @@ internal fun LoginContent(
     onSelectProvider: (String) -> Unit,
     onCancel: () -> Unit,
     onDismissError: () -> Unit,
+    /** `null` hides the server row (previews and golden captures). */
+    server: ServerUiState? = null,
+    serverActions: ServerActions = ServerActions(),
 ) {
     val colors = Waddle.colors
     BoxWithConstraints(
@@ -113,6 +137,8 @@ internal fun LoginContent(
                 onSelectProvider = onSelectProvider,
                 onCancel = onCancel,
                 onDismissError = onDismissError,
+                server = server,
+                serverActions = serverActions,
             )
         }
     }
@@ -124,6 +150,8 @@ private fun LoginBody(
     onSelectProvider: (String) -> Unit,
     onCancel: () -> Unit,
     onDismissError: () -> Unit,
+    server: ServerUiState?,
+    serverActions: ServerActions,
 ) {
     val colors = Waddle.colors
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -158,6 +186,11 @@ private fun LoginBody(
                 is LoginUiState.Verifying -> Verifying(userCode = state.userCode, onCancel = onCancel)
                 LoginUiState.Completing -> Working(label = stringResource(R.string.login_completing))
                 is LoginUiState.Failed -> Failed(phase = state, onDismiss = onDismissError)
+            }
+            // Mid-flow (code shown / completing) the server is fixed.
+            val serverEditable = state !is LoginUiState.Verifying && state != LoginUiState.Completing
+            if (server != null && serverEditable) {
+                ServerRow(server = server, actions = serverActions)
             }
         }
     }
@@ -286,6 +319,99 @@ private fun Failed(phase: LoginUiState.Failed, onDismiss: () -> Unit) {
         onClick = onDismiss,
         modifier = Modifier.heightIn(min = Waddle.control.touch),
     )
+}
+
+/** Callbacks of the server row; defaults are no-ops for previews. */
+internal data class ServerActions(
+    val onEdit: () -> Unit = {},
+    val onCancel: () -> Unit = {},
+    val onSubmit: (String) -> Unit = {},
+    val onUseDefault: () -> Unit = {},
+)
+
+object LoginTestTags {
+    const val SERVER_CHANGE = "login-server-change"
+    const val SERVER_FIELD = "login-server-field"
+    const val SERVER_CONNECT = "login-server-connect"
+}
+
+/**
+ * Which server sign-in talks to: a quiet line with the host and a
+ * Change action, expanding into an address field. Nothing is saved
+ * until the server answers as Waddle.
+ */
+@Composable
+private fun ServerRow(server: ServerUiState, actions: ServerActions) {
+    val colors = Waddle.colors
+    if (!server.editing) {
+        Text(
+            text = stringResource(R.string.login_server_current, server.label),
+            style = Waddle.type.time,
+            color = colors.fgMuted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = Waddle.space.md),
+        )
+        PillButton(
+            text = stringResource(R.string.login_server_change),
+            onClick = actions.onEdit,
+            tone = PillTone.QUIET,
+            modifier = Modifier
+                .heightIn(min = Waddle.control.touch)
+                .testTag(LoginTestTags.SERVER_CHANGE),
+        )
+        if (server.isCustom) {
+            PillButton(
+                text = stringResource(R.string.login_server_use_default),
+                onClick = actions.onUseDefault,
+                tone = PillTone.QUIET,
+                modifier = Modifier.heightIn(min = Waddle.control.touch),
+            )
+        }
+        return
+    }
+    var address by rememberSaveable { mutableStateOf("") }
+    val submit = { if (address.isNotBlank() && !server.checking) actions.onSubmit(address) }
+    OutlinedTextField(
+        value = address,
+        onValueChange = { address = it },
+        label = { Text(text = stringResource(R.string.login_server_label)) },
+        placeholder = { Text(text = stringResource(R.string.login_server_placeholder)) },
+        singleLine = true,
+        isError = server.error != null,
+        supportingText = server.error?.let { { Text(text = stringResource(it.messageRes())) } },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+        keyboardActions = KeyboardActions(onGo = { submit() }),
+        shape = HuddleFieldShape,
+        colors = huddleFieldColors(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = Waddle.space.md)
+            .testTag(LoginTestTags.SERVER_FIELD),
+    )
+    if (server.checking) {
+        Working(label = stringResource(R.string.login_server_checking))
+    } else {
+        PillButton(
+            text = stringResource(R.string.login_server_connect),
+            onClick = submit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = Waddle.control.touch)
+                .testTag(LoginTestTags.SERVER_CONNECT),
+        )
+    }
+    PillButton(
+        text = stringResource(R.string.action_cancel),
+        onClick = actions.onCancel,
+        tone = PillTone.QUIET,
+    )
+}
+
+private fun ServerDiscoveryError.messageRes(): Int = when (this) {
+    ServerDiscoveryError.INVALID_ADDRESS -> R.string.login_server_error_invalid
+    ServerDiscoveryError.INSECURE_SCHEME -> R.string.login_server_error_insecure
+    ServerDiscoveryError.UNREACHABLE -> R.string.login_server_error_unreachable
+    ServerDiscoveryError.NOT_A_WADDLE_SERVER -> R.string.login_server_error_not_waddle
 }
 
 private fun LoginFailureReason.messageRes(): Int = when (this) {

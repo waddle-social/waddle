@@ -39,6 +39,11 @@ cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
 `checkBindingsDrift`, `test`.
 
 Auth/XMPP defaults to `https://xmpp.waddle.social` (`-PwaddleServerUrl=…`).
+On the login screen, **Change server** points the app at another Waddle
+server (`host`, `host:port` or an `https://` URL). The address is probed
+(`/api/auth/providers`, then XEP-0156 host-meta delegation) before it is
+saved. Cleartext `http://` works only for `localhost`/`127.0.0.1`: reach a
+dev server on the host with `adb reverse tcp:<port> tcp:<port>`.
 GIF search uses the web proxy at `https://waddle.chat/api/giphy`, independently
 configured with `-PwaddleGifProxyUrl=https://your-web-origin`. The GIPHY API key
 stays on the web proxy; it is not shipped in the Android app.

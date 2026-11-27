@@ -21,6 +21,17 @@
     <string name="login_error_start">Couldn\'t start the sign-in.</string>
     <string name="login_error_poll">Sign-in failed while waiting for approval.</string>
     <string name="login_error_expired">The sign-in request expired.</string>
+    <string name="login_server_current">Server: %1$s</string>
+    <string name="login_server_change">Change server</string>
+    <string name="login_server_use_default">Use the default server</string>
+    <string name="login_server_label">Server address</string>
+    <string name="login_server_placeholder">waddle.example.com</string>
+    <string name="login_server_connect">Connect</string>
+    <string name="login_server_checking">Checking server…</string>
+    <string name="login_server_error_invalid">That isn\'t a valid server address.</string>
+    <string name="login_server_error_insecure">Servers must use https (http works only for localhost).</string>
+    <string name="login_server_error_unreachable">Couldn\'t reach that server.</string>
+    <string name="login_server_error_not_waddle">That server doesn\'t look like a Waddle server.</string>
     <string name="login_error_session">Couldn\'t fetch your session.</string>
 
     <!-- Home -->
