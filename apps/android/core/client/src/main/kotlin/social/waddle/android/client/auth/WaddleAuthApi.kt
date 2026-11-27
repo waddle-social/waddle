@@ -16,11 +16,15 @@ import java.io.IOException
  * suspend function returning `Result` with typed [AuthError] failures.
  */
 class WaddleAuthApi(
-    baseUrl: String,
+    private val baseUrlProvider: () -> String,
     private val client: OkHttpClient,
     private val json: Json = defaultAuthJson,
 ) {
-    private val baseUrl: HttpUrl = baseUrl.trimEnd('/').toHttpUrl()
+    constructor(baseUrl: String, client: OkHttpClient, json: Json = defaultAuthJson) :
+        this({ baseUrl }, client, json)
+
+    /** Resolved per request: the server can change between calls. */
+    private val baseUrl: HttpUrl get() = baseUrlProvider().trimEnd('/').toHttpUrl()
 
     /** `GET /api/auth/providers`. */
     suspend fun providers(): Result<List<AuthProvider>> =

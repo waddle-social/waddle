@@ -44,6 +44,8 @@ import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
 import social.waddle.android.client.push.PushStatus
 import social.waddle.android.client.push.pushStatusOf
+import social.waddle.android.client.server.ServerDiscovery
+import social.waddle.android.client.server.ServerSelection
 import social.waddle.android.client.session.fixedRateTicks
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.call.CallMediaController
@@ -87,8 +89,12 @@ import social.waddle.android.service.SessionPrefsPushedItems
 class AppGraph(
     context: Context,
     clientFactory: ClientFactory = RustClientFactory(),
-    /** REST auth + session base URL (BuildConfig, `-PwaddleServerUrl` override). */
-    val serverUrl: String = BuildConfig.WADDLE_SERVER_URL,
+    /**
+     * Default REST auth + session base URL (BuildConfig, `-PwaddleServerUrl`
+     * override). The person can pick another server on the login screen;
+     * see [serverSelection].
+     */
+    defaultServerUrl: String = BuildConfig.WADDLE_SERVER_URL,
     sessionStore: DataStore<Preferences>? = null,
     userStore: DataStore<Preferences>? = null,
     networkSignal: NetworkSignal? = null,
@@ -125,7 +131,17 @@ class AppGraph(
 
     val sessionPrefs: SessionPrefs = SessionPrefs(sessionStore ?: appContext.sessionPreferencesDataStore)
     val userPrefs: UserPrefs = UserPrefs(userStore ?: appContext.userPreferencesDataStore)
-    val authApi: WaddleAuthApi = WaddleAuthApi(serverUrl, okHttpClient)
+
+    /** The server in use: the build default until a custom one is chosen. */
+    val serverSelection: ServerSelection = ServerSelection(userPrefs, defaultServerUrl)
+
+    /** Validates and resolves a typed server address (host-meta aware). */
+    val serverDiscovery: ServerDiscovery = ServerDiscovery(okHttpClient)
+
+    /** Current server origin, for callers that need it as a fallback. */
+    val serverUrl: String get() = serverSelection.current.value
+
+    val authApi: WaddleAuthApi = WaddleAuthApi({ serverSelection.current.value }, okHttpClient)
 
     val loginGateway: () -> LoginAuthGateway =
         loginGatewayFactory ?: { WaddleLoginAuthGateway(authApi) }
@@ -206,6 +222,7 @@ class AppGraph(
     val bootstrap: SessionBootstrap = SessionBootstrap(
         sessionPrefs = sessionPrefs,
         authApi = authApi,
+        loadServer = { serverSelection.load(sessionPrefs.serverUrl.first()) },
         signIn = ::signIn,
         signOutLocally = { sessionManager.logout() },
         managerAppState = sessionManager.appState,
@@ -381,6 +398,9 @@ class AppGraph(
     /** Persist + start the XMPP session for a validated REST session. */
     suspend fun signIn(session: WaddleSessionInfo) {
         _currentSession.value = session
+        // The origin this session belongs to, beside its id: the unit a
+        // per-account list will key on.
+        sessionPrefs.setServerUrl(serverSelection.current.value)
         sessionManager.login(session)
     }
 

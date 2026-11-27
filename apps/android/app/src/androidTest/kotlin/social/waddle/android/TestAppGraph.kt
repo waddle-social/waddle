@@ -82,7 +82,7 @@ class TestAppGraph {
     val graph = AppGraph(
         context = ApplicationProvider.getApplicationContext(),
         clientFactory = clientFactory,
-        serverUrl = "https://waddle.test",
+        defaultServerUrl = "https://waddle.test",
         sessionStore = InMemoryPreferencesDataStore(),
         userStore = InMemoryPreferencesDataStore(),
         networkSignal = networkSignal,

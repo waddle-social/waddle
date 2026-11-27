@@ -2,6 +2,8 @@ package social.waddle.android.feature.login
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -19,6 +21,8 @@ import social.waddle.android.client.auth.AuthProvider
 import social.waddle.android.client.auth.DevicePollResult
 import social.waddle.android.client.auth.DeviceStartResponse
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.server.ServerDiscoveryError
+import social.waddle.android.client.server.ServerDiscoveryException
 import social.waddle.android.client.testSessionInfo
 import java.net.SocketTimeoutException
 
@@ -54,6 +58,24 @@ class LoginViewModelTest {
         override suspend fun session(sessionId: String): Result<WaddleSessionInfo?> = sessionResult
     }
 
+    private class FakeServers : LoginServerGateway {
+        override val default = "https://waddle.default"
+        private val state = MutableStateFlow(default)
+        override val current: StateFlow<String> = state
+        var resolveResult: Result<String> = Result.success("https://chat.example")
+        val resolved = mutableListOf<String>()
+
+        override suspend fun resolve(input: String): Result<String> {
+            resolved += input
+            return resolveResult
+        }
+
+        override suspend fun select(origin: String) {
+            state.value = origin
+        }
+    }
+
+    private val servers = FakeServers()
     private val gateway = FakeLoginAuthGateway()
     private val signedIn = mutableListOf<WaddleSessionInfo>()
 
@@ -68,7 +90,7 @@ class LoginViewModelTest {
     }
 
     private fun createViewModel(): LoginViewModel =
-        LoginViewModel(gateway = gateway) { signedIn += it }
+        LoginViewModel(gateway = gateway, servers = servers) { signedIn += it }
 
     @Test
     fun `providers load into the picker`() = runTest {
@@ -200,5 +222,62 @@ class LoginViewModelTest {
         advanceTimeBy(60_000)
         runCurrent()
         assertEquals("no polls after cancel", 0, gateway.pollCalls)
+    }
+
+    @Test
+    fun `server row starts on the default server`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        assertEquals(ServerUiState(label = "waddle.default", isCustom = false), viewModel.server.value)
+    }
+
+    @Test
+    fun `a resolved custom server is selected and providers reload`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        gateway.providersResult = Result.success(listOf(AuthProvider(id = "dev", kind = "dev")))
+
+        viewModel.editServer()
+        viewModel.submitServer("chat.example")
+        runCurrent()
+
+        assertEquals(listOf("chat.example"), servers.resolved)
+        assertEquals("https://chat.example", servers.current.value)
+        assertEquals(ServerUiState(label = "chat.example", isCustom = true), viewModel.server.value)
+        assertEquals(
+            LoginUiState.ProviderPicker(listOf(AuthProvider(id = "dev", kind = "dev"))),
+            viewModel.uiState.value,
+        )
+    }
+
+    @Test
+    fun `a failed probe keeps the working server and shows the error`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        servers.resolveResult =
+            Result.failure(ServerDiscoveryException(ServerDiscoveryError.NOT_A_WADDLE_SERVER))
+
+        viewModel.editServer()
+        viewModel.submitServer("example.com")
+        runCurrent()
+
+        assertEquals("https://waddle.default", servers.current.value)
+        val server = viewModel.server.value
+        assertEquals(ServerDiscoveryError.NOT_A_WADDLE_SERVER, server.error)
+        assertTrue(server.editing)
+    }
+
+    @Test
+    fun `use default returns to the default server`() = runTest {
+        val viewModel = createViewModel()
+        runCurrent()
+        viewModel.submitServer("chat.example")
+        runCurrent()
+
+        viewModel.useDefaultServer()
+        runCurrent()
+
+        assertEquals("https://waddle.default", servers.current.value)
+        assertEquals(false, viewModel.server.value.isCustom)
     }
 }
