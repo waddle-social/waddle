@@ -38,7 +38,7 @@ pub use authz_schema_version::{
     AUTHZ_SCHEMA_VERSION, AUTHZ_SCHEMA_VERSION_RELATION_PREFIX,
 };
 pub use check::{CheckRequest, CheckResponse, PermissionChecker};
-pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema, SPICEDB_SCHEMA};
+pub use schema::{ComputedPermission, ObjectTypeSchema, PermissionSchema};
 pub use spicedb_tenant::TenantSpiceDbPermissionBackend;
 pub use tuple::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 pub use waddle_broker::authz::local::LocalPermissionBackend;
