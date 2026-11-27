@@ -12,6 +12,16 @@ final class ComposerSnapshotTests: XCTestCase {
     private static let width: CGFloat = 420
     #endif
 
+    func testFormattingBar() async throws {
+        try await assertScreenSnapshot(
+            of: ComposerFormattingBar(onFormat: { _ in /* drawn only */ }, onLink: { /* drawn only */ })
+                .frame(height: ComposerMetrics.button)
+                .frame(maxHeight: .infinity)
+                .background(Theme.Colors.bg),
+            size: CGSize(width: Self.width, height: 160)
+        )
+    }
+
     func testMentionSuggestions() {
         let sample = SampleSession()
         assertHuddleSnapshot(

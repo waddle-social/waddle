@@ -102,10 +102,6 @@ private func sortedStably(_ spans: [MarkupSpan]) -> [MarkupSpan] {
         .map(\.element)
 }
 
-private func splitLines(_ scalars: Scalars) -> [Scalars] {
-    scalars.split(separator: "\n", omittingEmptySubsequences: false).map(Array.init)
-}
-
 func hasPrefix(_ scalars: Scalars, _ prefix: Scalars, at index: Int) -> Bool {
     guard index >= 0, index + prefix.count <= scalars.count else { return false }
     return scalars[index..<(index + prefix.count)].elementsEqual(prefix)
@@ -120,70 +116,36 @@ private struct FencePass {
     let removals: [Removal]
 }
 
-private let fence: Scalars = Array("```".unicodeScalars)
-
 private func extractFences(_ body: Scalars) -> FencePass {
-    let lines = splitLines(body)
-    var keep = [Bool](repeating: true, count: lines.count)
-    var contentGroups: [ClosedRange<Int>] = []
-    var opener: Int?
-    for (index, line) in lines.enumerated() {
-        if let open = opener {
-            guard closesMarkdownFence(line[...]) else { continue }
-            keep[open] = false
-            keep[index] = false
-            if index > open + 1 { contentGroups.append((open + 1)...(index - 1)) }
-            opener = nil
-        } else if opensMarkdownFence(line[...]) {
-            opener = index
-        }
-    }
-    return assembleFencePass(lines, keep: keep, contentGroups: contentGroups)
-}
-
-private func assembleFencePass(
-    _ lines: [Scalars], keep: [Bool], contentGroups: [ClosedRange<Int>]
-) -> FencePass {
+    let draft = ComposerDraftLines(body)
+    let lines = draft.lines
+    let dropped = Set(draft.codeBlocks.flatMap { [$0.opening, $0.closing] })
     var removals: [Removal] = []
     var kept: Scalars = []
-    var newStarts = [Int](repeating: -1, count: lines.count)
-    var oldStart = 0
+    var newStarts = [Int](repeating: 0, count: lines.count)
     for (index, line) in lines.enumerated() {
-        if keep[index] {
+        let content = line.beforeLF
+        if dropped.contains(index) {
+            // The dropped fence line plus the newline that joined it.
+            removals.append(Removal(start: content.lowerBound, length: content.count + 1))
+        } else {
             // Kotlin joins on `kept.isNotEmpty()`, so leading empty kept
             // lines contribute no newline; mirrored for wire parity.
             if !kept.isEmpty {
                 kept.append("\n")
-            } else if line.isEmpty, index + 1 < lines.count {
+            } else if content.isEmpty, index + 1 < lines.count {
                 // The skipped blank still consumes one scalar in the draft.
-                removals.append(Removal(start: oldStart, length: 1))
+                removals.append(Removal(start: content.lowerBound, length: 1))
             }
             newStarts[index] = kept.count
-            kept.append(contentsOf: line)
-        } else {
-            // The dropped fence line plus the newline that joined it.
-            removals.append(Removal(start: oldStart, length: line.count + 1))
+            kept.append(contentsOf: body[content])
         }
-        oldStart += line.count + 1
     }
-    let codeBlocks = contentGroups.map { group in
-        ScalarRange(start: newStarts[group.lowerBound], end: newStarts[group.upperBound] + lines[group.upperBound].count)
+    let codeBlocks = draft.codeBlocks.compactMap { block -> ScalarRange? in
+        guard let first = block.contentLines.first, let last = block.contentLines.last else { return nil }
+        return ScalarRange(start: newStarts[first], end: newStarts[last] + lines[last].beforeLF.count)
     }
     return FencePass(body: kept, codeBlocks: codeBlocks, removals: removals)
-}
-
-func opensMarkdownFence(_ line: ArraySlice<Unicode.Scalar>) -> Bool {
-    line.starts(with: fence)
-}
-
-func closesMarkdownFence(_ line: ArraySlice<Unicode.Scalar>) -> Bool {
-    let trimmed = line.drop(while: isKotlinWhitespace)
-    return opensMarkdownFence(trimmed) && trimmed.dropFirst(fence.count).allSatisfy(isKotlinWhitespace)
-}
-
-/// Kotlin `CharSequence.trim()`: `Character.isWhitespace || isSpaceChar`.
-private func isKotlinWhitespace(_ scalar: Unicode.Scalar) -> Bool {
-    (0x09...0x0D).contains(scalar.value) || (0x1C...0x1F).contains(scalar.value) || isSeparator(scalar)
 }
 
 func isSeparator(_ scalar: Unicode.Scalar) -> Bool {
@@ -197,17 +159,16 @@ func isSeparator(_ scalar: Unicode.Scalar) -> Bool {
 
 private func blockquoteSpans(_ body: Scalars, codeBlocks: [ScalarRange]) -> [MarkupSpan] {
     var spans: [MarkupSpan] = []
-    var offset = 0
     var group: ScalarRange?
-    for line in splitLines(body) {
+    for line in ComposerDraftLines.split(body) {
+        let offset = line.content.lowerBound
         let insideCode = codeBlocks.contains { $0.contains(offset) }
-        if line.first == ">", !insideCode {
-            group = ScalarRange(start: group?.start ?? offset, end: offset + line.count)
+        if body[line.beforeLF].first == ">", !insideCode {
+            group = ScalarRange(start: group?.start ?? offset, end: line.beforeLF.upperBound)
         } else if let finished = group {
             spans.append(finished.span(.blockquote))
             group = nil
         }
-        offset += line.count + 1
     }
     if let finished = group { spans.append(finished.span(.blockquote)) }
     return spans

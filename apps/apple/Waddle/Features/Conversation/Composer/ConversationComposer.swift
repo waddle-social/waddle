@@ -25,6 +25,8 @@ struct ConversationComposer: View {
     /// last wrote, or the result of a composer edit. An external change
     /// to the draft, such as a send, moves the caret to the end.
     @State private var selectionBase = ""
+    @State private var fieldEdits = ComposerFieldEdits()
+    @State private var draftRevision = 0
     @State private var showsFormatting = false
     @State private var showsPhotoPicker = false
     @State private var showsFileImporter = false
@@ -100,6 +102,8 @@ struct ConversationComposer: View {
     private var card: some View {
         ComposerCard(
             model: model,
+            draft: fieldDraft,
+            edits: fieldEdits,
             selection: $selection,
             showsFormatting: $showsFormatting,
             isFocused: $isFocused,
@@ -153,9 +157,9 @@ struct ConversationComposer: View {
         ComposerActions(
             submit: submit,
             changeText: fieldDidChange,
-            handleSuggestionKey: handleSuggestionKey,
-            cancelContext: cancelContext,
-            format: applyFormat,
+            keys: ComposerKeyInput(
+                suggestion: handleSuggestionKey, edit: apply, format: applyFormat, submit: submit, cancel: cancelContext
+            ),
             requestLink: { linkPrompt = ComposerLinkPrompt(isPresented: true) },
             insertEmoji: insertEmoji,
             startMention: startMention,
@@ -197,8 +201,8 @@ struct ConversationComposer: View {
     }
 
     private func apply(_ pick: ComposerSuggestionsModel.Pick) {
+        record(pick.edit, replacement: ComposerTextReplacement(pick.edit.text, replacing: pick.replacementRange))
         model.accept(pick)
-        focus(after: pick.edit)
     }
 
     // MARK: - Sending and slash commands
@@ -221,9 +225,8 @@ struct ConversationComposer: View {
         case let .run(action):
             perform(action)
         case let .complete(candidate):
-            model.replaceText(ComposerTextReplacement(SlashCompletion.complete(text: model.text, with: candidate)))
+            applySlashText(SlashCompletion.complete(text: model.text, with: candidate))
             model.errorMessage = nil
-            isFocused = true
         case .choose:
             model.errorMessage = "Choose a command from the list."
         case let .unknown(command):
@@ -235,7 +238,7 @@ struct ConversationComposer: View {
         model.errorMessage = nil
         switch action {
         case let .send(body):
-            model.replaceText(ComposerTextReplacement(body))
+            applySlashText(body)
             sendDraft()
         case let .searchGIFs(query):
             model.clearText()
@@ -260,6 +263,7 @@ struct ConversationComposer: View {
 
     private func sendDraft() {
         guard let submission = model.takeSubmission(thread: thread) else { return }
+        draftRevision += 1
         dispatch(submission)
     }
 
@@ -337,11 +341,25 @@ struct ConversationComposer: View {
     }
 
     private func apply(_ change: (edit: ComposerTextEdit, replacement: ComposerTextReplacement)) {
+        record(change.edit, replacement: change.replacement)
         model.replaceText(change.replacement)
-        focus(after: change.edit)
     }
 
-    private func focus(after edit: ComposerTextEdit) {
+    private func apply(_ edit: ComposerTextEdit) {
+        apply((edit, edit.replacement))
+    }
+
+    private func applySlashText(_ text: String) {
+        let end = text.unicodeScalars.count
+        apply(ComposerTextEdit(text: text, selection: end..<end))
+    }
+
+    private var fieldDraft: ComposerFieldEdits.Draft {
+        .init(model: ObjectIdentifier(model), editing: model.editing?.presentationID, revision: draftRevision)
+    }
+
+    private func record(_ edit: ComposerTextEdit, replacement: ComposerTextReplacement) {
+        fieldEdits.append(.init(original: model.text, replacement: replacement, selection: edit.selection), in: fieldDraft)
         selectionBase = edit.text
         selection = edit.selection
         isFocused = true

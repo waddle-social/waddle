@@ -1,8 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// The `Aa` bar: markdown styles `ComposerMarkdown` converts at send
-/// time, plus a link inserted as a bare URL.
+/// The `Aa` bar: text styles, list prefixes and a bare URL.
 struct ComposerFormattingBar: View {
     let onFormat: (ComposerFormat) -> Void
     let onLink: () -> Void
@@ -29,6 +28,8 @@ private extension ComposerFormat {
         case .bold: return "bold"
         case .italic: return "italic"
         case .strikethrough: return "strikethrough"
+        case .orderedList: return "list.number"
+        case .bulletList: return "list.bullet"
         case .code: return "chevron.left.forwardslash.chevron.right"
         case .codeBlock: return "curlybraces"
         case .quote: return "text.quote"
@@ -40,6 +41,8 @@ private extension ComposerFormat {
         case .bold: return "Bold"
         case .italic: return "Italic"
         case .strikethrough: return "Strikethrough"
+        case .orderedList: return "Numbered list"
+        case .bulletList: return "Bulleted list"
         case .code: return "Code"
         case .codeBlock: return "Code block"
         case .quote: return "Quote"

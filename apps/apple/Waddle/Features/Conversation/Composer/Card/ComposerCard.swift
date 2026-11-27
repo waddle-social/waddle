@@ -7,6 +7,8 @@ import WaddleKit
 struct ComposerCard: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     let model: ComposerModel
+    let draft: ComposerFieldEdits.Draft
+    let edits: ComposerFieldEdits
     @Binding var selection: ComposerScalarRange?
     @Binding var showsFormatting: Bool
     @Binding var isFocused: Bool
@@ -20,7 +22,7 @@ struct ComposerCard: View {
         VStack(alignment: .leading, spacing: 0) {
             if showsFormatting {
                 ComposerFormattingBar(
-                    onFormat: actions.format,
+                    onFormat: actions.keys.format,
                     onLink: actions.requestLink
                 )
                 HuddleDivider()
@@ -41,13 +43,13 @@ struct ComposerCard: View {
                 )
                 ComposerTextField(
                     text: model.text,
+                    draft: draft,
+                    edits: edits,
                     selection: $selection,
                     placeholder: model.isEditing ? "Edit message" : placeholder,
                     isFocused: $isFocused,
                     onTextChange: actions.changeText,
-                    onSubmit: actions.submit,
-                    onSuggestionKey: actions.handleSuggestionKey,
-                    onCancel: actions.cancelContext,
+                    keys: actions.keys,
                     onPaste: actions.paste
                 )
                 .padding(.horizontal, Theme.Spacing.s)

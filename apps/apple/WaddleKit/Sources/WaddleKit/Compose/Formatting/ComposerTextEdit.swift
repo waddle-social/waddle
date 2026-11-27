@@ -7,30 +7,69 @@ public typealias ComposerScalarRange = Range<Int>
 public struct ComposerTextEdit: Hashable, Sendable {
     public let text: String
     public let selection: ComposerScalarRange
+    let changes: [ComposerDraftChange]
 
     public init(text: String, selection: ComposerScalarRange) {
+        self.init(text: text, selection: selection, changes: [])
+    }
+
+    init(text: String, selection: ComposerScalarRange, changes: [ComposerDraftChange]) {
         self.text = text
         self.selection = selection
+        self.changes = changes
+    }
+
+    public var replacement: ComposerTextReplacement {
+        changes.isEmpty ? .inferred(text) : .changes(text, changes)
+    }
+
+    /// Edits compare by the resulting draft and selection.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.text == rhs.text && lhs.selection == rhs.selection
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(text)
+        hasher.combine(selection)
     }
 }
 
-/// A change to the draft and, when known, the range it replaced in the old text.
-public struct ComposerTextReplacement: Sendable {
-    public let text: String
-    public let range: ComposerScalarRange?
-    /// Where the old range's text lands when formatting wraps it.
-    let preservedRange: ComposerScalarRange?
+/// New draft text with the old scalar ranges available for reference relocation.
+public enum ComposerTextReplacement: Sendable {
+    case inferred(String)
+    case range(String, ComposerScalarRange)
+    case changes(String, [ComposerDraftChange])
 
     public init(_ text: String, replacing range: ComposerScalarRange? = nil) {
-        self.text = text
-        self.range = range
-        self.preservedRange = nil
+        self = range.map { .range(text, $0) } ?? .inferred(text)
     }
 
-    private init(_ text: String, wrapping range: ComposerScalarRange, at preservedRange: ComposerScalarRange) {
-        self.text = text
-        self.range = range
-        self.preservedRange = preservedRange
+    public var text: String {
+        switch self {
+        case let .inferred(text), let .range(text, _), let .changes(text, _): return text
+        }
+    }
+
+    /// Replacements in application order, measured against the original draft.
+    public func nativeChanges(from original: String) -> [ComposerDraftChange] {
+        if case let .changes(_, changes) = self { return Array(changes.reversed()) }
+
+        let old = Array(original.unicodeScalars)
+        let new = Array(text.unicodeScalars)
+        let delta = new.count - old.count
+        if case let .range(_, range) = self, range.lowerBound >= 0, range.upperBound <= old.count,
+           range.count + delta >= 0,
+           old[..<range.lowerBound].elementsEqual(new[..<range.lowerBound]),
+           old[range.upperBound...].elementsEqual(new[(range.upperBound + delta)...]) {
+            let inserted = new[range.lowerBound..<(range.upperBound + delta)]
+            return range.isEmpty && inserted.isEmpty ? [] : [ComposerDraftChange(range, String(String.UnicodeScalarView(inserted)))]
+        }
+
+        let prefix = zip(old, new).prefix { $0 == $1 }.count
+        if prefix == old.count, prefix == new.count { return [] }
+        let suffix = zip(old.dropFirst(prefix).reversed(), new.dropFirst(prefix).reversed()).prefix { $0 == $1 }.count
+        let inserted = new[prefix..<(new.count - suffix)]
+        return [ComposerDraftChange(prefix..<(old.count - suffix), String(String.UnicodeScalarView(inserted)))]
     }
 
     /// Keeps the old range even when the insertion has an identical prefix or text.
@@ -42,21 +81,10 @@ public struct ComposerTextReplacement: Sendable {
         return (edit, Self(edit.text, replacing: range))
     }
 
-    /// Keeps the wrapped text at its known destination, even when it contains the same markers.
     public static func applyingFormat(
         _ format: ComposerFormat, to text: String, selection: ComposerScalarRange?
     ) -> (edit: ComposerTextEdit, replacement: Self) {
         let edit = ComposerFormatting.apply(format, to: text, selection: selection)
-        // Quotes prefix each line. The other formats insert markers at the selection's edges.
-        guard format != .quote else { return (edit, Self(edit.text)) }
-        let scalars = text.unicodeScalars
-        let start = if let selection {
-            ComposerScalars.clamp(selection, count: scalars.count).lowerBound
-        } else {
-            // Without a selection, the formatter wraps the draft after its leading whitespace.
-            scalars.prefix(while: { $0.properties.isWhitespace }).count
-        }
-        let range = start..<(start + edit.selection.count)
-        return (edit, Self(edit.text, wrapping: range, at: edit.selection))
+        return (edit, edit.replacement)
     }
 }

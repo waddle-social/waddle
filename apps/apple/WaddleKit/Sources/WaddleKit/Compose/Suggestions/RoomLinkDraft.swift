@@ -25,26 +25,17 @@ extension RoomLinks {
         _ links: [RoomLinkDraft], from oldText: String, applying replacement: ComposerTextReplacement
     ) -> [RoomLinkDraft] {
         guard !links.isEmpty else { return [] }
+        if case let .changes(_, changes) = replacement {
+            return relocate(links, across: changes.map { ($0.range, $0.delta) })
+        }
         let old = Array(oldText.unicodeScalars)
         let new = Array(replacement.text.unicodeScalars)
         let delta = new.count - old.count
-        if let range = replacement.range, range.lowerBound >= 0, range.upperBound <= old.count,
+        if case let .range(_, range) = replacement, range.lowerBound >= 0, range.upperBound <= old.count,
            range.count + delta >= 0,
            old[..<range.lowerBound].elementsEqual(new[..<range.lowerBound]),
            old[range.upperBound...].elementsEqual(new[(range.upperBound + delta)...]) {
-            return links.compactMap { link in
-                if link.range.upperBound <= range.lowerBound { return link }
-                let shift: Int
-                if link.range.lowerBound >= range.upperBound {
-                    shift = delta
-                } else if let preserved = replacement.preservedRange,
-                          range.lowerBound <= link.range.lowerBound, link.range.upperBound <= range.upperBound {
-                    shift = preserved.lowerBound - range.lowerBound
-                } else {
-                    return nil
-                }
-                return RoomLinkDraft(room: link.room, range: (link.range.lowerBound + shift)..<(link.range.upperBound + shift))
-            }
+            return relocate(links, across: [(range, delta)])
         }
         if old == new { return links }
 
@@ -58,6 +49,24 @@ extension RoomLinks {
                   link.range.enumerated().allSatisfy({ mapping[$0.element] == start + $0.offset })
             else { return nil }
             return RoomLinkDraft(room: link.room, range: start..<(start + link.range.count))
+        }
+    }
+
+    private static func relocate(
+        _ links: [RoomLinkDraft], across changes: [(range: ComposerScalarRange, delta: Int)]
+    ) -> [RoomLinkDraft] {
+        links.compactMap { link in
+            var shift = 0
+            for change in changes {
+                if change.range.upperBound <= link.range.lowerBound {
+                    shift += change.delta
+                } else if change.range.lowerBound >= link.range.upperBound {
+                    break
+                } else {
+                    return nil
+                }
+            }
+            return RoomLinkDraft(room: link.room, range: (link.range.lowerBound + shift)..<(link.range.upperBound + shift))
         }
     }
 

@@ -64,9 +64,32 @@ struct ComposerFormattingTests {
         #expect(apply(.quote, "one\ntwo", nil) == ComposerTextEdit(text: "> one\n> two", selection: 2..<11))
         #expect(apply(.quote, "", nil) == ComposerTextEdit(text: "> ", selection: 2..<2))
     }
+
+    @Test func quotePreservesCRLFAndExcludesTheFollowingLine() {
+        let edit = apply(.quote, "a\r\nbc\r\nd", 0..<7)
+        #expect(edit.text == "> a\r\n> bc\r\nd")
+        #expect(edit.selection == 2..<11)
+    }
+
+    @Test func nativeFormattingInsertsMarkersWithoutReplacingTheSelection() {
+        let draft = "say hi now"
+        let change = ComposerTextReplacement.applyingFormat(.bold, to: draft, selection: 4..<6)
+        #expect(change.replacement.nativeChanges(from: draft) == [
+            ComposerDraftChange(6..<6, "**"),
+            ComposerDraftChange(4..<4, "**"),
+        ])
+        #expect(change.edit.selection == 6..<8)
+    }
 }
 
 struct ComposerInsertionTests {
+    @Test func nativeInsertionKeepsTheReplacementRangeWhenTextIsRepeated() {
+        let draft = "🎉🎉"
+        let change = ComposerTextReplacement.replacingSelection(with: "🎉", in: draft, selection: 0..<1)
+        #expect(change.replacement.nativeChanges(from: draft) == [ComposerDraftChange(0..<1, "🎉")])
+        #expect(change.edit.selection == 1..<1)
+    }
+
     @Test func replacingSelectionPutsTheCaretAfterTheInsertion() {
         #expect(ComposerInsertion.replacingSelection(with: "🎉", in: "hi there", selection: 3..<8)
             == ComposerTextEdit(text: "hi 🎉", selection: 4..<4))
