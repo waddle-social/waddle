@@ -175,6 +175,7 @@ private struct ThreadContent: View {
                 replyComposer(isSubThread: header.isSubThread)
             }
         }
+        .modifier(ConversationDropTarget(composer: composer))
         .modifier(ThreadNavigationChrome(isInspector: isInInspector, isSubThread: header.isSubThread))
         .environment(actions)
         .modifier(MessageActionDialogs(actions: actions))
