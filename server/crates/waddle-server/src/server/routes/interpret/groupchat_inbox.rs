@@ -439,6 +439,10 @@ async fn insert_groupchat_notification_candidate(
         &state.deps.occupant_id_secret,
     ) {
         Ok(candidate) => candidate,
+        Err(NotificationOutboxError::RetractionNotNotifiable) => {
+            // A retraction completes like any rejection, without the warning.
+            return GroupchatNotificationCandidateQueueOutcome::Completed;
+        }
         Err(error) => {
             warn!(%error, "groupchat notification candidate rejected");
             return GroupchatNotificationCandidateQueueOutcome::Completed;
@@ -673,10 +677,8 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
     else {
         return Ok(RecoverySweepOutcome::CanonicalGone);
     };
-    let policy = if completed {
-        RecoveryPolicyDecision::AlreadyCompleted
-    } else if deferred_policy || candidate_required {
-        let candidate = match crate::notification_outbox::candidate_from_envelope(
+    let policy = if candidate_required || (deferred_policy && !completed) {
+        match crate::notification_outbox::candidate_from_envelope(
             envelope.message(),
             GroupchatCandidateIdentity {
                 owner: &recovery.key.recipient,
@@ -694,34 +696,38 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
             },
             &state.deps.occupant_id_secret,
         ) {
-            Ok(candidate) => candidate,
+            Err(NotificationOutboxError::RetractionNotNotifiable) => {
+                RecoveryPolicyDecision::Suppressed
+            }
             Err(error) => {
                 warn!(%error, "canonical notification candidate rejected");
                 return Ok(RecoverySweepOutcome::Pending);
             }
-        };
-        if deferred_policy && !candidate_required {
-            match evaluate_recovery_policy(
-                state,
-                &candidate,
-                &recovery.key.room,
-                recovery.room_members_only,
-            )
-            .await
-            {
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. }) => {
-                    RecoveryPolicyDecision::Deliver(Box::new(candidate))
-                }
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::Suppressed { .. }) => {
-                    RecoveryPolicyDecision::Suppressed
-                }
-                Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy) | Err(_) => {
-                    RecoveryPolicyDecision::RetryLater
+            Ok(_) if completed => RecoveryPolicyDecision::AlreadyCompleted,
+            Ok(candidate) if deferred_policy && !candidate_required => {
+                match evaluate_recovery_policy(
+                    state,
+                    &candidate,
+                    &recovery.key.room,
+                    recovery.room_members_only,
+                )
+                .await
+                {
+                    Ok(crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. }) => {
+                        RecoveryPolicyDecision::Deliver(Box::new(candidate))
+                    }
+                    Ok(crate::notification_outbox::T1PushDispatchOutcome::Suppressed {
+                        ..
+                    }) => RecoveryPolicyDecision::Suppressed,
+                    Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy) | Err(_) => {
+                        RecoveryPolicyDecision::RetryLater
+                    }
                 }
             }
-        } else {
-            RecoveryPolicyDecision::Deliver(Box::new(candidate))
+            Ok(candidate) => RecoveryPolicyDecision::Deliver(Box::new(candidate)),
         }
+    } else if completed {
+        RecoveryPolicyDecision::AlreadyCompleted
     } else {
         RecoveryPolicyDecision::Suppressed
     };

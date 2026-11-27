@@ -263,6 +263,7 @@ impl NotificationOutboxStore {
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         expected: &NotificationCandidate,
+        legacy_body: Option<&str>,
     ) -> Result<bool, IngressUowError> {
         let query = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,call_sid,call_video,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
@@ -302,7 +303,15 @@ impl NotificationOutboxStore {
         // (including exact archive pointer) must still agree completely.
         stored.delivery_id = expected.delivery_id;
         stored.policy_error_count = expected.policy_error_count;
-        if &stored != expected {
+        // Candidates saved before fallback removal carried the original body.
+        // Accept that exact canonical snapshot for existing custody only.
+        // Remove legacy_body once no candidate rows from before #2860 can remain.
+        if &stored != expected
+            && stored
+                != expected
+                    .clone()
+                    .with_last_message_body(legacy_body.map(str::to_owned))
+        {
             return Ok(false);
         }
         drop(rows);

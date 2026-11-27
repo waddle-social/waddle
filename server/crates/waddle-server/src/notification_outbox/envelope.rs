@@ -3,10 +3,12 @@ use super::groupchat_class::{
     groupchat_mentions_carry_owner_noping, groupchat_notification_class,
     GroupchatNotificationClassDecision, GroupchatNotificationClassOutcome,
 };
+use super::summary_body::summary_body;
 use super::{NotificationCandidate, NotificationOutboxError, NotificationThreadId};
 use crate::notification_outbox::NotificationMessageHints;
 use jid::{BareJid, Jid};
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+use waddle_xmpp::xep::xep0424::is_retraction_message;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
@@ -25,6 +27,9 @@ pub fn candidate_from_envelope(
     identity: GroupchatCandidateIdentity<'_>,
     secret: &OccupantIdSecret,
 ) -> Result<NotificationCandidate, NotificationOutboxError> {
+    if is_retraction_message(message) {
+        return Err(NotificationOutboxError::RetractionNotNotifiable);
+    }
     let GroupchatCandidateIdentity {
         owner,
         room,
@@ -104,11 +109,5 @@ pub fn candidate_from_envelope(
         class,
         hints,
     )?;
-    Ok(candidate.with_last_message_body(
-        message
-            .bodies
-            .get("")
-            .or_else(|| message.bodies.values().next())
-            .cloned(),
-    ))
+    Ok(candidate.with_last_message_body(summary_body(message)))
 }

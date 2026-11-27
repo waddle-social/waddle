@@ -23,6 +23,8 @@ use super::{
 };
 use super::{GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey};
 use super::{IngressUowError, ReconcileVerdict};
+use waddle_xmpp::ingress::NotificationCandidateOutcome;
+use waddle_xmpp::xep::xep0424::is_retraction_message;
 
 pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 11] = [
     IngressEffectKind::RouteDirect,
@@ -138,6 +140,7 @@ pub(in crate::ingress) fn rebuild(
     }
     discarded_receipts.extend(carbons::restore(&mut plan, &input)?);
     discarded_receipts.extend(expired_live_notification_receipts(&input)?);
+    discarded_receipts.extend(offline_retraction_candidate_receipts(&input)?);
     muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
     let mut external = super::super::suppression::filter_external_effects(
@@ -214,6 +217,37 @@ pub(in crate::ingress) fn rebuild(
         unsupported_receipts,
         discarded_receipts,
     })
+}
+
+/// Discharge a pre-existing notification obligation for the retraction stanza
+/// itself while allowing recovery to deliver the archived stanza offline.
+/// Remove this function once no offline recovery rows from before #2860 can remain.
+fn offline_retraction_candidate_receipts(
+    input: &RecoveryInput<'_>,
+) -> Result<Vec<decision::EffectReceiptKey>, IngressUowError> {
+    if !is_retraction_message(input.envelope.message()) {
+        return Ok(Vec::new());
+    }
+    input
+        .unreceipted
+        .iter()
+        .filter(|intent| {
+            matches!(
+                intent,
+                IngressEffectIntent::NotificationActivityPreview {
+                    mutation: NotificationActivityMutation::NotificationCandidate {
+                        outcome: NotificationCandidateOutcome::Inserted,
+                        ..
+                    },
+                    ..
+                }
+            ) && input.recorded.iter().any(|recorded| {
+                matches!(recorded, IngressEffectIntent::PendingDelivery { mutation }
+                    if super::super::restore_offline::correlated_notification(intent, mutation))
+            })
+        })
+        .map(super::super::durable::receipt_key)
+        .collect()
 }
 
 /// A live call has no pending-delivery row from which to retry notification

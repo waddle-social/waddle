@@ -44,6 +44,8 @@ pub(crate) mod runtime_attach;
 #[path = "notification_outbox/runtime_attach_tests.rs"]
 mod runtime_attach_tests;
 mod schema;
+mod summary_body;
+pub(crate) use summary_body::selected_message_body;
 pub(crate) const fn outbox_schema_gate() -> (i32, i32) {
     schema::OUTBOX_SCHEMA_GATE
 }

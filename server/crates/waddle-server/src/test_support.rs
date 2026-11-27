@@ -848,6 +848,35 @@ pub async fn attach_notification_candidate_lineage_for_test(
     transaction.commit().await
 }
 
+/// Check notification custody for a late parent reusing an already marked pending row.
+#[cfg(feature = "test-support")]
+pub async fn attach_existing_pending_notification_for_test(
+    uow: &IngressUnitOfWork,
+    message: waddle_xmpp::ingress::MessageKey,
+    intent: &waddle_xmpp::ingress::IngressEffectIntent,
+    row: &waddle_xmpp::pending_delivery::PendingRow,
+) -> Result<bool, IngressUowError> {
+    use crate::ingress_uow::{CanonicalMessageRepository, RecoveryReceiptRepository};
+
+    let mut transaction = uow.begin().await?;
+    if !CanonicalMessageRepository::lock(&mut transaction, message).await? {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    let envelope = CanonicalMessageRepository::load_envelope(&mut transaction, message)
+        .await?
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    let reusable = RecoveryReceiptRepository::attach_existing_pending_notification(
+        &mut transaction,
+        message,
+        intent,
+        &envelope,
+        row,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(reusable)
+}
+
 /// Whether both the authority and its receipt worker carry this reserved lane.
 #[cfg(feature = "test-support")]
 pub fn receipt_custody_shares_ingress_lane(
@@ -2013,6 +2042,29 @@ pub fn direct_notification_candidate_from_envelope_for_test(
         sender,
         archive_stanza_id,
     )
+}
+
+/// Reconcile a single groupchat notification recovery row through the production route.
+#[cfg(feature = "test-support")]
+pub async fn reconcile_groupchat_notification_recovery_for_test(
+    state: &WebSocketState,
+    recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
+) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress_uow::IngressUowError> {
+    crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, recovery)
+        .await
+}
+
+/// Run one pending-delivery notification recovery pass and return its outcome.
+#[cfg(feature = "test-support")]
+pub async fn recover_pending_notifications_for_test(state: &WebSocketState) -> (usize, bool) {
+    let result =
+        crate::server::routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
+            state,
+            16,
+            &mut crate::server::routes::interpret::PendingNotificationRecoveryCursor::default(),
+        )
+        .await;
+    (result.completed, result.had_failure)
 }
 
 /// Run the production notification loops with an explicit timer for wake tests.

@@ -564,15 +564,12 @@ async fn prepare_notification_candidate_for_message(
         archive_stanza_id,
     ) {
         Ok(candidate) => candidate,
-        Err(
-            crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
-                _,
-            ),
-        ) => {
+        Err(error) if error.is_not_notifiable() => {
             debug!(
                 recipient = %recipient,
                 sender = %sender,
-                "XEP-0357 notification candidate skipped: self-directed (sender bare JID == recipient bare JID)"
+                error = %error,
+                "XEP-0357 notification candidate skipped"
             );
             return PreparedOfflineNotification::Suppressed;
         }

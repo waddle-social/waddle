@@ -618,12 +618,23 @@ pub enum NotificationOutboxError {
     ArchiveStanzaIdOwnerMismatch { expected: Jid, actual: Jid },
     #[error("notification candidate sender bare JID equals recipient bare JID: {0}")]
     SelfDirectedNotificationCandidate(BareJid),
+    #[error("XEP-0424 retraction messages do not create notification candidates")]
+    RetractionNotNotifiable,
     #[error("room policy lookup failed for {room}: {message}")]
     RoomPolicyLookup { room: BareJid, message: String },
     #[error("message count is out of range: {0}")]
     InvalidMessageCount(i64),
     #[error("notification outbox coalesce contention persisted after retry")]
     OutboxCoalesceContention,
+}
+
+impl NotificationOutboxError {
+    pub(crate) fn is_not_notifiable(&self) -> bool {
+        matches!(
+            self,
+            Self::SelfDirectedNotificationCandidate(_) | Self::RetractionNotNotifiable
+        )
+    }
 }
 
 #[cfg(test)]

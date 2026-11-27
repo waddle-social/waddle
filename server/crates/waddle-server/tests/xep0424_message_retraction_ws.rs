@@ -3,7 +3,10 @@
 use waddle_ws_test_support as ws_common;
 
 use tokio::sync::Mutex;
+use waddle_xmpp::xep::xep0424::build_retraction_message;
+use ws_common::iq::send_stanza;
 use ws_common::{extract_attr_after, TestServer, WsXmppClient};
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";
@@ -252,6 +255,94 @@ async fn dm_retraction_tombstones_both_archives() {
     );
 
     let _ = bob.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn offline_dm_retraction_is_archived_without_push() {
+    let _guard = TEST_SERIAL.lock().await;
+    let dir = tempfile::tempdir().expect("temporary database directory");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("server.db").display()
+    );
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("bob", "bob-password")]);
+    let mut admin = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        server.fixed_account_password(),
+        "offline-retraction-sender",
+    )
+    .await
+    .expect("connect sender");
+    let bob = "bob@localhost".parse::<jid::Jid>().expect("recipient JID");
+    let mut original = Message::chat(Some(bob.clone()));
+    original.id = Some(Id("original-offline-dm".into()));
+    original
+        .bodies
+        .insert(Lang::new(), "retract this offline message".into());
+    send_stanza(&mut admin, original).await;
+
+    // XEP-0424 excludes the compatibility body even without a fallback marker.
+    let mut retraction = build_retraction_message(Some(bob.clone()), None, "original-offline-dm");
+    retraction.type_ = MessageType::Chat;
+    retraction.id = Some(Id("offline-retraction".into()));
+    send_stanza(&mut admin, retraction).await;
+
+    // The MAM response on the sender's socket follows both message submissions.
+    let frames = query_mam(&mut admin, "admin@localhost", "offline-retraction-sync").await;
+    assert!(
+        frames.iter().any(|frame| {
+            frame.contains("<retract ") && frame.contains("id='original-offline-dm'")
+        }),
+        "the retraction must be accepted and archived: {frames:?}"
+    );
+
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("open notification database");
+    let candidate_bodies: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT last_message_body FROM notification_candidates WHERE recipient_bare_jid = ?",
+    )
+    .bind(bob.as_str())
+    .fetch_all(&pool)
+    .await
+    .expect("read Bob's notification candidates");
+    assert_eq!(
+        candidate_bodies,
+        [Some("retract this offline message".to_owned())],
+        "only the original offline message should create a candidate"
+    );
+    let outbox_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = ?")
+            .bind(bob.as_str())
+            .fetch_one(&pool)
+            .await
+            .expect("count Bob's outbox rows");
+    assert_eq!(outbox_rows, 0, "the retraction must leave no push job");
+
+    let mut bob_client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        "bob-password",
+        "offline-retraction-recipient",
+    )
+    .await
+    .expect("connect recipient");
+    let frames = query_mam(&mut bob_client, bob.as_str(), "offline-retraction-catchup").await;
+    assert!(
+        frames.iter().any(|frame| {
+            frame.contains("<result")
+                && frame.contains("<retract ")
+                && frame.contains("id='original-offline-dm'")
+        }),
+        "the offline client must catch up on the retraction from MAM: {frames:?}"
+    );
+
+    let _ = bob_client.close().await;
     let _ = admin.close().await;
 }
 
