@@ -1,6 +1,8 @@
 //! Typed identifiers, classes, reasons, statuses, outcomes, and errors
 //! for the notification outbox.
 
+use waddle_xmpp::push::names::PushNames;
+
 use super::{
     build_xep0357_notification_payload, BareJid, BlockingStorageError, DatabaseError, Element,
     Error, Jid, NotificationActivityError, PubSubItem, RichSummary,
@@ -117,6 +119,21 @@ impl NotificationClass {
             "call" => Ok(Self::Call),
             "missed_call" => Ok(Self::MissedCall),
             _ => Err(NotificationOutboxError::InvalidClass(value.to_string())),
+        }
+    }
+}
+
+impl From<NotificationClass> for waddle_xmpp::push::envelope::NotificationClass {
+    fn from(class: NotificationClass) -> Self {
+        match class {
+            NotificationClass::DirectMessage => Self::Dm,
+            NotificationClass::DirectMessageMention => Self::DmMention,
+            NotificationClass::PersonalMention => Self::PersonalMention,
+            NotificationClass::ChannelMention => Self::ChannelMention,
+            NotificationClass::ActiveChannelMention => Self::ActiveChannelMention,
+            NotificationClass::NotifyAll => Self::NotifyAll,
+            NotificationClass::Call => Self::Call,
+            NotificationClass::MissedCall => Self::MissedCall,
         }
     }
 }
@@ -393,6 +410,7 @@ pub struct NotificationOutboxJob {
     pub(super) class: NotificationClass,
     pub(super) message_count: u32,
     pub(super) context: Element,
+    pub(super) room_archive_stanza_id: Option<super::StanzaId>,
     /// Resolved XEP-0357 §5.4 rich summary fields, decided at T1 drain
     /// from the recipient's XEP-0492 opt-in and the candidate's
     /// XEP-0334 hints. Defaults to [`RichSummary::minimal`] (opt-out).
@@ -472,17 +490,27 @@ impl NotificationOutboxJob {
         &self.rich_summary
     }
 
-    pub fn to_xep0357_pubsub_item_with_count(&self, message_count: u32) -> PubSubItem {
+    pub fn to_xep0357_pubsub_item_with_count(
+        &self,
+        message_count: u32,
+        names: Option<&PushNames>,
+    ) -> PubSubItem {
         PubSubItem::new(
             Some(self.job_id.as_str().to_string()),
             Some(self.approved_payload.clone().unwrap_or_else(|| {
-                build_xep0357_notification_payload(message_count, &self.rich_summary, &self.context)
+                build_xep0357_notification_payload(
+                    message_count,
+                    &self.rich_summary,
+                    &self.context,
+                    self.class,
+                    names,
+                )
             })),
         )
     }
 
     pub fn to_xep0357_pubsub_item(&self) -> PubSubItem {
-        self.to_xep0357_pubsub_item_with_count(self.message_count)
+        self.to_xep0357_pubsub_item_with_count(self.message_count, None)
     }
 }
 

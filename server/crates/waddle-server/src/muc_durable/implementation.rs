@@ -2633,6 +2633,38 @@ impl MucDurableStore for PostgresMucRoomStore {
         })
     }
 
+    fn load_published_room_config<'a>(
+        &'a self,
+        room_jid: &'a BareJid,
+    ) -> MucDurableFuture<'a, Option<RoomConfig>> {
+        Box::pin(async move {
+            let conn = self.db.guard().await.map_err(db_err)?;
+            let mut rows = conn
+                .query(
+                    "SELECT room.config_json FROM clustering_muc_rooms AS room \
+                     LEFT JOIN clustering_muc_room_lifecycles AS lifecycle \
+                       ON lifecycle.room_jid = room.room_jid \
+                       AND lifecycle.lifecycle_id = room.lifecycle_id \
+                     WHERE room.room_jid = ? \
+                       AND (room.lifecycle_id IS NULL OR lifecycle.state IN (?, ?))",
+                    crate::db_params![
+                        room_jid.to_string(),
+                        RoomLifecycleState::Active.as_db_str(),
+                        RoomLifecycleState::Dormant.as_db_str(),
+                    ],
+                )
+                .await
+                .map_err(db_err)?;
+            let Some(row) = rows.next().await.map_err(db_err)? else {
+                return Ok(None);
+            };
+            let json: String = row.get(0).map_err(db_err)?;
+            serde_json::from_str(&json).map(Some).map_err(|error| {
+                XmppError::internal(format!("durable room config decode failed: {error}"))
+            })
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,

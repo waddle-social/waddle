@@ -28,6 +28,7 @@ pub(crate) mod groupchat_class;
 pub use envelope::{candidate_from_envelope, GroupchatCandidateIdentity};
 mod codec;
 mod deps;
+mod display_names;
 mod drain;
 mod enqueue;
 mod gate;
@@ -64,6 +65,7 @@ pub use deps::{
     MAX_ACTIVE_MENTION_TTL_SECONDS, MIN_ACTIVE_MENTION_TTL_SECONDS,
     WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
 };
+pub use display_names::{PushDisplayNameRequest, PushDisplayNameResolver};
 pub(crate) use gate::{
     evaluate_push_gate_at_dispatch, PushEvalCaches, PushEvalDeps, PushEvalStage,
     RoomPolicyCacheEntry, T1PushDispatchOutcome,
@@ -105,6 +107,7 @@ pub struct NotificationOutboxStore {
     db: Database,
     owner_preparation: Option<OwnerPreparationProof>,
     remote_publisher: remote::RemotePublisherSlot,
+    push_display_names: display_names::PushDisplayNamesSlot,
 }
 
 /// Proof that this exact URL-opened owner pool completed the legacy outbox
@@ -135,6 +138,7 @@ impl NotificationOutboxStore {
             db,
             owner_preparation: None,
             remote_publisher: Default::default(),
+            push_display_names: Default::default(),
         };
         store.initialize().await?;
         Ok(store)
@@ -157,6 +161,7 @@ impl NotificationOutboxStore {
             db: db.clone(),
             owner_preparation: None,
             remote_publisher: Default::default(),
+            push_display_names: Default::default(),
         };
         temporary.initialize_legacy_postgres_inline().await?;
         drop(temporary);
@@ -189,6 +194,7 @@ impl NotificationOutboxStore {
             db,
             owner_preparation: None,
             remote_publisher: Default::default(),
+            push_display_names: Default::default(),
         };
         store.validate_typed_schema_contract()?;
         let mut tx = store.db.begin().await?;
@@ -253,6 +259,7 @@ impl NotificationOutboxStore {
             db: db.clone(),
             owner_preparation: None,
             remote_publisher: Default::default(),
+            push_display_names: Default::default(),
         };
         store.validate_typed_schema_contract()?;
         let mut preparing = store.clone();

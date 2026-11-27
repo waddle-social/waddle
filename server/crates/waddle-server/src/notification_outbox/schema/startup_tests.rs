@@ -546,6 +546,7 @@ async fn postgres_gate_timeout_closes_detached_session_and_preserves_custody() {
         db: database,
         owner_preparation: None,
         remote_publisher: Default::default(),
+        push_display_names: Default::default(),
     };
     retain_unknown_work(&f).await;
     let before = snapshot(&f.db).await;

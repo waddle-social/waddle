@@ -11,6 +11,7 @@ pub mod encrypt;
 pub mod envelope;
 pub mod fcm;
 pub mod limiter;
+pub mod names;
 mod sender;
 mod store;
 pub mod types;

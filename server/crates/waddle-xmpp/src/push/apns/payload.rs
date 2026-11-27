@@ -7,10 +7,11 @@
 //! carries. By default there is no sender and no body, so nothing
 //! downstream of APNs can learn who wrote what.
 //!
-//! The alert names the sender and shows the body only when the publisher
-//! put them in the XEP-0357 summary ([`ApnsAlertContent`]), which the
-//! user server does only for a conversation whose owner opted in
-//! (`urn:waddle:push:rich:0`). There is never a `mutable-content` flag.
+//! The alert shows message content only when the publisher supplied a
+//! sender in the XEP-0357 summary ([`ApnsAlertContent`]). For an opted-in
+//! conversation (`urn:waddle:push:rich:0`), the user server can also
+//! provide display names alongside the summary. There is never a
+//! `mutable-content` flag.
 //!
 //! The payload is built from serde structs and serialized by
 //! [`ApnsPayload::encode`], which keeps it within Apple's 4096-byte
@@ -23,6 +24,7 @@ use thiserror::Error;
 use xmpp_parsers::jingle::SessionId;
 
 use crate::push::envelope::NotificationClass;
+use crate::push::names::DisplayName;
 
 /// Apple's maximum payload size for regular remote notifications.
 pub const MAX_APNS_PAYLOAD_BYTES: usize = 4096;
@@ -37,6 +39,9 @@ const MAX_ALERT_BODY_BYTES: usize = 1024;
 
 /// Longest alert title sent, in UTF-8 bytes before JSON escaping.
 const MAX_ALERT_TITLE_BYTES: usize = 256;
+
+/// Longest alert subtitle sent, in UTF-8 bytes before JSON escaping.
+const MAX_ALERT_SUBTITLE_BYTES: usize = 256;
 
 const ELLIPSIS: char = '…';
 
@@ -111,6 +116,8 @@ struct Alert {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    subtitle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
     #[serde(rename = "loc-key", skip_serializing_if = "Option::is_none")]
     loc_key: Option<&'static str>,
@@ -120,6 +127,7 @@ impl Alert {
     fn generic(loc_key: ApnsAlertLocKey) -> Self {
         Self {
             title: None,
+            subtitle: None,
             body: None,
             loc_key: Some(loc_key.as_str()),
         }
@@ -131,39 +139,33 @@ impl Alert {
         content: ApnsAlertContent<'_>,
     ) -> Self {
         // A message is never shown without its sender.
-        let Some(title) = alert_title(class, content.sender) else {
+        let is_room = class.is_room();
+        let fallback = if is_room {
+            content.sender.resource().map(|nick| nick.as_str())
+        } else {
+            content.sender.node().map(|node| node.as_str())
+        };
+        let Some(sender) = content.sender_name.map(DisplayName::as_str).or(fallback) else {
             return Self::generic(loc_key);
         };
-        let title = Some(truncated(title, MAX_ALERT_TITLE_BYTES));
-        match content.body.filter(|body| !body.is_empty()) {
-            Some(body) => Self {
-                title,
-                body: Some(truncated(body, MAX_ALERT_BODY_BYTES)),
-                loc_key: None,
-            },
-            None => Self {
-                title,
-                ..Self::generic(loc_key)
-            },
+        let (title, subtitle) = match content.room_name.filter(|_| is_room) {
+            Some(room) => (
+                truncated(&format!("#{}", room.as_str()), MAX_ALERT_TITLE_BYTES),
+                Some(truncated(sender, MAX_ALERT_SUBTITLE_BYTES)),
+            ),
+            None => (truncated(sender, MAX_ALERT_TITLE_BYTES), None),
+        };
+        let body = content
+            .body
+            .filter(|body| !body.is_empty())
+            .map(|body| truncated(body, MAX_ALERT_BODY_BYTES));
+        Self {
+            title: Some(title),
+            subtitle,
+            loc_key: body.is_none().then_some(loc_key.as_str()),
+            body,
         }
     }
-}
-
-/// The name shown for the sender: the account's localpart in a 1:1
-/// conversation, the occupant's nick in a room. The push service knows
-/// no display names.
-fn alert_title(class: NotificationClass, sender: &Jid) -> Option<&str> {
-    let name = match class {
-        NotificationClass::Call => None,
-        NotificationClass::MissedCall | NotificationClass::Dm | NotificationClass::DmMention => {
-            sender.node().map(|node| node.as_str())
-        }
-        NotificationClass::PersonalMention
-        | NotificationClass::ChannelMention
-        | NotificationClass::ActiveChannelMention
-        | NotificationClass::NotifyAll => sender.resource().map(|nick| nick.as_str()),
-    };
-    name.filter(|name| !name.is_empty())
 }
 
 /// `text` cut to at most `max_bytes` on a character boundary, ending in
@@ -181,14 +183,16 @@ fn truncated(text: &str, max_bytes: usize) -> String {
     cut
 }
 
-/// Who wrote the last message and what it says, as the XEP-0357 summary
-/// carried them (`last-message-sender`, `last-message-body`).
+/// The last message from the XEP-0357 summary and optional display names
+/// carried alongside it.
 #[derive(Clone, Copy)]
 pub struct ApnsAlertContent<'a> {
     /// Full JID: the sending resource in a 1:1 conversation, the
     /// occupant JID in a room.
     pub sender: &'a Jid,
     pub body: Option<&'a str>,
+    pub sender_name: Option<&'a DisplayName>,
+    pub room_name: Option<&'a DisplayName>,
 }
 
 /// Message content stays out of logs.
@@ -276,7 +280,7 @@ impl<'a> ApnsPayload<'a> {
                 body: Some(truncated(body, body.len() / 2)),
                 ..alert.clone()
             },
-            _ if alert.title.is_some() || alert.body.is_some() => {
+            _ if alert.title.is_some() || alert.subtitle.is_some() || alert.body.is_some() => {
                 Alert::generic(self.generic_loc_key)
             }
             _ => return Err(ApnsPayloadError::TooLarge { size: bytes.len() }),
@@ -414,7 +418,12 @@ mod tests {
     }
 
     fn content<'a>(sender: &'a Jid, body: Option<&'a str>) -> Option<ApnsAlertContent<'a>> {
-        Some(ApnsAlertContent { sender, body })
+        Some(ApnsAlertContent {
+            sender,
+            body,
+            sender_name: None,
+            room_name: None,
+        })
     }
 
     #[test]
@@ -438,6 +447,127 @@ mod tests {
                 ..fields(NotificationClass::PersonalMention, None)
             }),
             serde_json::json!({ "title": "Mallory M", "body": "@alice ping" })
+        );
+    }
+
+    #[test]
+    fn display_names_title_direct_alerts_and_add_room_subtitles() {
+        let room_sender: Jid = "general@rooms.example.com/Wonderland".parse().expect("jid");
+        let dm_sender: Jid = "alice@example.com/phone".parse().expect("jid");
+        let sender_name = DisplayName::parse("Alice Liddell").expect("sender name");
+        let room_name = DisplayName::parse("General").expect("room name");
+        for (class, sender, sender_name, room_name, title, subtitle) in [
+            (
+                NotificationClass::Dm,
+                &dm_sender,
+                Some(&sender_name),
+                Some(&room_name),
+                "Alice Liddell",
+                None,
+            ),
+            (NotificationClass::Dm, &dm_sender, None, None, "alice", None),
+            (
+                NotificationClass::PersonalMention,
+                &room_sender,
+                Some(&sender_name),
+                Some(&room_name),
+                "#General",
+                Some("Alice Liddell"),
+            ),
+            (
+                NotificationClass::PersonalMention,
+                &room_sender,
+                None,
+                Some(&room_name),
+                "#General",
+                Some("Wonderland"),
+            ),
+            (
+                NotificationClass::PersonalMention,
+                &room_sender,
+                Some(&sender_name),
+                None,
+                "Alice Liddell",
+                None,
+            ),
+            (
+                NotificationClass::PersonalMention,
+                &room_sender,
+                None,
+                None,
+                "Wonderland",
+                None,
+            ),
+        ] {
+            let json = encode_to_string(ApnsPayloadFields {
+                content: Some(ApnsAlertContent {
+                    sender,
+                    body: Some("hello"),
+                    sender_name,
+                    room_name,
+                }),
+                ..fields(class, None)
+            });
+            let payload: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+            let alert = &payload["aps"]["alert"];
+            assert_eq!(alert["title"], title);
+            assert_eq!(
+                alert.get("subtitle").and_then(serde_json::Value::as_str),
+                subtitle
+            );
+            assert_eq!(alert["body"], "hello");
+            assert!(payload["aps"].get("mutable-content").is_none());
+        }
+    }
+
+    #[test]
+    fn hostile_names_are_cleaned_and_capped_before_encoding() {
+        let raw = format!(
+            "  Alice\n\u{202e}\u{2069}\0  Liddell\u{2003} {}  ",
+            "🦋".repeat(10_000)
+        );
+        let name = DisplayName::parse(&raw).expect("name");
+        assert_eq!(name.as_str(), format!("Alice Liddell {}", "🦋".repeat(50)));
+        assert!(DisplayName::parse(" \n\0\u{202a}\u{2066}\u{fffe}\u{ffff} ").is_none());
+
+        let sender = "general@rooms.example.com/Wonderland".parse().expect("jid");
+        let long_name = DisplayName::parse(&"🦋".repeat(10_000)).expect("name");
+        let alert = alert_of(ApnsPayloadFields {
+            content: Some(ApnsAlertContent {
+                sender: &sender,
+                body: Some("hello"),
+                sender_name: Some(&long_name),
+                room_name: Some(&long_name),
+            }),
+            ..fields(NotificationClass::PersonalMention, None)
+        });
+        assert!(alert["title"].as_str().expect("title").len() <= 256);
+        assert!(alert["subtitle"].as_str().expect("subtitle").len() <= 256);
+    }
+
+    #[test]
+    fn oversized_room_alert_falls_back_to_generic_banner_without_subtitle() {
+        let class = NotificationClass::PersonalMention;
+        let sender = "general@rooms.example.com/Wonderland".parse().expect("jid");
+        let name = DisplayName::parse(&"🦋".repeat(64)).expect("name");
+        let overhead = encode_to_string(ApnsPayloadFields {
+            conversation: "",
+            ..fields(class, None)
+        })
+        .len();
+        let conversation = "a".repeat((MAX_APNS_PAYLOAD_BYTES - overhead) / 2);
+        assert_eq!(
+            alert_of(ApnsPayloadFields {
+                conversation: &conversation,
+                content: Some(ApnsAlertContent {
+                    sender: &sender,
+                    body: Some("hello"),
+                    sender_name: Some(&name),
+                    room_name: Some(&name),
+                }),
+                ..fields(class, None)
+            }),
+            serde_json::json!({ "loc-key": "WADDLE_PUSH_PERSONAL_MENTION" })
         );
     }
 

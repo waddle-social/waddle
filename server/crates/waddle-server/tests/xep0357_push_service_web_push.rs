@@ -10,19 +10,27 @@
 //! policy. Uncertain sends then retain custody as parked failed records;
 //! PubSub/queue acceptance never substitutes for a provider reply.
 
+mod push_envelope_support;
+
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use jid::BareJid;
 use minidom::Element;
+use p256::elliptic_curve::rand_core::OsRng;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
+use waddle_server::notification_outbox::WADDLE_PUSH_CONTEXT_NS;
 use waddle_server::push_service::vapid_storage::VapidStorage;
 use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;
+use waddle_xmpp::push::names::NS_PUSH_NAMES;
 use waddle_xmpp::push::types::{VapidSub, WebPushOutcome};
 use waddle_xmpp::push::{WebPushRequest, WebPushSender};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
@@ -89,6 +97,27 @@ impl WebPushSender for FixedOutcomeSender {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let outcome = self.outcome.clone();
         Box::pin(async move { outcome })
+    }
+}
+
+struct ReceivingSender {
+    secret: p256::SecretKey,
+    auth: [u8; 16],
+    envelopes: Mutex<Vec<serde_json::Value>>,
+}
+
+impl WebPushSender for ReceivingSender {
+    fn send(
+        &self,
+        request: WebPushRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = WebPushOutcome> + Send + '_>> {
+        let plaintext =
+            push_envelope_support::decrypt(&self.secret, &self.auth, request.payload.as_slice());
+        self.envelopes
+            .lock()
+            .expect("captured envelopes")
+            .push(serde_json::from_slice(&plaintext).expect("v1 envelope"));
+        Box::pin(async { WebPushOutcome::Delivered { status: 201 } })
     }
 }
 
@@ -191,7 +220,7 @@ fn web_push_notification_item(
                 .build(),
         )
         .build();
-    let context = Element::builder("context", "urn:waddle:push:context:0")
+    let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
         .attr(
             minidom::rxml::xml_ncname!("conversation").to_owned(),
             conversation,
@@ -210,16 +239,12 @@ fn web_push_notification_item(
 /// sender ignores them, but the worker's encrypt + sign path runs
 /// for real so the keys must be valid.
 fn fresh_subscription_material() -> (String, String) {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-    use p256::elliptic_curve::rand_core::OsRng;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    use rand::RngExt as _;
-    let secret = p256::SecretKey::random(&mut OsRng);
+    subscription_material(&p256::SecretKey::random(&mut OsRng), rand::random())
+}
+
+fn subscription_material(secret: &p256::SecretKey, auth: [u8; 16]) -> (String, String) {
     let p256dh_bytes = secret.public_key().to_encoded_point(false);
     let p256dh = URL_SAFE_NO_PAD.encode(p256dh_bytes.as_bytes());
-    let mut auth = [0u8; 16];
-    rand::rng().fill(&mut auth[..]);
     let auth = URL_SAFE_NO_PAD.encode(auth);
     (p256dh, auth)
 }
@@ -451,12 +476,16 @@ async fn subscription_gone_marks_device_disabled_per_xep0357_6() {
 }
 
 #[tokio::test]
-async fn delivered_outcome_keeps_device_active() {
-    let (store, sender) =
-        store_with_web_push_provider(WebPushOutcome::Delivered { status: 201 }).await;
+async fn notification_names_do_not_change_delivered_web_push_envelope() {
+    let sender = Arc::new(ReceivingSender {
+        secret: p256::SecretKey::random(&mut OsRng),
+        auth: rand::random(),
+        envelopes: Mutex::default(),
+    });
+    let store = store_with_web_push_sender(sender.clone()).await;
     let owner = owner();
     let node = store.ensure_node(&owner, "web").await.expect("node");
-    let (p256dh, auth) = fresh_subscription_material();
+    let (p256dh, auth) = subscription_material(&sender.secret, sender.auth);
     store
         .upsert_device(
             &owner,
@@ -469,20 +498,70 @@ async fn delivered_outcome_keeps_device_active() {
         )
         .await
         .expect("device");
-    store
-        .publish_notification_from_user_server(
-            node.node(),
-            &web_push_notification_item("delivered-item-1", "alice@example.com", "dm", 1),
-            &owner,
-        )
-        .await
-        .expect("publish");
+    let mut baseline = web_push_notification_item("delivered-item-1", "alice@example.com", "dm", 1);
+    let notification = baseline.payload.as_mut().expect("notification");
+    notification
+        .get_child_mut("context", WADDLE_PUSH_CONTEXT_NS)
+        .expect("context")
+        .set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("stanza-id").to_owned(),
+            "same-stanza",
+        );
+    let form_ns = waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
+    notification
+        .get_child_mut("x", form_ns)
+        .expect("summary")
+        .append_child(
+            Element::builder("field", form_ns)
+                .attr(
+                    minidom::rxml::xml_ncname!("var").to_owned(),
+                    "last-message-sender",
+                )
+                .append(
+                    Element::builder("value", form_ns)
+                        .append("alice@example.com/phone")
+                        .build(),
+                )
+                .build(),
+        );
+    let mut named = baseline.clone();
+    named.id = Some("delivered-item-2".to_owned());
+    named.payload.as_mut().expect("notification").append_child(
+        Element::builder("names", NS_PUSH_NAMES)
+            .append(
+                Element::builder("sender", NS_PUSH_NAMES)
+                    .append("Alice Liddell")
+                    .build(),
+            )
+            .build(),
+    );
+    for item in [baseline, named] {
+        store
+            .publish_notification_from_user_server(node.node(), &item, &owner)
+            .await
+            .expect("publish");
+    }
     store
         .drain_queued_notification_publish_jobs(16)
         .await
         .expect("drain");
 
-    assert_eq!(sender.call_count(), 1);
+    {
+        let envelopes = sender.envelopes.lock().expect("captured envelopes");
+        assert_eq!(envelopes.len(), 2);
+        assert_eq!(envelopes[0], envelopes[1]);
+        assert_eq!(
+            envelopes[1],
+            serde_json::json!({
+                "v": 1,
+                "class": "dm",
+                "conversation": "alice@example.com",
+                "item": "same-stanza",
+                "unread": 1,
+            }),
+        );
+    }
     assert_eq!(
         device_status(&store, node.node(), "web-1").await,
         DEVICE_STATUS_ACTIVE,
@@ -492,8 +571,10 @@ async fn delivered_outcome_keeps_device_active() {
         .delivery_attempts_for_node(node.node())
         .await
         .expect("attempts");
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_WEB_DELIVERED);
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts
+        .iter()
+        .all(|attempt| attempt.status() == ATTEMPT_STATUS_WEB_DELIVERED));
 }
 
 // #775 — XEP-0357 §6 forward cleanup: when the LAST active device on

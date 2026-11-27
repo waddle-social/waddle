@@ -1,6 +1,7 @@
 //! Outbox claim/publish lifecycle: claiming due jobs, XEP-0357 publish
 //! of claimed jobs, retry backoff, and terminal failure.
 
+use super::display_names::PushDisplayNameLookupBudget;
 #[cfg(test)]
 use super::publisher_persistence::retire_registration_outbox_tx;
 use super::publisher_persistence::{current_unread_count_for_job, PublisherTransition};
@@ -15,6 +16,15 @@ use super::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
 use crate::push_service::CanonicalNotificationTerminalProof;
 use crate::push_service::DatabasePushServiceStore;
 use tracing::Instrument;
+
+struct PublishDependencies<'a> {
+    push_service: &'a DatabasePushServiceStore,
+    push_store: &'a dyn PushSubscriptionStore,
+    inbox_storage: &'a dyn InboxStorage,
+    blocking_storage: &'a dyn BlockingStorage,
+    first_party_service_jid: &'a BareJid,
+    name_lookup_budget: PushDisplayNameLookupBudget,
+}
 
 pub(super) const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
@@ -204,6 +214,14 @@ impl NotificationOutboxStore {
         let DrainBatch { scope, batch_size } = batch;
         let jobs = self.claim_due_outbox_jobs(scope, batch_size).await?;
         let mut outcomes = Vec::with_capacity(jobs.len());
+        let mut deps = PublishDependencies {
+            push_service,
+            push_store,
+            inbox_storage,
+            blocking_storage,
+            first_party_service_jid,
+            name_lookup_budget: PushDisplayNameLookupBudget::default(),
+        };
         for job in jobs {
             let span = tracing::info_span!(
                 "notification.job.publish",
@@ -214,14 +232,7 @@ impl NotificationOutboxStore {
             );
             let outcome = async {
                 let outcome = match self
-                    .publish_claimed_job(
-                        &job,
-                        push_service,
-                        push_store,
-                        inbox_storage,
-                        blocking_storage,
-                        first_party_service_jid,
-                    )
+                    .publish_claimed_job_with_deps(&job, &mut deps)
                     .await
                 {
                     Ok(outcome) => outcome,
@@ -303,6 +314,33 @@ impl NotificationOutboxStore {
         blocking_storage: &dyn BlockingStorage,
         first_party_service_jid: &BareJid,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        self.publish_claimed_job_with_deps(
+            job,
+            &mut PublishDependencies {
+                push_service,
+                push_store,
+                inbox_storage,
+                blocking_storage,
+                first_party_service_jid,
+                name_lookup_budget: PushDisplayNameLookupBudget::default(),
+            },
+        )
+        .await
+    }
+
+    async fn publish_claimed_job_with_deps(
+        &self,
+        job: &NotificationOutboxJob,
+        deps: &mut PublishDependencies<'_>,
+    ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        let PublishDependencies {
+            push_service,
+            push_store,
+            inbox_storage,
+            blocking_storage,
+            first_party_service_jid,
+            ref mut name_lookup_budget,
+        } = *deps;
         if job.approved_payload.is_some() && self.claimed_job_is_current(job).await? {
             let item = job.to_xep0357_pubsub_item();
             let delivery = uuid::Uuid::parse_str(job.job_id.as_str())
@@ -470,7 +508,10 @@ impl NotificationOutboxStore {
         // XEP-0357 `message-count` stays scoped to this conversation and
         // thread. APNs reads the account-wide total immediately before send
         // so a delayed retry cannot replay an old absolute app-icon badge.
-        let item = job.to_xep0357_pubsub_item_with_count(message_count);
+        let names = self
+            .resolve_push_display_names(job, name_lookup_budget)
+            .await;
+        let item = job.to_xep0357_pubsub_item_with_count(message_count, names.as_ref());
         let Some((item, publish_options)) = self
             .freeze_approved_item(job, &item, registration.publish_options.as_ref())
             .await?
@@ -1070,7 +1111,7 @@ mod tests {
             .await
             .expect("current unread")
             .expect("inbox entry present");
-        let item = claimed.to_xep0357_pubsub_item_with_count(current_count);
+        let item = claimed.to_xep0357_pubsub_item_with_count(current_count, None);
         let payload = item.payload.expect("payload");
         let summary = payload
             .children()

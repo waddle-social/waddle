@@ -27,7 +27,7 @@ use minidom::Element;
 use p256::pkcs8::EncodePrivateKey;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
-use waddle_server::notification_outbox::{DrainBatch, DrainScope};
+use waddle_server::notification_outbox::{DrainBatch, DrainScope, WADDLE_PUSH_CONTEXT_NS};
 use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
@@ -40,6 +40,7 @@ use waddle_xmpp::push::apns::{
     ApnsTeamId, ApnsTopic, ApnsTransient, CachingApnsTokenSigner, SystemApnsClock,
     APNS_PROVIDER_TOKEN_MIN_REFRESH,
 };
+use waddle_xmpp::push::names::NS_PUSH_NAMES;
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::xep::xep0004::NS_DATA_FORMS;
 use waddle_xmpp::xep::xep0357::NS_PUSH;
@@ -316,7 +317,7 @@ fn notification_item_with_content(
             .append(data_form_field("last-message-sender", sender))
             .append(data_form_field("last-message-body", body));
     }
-    let context = Element::builder("context", "urn:waddle:push:context:0")
+    let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
         .attr(
             minidom::rxml::xml_ncname!("conversation").to_owned(),
             "bob@example.com",
@@ -681,6 +682,94 @@ async fn xep0357_apns_alert_carries_the_sender_and_body_of_an_opted_in_summary()
             },
         }),
     );
+}
+
+#[tokio::test]
+async fn xep0357_apns_room_names_are_optional_sanitized_and_require_summary_sender() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+
+    let hostile_name = format!("  Alice\n Liddell\u{202e} {}  ", "x".repeat(10_000));
+    let names = |display_name: &str, room_name: &str| {
+        Element::builder("names", NS_PUSH_NAMES)
+            .append(
+                Element::builder("sender", NS_PUSH_NAMES)
+                    .append(display_name)
+                    .build(),
+            )
+            .append(
+                Element::builder("room", NS_PUSH_NAMES)
+                    .append(room_name)
+                    .build(),
+            )
+            .build()
+    };
+    let rich = Some(("general@rooms.example.com/Wonderland", "hello"));
+    for (id, content, extension, expected) in [
+        (
+            "room-named",
+            rich,
+            Some(names("Alice Liddell", "General")),
+            serde_json::json!({ "title": "#General", "subtitle": "Alice Liddell", "body": "hello" }),
+        ),
+        (
+            "room-legacy",
+            rich,
+            None,
+            serde_json::json!({ "title": "Wonderland", "body": "hello" }),
+        ),
+        (
+            "room-invisible-names",
+            rich,
+            Some(names("\u{200b}", "\u{2060}")),
+            serde_json::json!({ "title": "Wonderland", "body": "hello" }),
+        ),
+        (
+            "room-private",
+            None,
+            Some(names("Alice Liddell", "General")),
+            serde_json::json!({ "loc-key": "WADDLE_PUSH_PERSONAL_MENTION" }),
+        ),
+        (
+            "room-hostile",
+            rich,
+            Some(names(&hostile_name, "General")),
+            serde_json::json!({
+                "title": "#General",
+                "subtitle": format!("Alice Liddell {}", "x".repeat(50)),
+                "body": "hello",
+            }),
+        ),
+    ] {
+        let mut item = notification_item_with_content(id, 1, content);
+        let payload = item.payload.as_mut().expect("payload");
+        let context = payload
+            .get_child_mut("context", WADDLE_PUSH_CONTEXT_NS)
+            .expect("context");
+        context.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("class").to_owned(),
+            "personal_mention",
+        );
+        context.set_attr(
+            minidom::rxml::Namespace::NONE,
+            minidom::rxml::xml_ncname!("conversation").to_owned(),
+            "general@rooms.example.com",
+        );
+        if let Some(extension) = extension {
+            payload.append_child(extension);
+        }
+        publish(&store, &owner, node.node(), item).await;
+        let calls = sender.calls();
+        let call = calls.last().expect("APNs request");
+        assert_eq!(call.payload["aps"]["alert"], expected, "{id}");
+        assert!(call.raw_payload.len() <= 4096);
+        assert!(call.payload["aps"].get("mutable-content").is_none());
+    }
+    assert_eq!(sender.calls().len(), 5);
 }
 
 /// The content is optional: a summary whose sender is not a JID is
@@ -1397,7 +1486,6 @@ async fn offline_propose_reaches_only_pushkit_and_plain_dm_reaches_only_alert_to
 }
 
 fn item_with_call_context(item_id: &str, class: &str, call: Option<Element>) -> PubSubItem {
-    use waddle_server::notification_outbox::WADDLE_PUSH_CONTEXT_NS;
     let mut context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS)
         .attr(
             minidom::rxml::xml_ncname!("conversation").to_owned(),
@@ -1422,14 +1510,73 @@ fn item_with_call_context(item_id: &str, class: &str, call: Option<Element>) -> 
 }
 
 fn call_context_child(sid: &str, video: &str, expires: &str) -> Element {
-    Element::builder(
+    Element::builder("call", WADDLE_PUSH_CONTEXT_NS)
+        .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
+        .attr(minidom::rxml::xml_ncname!("video").to_owned(), video)
+        .attr(minidom::rxml::xml_ncname!("expires").to_owned(), expires)
+        .build()
+}
+
+#[tokio::test]
+async fn call_payload_has_no_title_or_subtitle_with_rich_summary_and_names() {
+    let sender = FakeApnsSender::default();
+    let store = store_with_apns(sender.clone(), counting_tokens()).await;
+    let owner = owner();
+    let node = store
+        .ensure_node(&owner, "p4x.waddle.social.voip")
+        .await
+        .expect("VoIP node");
+    register_apple_device(&store, &owner, node.node(), "iphone", "prod", TOKEN_A).await;
+
+    let expires = SystemApnsClock.now_unix_seconds() + 45;
+    let mut item = item_with_call_context(
+        "rich-call",
         "call",
-        waddle_server::notification_outbox::WADDLE_PUSH_CONTEXT_NS,
-    )
-    .attr(minidom::rxml::xml_ncname!("sid").to_owned(), sid)
-    .attr(minidom::rxml::xml_ncname!("video").to_owned(), video)
-    .attr(minidom::rxml::xml_ncname!("expires").to_owned(), expires)
-    .build()
+        Some(call_context_child(
+            "rich-sid",
+            "false",
+            &expires.to_string(),
+        )),
+    );
+    let notification = item.payload.as_mut().expect("notification");
+    notification.append_child(
+        Element::builder("x", NS_DATA_FORMS)
+            .append(data_form_field("FORM_TYPE", "urn:xmpp:push:summary"))
+            .append(data_form_field(
+                "last-message-sender",
+                "mallory@example.com/phone",
+            ))
+            .build(),
+    );
+    notification.append_child(
+        Element::builder("names", NS_PUSH_NAMES)
+            .append(
+                Element::builder("sender", NS_PUSH_NAMES)
+                    .append("Mallory")
+                    .build(),
+            )
+            .append(
+                Element::builder("room", NS_PUSH_NAMES)
+                    .append("General")
+                    .build(),
+            )
+            .build(),
+    );
+    publish(&store, &owner, node.node(), item).await;
+
+    let calls = sender.calls_for(TOKEN_A);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].push_type, ApnsPushType::Voip);
+    assert_eq!(
+        calls[0].payload,
+        serde_json::json!({
+            "waddle": {
+                "v": 1, "class": "call", "conversation": "bob@example.com",
+                "item": "call-stanza", "node": node.node(),
+                "call": { "sid": "rich-sid", "video": false, "expires": expires },
+            },
+        }),
+    );
 }
 
 #[tokio::test]
@@ -1525,13 +1672,7 @@ async fn malformed_call_metadata_fails_without_sending_or_disabling_devices() {
         Some(call_context_child("sid", "yes", &expires)),
         Some(call_context_child("sid", "false", "invalid")),
         Some(Element::builder("call", NS_PUSH).build()),
-        Some(
-            Element::builder(
-                "call",
-                waddle_server::notification_outbox::WADDLE_PUSH_CONTEXT_NS,
-            )
-            .build(),
-        ),
+        Some(Element::builder("call", WADDLE_PUSH_CONTEXT_NS).build()),
     ]
     .into_iter()
     .enumerate()

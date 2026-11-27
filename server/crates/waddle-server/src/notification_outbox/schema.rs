@@ -1869,6 +1869,7 @@ mod tests {
             db: db.clone(),
             owner_preparation: None,
             remote_publisher: Default::default(),
+            push_display_names: Default::default(),
         };
         let class_migrate = store
             .migrate_postgres_check_constraint_on_column(

@@ -296,6 +296,32 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Build the production push display-name resolver over a test server's state.
+pub fn published_push_display_name_resolver(
+    state: &WebSocketState,
+) -> impl crate::notification_outbox::PushDisplayNameResolver {
+    crate::push_display_names::PublishedPushDisplayNameResolver::new(state)
+}
+
+/// Build a test state with a durable store for published room config reads.
+#[cfg(feature = "clustering")]
+pub async fn websocket_state_with_muc_durable_store(
+    store: Arc<dyn waddle_xmpp::muc::MucDurableStore>,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            clustering: Some(crate::clustering::ClusteringHandles {
+                muc_durable_store: Some(store),
+                ..Default::default()
+            }),
+            ..TestStateOverrides::default()
+        },
+        || std::future::ready(None),
+    )
+    .await
+}
+
 /// [`websocket_state`] whose stream-management session registry keeps its
 /// sessions and their ingress custody in `persistence`, which the caller
 /// keeps to seed and read them.

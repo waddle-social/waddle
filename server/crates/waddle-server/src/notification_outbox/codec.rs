@@ -6,8 +6,9 @@ use super::{
     require_sender_set_contains_scalar, require_sender_set_matches_conversation, BareJid, Element,
     Jid, NotificationCandidate, NotificationClass, NotificationOutboxError, NotificationOutboxJob,
     NotificationOutboxJobId, NotificationOutboxStatus, NotificationReason, NotificationThreadId,
-    PushServiceNodeName, RichSummary, Row, StanzaId,
+    PushServiceNodeName, RichSummary, Row, StanzaId, WADDLE_PUSH_CONTEXT_NS,
 };
+use waddle_xmpp::push::envelope::NotificationClass as WireNotificationClass;
 
 pub(super) fn encode_sender_jids(sender_jids: &[Jid]) -> Result<String, NotificationOutboxError> {
     let values: Vec<String> = sender_jids.iter().map(ToString::to_string).collect();
@@ -139,6 +140,20 @@ pub(super) fn decode_outbox_job(
         sender: summary_sender,
         body: summary_body,
     };
+    let class = NotificationClass::from_db_value(&row.get::<String>(8)?)?;
+    let context = context_xml
+        .parse::<Element>()
+        .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?;
+    let room_archive_stanza_id = if WireNotificationClass::from(class).is_room()
+        && context.is("context", WADDLE_PUSH_CONTEXT_NS)
+    {
+        context
+            .attr("stanza-id")
+            .filter(|id| !id.is_empty())
+            .map(|id| StanzaId::new(id, Jid::from(conversation_jid.clone())))
+    } else {
+        None
+    };
     Ok(NotificationOutboxJob {
         job_id: NotificationOutboxJobId::from(row.get::<String>(0)?),
         recipient_bare_jid: recipient_raw
@@ -152,12 +167,11 @@ pub(super) fn decode_outbox_job(
         sender_jid,
         sender_jids,
         thread_id: NotificationThreadId::new(row.get::<String>(7)?),
-        class: NotificationClass::from_db_value(&row.get::<String>(8)?)?,
+        class,
         message_count: u32::try_from(message_count)
             .map_err(|_| NotificationOutboxError::InvalidMessageCount(message_count))?,
-        context: context_xml
-            .parse::<Element>()
-            .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?,
+        context,
+        room_archive_stanza_id,
         rich_summary,
         approved_payload: row
             .get::<Option<String>>(17)?

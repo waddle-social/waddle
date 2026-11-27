@@ -116,6 +116,20 @@ pub enum NotificationClass {
 pub struct NotificationClassParseError(pub Box<str>);
 
 impl NotificationClass {
+    pub const fn allows_display_names(self) -> bool {
+        !matches!(self, Self::Call)
+    }
+
+    pub const fn is_room(self) -> bool {
+        match self {
+            Self::PersonalMention
+            | Self::ChannelMention
+            | Self::ActiveChannelMention
+            | Self::NotifyAll => true,
+            Self::Call | Self::MissedCall | Self::Dm | Self::DmMention => false,
+        }
+    }
+
     pub fn from_db_value(s: &str) -> Result<Self, NotificationClassParseError> {
         match s {
             "call" => Ok(Self::Call),
