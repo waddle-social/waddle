@@ -11,9 +11,10 @@ use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
 #[cfg(test)]
 use crate::db::Database;
 use crate::db::{row_value, ValueExt};
+use crate::server::tenant_routing::ResolvedTenant;
 use crate::server::AppState;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, put};

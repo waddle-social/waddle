@@ -3,6 +3,7 @@ use crate::clustering::NodeLifecycle;
 use crate::db::lineage::{LineageReport, LineageStatus};
 use crate::db::PoolHealth;
 use crate::server::liveness::{RuntimeProgress, RUNTIME_PROGRESS_STALL_LIMIT};
+use crate::server::tenant_routing::TenantHostResolver;
 use crate::server::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderName, Method, StatusCode};
@@ -25,29 +26,55 @@ const LINEAGE_PER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// If `WADDLE_CORS_ORIGINS` is set (comma-separated list of origins),
 /// only those origins are allowed. Otherwise, falls back to permissive
 /// CORS (suitable for development).
-pub(crate) fn configure_cors() -> CorsLayer {
+/// Configure CORS layer with dynamic tenant-origin support.
+///
+/// When `WADDLE_CORS_ORIGINS` is set, allows both the static configured origins
+/// and any origin matching an active tenant hostname in `tenant_resolver`.
+/// When `WADDLE_CORS_ORIGINS` is unset, preserves permissive CORS behavior.
+pub(crate) fn configure_cors_with_resolver(tenant_resolver: Arc<TenantHostResolver>) -> CorsLayer {
     let origins = std::env::var("WADDLE_CORS_ORIGINS").ok();
-    build_cors(origins.as_deref())
+    build_cors_with_resolver(origins.as_deref(), Some(tenant_resolver))
 }
 
+#[cfg(test)]
 pub(crate) fn build_cors(origins: Option<&str>) -> CorsLayer {
+    build_cors_with_resolver(origins, None)
+}
+
+fn build_cors_with_resolver(
+    origins: Option<&str>,
+    tenant_resolver: Option<Arc<TenantHostResolver>>,
+) -> CorsLayer {
+    use axum::http::HeaderValue;
     use tower_http::cors::AllowOrigin;
 
     match origins {
         Some(origins) if !origins.is_empty() => {
-            let allowed: Vec<_> = origins
+            let allowed: Vec<HeaderValue> = origins
                 .split(',')
                 .filter_map(|o| o.trim().parse().ok())
                 .collect();
-            if allowed.is_empty() {
+            if allowed.is_empty() && tenant_resolver.is_none() {
                 warn!(
                     "WADDLE_CORS_ORIGINS set but no valid origins parsed, falling back to permissive CORS"
                 );
                 CorsLayer::permissive()
             } else {
                 info!(origins = ?allowed, "Configured CORS with explicit allowed origins");
+                let allow_origin = if let Some(resolver) = tenant_resolver {
+                    let allowed = Arc::new(allowed);
+                    AllowOrigin::predicate(move |origin: &HeaderValue, _parts| {
+                        allowed.iter().any(|entry| entry == origin)
+                            || origin
+                                .to_str()
+                                .ok()
+                                .is_some_and(|raw| resolver.is_allowed_origin_str(raw))
+                    })
+                } else {
+                    AllowOrigin::list(allowed)
+                };
                 CorsLayer::new()
-                    .allow_origin(AllowOrigin::list(allowed))
+                    .allow_origin(allow_origin)
                     .allow_methods([
                         Method::GET,
                         Method::POST,

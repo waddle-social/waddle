@@ -450,8 +450,15 @@ pub(super) async fn handle_archive_inbox_upload_iq(
                 + chrono::Duration::seconds(waddle_xmpp::xep::xep0363::SLOT_VALIDITY_SECS))
             .to_rfc3339();
 
-            let base_url =
-                std::env::var("WADDLE_BASE_URL").unwrap_or_else(|_| format!("https://{}", domain));
+            let base_url = state
+                .deps
+                .app_state
+                .tenant_resolver
+                .base_url_for_domain(domain)
+                .unwrap_or_else(|| {
+                    std::env::var("WADDLE_BASE_URL")
+                        .unwrap_or_else(|_| format!("https://{}", domain))
+                });
             let base_url = base_url.trim_end_matches('/');
             let put_url = waddle_xmpp::xep::xep0363::slot_put_url(base_url, &slot_id);
             let get_url =

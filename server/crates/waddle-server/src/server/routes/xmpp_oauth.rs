@@ -4,7 +4,8 @@ use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::oauth_grants::OAuthGrantStore;
 use crate::auth::redirect::{PkceS256Challenge, RedirectError, XmppClientRedirectUri};
-use axum::extract::{Query, State};
+use crate::server::tenant_routing::ResolvedTenant;
+use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Redirect};
 use axum::routing::{get, post};
@@ -39,11 +40,18 @@ struct OAuthServerMetadata {
 }
 
 #[instrument(skip(state))]
-pub async fn oauth_discovery_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
+pub async fn oauth_discovery_handler(
+    State(state): State<Arc<AuthState>>,
+    resolved: Option<Extension<ResolvedTenant>>,
+) -> impl IntoResponse {
+    let base_url = resolved
+        .as_ref()
+        .map(|Extension(tenant)| tenant.base_url_str())
+        .unwrap_or_else(|| state.base_url.clone());
     let metadata = OAuthServerMetadata {
-        issuer: state.base_url.clone(),
-        authorization_endpoint: format!("{}/api/auth/xmpp/authorize", state.base_url),
-        token_endpoint: format!("{}/api/auth/xmpp/token", state.base_url),
+        issuer: base_url.clone(),
+        authorization_endpoint: format!("{base_url}/api/auth/xmpp/authorize"),
+        token_endpoint: format!("{base_url}/api/auth/xmpp/token"),
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec!["authorization_code".to_string()],
         code_challenge_methods_supported: vec!["S256".to_string()],
@@ -83,6 +91,7 @@ fn default_response_type() -> String {
 #[instrument(skip(state, params))]
 pub async fn xmpp_authorize_handler(
     State(state): State<Arc<AuthState>>,
+    resolved: Option<Extension<ResolvedTenant>>,
     Query(params): Query<XmppAuthorizeQuery>,
 ) -> impl IntoResponse {
     if params.response_type != "code" {
@@ -161,8 +170,9 @@ pub async fn xmpp_authorize_handler(
         }
     };
 
+    let tenant = state.tenant_or_fallback(resolved);
     match state
-        .start_authorization(
+        .start_authorization_for_tenant(
             provider,
             PendingFlow::Xmpp {
                 client_redirect_uri: redirect.as_str().to_string(),
@@ -170,6 +180,7 @@ pub async fn xmpp_authorize_handler(
                 client_code_challenge: Some(code_challenge.as_str().to_string()),
                 scopes,
             },
+            &tenant,
         )
         .await
     {
@@ -226,6 +237,7 @@ fn pkce_s256(verifier: &str) -> String {
 #[instrument(skip(state, request))]
 pub async fn xmpp_token_handler(
     State(state): State<Arc<AuthState>>,
+    resolved: Option<Extension<ResolvedTenant>>,
     Form(request): Form<XmppTokenRequest>,
 ) -> impl IntoResponse {
     if request.grant_type != "authorization_code" {
@@ -347,6 +359,19 @@ pub async fn xmpp_token_handler(
                 .into_response();
         }
     };
+
+    let tenant = state.tenant_or_fallback(resolved);
+    if !state.session_matches_tenant(&tenant, &session.user_jid) {
+        record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "access_denied",
+                "Session does not belong to this tenant domain",
+            )),
+        )
+            .into_response();
+    }
 
     // The owner can list and revoke this authorization (XEP-0494) through
     // the grant recorded here.

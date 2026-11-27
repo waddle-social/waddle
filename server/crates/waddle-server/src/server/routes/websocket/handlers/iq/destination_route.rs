@@ -35,7 +35,16 @@ pub(super) fn classify_iq_destination(
     domain: &str,
     state: &WebSocketState,
 ) -> Option<Destination> {
-    let served = state.deps.service_domains.served_domains(domain);
+    let served = if domain == state.deps.auth_state.xmpp_domain {
+        state.deps.service_domains.served_domains(domain)
+    } else {
+        crate::server::routes::websocket::XmppServiceDomains::new(
+            domain,
+            &format!("muc.{domain}"),
+            &format!("spaces.{domain}"),
+        )
+        .served_domains(domain)
+    };
     if served.is_none() {
         warn!("home domain is not a valid domainpart; IQ destination unclassifiable");
     }

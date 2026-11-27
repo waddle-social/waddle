@@ -1,9 +1,9 @@
 use super::{
     auth_error_response, auth_error_to_response, header, instrument, oauth2, oidc,
-    reconcile_user_membership, record_auth_failure, record_auth_success, warn, Arc, AuthError,
-    AuthFailure, AuthProviderKind, AuthStage, AuthState, BrowserSessionTransport, CallbackQuery,
-    DeviceAuthStatus, IntoResponse, PendingFlow, Query, Redirect, Session, State, StatusCode, Utc,
-    Uuid, XmppAuthCode,
+    reconcile_user_membership_for_tenant, record_auth_failure, record_auth_success, warn, Arc,
+    AuthError, AuthFailure, AuthProviderKind, AuthStage, AuthState, BootstrapMembershipConfig,
+    BrowserSessionTransport, CallbackQuery, DeviceAuthStatus, Extension, IntoResponse, PendingFlow,
+    Query, Redirect, ResolvedTenant, Session, State, StatusCode, Utc, Uuid, XmppAuthCode,
 };
 use crate::auth::redirect::{
     PkceS256Challenge, RedirectError, TrustedWebOrigins, XmppClientRedirectUri,
@@ -12,11 +12,16 @@ use crate::profile::NameIntent;
 use crate::profile::PhotoIntent;
 use crate::profile::ProfileSource;
 
-#[instrument(skip(state, query))]
+#[instrument(skip(state, tenant, query))]
 pub(super) async fn callback_handler(
     State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
+    let trusted_web_origins = state
+        .trusted_web_origins
+        .with_tenant_base(&tenant.public_base_url);
     if let Some(err) = query.error {
         let msg = query
             .error_description
@@ -54,12 +59,16 @@ pub(super) async fn callback_handler(
         record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
+    if pending.redirect_uri != tenant.callback_url() {
+        record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
+        return auth_error_to_response(AuthError::InvalidState).into_response();
+    }
     record_auth_success(AuthStage::State);
 
     // Check where this sign-in will be sent before any session exists. The
     // start handlers already validated it; this also covers handshakes begun
     // before those checks shipped.
-    let flow = match ValidatedFlow::from_pending(pending.flow.clone(), &state.trusted_web_origins) {
+    let flow = match ValidatedFlow::from_pending(pending.flow.clone(), &trusted_web_origins) {
         Ok(flow) => flow,
         Err(err) => {
             record_auth_failure(
@@ -239,7 +248,7 @@ pub(super) async fn callback_handler(
 
     let linked = match state
         .identity_service
-        .resolve_or_create_user(provider, &identity_claims, &state.xmpp_domain)
+        .resolve_or_create_user(provider, &identity_claims, tenant.xmpp_domain.as_str())
         .await
     {
         Ok(v) => v,
@@ -251,8 +260,12 @@ pub(super) async fn callback_handler(
     // `WebSocketState` exists; if it isn't installed (e.g. tests that
     // bypass HTTP), this is a silent no-op.
     if let Some(hook) = state.profile_publish_hook() {
-        if let Ok(jid) =
-            format!("{}@{}", linked.user.xmpp_localpart, state.xmpp_domain).parse::<jid::BareJid>()
+        if let Ok(jid) = format!(
+            "{}@{}",
+            linked.user.xmpp_localpart,
+            tenant.xmpp_domain.as_str()
+        )
+        .parse::<jid::BareJid>()
         {
             // Treat empty / whitespace-only `name` claims as absent so
             // the bridge does NOT publish a blank `<FN>` to vcard-temp
@@ -309,9 +322,19 @@ pub(super) async fn callback_handler(
         }
     }
 
-    if let Err(err) = reconcile_user_membership(
+    let membership_config = if !tenant.owners.is_empty() {
+        BootstrapMembershipConfig::with_owners(tenant.owners.clone())
+            .serving(tenant.xmpp_domain.as_str())
+    } else {
+        state
+            .bootstrap_membership
+            .clone()
+            .serving(tenant.xmpp_domain.as_str())
+    };
+    if let Err(err) = reconcile_user_membership_for_tenant(
         &state.permission_actor,
-        &state.bootstrap_membership,
+        &tenant.tenant_id,
+        &membership_config,
         &linked.user.jid,
         &linked.user.xmpp_localpart,
     )
@@ -340,7 +363,7 @@ pub(super) async fn callback_handler(
             session_transport,
         } => {
             let redirect_to = match session_transport {
-                BrowserSessionTransport::Cookie => state.trusted_web_origins.location(&return_to),
+                BrowserSessionTransport::Cookie => trusted_web_origins.location(&return_to),
                 BrowserSessionTransport::Fragment => {
                     let mut url = return_to;
 
@@ -364,7 +387,7 @@ pub(super) async fn callback_handler(
             response.headers_mut().append(
                 header::SET_COOKIE,
                 state
-                    .session_cookie_header(Some(&session.id), 60 * 60 * 24 * 30)
+                    .session_cookie_header_for_tenant(&tenant, Some(&session.id), 60 * 60 * 24 * 30)
                     .parse()
                     .expect("valid cookie"),
             );

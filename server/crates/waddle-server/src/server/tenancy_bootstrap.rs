@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::{PermissionBackend, TenantAuthzStoreRef};
@@ -31,6 +32,110 @@ pub struct TenantManifestSpec {
     pub owners: Vec<String>,
     #[serde(default, alias = "placement_mode")]
     pub placement_mode: Option<String>,
+    #[serde(default)]
+    pub hostnames: Vec<String>,
+}
+
+/// Computes a deterministic SHA-256 digest over all sorted `*.json` files in
+/// `dir` and returns the parsed manifests alongside that digest.
+///
+/// Returns `Ok(None)` when `dir` does not exist yet.
+pub async fn load_tenant_manifests_with_digest(
+    dir: &Path,
+) -> anyhow::Result<Option<([u8; 32], Vec<TenantManifestSpec>)>> {
+    if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+        return Ok(None);
+    }
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|err| {
+        anyhow::anyhow!("failed to read WADDLE_TENANTS_DIR {}: {err}", dir.display())
+    })?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|err| {
+        anyhow::anyhow!(
+            "failed to iterate WADDLE_TENANTS_DIR {}: {err}",
+            dir.display()
+        )
+    })? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut hasher = Sha256::new();
+    let mut raw_files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let raw = tokio::fs::read(&path).await.map_err(|err| {
+            anyhow::anyhow!("failed to read tenant manifest {}: {err}", path.display())
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        hasher.update((file_name.len() as u64).to_be_bytes());
+        hasher.update(file_name.as_bytes());
+        hasher.update((raw.len() as u64).to_be_bytes());
+        hasher.update(&raw);
+        raw_files.push((path, raw));
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+
+    let mut specs = Vec::with_capacity(raw_files.len());
+    for (path, raw) in raw_files {
+        let spec: TenantManifestSpec = serde_json::from_slice(&raw).map_err(|err| {
+            anyhow::anyhow!("failed to parse tenant manifest {}: {err}", path.display())
+        })?;
+        let _ = TenantId::parse(&spec.tenant_id).map_err(|err| {
+            anyhow::anyhow!(
+                "invalid tenant_id '{}' in {}: {err}",
+                spec.tenant_id,
+                path.display()
+            )
+        })?;
+        specs.push(spec);
+    }
+    Ok(Some((digest, specs)))
+}
+
+/// Computes the sorted `(filename, raw_bytes)` SHA-256 digest of `*.json`
+/// files in `dir` without parsing JSON, for cheap polling change detection.
+pub async fn hash_tenants_dir(dir: &Path) -> anyhow::Result<Option<[u8; 32]>> {
+    if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+        return Ok(None);
+    }
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|err| {
+        anyhow::anyhow!("failed to read WADDLE_TENANTS_DIR {}: {err}", dir.display())
+    })?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|err| {
+        anyhow::anyhow!(
+            "failed to iterate WADDLE_TENANTS_DIR {}: {err}",
+            dir.display()
+        )
+    })? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut hasher = Sha256::new();
+    for path in paths {
+        let raw = tokio::fs::read(&path).await.map_err(|err| {
+            anyhow::anyhow!("failed to read tenant manifest {}: {err}", path.display())
+        })?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        hasher.update((file_name.len() as u64).to_be_bytes());
+        hasher.update(file_name.as_bytes());
+        hasher.update((raw.len() as u64).to_be_bytes());
+        hasher.update(&raw);
+    }
+    Ok(Some(hasher.finalize().into()))
 }
 
 /// Loads all `*.json` tenant manifest specs from `dir`.

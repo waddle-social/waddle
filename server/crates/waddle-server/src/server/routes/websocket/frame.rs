@@ -558,6 +558,9 @@ impl ClassifiedInboundFrame {
                         ParseError::InvalidOpenFrom => {
                             MalformedInboundInput::Open(DefinedCondition::InvalidFrom)
                         }
+                        ParseError::InvalidOpenTo => {
+                            MalformedInboundInput::Open(DefinedCondition::HostUnknown)
+                        }
                         ParseError::InvalidOpenXml => {
                             MalformedInboundInput::Open(DefinedCondition::NotWellFormed)
                         }
@@ -699,6 +702,23 @@ async fn handle_xmpp_frame_impl(
         return ResponseBatch::default();
     }
 
+    let effective_domain_owned = conn
+        .tenant
+        .as_ref()
+        .map(|t| t.xmpp_domain.as_str().to_owned())
+        .unwrap_or_else(|| domain.to_owned());
+    let domain = effective_domain_owned.as_str();
+    let effective_base_url = conn
+        .tenant
+        .as_ref()
+        .map(crate::server::tenant_routing::ResolvedTenant::base_url_str)
+        .unwrap_or_else(|| state.deps.auth_state.base_url.clone());
+    let muc_domain = conn
+        .tenant
+        .as_ref()
+        .map(|t| t.muc_domain.as_str().to_owned())
+        .unwrap_or_else(|| state.deps.service_domains.muc.clone());
+
     let stream_open_committed = conn.stream_open_handled;
     let WsConnState {
         connection_ref: _,
@@ -744,7 +764,6 @@ async fn handle_xmpp_frame_impl(
             return ResponseBatch::default();
         }
     }
-    let muc_domain = state.deps.service_domains.muc.clone();
 
     // Both transport and dormant owner inputs share the same typed SM dispatch.
     if let ClassifiedInboundInput::StreamManagement(sm) = input.input {
@@ -882,8 +901,28 @@ async fn handle_xmpp_frame_impl(
     }
 
     match parsed.frame {
-        InboundFrame::Open { from } => {
-            info!("XMPP stream open requested");
+        InboundFrame::Open { from, to } => {
+            info!(domain = %domain, "XMPP stream open requested");
+            if let Some(requested_to) = to.as_ref() {
+                if requested_to.as_str() != domain {
+                    warn!(
+                        requested_to = %requested_to,
+                        expected_domain = %domain,
+                        "Rejecting XMPP <open/> with mismatched `to` domain"
+                    );
+                    *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                    *stream_open_from = None;
+                    conn.begin_server_stream_open_response();
+                    return stream_open_error_response(
+                        domain,
+                        from.as_ref(),
+                        DefinedCondition::HostUnknown,
+                    );
+                }
+            }
+            let mismatched_domain = from
+                .as_ref()
+                .is_some_and(|requested| requested.domain().as_str() != domain);
             let mismatched_principal = from.as_ref().is_some_and(|requested| {
                 phase
                     .authenticated_bare_jid()
@@ -892,7 +931,7 @@ async fn handle_xmpp_frame_impl(
                         .bound_jid()
                         .is_some_and(|principal| requested != &principal.to_bare())
             });
-            if mismatched_principal {
+            if mismatched_domain || mismatched_principal {
                 *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
                 *stream_open_from = None;
                 conn.begin_server_stream_open_response();
@@ -941,11 +980,15 @@ async fn handle_xmpp_frame_impl(
                     "OAUTHBEARER" => {
                         handle_sasl_oauthbearer(
                             &data,
+                            super::sasl::OAuthBearerContext {
+                                domain,
+                                base_url: &effective_base_url,
+                                stream_from: stream_open_from.as_ref(),
+                                sasl2: false,
+                            },
                             state,
-                            stream_open_from.as_ref(),
                             authenticated_session,
                             phase,
-                            false,
                         )
                         .await
                     }
@@ -1069,11 +1112,15 @@ async fn handle_xmpp_frame_impl(
                     Sasl2Mechanism::OAuthBearer => {
                         handle_sasl_oauthbearer(
                             &initial_response,
+                            super::sasl::OAuthBearerContext {
+                                domain,
+                                base_url: &effective_base_url,
+                                stream_from: stream_open_from.as_ref(),
+                                sasl2: true,
+                            },
                             state,
-                            stream_open_from.as_ref(),
                             authenticated_session,
                             phase,
-                            true,
                         )
                         .await
                     }

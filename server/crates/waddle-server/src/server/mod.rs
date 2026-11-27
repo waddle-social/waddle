@@ -30,6 +30,7 @@ pub(crate) mod state_inventory;
 pub(crate) mod state_inventory_metrics;
 pub(crate) mod state_inventory_route;
 pub mod tenancy_bootstrap;
+pub mod tenant_routing;
 pub(crate) mod topology;
 mod trace;
 #[cfg(test)]

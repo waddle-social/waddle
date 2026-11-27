@@ -395,9 +395,23 @@ impl OpenFgaPermissionBackend {
         }
         let store_ref = self.require_store_ref(tenant)?;
         let keys: Vec<OpenFgaTupleKey> = tuples.iter().map(OpenFgaTupleKey::from_tuple).collect();
+        // OpenFGA v1.8+ (cluster runs v1.11.1) supports per-write conflict
+        // options so tuple writes and deletes match SpiceDB Touch/Delete
+        // idempotency (preventing HTTP 400 on repeat logins / retries).
+        let section_body = match section {
+            "writes" => json!({
+                "tuple_keys": keys,
+                "on_duplicate": "ignore"
+            }),
+            "deletes" => json!({
+                "tuple_keys": keys,
+                "on_missing": "ignore"
+            }),
+            _ => json!({ "tuple_keys": keys }),
+        };
         let payload = json!({
             "authorization_model_id": store_ref.model_version,
-            section: { "tuple_keys": keys }
+            section: section_body
         });
         self.send_empty(
             reqwest::Method::POST,
@@ -696,6 +710,13 @@ impl PermissionBackend for OpenFgaPermissionBackend {
         };
         self.register_store_ref(store_ref.clone())?;
         Ok(store_ref)
+    }
+
+    fn register_tenant_store_ref(
+        &self,
+        store_ref: TenantAuthzStoreRef,
+    ) -> Result<(), PermissionBackendError> {
+        self.register_store_ref(store_ref)
     }
 
     async fn delete_tenant_store(&self, tenant: &TenantId) -> Result<(), PermissionBackendError> {
@@ -1102,6 +1123,36 @@ fn handle_write(
         Ok(tuples) => tuples,
         Err(resp) => return resp,
     };
+    let ignore_duplicate = val
+        .get("writes")
+        .and_then(|s| s.get("on_duplicate"))
+        .and_then(|v| v.as_str())
+        == Some("ignore");
+    let ignore_missing = val
+        .get("deletes")
+        .and_then(|s| s.get("on_missing"))
+        .and_then(|v| v.as_str())
+        == Some("ignore");
+
+    if !ignore_missing {
+        for t in &to_delete {
+            if !store.tuples.contains(t) {
+                return bad_request(
+                    "cannot delete a tuple which does not exist: tuple to be deleted did not exist",
+                );
+            }
+        }
+    }
+    if !ignore_duplicate {
+        for t in &to_write {
+            if store.tuples.contains(t) && !to_delete.contains(t) {
+                return bad_request(
+                    "cannot write a tuple which already exists: tuple to be written already existed",
+                );
+            }
+        }
+    }
+
     for t in to_delete {
         store.tuples.remove(&t);
     }
@@ -1300,4 +1351,88 @@ fn route_openfga_request(
     }
 
     json_err(404, "Not Found", "unknown route")
+}
+
+#[cfg(test)]
+mod idempotency_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_and_delete_tuples_are_idempotent_with_ignore_conflict_options() {
+        let server = InProcessOpenFgaServer::start()
+            .await
+            .expect("start mock OpenFGA");
+        let backend = OpenFgaPermissionBackend::new(OpenFgaConfig {
+            endpoint: server.endpoint().to_owned(),
+            bearer_token: None,
+            caller_role: AuthzCallerRole::Cell,
+            pinned_model_version: None,
+        })
+        .expect("construct backend");
+
+        let tenant = TenantId::parse("waddle.social").expect("valid tenant");
+        backend
+            .provision_tenant_store(&tenant)
+            .await
+            .expect("provision tenant store");
+
+        let tuple = AuthzTuple {
+            object: AuthzObject {
+                object_type: AuthzObjectType::Server,
+                id: "deployment".to_owned(),
+            },
+            relation: AuthzRelation::new("owner"),
+            subject: AuthzSubject {
+                subject_type: AuthzSubjectType::Account,
+                id: "rawkode@waddle.social".to_owned(),
+                relation: None,
+            },
+        };
+
+        // First write succeeds.
+        backend
+            .write_tuples(&tenant, AuthzModule::Chat, std::slice::from_ref(&tuple))
+            .await
+            .expect("first write");
+        // Duplicate write (second-device / repeat login) must also succeed!
+        backend
+            .write_tuples(&tenant, AuthzModule::Chat, std::slice::from_ref(&tuple))
+            .await
+            .expect("duplicate write must be idempotent");
+
+        // Delete succeeds, and deleting an already-missing tuple must also succeed!
+        backend
+            .delete_tuples(&tenant, AuthzModule::Chat, std::slice::from_ref(&tuple))
+            .await
+            .expect("first delete");
+        backend
+            .delete_tuples(&tenant, AuthzModule::Chat, std::slice::from_ref(&tuple))
+            .await
+            .expect("missing delete must be idempotent");
+
+        // Verify wire payloads explicitly set on_duplicate / on_missing = "ignore".
+        let recorded = server.recorded_requests();
+        let write_reqs: Vec<&serde_json::Value> = recorded
+            .iter()
+            .filter(|req| req.method == "POST" && req.path.ends_with("/write"))
+            .filter_map(|req| req.body.as_ref())
+            .collect();
+        assert_eq!(write_reqs.len(), 4);
+        assert_eq!(
+            write_reqs[0]["writes"]["on_duplicate"].as_str(),
+            Some("ignore")
+        );
+        assert_eq!(
+            write_reqs[1]["writes"]["on_duplicate"].as_str(),
+            Some("ignore")
+        );
+        assert_eq!(
+            write_reqs[2]["deletes"]["on_missing"].as_str(),
+            Some("ignore")
+        );
+        assert_eq!(
+            write_reqs[3]["deletes"]["on_missing"].as_str(),
+            Some("ignore")
+        );
+    }
 }

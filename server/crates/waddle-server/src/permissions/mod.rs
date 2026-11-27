@@ -13,12 +13,12 @@ pub mod spicedb_tenant;
 mod tuple;
 
 pub use actor::{
-    CheckPermission, ClearHostGrantWitnesses, DeleteTuple, EnsureAuthzCodecIncarnation,
-    EnsureSchema, ExclusiveRelationSwap, ListHostGrantWitnesses, ListRelations, ListSubjects,
-    LookupResources, LookupSubjects, ObserveHostGrantProjection, Permission, PermissionActor,
-    ReadHostGrantWitness, RecordAuthzSchemaVersion, ReplaceExclusiveRelation,
-    ReplaceHostGrantWitnesses, SwapExclusiveRelation, TakeOverHostGrantProjection,
-    WriteHostGrantProjection, WriteTuple,
+    AttachTenantResolver, CheckPermission, ClearHostGrantWitnesses, DeleteTuple,
+    EnsureAuthzCodecIncarnation, EnsureSchema, ExclusiveRelationSwap, ForTenant,
+    ListHostGrantWitnesses, ListRelations, ListSubjects, LookupResources, LookupSubjects,
+    ObserveHostGrantProjection, Permission, PermissionActor, ReadHostGrantWitness,
+    RecordAuthzSchemaVersion, ReplaceExclusiveRelation, ReplaceHostGrantWitnesses,
+    SwapExclusiveRelation, TakeOverHostGrantProjection, WriteHostGrantProjection, WriteTuple,
 };
 pub use authz_id::{
     decode_object, decode_subject, decode_tenant_scoped_id, encode_tenant_scoped_id, AuthzIdError,

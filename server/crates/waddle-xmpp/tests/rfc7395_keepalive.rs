@@ -124,6 +124,7 @@ fn client_frames_count_as_liveness_evidence() {
                    // marks alive without a separate KeepaliveAck.
     sm.handle(InboundEvent::FrameReceived(InboundFrame::Open {
         from: None,
+        to: None,
     }));
     let events = tick(&mut sm);
     assert!(

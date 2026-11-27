@@ -218,9 +218,21 @@ pub async fn start_with_config_and_owner_outbox(
     crate::auth::retirement::verify_ledger_readable(db_pool.global()).await?;
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
-    let tenant_manifests = match server_config.tenancy.tenants_dir.as_deref() {
-        Some(dir) => super::tenancy_bootstrap::load_tenant_manifests(dir).await?,
-        None => Vec::new(),
+    let (initial_tenants_digest, tenant_manifests) = match server_config
+        .tenancy
+        .tenants_dir
+        .as_deref()
+    {
+        Some(dir) => {
+            match super::tenancy_bootstrap::load_tenant_manifests_with_digest(dir).await? {
+                Some((digest, specs)) => (Some(digest), specs),
+                None => {
+                    info!(path = %dir.display(), "WADDLE_TENANTS_DIR does not exist yet; skipping manifest scan");
+                    (None, Vec::new())
+                }
+            }
+        }
+        None => (None, Vec::new()),
     };
     let extra_openfga_stores =
         super::tenancy_bootstrap::extract_openfga_store_refs(&tenant_manifests)?;
@@ -483,9 +495,54 @@ pub async fn start_with_config_and_owner_outbox(
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
     });
+    let fallback_xmpp_domain: jid::DomainPart = xmpp_config.domain.parse().map_err(|err| {
+        anyhow::anyhow!("invalid WADDLE_XMPP_DOMAIN {:?}: {err}", xmpp_config.domain)
+    })?;
+    let fallback_tenant = super::tenant_routing::ResolvedTenant::from_static_defaults(
+        default_tenant.clone(),
+        &server_config.base_url,
+        &xmpp_config.public_websocket_url,
+        fallback_xmpp_domain,
+        xmpp_config.muc_domain.clone(),
+        xmpp_config.spaces_jid.clone(),
+        owner_config.owner_localparts().to_vec(),
+    )?;
+    let tenant_resolver = if server_config.tenancy.tenants_dir.is_some() {
+        Arc::new(
+            super::tenant_routing::TenantHostResolver::multi_tenant(
+                fallback_tenant,
+                &tenant_manifests,
+            )
+            .map_err(|err| anyhow::anyhow!("failed to build tenant routing table: {err}"))?,
+        )
+    } else {
+        Arc::new(super::tenant_routing::TenantHostResolver::single_tenant(
+            fallback_tenant,
+        ))
+    };
     state.host_grants = host_grants;
-    state.broker_permission_backend = broker_permission_backend;
-    state.tenant_registry = tenant_registry;
+    state.broker_permission_backend = broker_permission_backend.clone();
+    state.tenant_registry = tenant_registry.clone();
+    state.tenant_resolver = Arc::clone(&tenant_resolver);
+    state
+        .permission_actor
+        .ask(crate::permissions::AttachTenantResolver(Arc::clone(
+            &tenant_resolver,
+        )))
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!("failed attaching tenant resolver to permission actor: {err}")
+        })?;
+    if let Some(tenants_dir) = server_config.tenancy.tenants_dir.clone() {
+        super::tenant_routing::spawn_tenants_dir_reloader(
+            tenants_dir,
+            initial_tenants_digest,
+            Arc::clone(&tenant_resolver),
+            tenant_registry,
+            broker_permission_backend,
+            stop_token.clone(),
+        );
+    }
     // Host-grant decisions about remote principals read the snapshot this
     // replica runs; while S2S is off they admit no remote domain.
     state.s2s_federation = s2s_config

@@ -93,6 +93,20 @@ impl TrustedWebOrigins {
         Ok(Self { base_url, origins })
     }
 
+    /// Return a tenant-scoped copy whose own origin is `tenant_base_url` while
+    /// retaining configured `WADDLE_CORS_ORIGINS`.
+    pub fn with_tenant_base(&self, tenant_base_url: &Url) -> Self {
+        let mut origins = self.origins.clone();
+        let tenant_origin = tenant_base_url.origin();
+        if !origins.contains(&tenant_origin) {
+            origins.push(tenant_origin);
+        }
+        Self {
+            base_url: tenant_base_url.clone(),
+            origins,
+        }
+    }
+
     /// Resolve a browser flow's `next` value to an absolute URL on a trusted
     /// origin. A missing value returns to the server root; a path is resolved
     /// against `WADDLE_BASE_URL`.

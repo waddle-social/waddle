@@ -7,12 +7,14 @@ use waddle_xmpp::identity::AccountLocalpart;
 /// The provider part of a fallback account name such as `ext_github_…`.
 const PROVIDER_COMPONENT_MAX_BYTES: usize = 32;
 
-use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
+use crate::db::actor::{DbActor, DbExecute, DbQuery};
 use crate::db::{row_value, ValueExt};
 use chrono::Utc;
+use jid::BareJid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,11 +71,14 @@ impl IdentityService {
 
         let issuer = Self::identity_issuer(provider, claims)?;
 
-        if let Some(existing) = self.find_by_issuer_subject(&issuer, subject).await? {
+        if let Some(existing) = self
+            .find_by_issuer_subject(&issuer, subject, domain)
+            .await?
+        {
             // The bare JID is immutable: reconciliation only refreshes
             // mutable profile fields, never the localpart/JID/username.
             let user = self.reconcile_existing_user(claims, &existing).await?;
-            self.update_identity_last_login(provider, claims, &issuer, subject)
+            self.update_identity_last_login(provider, claims, &issuer, subject, &user.jid)
                 .await?;
             return Ok(LinkedIdentity {
                 issuer,
@@ -83,7 +88,7 @@ impl IdentityService {
         }
 
         let user = self.create_user(provider, claims, &issuer, domain).await?;
-        self.insert_identity(provider, claims, &issuer, &user.jid)
+        self.insert_identity(provider, claims, &issuer, &user.jid, domain)
             .await?;
 
         Ok(LinkedIdentity {
@@ -118,31 +123,35 @@ impl IdentityService {
         &self,
         issuer: &str,
         subject: &str,
+        domain: &str,
     ) -> Result<Option<UserRecord>, AuthError> {
         let query = r#"
             SELECT u.jid, u.username, u.xmpp_localpart, u.display_name, u.avatar_url, u.primary_email
             FROM auth_identities ai
             JOIN users u ON u.jid = ai.user_jid
             WHERE ai.issuer = ? AND ai.subject = ?
-            LIMIT 1
         "#;
 
-        let row = self
+        let rows = self
             .actor
-            .ask(DbQueryOne {
+            .ask(DbQuery {
                 sql: query.to_string(),
                 params: vec![issuer.into(), subject.into()],
             })
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to query identity: {}", e)))?;
 
-        match row {
-            Some(row) => Ok(Some(UserRecord {
-                jid: row_value(&row, 0)
-                    .and_then(ValueExt::as_string)
-                    .map_err(|e| {
-                        AuthError::DatabaseError(format!("Failed to get user jid: {}", e))
-                    })?,
+        for row in rows {
+            let jid = row_value(&row, 0)
+                .and_then(ValueExt::as_string)
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to get user jid: {}", e)))?;
+            let matches_domain = BareJid::from_str(&jid)
+                .is_ok_and(|parsed| parsed.domain().as_str().eq_ignore_ascii_case(domain));
+            if !matches_domain {
+                continue;
+            }
+            return Ok(Some(UserRecord {
+                jid,
                 username: row_value(&row, 1)
                     .and_then(ValueExt::as_string)
                     .map_err(|e| {
@@ -168,9 +177,9 @@ impl IdentityService {
                     .map_err(|e| {
                         AuthError::DatabaseError(format!("Failed to get primary_email: {}", e))
                     })?,
-            })),
-            None => Ok(None),
+            }));
         }
+        Ok(None)
     }
 
     fn derive_base_username(
@@ -261,8 +270,8 @@ impl IdentityService {
             };
             let insert = format!(
                 "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, display_name, \
-                 avatar_url, primary_email, created_at, updated_at) \
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL}"
+                 avatar_url, primary_email, created_at, updated_at, tenant_id) \
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE {JID_NOT_RETIRED_SQL}"
             );
 
             let result = self
@@ -282,6 +291,7 @@ impl IdentityService {
                         claims.email.clone().into(),
                         now.clone().into(),
                         now.clone().into(),
+                        domain.into(),
                         retirement_key.into(),
                     ],
                 })
@@ -374,6 +384,7 @@ impl IdentityService {
         claims: &IdentityClaims,
         issuer: &str,
         user_jid: &str,
+        domain: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
         let identity_id = Uuid::new_v4().to_string();
@@ -385,8 +396,8 @@ impl IdentityService {
                 sql: r#"
                     INSERT INTO auth_identities (
                         id, user_jid, provider_id, issuer, subject, email, email_verified,
-                        raw_claims_json, created_at, last_login_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_claims_json, created_at, last_login_at, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#
                 .to_string(),
                 params: vec![
@@ -407,6 +418,7 @@ impl IdentityService {
                     raw.into(),
                     now.clone().into(),
                     now.into(),
+                    domain.into(),
                 ],
             })
             .await
@@ -421,6 +433,7 @@ impl IdentityService {
         claims: &IdentityClaims,
         issuer: &str,
         subject: &str,
+        user_jid: &str,
     ) -> Result<(), AuthError> {
         let now = Utc::now().to_rfc3339();
         let raw = serde_json::to_string(&claims.raw_claims)
@@ -430,7 +443,7 @@ impl IdentityService {
             .ask(DbExecute {
                 sql: "UPDATE auth_identities
                       SET last_login_at = ?, provider_id = ?, email = ?, email_verified = ?, raw_claims_json = ?
-                      WHERE issuer = ? AND subject = ?"
+                      WHERE issuer = ? AND subject = ? AND user_jid = ?"
                     .to_string(),
                 params: vec![
                     now.into(),
@@ -441,6 +454,7 @@ impl IdentityService {
                     raw.into(),
                     issuer.into(),
                     subject.into(),
+                    user_jid.into(),
                 ],
             })
             .await

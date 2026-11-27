@@ -182,7 +182,8 @@ fn open_frame_is_noop_and_close_enters_closing_phase() {
     let mut sm = XmppStateMachine::new("waddle.social", StanzaDispatcher::new());
     assert!(sm
         .handle(InboundEvent::FrameReceived(InboundFrame::Open {
-            from: None
+            from: None,
+            to: None,
         }))
         .is_empty());
     assert!(sm

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -24,6 +24,7 @@ use waddle_xmpp::pubsub::{AccessModel, PubSubStorage, StoredItem};
 use waddle_xmpp_core::xcal::{CalendarDateValue, CalendarItem, Rrule, RruleEnd, VEvent};
 
 use super::auth::AuthState;
+use crate::server::tenant_routing::ResolvedTenant;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -94,9 +95,11 @@ pub fn router(state: Arc<CalendarFeedState>) -> Router {
 
 async fn community_feed_url_handler(
     State(state): State<Arc<CalendarFeedState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Query(query): Query<FeedUrlQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let tenant = state.auth_state.tenant_or_fallback(tenant);
     let Some(session_id) =
         extract_session_header(&headers).or_else(|| extract_session_cookie(&headers))
     else {
@@ -106,13 +109,13 @@ async fn community_feed_url_handler(
             "missing session cookie",
         );
     };
-    match state
+    let session = match state
         .auth_state
         .session_manager
         .validate_session(&session_id)
         .await
     {
-        Ok(_) => {}
+        Ok(session) => session,
         Err(error) => {
             return json_error(
                 StatusCode::UNAUTHORIZED,
@@ -120,6 +123,16 @@ async fn community_feed_url_handler(
                 error.to_string(),
             );
         }
+    };
+    if !state
+        .auth_state
+        .session_matches_tenant(&tenant, &session.user_jid)
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "tenant_mismatch",
+            "session does not belong to this tenant",
+        );
     }
 
     let requested = match query.community_jid.parse::<BareJid>() {
@@ -128,7 +141,7 @@ async fn community_feed_url_handler(
             return json_error(StatusCode::BAD_REQUEST, "invalid_jid", error.to_string());
         }
     };
-    let expected = match expected_community_jid(&state.auth_state.xmpp_domain) {
+    let expected = match expected_community_jid(tenant.xmpp_domain.as_str()) {
         Ok(jid) => jid,
         Err(error) => {
             return json_error(
@@ -149,7 +162,7 @@ async fn community_feed_url_handler(
     let token = sign_feed_token(&state.token_key, &requested);
     let url = format!(
         "{}/api/calendar/community/{}/events.ics",
-        state.auth_state.base_url.trim_end_matches('/'),
+        tenant.base_url_str(),
         token,
     );
     (
@@ -162,8 +175,10 @@ async fn community_feed_url_handler(
 
 async fn community_feed_handler(
     State(state): State<Arc<CalendarFeedState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
     Path(token): Path<String>,
 ) -> Response {
+    let tenant = state.auth_state.tenant_or_fallback(tenant);
     let community_jid = match verify_feed_token(&state.token_key, &token) {
         Ok(jid) => jid,
         Err(error) => {
@@ -171,7 +186,7 @@ async fn community_feed_handler(
             return text_response(StatusCode::NOT_FOUND, "Not found");
         }
     };
-    let expected = match expected_community_jid(&state.auth_state.xmpp_domain) {
+    let expected = match expected_community_jid(tenant.xmpp_domain.as_str()) {
         Ok(jid) => jid,
         Err(error) => {
             warn!(error = %error, "Calendar feed unavailable: invalid community service JID");

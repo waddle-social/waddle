@@ -6,8 +6,9 @@ use std::sync::OnceLock;
 use super::{
     header, oidc, ActorRef, AppState, Arc, AuthError, AuthHandshakeStore, AuthProviderConfig,
     AuthProviderKind, AuthProviderTokenEndpointAuthMethod, BootstrapMembershipConfig, DashMap,
-    Digest, Engine, IdentityService, Mutex, PendingAuthorization, PendingFlow, PermissionActor,
-    ProviderRegistry, ServerConfig, SessionManager, Sha256, Utc, URL_SAFE_NO_PAD,
+    Digest, Engine, Extension, IdentityService, Mutex, PendingAuthorization, PendingFlow,
+    PermissionActor, ProviderRegistry, ResolvedTenant, ServerConfig, SessionManager, Sha256,
+    TenantHostResolver, Utc, URL_SAFE_NO_PAD,
 };
 
 /// Typed callback the OIDC callback handler fires after a successful
@@ -49,6 +50,7 @@ pub struct AuthState {
     pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub permission_actor: ActorRef<PermissionActor>,
     pub bootstrap_membership: BootstrapMembershipConfig,
+    pub tenant_resolver: Arc<TenantHostResolver>,
     /// Set once at startup after `WebSocketState` exists. The callback
     /// handler reads it via `profile_publish_hook()` and spawns it on
     /// every successful OIDC login.
@@ -74,11 +76,39 @@ impl AuthState {
             panic!("WADDLE_XMPP_DOMAIN={xmpp_domain:?} is not a valid JID at startup: {error}")
         });
         let bootstrap_membership = BootstrapMembershipConfig::from_env().serving(&xmpp_domain);
+        let base_url = server_config.base_url.trim_end_matches('/').to_string();
+        let tenant_resolver = if app_state.tenant_resolver.is_multi_tenant() {
+            app_state.tenant_resolver.clone()
+        } else {
+            let domain_part: jid::DomainPart = xmpp_domain
+                .parse()
+                .unwrap_or_else(|_| "localhost".parse().expect("valid localhost domain"));
+            let muc_domain: jid::DomainPart = format!("muc.{}", domain_part.as_str())
+                .parse()
+                .unwrap_or_else(|_| "muc.localhost".parse().expect("valid muc domain"));
+            let spaces_jid: jid::BareJid = format!("spaces.{}", domain_part.as_str())
+                .parse()
+                .unwrap_or_else(|_| "spaces.localhost".parse().expect("valid spaces jid"));
+            let tenant_id = waddle_broker_core::identity::TenantId::parse(domain_part.as_str())
+                .unwrap_or_else(|_| app_state.tenant_resolver.fallback_tenant().tenant_id);
+            match ResolvedTenant::from_static_defaults(
+                tenant_id,
+                &base_url,
+                public_xmpp_websocket_url,
+                domain_part,
+                muc_domain,
+                spaces_jid,
+                bootstrap_membership.owner_localparts().to_vec(),
+            ) {
+                Ok(fallback) => Arc::new(TenantHostResolver::single_tenant(fallback)),
+                Err(_) => app_state.tenant_resolver.clone(),
+            }
+        };
         Self {
             session_manager,
             identity_service,
             providers,
-            base_url: server_config.base_url.trim_end_matches('/').to_string(),
+            base_url,
             trusted_web_origins: server_config.trusted_web_origins.clone(),
             public_xmpp_websocket_url: public_xmpp_websocket_url.clone(),
             xmpp_domain,
@@ -89,8 +119,26 @@ impl AuthState {
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
             permission_actor: app_state.permission_actor.clone(),
             bootstrap_membership,
+            tenant_resolver,
             profile_publish_hook: OnceLock::new(),
         }
+    }
+
+    /// Resolve the request's tenant from the middleware extension, or fall back
+    /// to this server's static single-tenant configuration (used by direct unit
+    /// tests that call auth routers without the outer host-routing middleware).
+    pub fn tenant_or_fallback(&self, ext: Option<Extension<ResolvedTenant>>) -> ResolvedTenant {
+        match ext {
+            Some(Extension(tenant)) => tenant,
+            None => self.tenant_resolver.fallback_tenant(),
+        }
+    }
+
+    /// Returns `true` when `user_jid` belongs to `tenant` in multi-tenant mode
+    /// (enforcing strict cross-tenant credential isolation), or unconditionally
+    /// in single-tenant mode where only one deployment exists.
+    pub(crate) fn session_matches_tenant(&self, tenant: &ResolvedTenant, user_jid: &str) -> bool {
+        !self.tenant_resolver.is_multi_tenant() || tenant.owns_jid_str(user_jid)
     }
 
     /// Install the profile-publish hook. Idempotent (subsequent calls
@@ -110,18 +158,19 @@ impl AuthState {
         discovery: &oidc::OidcDiscovery,
         redirect_uri: &str,
     ) -> Result<oidc::DynamicClientRegistration, AuthError> {
-        if let Some(cached) = self.dynamic_oidc_clients.get(&provider.id) {
+        let cache_key = format!("{}\0{}", provider.id, redirect_uri);
+        if let Some(cached) = self.dynamic_oidc_clients.get(&cache_key) {
             return Ok(cached.clone());
         }
 
         let lock = self
             .dynamic_oidc_client_locks
-            .entry(provider.id.clone())
+            .entry(cache_key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = lock.lock().await;
 
-        if let Some(cached) = self.dynamic_oidc_clients.get(&provider.id) {
+        if let Some(cached) = self.dynamic_oidc_clients.get(&cache_key) {
             return Ok(cached.clone());
         }
 
@@ -129,19 +178,22 @@ impl AuthState {
             oidc::register_dynamic_client(&self.http_client, provider, discovery, redirect_uri)
                 .await?;
         self.dynamic_oidc_clients
-            .insert(provider.id.clone(), registered.clone());
+            .insert(cache_key, registered.clone());
         Ok(registered)
     }
 
-    fn callback_url(&self) -> String {
-        format!("{}/api/auth/callback", self.base_url)
-    }
-
-    pub(crate) fn websocket_url(&self) -> String {
-        self.public_xmpp_websocket_url.as_str().to_string()
-    }
-
+    #[cfg(test)]
     pub(super) fn session_cookie_header(&self, session_id: Option<&str>, max_age: i64) -> String {
+        let tenant = self.tenant_resolver.fallback_tenant();
+        self.session_cookie_header_for_tenant(&tenant, session_id, max_age)
+    }
+
+    pub(super) fn session_cookie_header_for_tenant(
+        &self,
+        tenant: &ResolvedTenant,
+        session_id: Option<&str>,
+        max_age: i64,
+    ) -> String {
         let mut parts = vec![
             format!("waddle_session={}", session_id.unwrap_or_default()),
             "Path=/".to_string(),
@@ -150,7 +202,7 @@ impl AuthState {
             format!("Max-Age={max_age}"),
         ];
 
-        if self.base_url.starts_with("https://") {
+        if tenant.is_https() {
             parts.push("Secure".to_string());
         }
 
@@ -179,11 +231,22 @@ impl AuthState {
         provider: &AuthProviderConfig,
         flow: PendingFlow,
     ) -> Result<String, AuthError> {
+        let tenant = self.tenant_resolver.fallback_tenant();
+        self.start_authorization_for_tenant(provider, flow, &tenant)
+            .await
+    }
+
+    pub async fn start_authorization_for_tenant(
+        &self,
+        provider: &AuthProviderConfig,
+        flow: PendingFlow,
+        tenant: &ResolvedTenant,
+    ) -> Result<String, AuthError> {
         let state = Self::random_state();
         let nonce = Self::random_state();
         let code_verifier = Self::create_pkce_verifier();
         let code_challenge = Self::pkce_challenge(&code_verifier);
-        let redirect_uri = self.callback_url();
+        let redirect_uri = tenant.callback_url();
         let mut client_id = provider.client_id.clone();
         let mut client_secret = provider.client_secret.clone();
         let mut token_endpoint_auth_method = provider.token_endpoint_auth_method;
