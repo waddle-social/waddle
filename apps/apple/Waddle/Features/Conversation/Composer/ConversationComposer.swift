@@ -296,7 +296,7 @@ struct ConversationComposer: View {
 
     private func dispatch(
         _ submission: ComposerSubmission, _ payload: LinkPreviewPayload? = nil,
-        _ onQueued: @escaping @MainActor @Sendable () -> Void = {}
+        _ onQueued: @escaping @MainActor @Sendable () -> Void = { /* nothing to clear: not a typed draft */ }
     ) async {
         sendCount += 1
         await model.perform(submission, session: session, in: conversation, linkPreview: payload, onQueued: onQueued)

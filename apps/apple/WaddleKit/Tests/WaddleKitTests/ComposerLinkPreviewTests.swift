@@ -292,7 +292,7 @@ struct ComposerLinkPreviewTests {
     private func immediateSleep(_ duration: Duration) async throws {
         if duration != ComposerLinkPreview.lookupDebounce {
             let stream = AsyncStream<Void>.makeStream()
-            for await _ in stream.stream {}
+            for await _ in stream.stream { /* never yields: this sleep does not end */ }
         }
     }
 }
@@ -324,7 +324,7 @@ final class PreviewTestClock {
            (reportsDebounce || duration != ComposerLinkPreview.lookupDebounce) {
             channel.continuation.yield(Sleep(duration: duration, wake: { signal.continuation.finish() }))
         }
-        for await _ in signal.stream {}
+        for await _ in signal.stream { /* waits for the test to finish the stream */ }
         try Task.checkCancellation()
     }
 }

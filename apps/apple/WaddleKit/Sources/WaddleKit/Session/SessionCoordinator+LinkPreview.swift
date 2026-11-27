@@ -12,7 +12,7 @@ extension SessionCoordinator {
     @discardableResult
     public func send(
         _ draft: Draft, in conversation: ConversationID, linkPreview: LinkPreviewPayload? = nil,
-        onQueued: @MainActor @Sendable () -> Void = {}
+        onQueued: @MainActor @Sendable () -> Void = { /* the caller keeps no draft to clear */ }
     ) async -> String? {
         guard var composed = MessageComposer.compose(draft) else { return nil }
         if canFlushOutboundQueue { composed.options.linkPreview = linkPreview?.ifFresh(at: now()) }

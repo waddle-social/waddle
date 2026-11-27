@@ -20,7 +20,7 @@ extension SessionCoordinator {
         _ composed: (body: String, options: OutboundOptions),
         preview: String,
         in conversation: ConversationID,
-        onQueued: @MainActor @Sendable () -> Void = {}
+        onQueued: @MainActor @Sendable () -> Void = { /* the caller keeps no draft to clear */ }
     ) async -> String? {
         guard !isStopped else { return nil }
         // A room the account left takes nothing from this device until it
