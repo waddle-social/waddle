@@ -706,8 +706,7 @@ CREATE TABLE extension_room_observers (
     identity text NOT NULL,
     scope_json text NOT NULL,
     max_concurrent bigint NOT NULL,
-    tenant_id text DEFAULT 'default'::text NOT NULL,
-    CONSTRAINT extension_room_observers_pkey PRIMARY KEY (tenant_id, plugin_id)
+    CONSTRAINT extension_room_observers_pkey PRIMARY KEY (plugin_id)
 );
 
 CREATE TABLE extension_room_publications (
@@ -1743,8 +1742,7 @@ CREATE TABLE spaces_metadata (
     icon_url text,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
-    tenant_id text DEFAULT 'default'::text NOT NULL,
-    CONSTRAINT spaces_metadata_pkey PRIMARY KEY (tenant_id, space_node)
+    CONSTRAINT spaces_metadata_pkey PRIMARY KEY (space_node)
 );
 
 CREATE TABLE upload_slots (

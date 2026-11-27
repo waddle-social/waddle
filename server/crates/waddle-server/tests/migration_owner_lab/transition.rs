@@ -1241,9 +1241,10 @@ async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
         .await
         .expect("restore guard candidate");
     restore.commit().await.expect("commit guard restore");
+    let baseline_version = waddle_server::db::BASELINE_VERSION;
     fixture
         .admin(&format!(
-            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 2000",
+            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = {baseline_version}",
             fixture.schema
         ))
         .await;
@@ -1253,9 +1254,13 @@ async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
     );
     fixture
         .admin(&format!(
-            "UPDATE {}._migrations SET checksum = '{}' WHERE version = 2000",
+            "UPDATE {}._migrations SET checksum = '{}' WHERE version = {baseline_version}",
             fixture.schema,
-            ledger.iter().find(|(v, _)| *v == 2000).expect("baseline").1
+            ledger
+                .iter()
+                .find(|(v, _)| *v == baseline_version)
+                .expect("baseline")
+                .1
         ))
         .await;
     fixture

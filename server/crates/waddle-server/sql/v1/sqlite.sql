@@ -238,7 +238,7 @@ CREATE TABLE extension_room_observers (
     identity TEXT NOT NULL,
     scope_json TEXT NOT NULL,
     max_concurrent BIGINT NOT NULL
-, tenant_id TEXT NOT NULL DEFAULT 'default');
+);
 
 CREATE TABLE extension_room_publications (
     id TEXT PRIMARY KEY,
@@ -1217,7 +1217,7 @@ CREATE TABLE spaces_metadata (
             icon_url TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
-        , tenant_id TEXT NOT NULL DEFAULT 'default');
+        );
 
 CREATE TABLE tenant_placement_leases (
     tenant_id                 TEXT PRIMARY KEY,
@@ -1375,9 +1375,6 @@ CREATE INDEX idx_channels_position ON channels(position);
 CREATE INDEX idx_device_auth_expires_at ON device_auth(expires_at_ms);
 
 CREATE INDEX idx_entity_caps_verified_at ON entity_caps (verified_at_ms);
-
-CREATE INDEX idx_extension_room_observers_tenant_plugin
-    ON extension_room_observers (tenant_id, plugin_id);
 
 CREATE INDEX idx_groupchat_notification_recovery_completed_prune ON groupchat_notification_recovery (completed_at_ms, recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id) WHERE completed_at_ms IS NOT NULL;
 
@@ -1558,9 +1555,6 @@ CREATE INDEX idx_spaces_metadata_created_at ON spaces_metadata (created_at ASC, 
 CREATE INDEX idx_spaces_metadata_space_jid ON spaces_metadata (space_jid);
 
 CREATE UNIQUE INDEX idx_spaces_metadata_space_node ON spaces_metadata (space_node);
-
-CREATE INDEX idx_spaces_metadata_tenant_node
-    ON spaces_metadata (tenant_id, space_node);
 
 CREATE INDEX idx_tuples_check ON permission_tuples(object_type, object_id, relation, subject_type, subject_id);
 

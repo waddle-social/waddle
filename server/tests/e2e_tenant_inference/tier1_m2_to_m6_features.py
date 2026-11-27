@@ -129,7 +129,7 @@ def _t1_f07_03(ctx: RunContext) -> None:
     pg_v1 = ctx.read_text(
         "server/crates/waddle-server/sql/v1/postgres.sql"
     )
-    for tbl in ("users", "auth_identities", "spaces_metadata"):
+    for tbl in ("users", "auth_identities", "native_users"):
         assert_contains_regex(
             rf"CREATE TABLE\s+{tbl}\s*\([^;]*\btenant_id\b",
             pg_v1,
@@ -932,7 +932,7 @@ def get_tests() -> list[TestCase]:
         # F7 (M2)
         TestCase("T1-F07-01", 1, "M2", ("F7",), ("Gate1",), "Turso per-tenant <tenant>.db TenantStore implementation exists", _t1_f07_01),
         TestCase("T1-F07-02", 1, "M2", ("F7",), ("Gate1",), "Turso LRU FD pool checkpoints and evicts cleanly", _t1_f07_02),
-        TestCase("T1-F07-03", 1, "M2", ("F7",), ("Gate1",), "Postgres users/auth_identities/spaces_metadata scoped by tenant_id", _t1_f07_03),
+        TestCase("T1-F07-03", 1, "M2", ("F7",), ("Gate1",), "Postgres users/auth_identities/native_users scoped by tenant_id", _t1_f07_03),
         TestCase("T1-F07-04", 1, "M2", ("F7",), ("Gate1",), "schema_catalog.py catalog parity passes with tenant_id & account_id", _t1_f07_04),
         TestCase("T1-F07-05", 1, "M2", ("F7",), ("Gate1",), "Shared TenantStore parity suite passes on Turso and Postgres", _t1_f07_05),
         # F8 (M2)
