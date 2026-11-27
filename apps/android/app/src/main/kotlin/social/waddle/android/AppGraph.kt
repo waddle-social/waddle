@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import social.waddle.android.client.ClientFactory
+import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.ConnectivityNetworkSignal
 import social.waddle.android.client.EncryptedAttachmentDownloader
 import social.waddle.android.client.GifSearchGateway
@@ -212,6 +214,63 @@ class AppGraph(
     val activeKey: StateFlow<String?> = _activeKey.asStateFlow()
 
     private val registryLoaded = MutableStateFlow(false)
+    private val _addingAccount = MutableStateFlow(false)
+
+    /** The person is adding another account: the sign-in screen shows over the signed-in shell. */
+    val addingAccount: StateFlow<Boolean> = _addingAccount.asStateFlow()
+
+    private val _loginAttempt = MutableStateFlow(0)
+
+    /** Bumped for each sign-in screen so its view model starts fresh. */
+    val loginAttempt: StateFlow<Int> = _loginAttempt.asStateFlow()
+
+    fun beginAddAccount() {
+        _loginAttempt.update { it + 1 }
+        _addingAccount.value = true
+    }
+
+    fun cancelAddAccount() {
+        _addingAccount.value = false
+    }
+
+    /** Point the sign-in screen at the selected account's server (signing in again after a rejection). */
+    suspend fun prepareReauth() {
+        _activeRuntime.value.takeIf { it !== idleRuntime }?.let { serverSelection.select(it.origin) }
+    }
+
+    /** One tile per account for the switcher: identity, connection, unread and warning state. */
+    val accountTiles: StateFlow<List<AccountTile>> =
+        combine(_accounts, _runtimes, _activeKey, ::Triple)
+            .flatMapLatest { (accounts, runtimes, key) ->
+                if (accounts.isEmpty()) {
+                    flowOf(emptyList())
+                } else {
+                    combine(accounts.map { account -> tileFlow(account, runtimes[account.key], key) }) { it.toList() }
+                }
+            }
+            .stateIn(applicationScope, SharingStarted.Eagerly, emptyList())
+
+    private fun tileFlow(account: Account, runtime: AccountRuntime?, activeKey: String?): Flow<AccountTile> {
+        fun tile(connection: ConnectionState, unread: Int, paused: Boolean) = AccountTile(
+            key = account.key,
+            label = account.label,
+            jid = account.bareJid,
+            connection = connection,
+            unread = unread,
+            needsSignIn = account.needsSignIn,
+            paused = paused,
+            selected = account.key == activeKey,
+        )
+        return if (runtime == null) {
+            flowOf(tile(ConnectionState.Idle, 0, false))
+        } else {
+            combine(
+                runtime.sessionManager.connectionState,
+                runtime.sessionManager.unreadStore.counts,
+                runtime.isParked,
+            ) { connection, counts, paused -> tile(connection, counts.values.sum(), paused) }
+        }
+    }
     private val lastUsed = HashMap<String, Long>()
 
     private val runtimeEnvironment = AccountRuntimeEnvironment(
@@ -527,6 +586,7 @@ class AppGraph(
         accountRegistry.upsertAndSelect(account)
         runtime.signIn(session, origin)
         synchronized(accountsLock) { selectLocked(account.key) }
+        _addingAccount.value = false
     }
 
     /**
@@ -562,7 +622,10 @@ class AppGraph(
         accountRegistry.remove(runtime.key)
         next?.let { accountRegistry.select(it) }
         accountStores.remove(runtime.key)
-        if (next == null) encryptedAttachmentOpener.clearCache()
+        if (next == null) {
+            _addingAccount.value = false
+            encryptedAttachmentOpener.clearCache()
+        }
     }
 
     /** FCM rotated the device token: every account registers it. */
@@ -594,6 +657,20 @@ class AppGraph(
         const val IDLE_KEY = "idle"
     }
 }
+
+/** One account in the switcher. */
+data class AccountTile(
+    val key: String,
+    /** The server's name (its host). */
+    val label: String,
+    val jid: String,
+    val connection: ConnectionState,
+    val unread: Int,
+    val needsSignIn: Boolean,
+    /** The live-account cap has paused this account's stream. */
+    val paused: Boolean,
+    val selected: Boolean,
+)
 
 /**
  * A [StateFlow] that follows whichever flow [select] picks from the current

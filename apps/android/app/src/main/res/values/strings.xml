@@ -459,6 +459,20 @@
     <string name="tab_home_live">a huddle is live</string>
     <string name="sidebar_search_hint">Search or jump to…</string>
     <string name="sidebar_browse_rooms">Browse rooms</string>
+    <string name="accounts_title">Accounts</string>
+    <string name="accounts_switch_description">Switch account</string>
+    <string name="accounts_add">Add account</string>
+    <string name="accounts_needs_sign_in">Sign in again</string>
+    <string name="accounts_paused">Paused</string>
+    <string name="accounts_state_connected">Connected</string>
+    <string name="accounts_state_connecting">Connecting</string>
+    <string name="accounts_state_offline">Offline</string>
+    <string name="accounts_row_description">%1$s, %2$s</string>
+    <string name="accounts_sign_out">Sign out</string>
+    <string name="accounts_more">More for %1$s</string>
+    <string name="accounts_sign_out_title">Sign out of %1$s?</string>
+    <string name="accounts_sign_out_body">This removes %1$s on this device. Your other accounts stay signed in.</string>
+    <string name="accounts_cancel">Cancel</string>
     <string name="sidebar_all_dms">All direct messages</string>
     <string name="shell_clear_search">Clear search</string>
     <string name="home_strip_more">+%1$d</string>
@@ -761,4 +775,8 @@
     <string name="call_channel_kicker_voice">Voice huddle · %1$d in</string>
     <string name="call_channel_kicker_video">Video huddle · %1$d in</string>
     <string name="call_channel_ongoing_kicker">You are in this huddle · %1$d in</string>
+    <plurals name="accounts_unread_count">
+        <item quantity="one">%1$d unread message</item>
+        <item quantity="other">%1$d unread messages</item>
+    </plurals>
 </resources>
