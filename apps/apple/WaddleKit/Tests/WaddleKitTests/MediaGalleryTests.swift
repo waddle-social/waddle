@@ -24,9 +24,17 @@ struct MediaGalleryTests {
         #expect(reversed.position == 3)
         #expect(reversed.neighbor(.next) == nil)
         let start = try #require(open([inline, post], selected: eligibleImages(in: inline)[0].id))
-        #expect(start.current.accessibilityName == "last.png")
+        #expect(start.current.accessibilityName == "Image")
         #expect(start.position == 1)
         #expect(start.neighbor(.previous) == nil)
+    }
+
+    @Test func inlineGIFUsesTheRowDescriptionForAccessibility() throws {
+        let url = try #require(URL(string: "https://i.giphy.com/abc123"))
+        let inline = row(body: url.absoluteString)
+        let image = try #require(eligibleImages(in: inline).first)
+        #expect(image.file == MessageContent.inlineImageFile(url))
+        #expect(image.accessibilityName == "GIF")
     }
 
     @Test func withheldRowsAppearOnlyAfterConsentAndAnInvalidSelectionCloses() throws {

@@ -53,4 +53,12 @@ struct MediaGalleryViewportTests {
         #expect(transform.imageFrame(image, in: viewport) == CGRect(x: -50, y: 40, width: 600, height: 120))
         #expect(transform.imageFrame(image, in: viewport).contains(CGPoint(x: 50, y: 55)))
     }
+
+    @Test func missingImageLeavesTheWholeViewportAsBackdrop() {
+        var transform = MediaGalleryViewport()
+        transform.toggleZoom()
+        let frame = transform.imageFrame(nil, in: viewport)
+        #expect(frame.isNull)
+        #expect(!frame.contains(CGPoint(x: viewport.width / 2, y: viewport.height / 2)))
+    }
 }

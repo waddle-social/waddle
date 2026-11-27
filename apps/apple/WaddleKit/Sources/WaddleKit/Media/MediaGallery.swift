@@ -59,7 +59,7 @@ public struct MediaGallery: Equatable, Sendable {
     public static func images(in item: TimelineItem, media: MessageMedia) -> [Image] {
         guard item.tombstone == nil, item.callAnchor == nil else { return [] }
         if case let .image(url) = media.inlineBody {
-            return [Image(id: .init(row: item.presentationID, source: .inline(url)), file: SharedFile(url: url))]
+            return [Image(id: .init(row: item.presentationID, source: .inline(url)), file: MessageContent.inlineImageFile(url))]
         }
         // A sticker attachment opens its pack from the row.
         guard !item.message.isSticker else { return [] }

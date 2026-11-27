@@ -2,6 +2,10 @@ import Foundation
 
 /// The transform of the current image relative to its aspect-fit frame.
 public struct MediaGalleryViewport: Equatable, Sendable {
+    private static let doubleTapScale: CGFloat = 2
+    private static let maximumScale: CGFloat = 5
+    private static let minimumSwipeDistance: CGFloat = 44
+
     public private(set) var scale: CGFloat = 1
     public private(set) var offset: CGSize = .zero
 
@@ -9,7 +13,8 @@ public struct MediaGalleryViewport: Equatable, Sendable {
 
     public var isZoomed: Bool { scale > 1 }
 
-    public func imageFrame(_ image: CGSize, in viewport: CGSize) -> CGRect {
+    public func imageFrame(_ image: CGSize?, in viewport: CGSize) -> CGRect {
+        guard let image else { return .null }
         let size = CGSize(width: image.width * scale, height: image.height * scale)
         return CGRect(
             x: (viewport.width - size.width) / 2 + offset.width,
@@ -20,12 +25,12 @@ public struct MediaGalleryViewport: Equatable, Sendable {
     }
 
     public mutating func toggleZoom() {
-        scale = isZoomed ? 1 : 2
+        scale = isZoomed ? 1 : Self.doubleTapScale
         offset = .zero
     }
 
     public mutating func magnify(by factor: CGFloat, image: CGSize, in viewport: CGSize) {
-        scale = min(5, max(1, scale * factor))
+        scale = min(Self.maximumScale, max(1, scale * factor))
         pan(by: .zero, image: image, in: viewport)
     }
 
@@ -43,7 +48,9 @@ public struct MediaGalleryViewport: Equatable, Sendable {
     }
 
     public func swipe(_ translation: CGSize) -> MediaGallery.Direction? {
-        guard !isZoomed, abs(translation.width) >= 44, abs(translation.width) > abs(translation.height) else { return nil }
+        guard !isZoomed, abs(translation.width) >= Self.minimumSwipeDistance,
+              abs(translation.width) > abs(translation.height)
+        else { return nil }
         return translation.width < 0 ? .next : .previous
     }
 }

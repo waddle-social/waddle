@@ -8,37 +8,34 @@ struct MediaGalleryView: View {
     var standIn: Image?
 
     @AccessibilityFocusState private var focusedImage: MediaGallery.Image.ID?
-    #if os(macOS)
-    @FocusState private var keyboardFocused: Bool
-    #endif
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
 
     var body: some View {
         GeometryReader { geometry in
+            let compactHeightFraction: CGFloat = 0.72
+            // Regular-width limits mirror chat/src/components/ui/ImageLightbox.vue.
             let viewport = CGSize(
                 width: min(geometry.size.width * (isCompact ? 1 : 0.92), 1_536),
-                height: geometry.size.height * (isCompact ? 0.72 : 0.82)
+                height: geometry.size.height * (isCompact ? compactHeightFraction : 0.82)
             )
             ZStack {
                 (isCompact ? Theme.Colors.bg : Theme.Material.mediaBackdrop).ignoresSafeArea()
                     .onTapGesture(perform: close)
                     .accessibilityHidden(true)
-                GalleryZoomView(viewport: viewport, step: step, close: close, picture: picture) {
-                    if !isCompact { caption }
-                }
-                .id(gallery.current.id)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text(gallery.current.accessibilityName))
-                .accessibilityValue(positionText)
-                .accessibilityAddTraits(.isImage)
-                .accessibilityActions {
-                    if gallery.neighbor(.previous) != nil { Button("Previous image") { step(.previous) } }
-                    if gallery.neighbor(.next) != nil { Button("Next image") { step(.next) } }
-                }
-                .accessibilityFocused($focusedImage, equals: gallery.current.id)
-                .task(id: gallery.current.id) { focusedImage = gallery.current.id }
+                stage(in: viewport)
+                    .id(gallery.current.id)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(gallery.current.accessibilityName))
+                    .accessibilityValue(positionText)
+                    .accessibilityAddTraits(.isImage)
+                    .accessibilityActions {
+                        if gallery.neighbor(.previous) != nil { Button("Previous image") { step(.previous) } }
+                        if gallery.neighbor(.next) != nil { Button("Next image") { step(.next) } }
+                    }
+                    .accessibilityFocused($focusedImage, equals: gallery.current.id)
+                    .task(id: gallery.current.id) { focusedImage = gallery.current.id }
 
                 if !isCompact, gallery.count > 1 {
                     arrows.frame(maxWidth: .infinity, alignment: .center)
@@ -58,32 +55,22 @@ struct MediaGalleryView: View {
         }
         .foregroundStyle(Theme.Material.mediaFg)
         .environment(\.colorScheme, .dark)
-        #if os(macOS)
-        .focusable()
-        .focusEffectDisabled()
-        .focused($keyboardFocused)
-        .onAppear { keyboardFocused = true }
-        .onKeyPress(.leftArrow) {
-            step(.previous)
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            step(.next)
-            return .handled
-        }
-        .onKeyPress(.escape) {
-            close()
-            return .handled
-        }
-        #endif
     }
 
     @ViewBuilder
-    private var picture: some View {
+    private func stage(in viewport: CGSize) -> some View {
         if let standIn {
-            standIn.resizable().scaledToFit()
+            zoomView(.still(standIn), in: viewport)
         } else {
-            GalleryPicture(file: gallery.current.file)
+            GalleryPicture(file: gallery.current.file) { picture in
+                zoomView(picture, in: viewport)
+            }
+        }
+    }
+
+    private func zoomView(_ picture: GalleryPicturePhase, in viewport: CGSize) -> some View {
+        GalleryZoomView(viewport: viewport, step: step, close: close, picture: picture) {
+            if !isCompact { caption }
         }
     }
 
@@ -121,7 +108,9 @@ struct MediaGalleryView: View {
     }
 
     private var caption: some View {
-        HStack(spacing: Theme.Spacing.s) {
+        let compactCaptionWidth: CGFloat = 320
+        let regularCaptionWidth: CGFloat = 672
+        return HStack(spacing: Theme.Spacing.s) {
             Text(gallery.current.name)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -131,7 +120,7 @@ struct MediaGalleryView: View {
         }
         .huddleText(Theme.Typography.caption)
         .foregroundStyle(Theme.Colors.fgMuted)
-        .frame(maxWidth: isCompact ? 320 : 672)
+        .frame(maxWidth: isCompact ? compactCaptionWidth : regularCaptionWidth)
         .accessibilityHidden(true)
     }
 

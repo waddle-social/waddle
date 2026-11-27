@@ -107,3 +107,15 @@ public struct MessageMedia: Sendable {
         "avif", "bmp", "svg", "mp4", "webm", "mov", "m4v", "ogv", "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "pdf",
     ])
 }
+
+public enum MessageContent {
+    /// The inline image of a body as a file, so it renders and previews like a shared image.
+    public static func inlineImageFile(_ url: URL) -> SharedFile {
+        SharedFile(url: url, description: inlineImageNoun(url))
+    }
+
+    /// "GIF" or "Image", for VoiceOver and previews.
+    public static func inlineImageNoun(_ url: URL) -> String {
+        GifMedia.isGIF(mediaType: nil, url: url) ? "GIF" : "Image"
+    }
+}

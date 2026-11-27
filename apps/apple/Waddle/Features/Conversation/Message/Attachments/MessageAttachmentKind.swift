@@ -59,8 +59,7 @@ enum MessageAttachmentKind: Hashable {
     }
 }
 
-/// Which parts of a row's content are shown.
-enum MessageContent {
+extension MessageContent {
     /// The body, unless it only repeats an attachment URL (attachment-only
     /// sends carry the first file URL as their body for older clients) or
     /// describes a sticker that is shown as its picture.
@@ -74,17 +73,6 @@ enum MessageContent {
             return nil
         }
         return item.body
-    }
-
-    /// The inline image of a body as a file, so it renders and previews
-    /// like a shared image.
-    static func inlineImageFile(_ url: URL) -> SharedFile {
-        SharedFile(url: url, description: inlineImageNoun(url))
-    }
-
-    /// "GIF" or "Image", for VoiceOver and previews.
-    static func inlineImageNoun(_ url: URL) -> String {
-        GifMedia.isGIF(mediaType: nil, url: url) ? "GIF" : "Image"
     }
 
     /// Inline image size capped to `maxWidth`, keeping the aspect ratio

@@ -1,45 +1,82 @@
 import SwiftUI
 import WaddleKit
 
-struct GalleryPicture: View {
-    let file: SharedFile
+enum GalleryPicturePhase: View {
+    case loading
+    case still(Image)
+    case animated(DecodedAnimatedImage, animates: Bool)
+    case failed
+
+    var isLoaded: Bool {
+        switch self {
+        case .still, .animated: true
+        case .loading, .failed: false
+        }
+    }
 
     var body: some View {
-        if isGIF || canAnimate {
-            RemoteImageDataView(url: file.url) { phase in
-                switch phase {
-                case let .success(data):
-                    // Several frames fit the decoder's byte budget even for a square image.
-                    AnimatedImageView(data: data, maxPixelSize: 1_024)
-                case .empty: ProgressView()
-                case .failure:
-                    // Still PNG and WebP files can exceed the animation cache's byte limit.
-                    if isGIF { failure } else { stillPicture }
+        switch self {
+        case .loading:
+            ProgressView()
+        case let .still(image):
+            image.resizable().scaledToFit()
+        case let .animated(image, animates):
+            AnimatedImageRepresentable(image: image, animates: animates)
+        case .failed:
+            ContentUnavailableView("Couldn't load image", systemImage: "photo.badge.exclamationmark")
+        }
+    }
+}
+
+struct GalleryPicture<Content: View>: View {
+    let file: SharedFile
+    @ViewBuilder let content: (GalleryPicturePhase) -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase = GalleryPicturePhase.loading
+    @State private var animationData: Data?
+
+    var body: some View {
+        content(phase)
+            .task(id: reduceMotion) { await load(animates: !reduceMotion) }
+    }
+
+    private func load(animates: Bool) async {
+        do {
+            let data: Data
+            if let animationData {
+                data = animationData
+            } else {
+                guard case .loading = phase else { return }
+                data = try await Self.fetch(file.url)
+                try Task.checkCancellation()
+                guard AnimatedImageMedia.isAnimated(data: data) else {
+                    phase = Image(data: data).map(GalleryPicturePhase.still) ?? .failed
+                    return
                 }
+                animationData = data
             }
-        } else {
-            stillPicture
+
+            // Use the timeline's frame size and budget so the gallery keeps the same cadence.
+            let image = await AnimatedImageDecoder.decodeInBackground(
+                data, animated: animates, maxPixelSize: AnimatedImageDecoder.defaultMaxPixelSize
+            )
+            try Task.checkCancellation()
+            phase = image.map { .animated($0, animates: animates) } ?? .failed
+        } catch {
+            if !Task.isCancelled { phase = .failed }
         }
     }
 
-    private var isGIF: Bool { GifMedia.isGIF(mediaType: file.mediaType, url: file.url) }
+    private static func fetch(_ url: URL) async throws -> Data {
+        if let cached = RemoteImageStore.shared.cached(url) { return cached }
 
-    private var canAnimate: Bool {
-        ["image/png", "image/apng", "image/webp"].contains(file.mediaType?.lowercased() ?? "")
-            || ["png", "apng", "webp"].contains(file.url.pathExtension.lowercased())
-    }
-
-    private var stillPicture: some View {
-        AsyncImage(url: file.url) { phase in
-            switch phase {
-            case let .success(image): image.resizable().scaledToFit()
-            case .failure: failure
-            default: ProgressView()
-            }
+        // Stills can exceed the timeline's fetch limit. Keep their original bytes on disk.
+        let (download, response) = try await URLSession.shared.download(from: url)
+        defer { try? FileManager.default.removeItem(at: download) }
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse)
         }
-    }
-
-    private var failure: some View {
-        ContentUnavailableView("Couldn't Load Image", systemImage: "photo.badge.exclamationmark")
+        return try Data(contentsOf: download, options: .mappedIfSafe)
     }
 }

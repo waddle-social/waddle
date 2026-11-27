@@ -2,11 +2,11 @@ import SwiftUI
 import WaddleKit
 
 /// Zoom follows an image's identity, so changing images restores aspect fit.
-struct GalleryZoomView<Picture: View, Caption: View>: View {
+struct GalleryZoomView<Caption: View>: View {
     let viewport: CGSize
     let step: (MediaGallery.Direction) -> Void
     let close: () -> Void
-    let picture: Picture
+    let picture: GalleryPicturePhase
     @ViewBuilder let caption: Caption
 
     @State private var transform = MediaGalleryViewport()
@@ -16,29 +16,46 @@ struct GalleryZoomView<Picture: View, Caption: View>: View {
 
     var body: some View {
         let displayed = displayedTransform
-        let frame = displayed.imageFrame(pictureSize, in: viewport)
-        let surface =
-            picture
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large))
-            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { pictureSize = $0 })
-            .scaleEffect(displayed.scale)
-            .offset(displayed.offset)
-            .frame(width: viewport.width, height: viewport.height)
-            .clipped()
-            .contentShape(Rectangle())
-            .gesture(tap(in: frame))
-            .simultaneousGesture(pinch)
-            .simultaneousGesture(drag)
-            .overlay(alignment: .top) {
+        let frame = displayed.imageFrame(picture.isLoaded ? pictureSize : nil, in: viewport)
+        let surface = Group {
+            if picture.isLoaded {
+                picture
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large))
+                    .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { pictureSize = $0 })
+                    .scaleEffect(displayed.scale)
+                    .offset(displayed.offset)
+            } else {
+                picture.fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+                    .overlay(alignment: .bottom) {
+                        caption.fixedSize(horizontal: false, vertical: true)
+                            .alignmentGuide(.bottom) { $0[.top] - Theme.Spacing.m }
+                    }
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: viewport.width, height: viewport.height)
+        .clipped()
+        .contentShape(Rectangle())
+        .gesture(tap(in: frame))
+        .simultaneousGesture(pinch)
+        .simultaneousGesture(drag)
+        .overlay(alignment: .top) {
+            if picture.isLoaded {
                 caption
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, (viewport.height + pictureSize.height) / 2 + Theme.Spacing.m)
                     .allowsHitTesting(false)
             }
+        }
         #if os(macOS)
         surface.background {
-            GalleryScrollWheel { delta, precise in
-                magnify(by: exp(delta * (precise ? 0.01 : 0.12)))
+            if picture.isLoaded {
+                GalleryScrollWheel { delta, precise in
+                    let trackpadSensitivity: CGFloat = 0.01
+                    let mouseWheelSensitivity: CGFloat = 0.12
+                    magnify(by: exp(delta * (precise ? trackpadSensitivity : mouseWheelSensitivity)))
+                }
             }
         }
         #else
@@ -47,6 +64,7 @@ struct GalleryZoomView<Picture: View, Caption: View>: View {
     }
 
     private var displayedTransform: MediaGalleryViewport {
+        guard picture.isLoaded else { return MediaGalleryViewport() }
         var displayed = transform
         displayed.magnify(by: pinchScale, image: pictureSize, in: viewport)
         displayed.pan(by: dragTranslation, image: pictureSize, in: viewport)
@@ -60,6 +78,8 @@ struct GalleryZoomView<Picture: View, Caption: View>: View {
                 switch result {
                 case let .first(tap) where imageFrame.contains(tap.location):
                     transform.toggleZoom()
+                case .first where imageFrame.isNull:
+                    close()
                 case let .second(tap) where !imageFrame.contains(tap.location):
                     close()
                 default:
@@ -78,7 +98,7 @@ struct GalleryZoomView<Picture: View, Caption: View>: View {
         DragGesture()
             .updating($dragTranslation) { value, translation, _ in translation = value.translation }
             .onEnded { value in
-                if transform.isZoomed {
+                if picture.isLoaded, transform.isZoomed {
                     transform.pan(by: value.translation, image: pictureSize, in: viewport)
                     return
                 }
@@ -91,6 +111,7 @@ struct GalleryZoomView<Picture: View, Caption: View>: View {
     }
 
     private func magnify(by factor: CGFloat) {
+        guard picture.isLoaded else { return }
         transform.magnify(by: factor, image: pictureSize, in: viewport)
     }
 }

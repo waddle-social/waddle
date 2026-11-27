@@ -1,4 +1,8 @@
 import Foundation
+#if canImport(ImageIO)
+import ImageIO
+import UniformTypeIdentifiers
+#endif
 
 /// Recognises GIFs, which the timeline plays instead of showing only their
 /// first frame.
@@ -30,3 +34,16 @@ public enum GifMedia {
 private extension Character {
     var isASCIIDigit: Bool { isASCII && isNumber }
 }
+
+#if canImport(ImageIO)
+public enum AnimatedImageMedia {
+    /// Checks the downloaded bytes for multiple frames in a supported animation format.
+    public static func isAnimated(data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String?,
+              CGImageSourceGetCount(source) > 1
+        else { return false }
+        return [UTType.gif.identifier, UTType.png.identifier, UTType.webP.identifier].contains(type)
+    }
+}
+#endif
