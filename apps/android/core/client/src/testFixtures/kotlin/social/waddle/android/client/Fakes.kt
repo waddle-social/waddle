@@ -1621,3 +1621,15 @@ suspend fun XmppSessionManager.deliverArchivedPage(
         fetchDmHistory(conversationJid, 50u, null)
     }
 }
+
+/** Memory-backed [social.waddle.android.client.account.AccountStoreProvider] for graph tests. */
+class InMemoryAccountStores : social.waddle.android.client.account.AccountStoreProvider {
+    private val stores = java.util.concurrent.ConcurrentHashMap<String, InMemoryPreferencesDataStore>()
+
+    override fun storeFor(key: String): DataStore<Preferences> =
+        stores.computeIfAbsent(key) { InMemoryPreferencesDataStore() }
+
+    override fun remove(key: String) {
+        stores.remove(key)
+    }
+}

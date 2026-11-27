@@ -81,13 +81,6 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
     val stayConnected: Flow<Boolean?> = dataStore.data.map { it[KEY_STAY_CONNECTED] }
 
     /**
-     * The UnifiedPush instance last registered with a distributor. Kept
-     * across sign-out (unlike the session store) so a sign-out that wiped
-     * the session can still unregister it.
-     */
-    val lastPushInstance: Flow<String?> = dataStore.data.map { it[KEY_LAST_PUSH_INSTANCE] }
-
-    /**
      * Which push transport the user chose where more than one exists (the
      * Play build: FCM or a UnifiedPush distributor). Kept across sign-out,
      * like the distributor choice it stands for; `null` until chosen.
@@ -131,12 +124,6 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         }
     }
 
-    suspend fun setLastPushInstance(instance: String?) {
-        dataStore.edit { prefs ->
-            if (instance == null) prefs.remove(KEY_LAST_PUSH_INSTANCE) else prefs[KEY_LAST_PUSH_INSTANCE] = instance
-        }
-    }
-
     suspend fun setTheme(mode: ThemeMode) {
         dataStore.edit { it[KEY_THEME] = mode.storageValue }
     }
@@ -174,7 +161,6 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         val KEY_READ_RECEIPTS = booleanPreferencesKey("read_receipts_enabled")
         val KEY_STAY_CONNECTED = booleanPreferencesKey("stay_connected")
         val KEY_WALLPAPER_COLORS = booleanPreferencesKey("wallpaper_colors")
-        val KEY_LAST_PUSH_INSTANCE = stringPreferencesKey("last_push_instance")
         val KEY_PUSH_TRANSPORT = stringPreferencesKey("push_transport")
         val KEY_FCM_TOKEN_DELETION_PENDING = booleanPreferencesKey("fcm_token_deletion_pending")
     }

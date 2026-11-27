@@ -12,12 +12,14 @@ class NotificationDismissReceiver : BroadcastReceiver() {
         val conversationJid = intent.getStringExtra(EXTRA_CONVERSATION_JID) ?: return
         (context.applicationContext as WaddleApplication)
             .graph
-            .messageNotifier
-            .clearConversation(conversationJid)
+            .runtimeFor(intent.getStringExtra(EXTRA_ACCOUNT_KEY))
+            ?.messageNotifier
+            ?.clearConversation(conversationJid)
     }
 
     companion object {
         const val ACTION_DISMISS = "social.waddle.android.action.DISMISS_MESSAGES"
+        const val EXTRA_ACCOUNT_KEY = "social.waddle.android.extra.ACCOUNT_KEY"
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
     }
 }

@@ -18,13 +18,15 @@ class CallActionReceiver : BroadcastReceiver() {
         val action = intent.action ?: return
         if (action != ACTION_DECLINE && action != ACTION_HANG_UP) return
         val graph = (context.applicationContext as WaddleApplication).graph
+        val runtime = (intent.getStringExtra(EXTRA_ACCOUNT_KEY)?.let(graph::runtimeFor) ?: graph.callRuntime())
+            ?: return
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
                 runCatching {
                     when (action) {
-                        ACTION_DECLINE -> graph.sessionManager.callStore.declineIncoming()
-                        ACTION_HANG_UP -> graph.sessionManager.callStore.hangUp()
+                        ACTION_DECLINE -> runtime.sessionManager.callStore.declineIncoming()
+                        ACTION_HANG_UP -> runtime.sessionManager.callStore.hangUp()
                     }
                 }
             } finally {
@@ -34,6 +36,7 @@ class CallActionReceiver : BroadcastReceiver() {
     }
 
     companion object {
+        const val EXTRA_ACCOUNT_KEY = "social.waddle.android.extra.ACCOUNT_KEY"
         const val ACTION_DECLINE = "social.waddle.android.action.CALL_DECLINE"
         const val ACTION_HANG_UP = "social.waddle.android.action.CALL_HANG_UP"
     }

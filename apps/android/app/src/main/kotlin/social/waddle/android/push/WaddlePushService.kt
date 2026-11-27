@@ -20,13 +20,16 @@ class WaddlePushService : PushService() {
         // connector's key pair cannot receive encrypted payloads.
         val keys = endpoint.pubKeySet ?: return
         graph.applicationScope.launch {
-            runCatching { graph.push.onUnifiedPushEndpoint(instance, endpoint.url, keys.pubKey, keys.auth) }
+            val runtime = graph.runtimeForPushInstance(instance) ?: return@launch
+            runCatching { runtime.push.onUnifiedPushEndpoint(instance, endpoint.url, keys.pubKey, keys.auth) }
         }
     }
 
     override fun onMessage(message: PushMessage, instance: String) {
         graph.applicationScope.launch {
-            runCatching { graph.pushMessageHandler.handle(instance, message.content, message.decrypted) }
+            // The instance names the account (it is scoped to origin and JID).
+            val runtime = graph.runtimeForPushInstance(instance) ?: return@launch
+            runCatching { runtime.pushMessageHandler.handle(instance, message.content, message.decrypted) }
         }
     }
 
@@ -38,7 +41,8 @@ class WaddlePushService : PushService() {
 
     override fun onUnregistered(instance: String) {
         graph.applicationScope.launch {
-            runCatching { graph.push.onUnifiedPushUnregistered(instance) }
+            val runtime = graph.runtimeForPushInstance(instance) ?: return@launch
+            runCatching { runtime.push.onUnifiedPushUnregistered(instance) }
         }
     }
 }

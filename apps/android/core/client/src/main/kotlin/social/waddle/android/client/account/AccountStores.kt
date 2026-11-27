@@ -10,6 +10,14 @@ import kotlinx.coroutines.cancel
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+/** Where each account's session DataStore lives; tests swap in memory-backed ones. */
+interface AccountStoreProvider {
+    fun storeFor(key: String): DataStore<Preferences>
+
+    /** Drops the account's store and everything persisted in it. */
+    fun remove(key: String)
+}
+
 /**
  * One session DataStore file per account (`session_<key>.preferences_pb`).
  * A second DataStore over the same file crashes ("multiple DataStores
@@ -17,12 +25,12 @@ import java.util.concurrent.ConcurrentHashMap
  * the life of the process. [remove] cancels the store's scope before
  * deleting the file so nothing can recreate it.
  */
-class AccountStores(private val directory: File) {
+class AccountStores(private val directory: File) : AccountStoreProvider {
     private class Entry(val scope: CoroutineScope, val store: DataStore<Preferences>)
 
     private val entries = ConcurrentHashMap<String, Entry>()
 
-    fun storeFor(key: String): DataStore<Preferences> {
+    override fun storeFor(key: String): DataStore<Preferences> {
         requireSafe(key)
         return entries.computeIfAbsent(key) { create(key) }.store
     }
@@ -33,7 +41,7 @@ class AccountStores(private val directory: File) {
     }
 
     /** Stops the account's store and deletes its file. */
-    fun remove(key: String) {
+    override fun remove(key: String) {
         requireSafe(key)
         entries.remove(key)?.scope?.cancel()
         fileFor(key).delete()

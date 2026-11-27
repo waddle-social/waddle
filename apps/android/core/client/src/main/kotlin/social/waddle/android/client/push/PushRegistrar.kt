@@ -301,10 +301,13 @@ fun pushServiceJidFor(ownerBareJid: String): String? =
  * The UnifiedPush instance name for an account. Scoping it to the account
  * keeps a later account from inheriting the previous one's endpoint (the
  * payload names no account), without putting the JID in the distributor.
+ * [accountKey] (the registry key: origin and JID) disambiguates servers.
  */
-fun pushInstanceFor(ownerBareJid: String): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-        .digest(ownerBareJid.lowercase(Locale.ROOT).toByteArray(Charsets.UTF_8))
+fun pushInstanceFor(ownerBareJid: String, accountKey: String? = null): String {
+    // The account key folds the server in: the same JID text on two servers
+    // is two accounts and must be two distributor registrations.
+    val seed = ownerBareJid.lowercase(Locale.ROOT) + (accountKey?.let { "\n$it" }.orEmpty())
+    val digest = MessageDigest.getInstance("SHA-256").digest(seed.toByteArray(Charsets.UTF_8))
     return "waddle-" + digest.take(INSTANCE_DIGEST_BYTES).joinToString("") { "%02x".format(it) }
 }
 

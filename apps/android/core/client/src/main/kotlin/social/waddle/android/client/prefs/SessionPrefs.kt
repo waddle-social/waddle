@@ -51,6 +51,18 @@ class SessionPrefs(
         } ?: emptyMap()
     }
 
+    /**
+     * The UnifiedPush instance this account last registered, kept across
+     * [clear] so sign-out can still unregister it after the owner is gone.
+     */
+    val lastPushInstance: Flow<String?> = dataStore.data.map { it[KEY_LAST_PUSH_INSTANCE] }
+
+    suspend fun setLastPushInstance(instance: String?) {
+        dataStore.edit { prefs ->
+            if (instance == null) prefs.remove(KEY_LAST_PUSH_INSTANCE) else prefs[KEY_LAST_PUSH_INSTANCE] = instance
+        }
+    }
+
     suspend fun setServerUrl(url: String) {
         dataStore.edit { it[KEY_SERVER_URL] = url }
     }
@@ -138,9 +150,9 @@ class SessionPrefs(
         runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
 
     /**
-     * Stable-per-install 8-hex suffix for the XMPP resource
+     * Stable-per-account 8-hex suffix for the XMPP resource
      * (`waddle-android-<suffix>`); generated once, atomically, and kept
-     * across [clear] so reinstalls — not logouts — rotate the resource.
+     * across [clear] so re-adding the account on a fresh install — not logouts — rotates the resource.
      */
     suspend fun resourceSuffix(): String {
         var suffix = ""
@@ -152,12 +164,17 @@ class SessionPrefs(
         return suffix
     }
 
-    /** Logout: wipe everything except the per-install resource suffix. */
+    /**
+     * Logout: wipe everything except the per-account resource suffix and the
+     * last push instance (sign-out unregisters it after this runs).
+     */
     suspend fun clear() {
         dataStore.edit { prefs ->
             val suffix = prefs[KEY_RESOURCE_SUFFIX]
+            val pushInstance = prefs[KEY_LAST_PUSH_INSTANCE]
             prefs.clear()
             suffix?.let { prefs[KEY_RESOURCE_SUFFIX] = it }
+            pushInstance?.let { prefs[KEY_LAST_PUSH_INSTANCE] = it }
         }
     }
 
@@ -175,6 +192,7 @@ class SessionPrefs(
         val KEY_OUTBOUND_QUEUE = stringPreferencesKey("outbound_queue")
         val KEY_RESUME_CURSORS = stringPreferencesKey("resume_cursors")
         val KEY_RESOURCE_SUFFIX = stringPreferencesKey("resource_suffix")
+        val KEY_LAST_PUSH_INSTANCE = stringPreferencesKey("last_push_instance")
         val KEY_PUSH_ANNOUNCED_ITEMS = stringPreferencesKey("push_announced_items")
 
         const val RESOURCE_SUFFIX_LENGTH = 8

@@ -20,7 +20,7 @@ object LegacySessionMigration {
     suspend fun migrate(
         legacy: DataStore<Preferences>,
         registry: AccountRegistry,
-        stores: AccountStores,
+        stores: AccountStoreProvider,
         defaultOrigin: String,
     ): Account? {
         if (registry.accounts.first().isNotEmpty()) return null

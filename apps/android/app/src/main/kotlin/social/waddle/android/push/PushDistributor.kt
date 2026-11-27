@@ -14,7 +14,6 @@ import social.waddle.android.R
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.prefs.PushEndpoint
 import social.waddle.android.client.prefs.SessionPrefs
-import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.VapidKey
 
 /**
@@ -32,7 +31,6 @@ class PushDistributor(
     private val scope: CoroutineScope,
     private val sessionManager: XmppSessionManager,
     private val sessionPrefs: SessionPrefs,
-    private val userPrefs: UserPrefs,
 ) {
     private val _distributorLabel = MutableStateFlow<String?>(null)
 
@@ -111,9 +109,9 @@ class PushDistributor(
      * the server stops pushing to it.
      */
     suspend fun unregister() {
-        val instance = userPrefs.lastPushInstance.first() ?: return
+        val instance = sessionPrefs.lastPushInstance.first() ?: return
         runCatching { UnifiedPush.unregister(context, instance) }
-        userPrefs.setLastPushInstance(null)
+        sessionPrefs.setLastPushInstance(null)
     }
 
     private suspend fun currentKey(): VapidKey? {
@@ -126,7 +124,7 @@ class PushDistributor(
     private suspend fun register(key: VapidKey) {
         val instance = sessionManager.pushInstance() ?: return
         sessionManager.recordPushDistributorRequest(instance, key.kid)
-        userPrefs.setLastPushInstance(instance)
+        sessionPrefs.setLastPushInstance(instance)
         runCatching {
             UnifiedPush.register(
                 context,

@@ -33,6 +33,7 @@ class MarkReadReceiver : BroadcastReceiver() {
         }
 
         val graph = (context.applicationContext as WaddleApplication).graph
+        val runtime = graph.runtimeFor(intent.getStringExtra(EXTRA_ACCOUNT_KEY)) ?: return
         // The marker goes out over the stream: hold it open while push
         // mode has it closed (a queued marker drains once ready), keeping
         // the receiver unfinished meanwhile so the process stays active.
@@ -47,20 +48,22 @@ class MarkReadReceiver : BroadcastReceiver() {
                 // waits its turn). A parked marker is out once it is no
                 // longer parked.
                 val dispatch = runCatching {
-                    graph.sessionManager.markConversationDisplayed(
+                    runtime.sessionManager.markConversationDisplayed(
                         conversationJid,
                         isGroupchat,
                         explicitTarget,
                     )
                 }.getOrDefault(MarkerDispatch.SETTLED)
-                runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
-                runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
+                runCatching { runtime.sessionManager.unreadStore.clear(conversationJid) }
+                runCatching { runtime.messageNotifier.clearConversationNotification(conversationJid) }
                 val drained = dispatch == MarkerDispatch.SETTLED || withTimeoutOrNull(MARKER_HOLD_MILLIS) {
-                    graph.sessionManager.awaitMarkerNotParked(conversationJid)
+                    runtime.sessionManager.awaitMarkerNotParked(conversationJid)
                 } != null
                 // Not drained within the receiver's budget: a short
                 // foreground service carries the marker the rest of the way.
-                if (!drained) PendingDeliveryService.start(context, markerConversationJid = conversationJid)
+                if (!drained) {
+                    PendingDeliveryService.start(context, runtime.key, markerConversationJid = conversationJid)
+                }
             } finally {
                 hold.release()
                 pendingResult.finish()
@@ -73,6 +76,7 @@ class MarkReadReceiver : BroadcastReceiver() {
 
         /** Within the receiver's ~10 s goAsync budget. */
         private const val MARKER_HOLD_MILLIS = 9_000L
+        const val EXTRA_ACCOUNT_KEY = "social.waddle.android.extra.ACCOUNT_KEY"
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val EXTRA_MARKER_ID = "social.waddle.android.extra.MARKER_ID"
