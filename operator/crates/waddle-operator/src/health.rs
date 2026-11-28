@@ -30,7 +30,8 @@ impl HealthState {
         }
     }
 
-    /// Marks the operator ready to serve traffic after discovery, leadership, and reflector sync.
+    /// Marks the operator ready: either as a standby waiting on another replica's Lease,
+    /// or as the leader once its primary reflector has synced.
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
     }

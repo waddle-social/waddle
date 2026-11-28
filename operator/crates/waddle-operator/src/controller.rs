@@ -132,7 +132,20 @@ pub async fn run_controller(
     let mut leader_guard = if args.leader_election {
         let (lease_ns, holder_id) = resolve_lease_identity(&args);
         let cfg = LeaderConfig::new(lease_ns, args.lease_name.clone(), holder_id);
-        let Some(guard) = LeaderGuard::acquire(&client, cfg, shutdown.clone()).await? else {
+        // A replica waiting on a Lease held by another healthy replica is a valid standby.
+        // Reporting it ready lets a rolling update finish: the old leader is only
+        // terminated (and releases the Lease) once its replacement is ready.
+        let standby_health = Arc::clone(&health);
+        let mut announced_standby = false;
+        let on_standby = move || {
+            if !announced_standby {
+                announced_standby = true;
+                tracing::info!("leader election Lease held by another replica; ready as standby");
+            }
+            standby_health.set_ready(true);
+        };
+        let Some(guard) = LeaderGuard::acquire(&client, cfg, shutdown.clone(), on_standby).await?
+        else {
             return Ok(());
         };
         Some(guard)
