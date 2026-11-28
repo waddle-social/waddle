@@ -64,8 +64,9 @@ pub struct TenantIngressSpec {
     pub mode: TenantIngressMode,
     /// Explicit lower-case FQDNs served for this tenant (defaults to `[spec.tenantId]` when empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16), inner(length(max = 253)))]
     #[x_kube(
-        validation = r#"self.all(h, size(h) > 0 && size(h) <= 253 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))"#
+        validation = r#"self.all(h, size(h) > 0 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))"#
     )]
     pub hostnames: Vec<String>,
 }
@@ -241,8 +242,9 @@ pub struct WaddleTenantSpec {
     pub server_ref: LocalObjectRef,
 
     /// Canonical lower-case DNS domain identifying the tenant (e.g. `waddle.social`).
+    #[schemars(length(max = 253))]
     #[x_kube(
-        validation = r#"size(self) > 0 && size(self) <= 253 && self.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$')"#
+        validation = r#"size(self) > 0 && self.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$')"#
     )]
     pub tenant_id: String,
 
@@ -898,5 +900,30 @@ mod tests {
         assert!(WaddleTenant::new("bad-upper-host", upper)
             .validate_cel()
             .is_err());
+    }
+
+    #[test]
+    fn crd_schemas_bound_cel_validated_fields() {
+        let tenant_crd = serde_json::to_value(<WaddleTenant as kube::CustomResourceExt>::crd())
+            .expect("serialize WaddleTenant CRD");
+        let tenant_spec = &tenant_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]
+            ["properties"]["spec"]["properties"];
+        assert_eq!(tenant_spec["tenantId"]["maxLength"], 253);
+        let hostnames = &tenant_spec["ingress"]["properties"]["hostnames"];
+        assert_eq!(hostnames["maxItems"], 16);
+        assert_eq!(hostnames["items"]["maxLength"], 253);
+
+        let server_crd =
+            serde_json::to_value(<crate::WaddleServer as kube::CustomResourceExt>::crd())
+                .expect("serialize WaddleServer CRD");
+        let server_ingress = &server_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]
+            ["properties"]["spec"]["properties"]["ingress"]["properties"];
+        assert_eq!(server_ingress["reservedSubdomains"]["maxItems"], 256);
+        assert_eq!(
+            server_ingress["reservedSubdomains"]["items"]["maxLength"],
+            63
+        );
+        assert_eq!(server_ingress["targetIps"]["maxItems"], 16);
+        assert_eq!(server_ingress["targetIps"]["items"]["maxLength"], 45);
     }
 }

@@ -93,10 +93,12 @@ spec:
                   hostnames:
                     description: Explicit lower-case FQDNs served for this tenant (defaults to `[spec.tenantId]` when empty).
                     items:
+                      maxLength: 253
                       type: string
+                    maxItems: 16
                     type: array
                     x-kubernetes-validations:
-                    - rule: self.all(h, size(h) > 0 && size(h) <= 253 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))
+                    - rule: self.all(h, size(h) > 0 && h.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'))
                   mode:
                     default: Auto
                     description: Ingress reconciliation mode (`Auto`, `ManagedSubdomain`, `CustomDomain`, or `Disabled`).
@@ -161,9 +163,10 @@ spec:
                 type: object
               tenantId:
                 description: Canonical lower-case DNS domain identifying the tenant (e.g. `waddle.social`).
+                maxLength: 253
                 type: string
                 x-kubernetes-validations:
-                - rule: size(self) > 0 && size(self) <= 253 && self.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$')
+                - rule: size(self) > 0 && self.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$')
             required:
             - serverRef
             - tenantId
