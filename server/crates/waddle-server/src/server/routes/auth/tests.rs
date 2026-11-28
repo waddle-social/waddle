@@ -217,7 +217,9 @@ async fn callback_records_state_success_before_subsequent_provider_failure() {
         .auth_handshake
         .insert_pending(&PendingAuthorization {
             state: "validated-state".to_string(),
+            tenant_id: auth_state.tenant_resolver.fallback_tenant().tenant_id,
             provider_id: "missing-provider".to_string(),
+            issuer: None,
             nonce: "nonce".to_string(),
             code_verifier: "verifier".to_string(),
             redirect_uri: "http://localhost:3000/api/auth/callback".to_string(),
@@ -263,7 +265,9 @@ async fn insert_pending_flow(auth_state: &AuthState, state: &str, flow: PendingF
         .auth_handshake
         .insert_pending(&PendingAuthorization {
             state: state.to_string(),
+            tenant_id: auth_state.tenant_resolver.fallback_tenant().tenant_id,
             provider_id: "missing-provider".to_string(),
+            issuer: None,
             nonce: "nonce".to_string(),
             code_verifier: "verifier".to_string(),
             redirect_uri: "http://localhost:3000/api/auth/callback".to_string(),

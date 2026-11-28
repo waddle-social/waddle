@@ -145,7 +145,11 @@ pub async fn device_start_handler(
     Json(request): Json<DeviceStartRequest>,
 ) -> impl IntoResponse {
     let tenant = state.tenant_or_fallback(tenant);
-    if state.providers.get(&request.provider).is_none() {
+    if state
+        .providers_for(&tenant)
+        .get(&request.provider)
+        .is_none()
+    {
         record_auth_failure("unknown", None, AuthFailure::DeviceInvalidClient);
         return (
             StatusCode::BAD_REQUEST,
@@ -166,6 +170,7 @@ pub async fn device_start_handler(
         let candidate = DeviceAuthorization {
             device_code: generate_device_code(),
             user_code: generate_user_code(),
+            tenant_id: tenant.tenant_id.clone(),
             provider_id: request.provider.clone(),
             expires_at: Utc::now() + Duration::minutes(15),
             status: DeviceAuthStatus::Pending,
@@ -394,8 +399,10 @@ pub async fn device_verify_submit_handler(
         .find_device_by_user_code(&normalized)
         .await
     {
-        Ok(Some(v)) => v,
-        Ok(None) => {
+        // A code issued on another tenant is reported exactly like an
+        // unknown one, so this host cannot probe other tenants' codes.
+        Ok(Some(v)) if v.tenant_id == tenant.tenant_id => v,
+        Ok(_) => {
             record_auth_failure("unknown", None, AuthFailure::DeviceInvalidCode);
             return (
                 StatusCode::BAD_REQUEST,
@@ -460,7 +467,8 @@ pub async fn device_verify_submit_handler(
     let device_code = auth.device_code.clone();
     let provider_id = auth.provider_id.clone();
 
-    let provider = match state.providers.get(&provider_id) {
+    let providers = state.providers_for(&tenant);
+    let provider = match providers.get(&provider_id) {
         Some(v) => v,
         None => {
             record_auth_failure(&provider_id, None, AuthFailure::DeviceInvalidClient);

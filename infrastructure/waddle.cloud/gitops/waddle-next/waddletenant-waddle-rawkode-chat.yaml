@@ -12,9 +12,19 @@ spec:
   placementMode: SharedPool
   owners:
     - rawkode
-  authProvidersSecretRef:
-    name: waddle-runtime-secrets
-    key: WADDLE_AUTH_PROVIDERS_JSON
+  auth:
+    providers:
+      - id: rawkode-academy
+        displayName: Rawkode Academy
+        kind: oidc
+        clientId: waddle-rawkode-chat
+        issuer: https://id.rawkode.academy
+        scopes:
+          - openid
+          - profile
+          - email
+        usernameClaim: preferred_username
+        emailClaim: email
   ingress:
     mode: CustomDomain
   quotas:

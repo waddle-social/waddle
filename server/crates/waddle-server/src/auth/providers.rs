@@ -7,6 +7,9 @@ use std::collections::{HashMap, HashSet};
 #[serde(rename_all = "snake_case")]
 pub enum AuthProviderKind {
     Oidc,
+    /// Serialized as `o_auth2`; tenant manifests written by the operator
+    /// use `oauth2`.
+    #[serde(alias = "oauth2")]
     OAuth2,
 }
 
@@ -23,7 +26,7 @@ pub enum AuthProviderTokenEndpointAuthMethod {
 }
 
 /// Static auth provider configuration loaded from environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthProviderConfig {
     pub id: String,
     pub display_name: String,
@@ -193,7 +196,67 @@ pub struct PublicProvider {
     pub kind: AuthProviderKind,
 }
 
-#[derive(Debug, Clone)]
+/// A sign-in provider declared in a tenant manifest (`authProviders`).
+///
+/// Manifest providers are public clients: they never carry a client secret.
+/// A static client authenticates with PKCE only
+/// (`token_endpoint_auth_method = none`); a client obtained through dynamic
+/// client registration uses whatever method the provider assigns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TenantAuthProviderSpec {
+    pub id: String,
+    pub display_name: String,
+    pub kind: AuthProviderKind,
+    #[serde(default)]
+    pub dynamic_client_registration: bool,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub require_dpop: bool,
+    pub scopes: Vec<String>,
+    pub issuer: String,
+    #[serde(default)]
+    pub authorization_endpoint: Option<String>,
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    #[serde(default)]
+    pub userinfo_endpoint: Option<String>,
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    #[serde(default = "default_subject_claim")]
+    pub subject_claim: String,
+    #[serde(default)]
+    pub username_claim: Option<String>,
+    #[serde(default)]
+    pub email_claim: Option<String>,
+}
+
+impl From<TenantAuthProviderSpec> for AuthProviderConfig {
+    fn from(spec: TenantAuthProviderSpec) -> Self {
+        Self {
+            id: spec.id,
+            display_name: spec.display_name,
+            kind: spec.kind,
+            dynamic_client_registration: spec.dynamic_client_registration,
+            client_id: spec.client_id,
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: spec.require_dpop,
+            scopes: spec.scopes,
+            issuer: Some(spec.issuer),
+            authorization_endpoint: spec.authorization_endpoint,
+            token_endpoint: spec.token_endpoint,
+            userinfo_endpoint: spec.userinfo_endpoint,
+            jwks_uri: spec.jwks_uri,
+            subject_claim: spec.subject_claim,
+            username_claim: spec.username_claim,
+            email_claim: spec.email_claim,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderRegistry {
     providers: HashMap<String, AuthProviderConfig>,
 }
@@ -215,6 +278,12 @@ impl ProviderRegistry {
         }
 
         Ok(Self { providers: map })
+    }
+
+    /// Builds a registry from tenant-manifest providers, applying the same
+    /// validation as environment providers.
+    pub fn try_from_tenant_specs(specs: Vec<TenantAuthProviderSpec>) -> Result<Self, AuthError> {
+        Self::try_new(specs.into_iter().map(AuthProviderConfig::from).collect())
     }
 
     pub fn get(&self, id: &str) -> Option<&AuthProviderConfig> {

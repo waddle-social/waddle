@@ -14,9 +14,20 @@ spec:
     - rawkode
     - icepuma
     - randax
-  authProvidersSecretRef:
-    name: waddle-runtime-secrets
-    key: WADDLE_AUTH_PROVIDERS_JSON
+  auth:
+    providers:
+      - id: colony
+        displayName: Colony
+        kind: oidc
+        dynamicClientRegistration: true
+        requireDpop: true
+        issuer: https://colony.waddle.social
+        scopes:
+          - openid
+          - profile
+          - email
+        usernameClaim: preferred_username
+        emailClaim: email
   ingress:
     mode: ManagedSubdomain
   quotas:

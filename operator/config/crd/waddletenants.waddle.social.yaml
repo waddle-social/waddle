@@ -44,23 +44,107 @@ spec:
           spec:
             description: Declarative specification for a `WaddleTenant` resource.
             properties:
-              authProvidersSecretRef:
-                description: Optional same-namespace Secret key holding `WADDLE_AUTH_PROVIDERS_JSON` for this tenant.
+              auth:
+                description: |-
+                  Sign-in providers for this tenant. A tenant without providers has
+                  sign-in disabled; it never inherits server-wide providers.
                 nullable: true
                 properties:
-                  key:
-                    description: Key inside the `Secret` data map.
-                    type: string
-                    x-kubernetes-validations:
-                    - rule: size(self) > 0
-                  name:
-                    description: Name of the Kubernetes `Secret` in the same namespace.
-                    type: string
-                    x-kubernetes-validations:
-                    - rule: size(self) > 0
-                required:
-                - key
-                - name
+                  providers:
+                    default: []
+                    description: OIDC or OAuth2 providers users of this tenant can sign in with.
+                    items:
+                      description: |-
+                        A public (PKCE) sign-in client for a tenant. Client secrets are not
+                        supported: a static client authenticates with PKCE only, and a dynamically
+                        registered client uses the method its provider assigns.
+                      properties:
+                        authorizationEndpoint:
+                          description: Authorization endpoint override (required for `oauth2`).
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        clientId:
+                          description: |-
+                            Pre-registered public client ID (required unless
+                            `dynamicClientRegistration` is set).
+                          maxLength: 256
+                          type: string
+                        displayName:
+                          description: Name shown on the sign-in button.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        dynamicClientRegistration:
+                          description: |-
+                            Register a client with the provider at runtime (RFC 7591) instead of
+                            using `clientId`.
+                          type: boolean
+                        emailClaim:
+                          description: Claim holding the email address.
+                          maxLength: 128
+                          nullable: true
+                          type: string
+                        id:
+                          description: Provider identifier, unique within the tenant (used in sign-in URLs).
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                        issuer:
+                          description: HTTPS issuer URL (OIDC discovery base).
+                          maxLength: 512
+                          type: string
+                        jwksUri:
+                          description: JWKS URI override.
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        kind:
+                          description: Provider protocol.
+                          enum:
+                          - oidc
+                          - oauth2
+                          type: string
+                        requireDpop:
+                          description: Bind tokens with DPoP.
+                          type: boolean
+                        scopes:
+                          description: Requested scopes (OIDC providers must include `openid`).
+                          items:
+                            maxLength: 128
+                            type: string
+                          maxItems: 16
+                          minItems: 1
+                          type: array
+                        subjectClaim:
+                          description: Claim holding the stable subject identifier (default `sub`).
+                          maxLength: 128
+                          nullable: true
+                          type: string
+                        tokenEndpoint:
+                          description: Token endpoint override (required for `oauth2`).
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        userinfoEndpoint:
+                          description: Userinfo endpoint override (required for `oauth2`).
+                          maxLength: 512
+                          nullable: true
+                          type: string
+                        usernameClaim:
+                          description: Claim used as the username / XMPP localpart.
+                          maxLength: 128
+                          nullable: true
+                          type: string
+                      required:
+                      - displayName
+                      - id
+                      - issuer
+                      - kind
+                      - scopes
+                      type: object
+                    maxItems: 8
+                    type: array
                 type: object
               extensions:
                 description: Optional per-tenant extension and inference provider allowlists.

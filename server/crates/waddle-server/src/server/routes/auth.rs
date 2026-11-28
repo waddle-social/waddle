@@ -54,6 +54,8 @@ pub use handshake::AuthHandshakeStore;
 pub use state::{AuthState, ProfilePublishHook};
 
 #[cfg(test)]
+mod tenant_provider_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 
 mod implementation;

@@ -59,7 +59,7 @@ pub(super) async fn callback_handler(
         record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
-    if pending.redirect_uri != tenant.callback_url() {
+    if pending.tenant_id != tenant.tenant_id || pending.redirect_uri != tenant.callback_url() {
         record_auth_failure(&pending.provider_id, None, AuthFailure::StateMismatch);
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
@@ -81,9 +81,13 @@ pub(super) async fn callback_handler(
         }
     };
 
-    let provider = match state.providers.get(&pending.provider_id) {
-        Some(p) => p,
-        None => {
+    let providers = state.providers_for(&tenant);
+    let provider = match providers.get(&pending.provider_id) {
+        // A manifest reload may have pointed this provider id at another
+        // issuer since the sign-in started; the pending client id and
+        // nonce belong to the old one.
+        Some(p) if p.issuer == pending.issuer => p,
+        _ => {
             record_auth_failure(
                 &pending.provider_id,
                 None,
@@ -411,6 +415,9 @@ pub(super) async fn callback_handler(
             };
 
             let approved = match state.auth_handshake.get_device(&device_code).await {
+                // A device code is only approved by a sign-in on the tenant
+                // that issued it.
+                Ok(Some(entry)) if entry.tenant_id != tenant.tenant_id => false,
                 Ok(Some(mut entry)) => {
                     if entry.is_expired() {
                         // The IdP round-trip outlived the device-code

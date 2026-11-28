@@ -71,6 +71,7 @@ fn manifest(tenant_id: &str, hostnames: &[&str], owners: &[&str]) -> TenantManif
         owners: owners.iter().map(|s| (*s).to_owned()).collect(),
         placement_mode: None,
         hostnames: hostnames.iter().map(|s| (*s).to_owned()).collect(),
+        auth_providers: Vec::new(),
     }
 }
 

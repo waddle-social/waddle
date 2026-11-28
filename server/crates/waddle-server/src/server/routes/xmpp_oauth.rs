@@ -138,10 +138,12 @@ pub async fn xmpp_authorize_handler(
         }
     };
 
+    let tenant = state.tenant_or_fallback(resolved);
+    let providers = state.providers_for(&tenant);
     let provider_id = match params.provider {
         Some(v) => v,
         None => {
-            let list = state.providers.list();
+            let list = providers.list();
             if let Some(default) = list.first() {
                 default.id.clone()
             } else {
@@ -158,7 +160,7 @@ pub async fn xmpp_authorize_handler(
         }
     };
 
-    let provider = match state.providers.get(&provider_id) {
+    let provider = match providers.get(&provider_id) {
         Some(v) => v,
         None => {
             record_auth_failure("unknown", None, AuthFailure::AuthorizationInvalidClient);
@@ -170,7 +172,6 @@ pub async fn xmpp_authorize_handler(
         }
     };
 
-    let tenant = state.tenant_or_fallback(resolved);
     match state
         .start_authorization_for_tenant(
             provider,
