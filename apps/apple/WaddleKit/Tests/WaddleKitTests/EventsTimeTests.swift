@@ -31,8 +31,15 @@ private func form(
     var form = EventForm(on: day(2027, 2, 1), now: at("2027-02-01T09:00:00Z"), timeZone: timeZone)
     form.title = "Game night"
     form.start = at(start)
-    form.end = end.map(at) ?? at(start)
-    form.hasEnd = end != nil
+    form.lastDay = at(start)
+    if let end {
+        if allDay {
+            form.lastDay = at(end)
+        } else {
+            form.duration = .custom
+            form.customEnd = at(end)
+        }
+    }
     form.isAllDay = allDay
     form.repeats = repeats
     return form
@@ -155,7 +162,7 @@ struct EventsTimeTests {
     }
 
     @Test func aTimedEventWithoutAnEndIsAnInstant() throws {
-        let draft = try #require(form(start: "2027-02-05T19:00:00+01:00").draft())
+        let draft = try #require(EventDraft(title: "Game night", start: .instant(at("2027-02-05T19:00:00+01:00"))))
 
         #expect(draft.start == .instant(at("2027-02-05T18:00:00Z")))
         #expect(draft.end == nil)
@@ -198,17 +205,18 @@ struct EventsTimeTests {
         #expect(!picks.offersEndDate)
     }
 
-    @Test func movingTheStartKeepsTheLength() {
-        var picks = form(start: "2027-02-05T19:00:00+01:00", end: "2027-02-05T21:30:00+01:00")
+    @Test func movingTheStartKeepsTheNumberOfAllDayDates() {
+        var picks = form(start: "2027-02-05T19:00:00+01:00", end: "2027-02-07T21:30:00+01:00", allDay: true)
 
         picks.moveStart(to: at("2027-02-06T10:00:00+01:00"))
 
         #expect(picks.start == at("2027-02-06T10:00:00+01:00"))
-        #expect(picks.end == at("2027-02-06T12:30:00+01:00"))
+        #expect(CalendarDay(picks.lastDay, in: oslo) == day(2027, 2, 8))
     }
 
     @Test func movingAWeeklySeriesMovesItsWeekday() throws {
-        var picks = form(start: "2027-02-08T19:00:00+01:00", end: "2027-02-08T21:00:00+01:00", repeats: .weekly)
+        var picks = form(start: "2027-02-08T19:00:00+01:00", repeats: .weekly)
+        picks.duration = .twoHours
         picks.weekdays = [.monday, .friday]
 
         picks.moveStart(to: at("2027-02-09T19:00:00+01:00"))
@@ -218,7 +226,8 @@ struct EventsTimeTests {
     }
 
     @Test func aSeriesCanAlwaysEndOnADateOnceItsStartMoves() throws {
-        var picks = form(start: "2027-02-05T19:00:00+01:00", end: "2027-02-05T21:00:00+01:00", repeats: .weekly)
+        var picks = form(start: "2027-02-05T19:00:00+01:00", repeats: .weekly)
+        picks.duration = .twoHours
 
         picks.moveStart(to: at("2027-06-04T19:00:00+02:00"))
         picks.ending = .on
@@ -237,7 +246,7 @@ struct EventsTimeTests {
         #expect(picks.draft() != nil)
     }
 
-    @Test func anAllDayEventGivenATimeRunsAnHour() throws {
+    @Test func anAllDayEventGivenATimeUsesTheDefaultDuration() throws {
         let event = fetched(nil, start: .day(day(2027, 2, 5)), end: .day(day(2027, 2, 6)))
         var picks = EventForm(editing: event, now: at("2027-02-01T09:00:00Z"), timeZone: oslo)
 
@@ -245,15 +254,13 @@ struct EventsTimeTests {
 
         let draft = try #require(picks.draft())
         #expect(draft.start == .instant(at("2027-02-05T00:00:00+01:00")))
-        #expect(draft.end == .instant(at("2027-02-05T01:00:00+01:00")))
+        #expect(draft.end == .instant(at("2027-02-05T00:30:00+01:00")))
     }
 
-    @Test func aNewEventStartsAtTheNextFullHourTodayAndRunsAnHour() {
+    @Test func aNewEventStartsAtTheNextFullHourToday() {
         let picks = EventForm(on: day(2027, 2, 5), now: at("2027-02-05T14:20:00+01:00"), timeZone: oslo)
 
         #expect(picks.start == at("2027-02-05T15:00:00+01:00"))
-        #expect(picks.end == at("2027-02-05T16:00:00+01:00"))
-        #expect(picks.hasEnd)
     }
 
     @Test func aNewEventOnAnotherDayStartsInTheMorning() {
@@ -316,7 +323,7 @@ struct EventsTimeTests {
 
         #expect(picks.isAllDay)
         #expect(CalendarDay(picks.start, in: oslo) == day(2027, 2, 5))
-        #expect(CalendarDay(picks.end, in: oslo) == day(2027, 2, 7))
+        #expect(CalendarDay(picks.lastDay, in: oslo) == day(2027, 2, 7))
     }
 
     @Test func editingASeriesThatEndsOnADateShowsThatLocalDay() {

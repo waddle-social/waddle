@@ -96,6 +96,7 @@ struct EventsView: View {
             occurrences: occurrences.filter { $0.days(in: timeZone).upperBound >= selected && $0.days(in: timeZone).lowerBound < agendaEnd },
             from: selected,
             today: today,
+            now: now,
             undated: session.events.undated,
             onOpen: { openEvent = $0 }
         ) {

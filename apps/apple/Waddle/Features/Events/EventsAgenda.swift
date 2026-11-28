@@ -10,6 +10,7 @@ struct EventsAgenda<Placeholder: View>: View {
     let occurrences: [EventOccurrence]
     let from: CalendarDay
     let today: CalendarDay
+    let now: Date
     let undated: [CommunityEvent]
     let onOpen: (OpenEvent) -> Void
     /// Shown while there are no events at all.
@@ -29,7 +30,7 @@ struct EventsAgenda<Placeholder: View>: View {
                     section(copy.agendaTitle(group.day, today: today)) {
                         ForEach(Array(group.occurrences.enumerated()), id: \.element.id) { index, occurrence in
                             if index > 0 { HuddleDivider() }
-                            EventsAgendaRow(occurrence: occurrence, day: group.day) {
+                            EventsAgendaRow(occurrence: occurrence, day: group.day, status: occurrence.status(at: now)) {
                                 onOpen(OpenEvent(eventID: occurrence.eventID, occurrence: occurrence))
                             }
                         }
@@ -82,6 +83,7 @@ private struct EventsAgendaRow: View {
     @Environment(\.eventsCalendar) private var calendar
     let occurrence: EventOccurrence
     let day: CalendarDay
+    let status: EventStatus?
     let onOpen: () -> Void
 
     var body: some View {
@@ -102,6 +104,11 @@ private struct EventsAgendaRow: View {
                 .monospacedDigit()
                 .frame(width: 58, alignment: .leading)
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    if let status {
+                        Text(status.label)
+                            .huddleText(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Colors.liveText)
+                    }
                     HStack(spacing: Theme.Spacing.xs) {
                         Text(occurrence.title)
                             .huddleText(Theme.Typography.author)

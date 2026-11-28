@@ -21,27 +21,16 @@ public struct EventForm: Equatable, Sendable {
     public var hasDate = true
     public var isAllDay = false {
         didSet {
-            guard isAllDay else {
-                // A last day is not an end time: give the event an hour.
-                if oldValue, end <= start { end = start.addingTimeInterval(3600) }
-                return
-            }
-            // An all-day series cannot end on a date, and an all-day event
-            // always has a last day.
-            if ending == .on { ending = .never }
-            if !hasEnd {
-                end = start
-                hasEnd = true
-            }
+            if isAllDay, ending == .on { ending = .never }
         }
     }
 
     /// The start time; for an all-day event, any time on the first day.
     public var start: Date
-    /// The end time; for an all-day event, any time on the last day.
-    public var end: Date
-    /// A timed event without an end is an instant.
-    public var hasEnd = true
+    /// Any time on the inclusive last day of an all-day event.
+    public var lastDay: Date
+    public var duration: EventDuration = .thirtyMinutes
+    public var customEnd: Date?
     public var repeats: Repeat = .never
     public var interval = 1
     /// The weekdays of a weekly series, as the person sees them. The start's
@@ -77,14 +66,14 @@ public struct EventForm: Equatable, Sendable {
     }
 
     /// A new event on `day`: at the next full hour when that is today,
-    /// otherwise at ten, for an hour.
+    /// otherwise at ten.
     public init(on day: CalendarDay, now: Date, timeZone: TimeZone) {
         let calendar = CalendarDay.gregorian(timeZone)
         let start = day == CalendarDay(now, in: timeZone)
             ? calendar.dateInterval(of: .hour, for: now)!.end
             : calendar.date(bySettingHour: 10, minute: 0, second: 0, of: day.start(in: timeZone))!
         self.start = start
-        end = start.addingTimeInterval(3600)
+        lastDay = start
         until = Self.aMonthAfter(start, in: timeZone)
         eventID = nil
         self.timeZone = timeZone
@@ -105,18 +94,15 @@ public struct EventForm: Equatable, Sendable {
             isAllDay = true
             start = first.start(in: timeZone)
             if case let .day(after)? = event.end, after > first {
-                end = after.advanced(by: -1).start(in: timeZone)
+                lastDay = after.advanced(by: -1).start(in: timeZone)
             } else {
-                end = start
+                lastDay = start
             }
         case let .instant(date)?:
             start = date
-            if case let .instant(finish)? = event.end {
-                end = finish
-            } else {
-                end = date.addingTimeInterval(3600)
-                hasEnd = false
-            }
+            lastDay = date
+            if case let .instant(finish)? = event.end { customEnd = finish }
+            duration = EventDuration(start: date, end: customEnd)
         }
         until = Self.aMonthAfter(start, in: timeZone)
         if let rule = event.recurrence, let first = event.start {
@@ -153,20 +139,25 @@ public struct EventForm: Equatable, Sendable {
         CalendarDay.gregorian(timeZone).date(byAdding: .month, value: 1, to: start)!
     }
 
-    /// Moves the start and keeps the length: the same time, or for an
-    /// all-day event the same number of days. A weekly series moves to the
-    /// new weekday, and a last date left behind moves past the start.
+    /// Moves the start, keeping the number of days of an all-day event.
+    /// A weekly series moves to the new weekday, and a recurrence end
+    /// date left behind moves past the start.
     public mutating func moveStart(to date: Date) {
         let weekday = CalendarDay(start, in: timeZone).weekday
         if CalendarDay(date, in: timeZone).weekday != weekday { weekdays.remove(weekday) }
         if until < date { until = Self.aMonthAfter(date, in: timeZone) }
         if isAllDay {
-            let days = CalendarDay(start, in: timeZone).distance(to: CalendarDay(end, in: timeZone))
-            end = CalendarDay(date, in: timeZone).advanced(by: max(days, 0)).start(in: timeZone)
+            let days = CalendarDay(start, in: timeZone).distance(to: CalendarDay(lastDay, in: timeZone))
+            lastDay = CalendarDay(date, in: timeZone).advanced(by: max(days, 0)).start(in: timeZone)
         } else {
-            end = date.addingTimeInterval(max(end.timeIntervalSince(start), 0))
+            lastDay = date
         }
         start = date
+    }
+
+    /// Starts an unset custom end at the same time as the default preset.
+    public mutating func addCustomEnd() {
+        customEnd = EventDuration.thirtyMinutes.end(startingAt: start, customEnd: nil)
     }
 
     /// The weekdays a weekly series is shown with: those picked, and the
@@ -189,14 +180,15 @@ public struct EventForm: Equatable, Sendable {
                 eventID: eventID, title: title, details: details, location: location, workspaceRoom: workspaceRoom
             )
         }
-        let endMoment: CalendarMoment?
+        let endMoment: CalendarMoment
         if isAllDay {
             let first = CalendarDay(start, in: timeZone)
-            let last = CalendarDay(end, in: timeZone)
+            let last = CalendarDay(lastDay, in: timeZone)
             guard last >= first else { return nil }
             endMoment = .day(last.advanced(by: 1))
         } else {
-            endMoment = hasEnd ? .instant(end) : nil
+            guard let end = duration.end(startingAt: start, customEnd: customEnd) else { return nil }
+            endMoment = .instant(end)
         }
         return EventDraft(
             eventID: eventID,

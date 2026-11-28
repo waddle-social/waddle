@@ -58,6 +58,55 @@ final class EventsSnapshotTests: XCTestCase {
         )
     }
 
+    func testAgendaWithEventsUnderwayAndStartingSoon() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        let refresh = store.begin()
+        store.publish(events: [
+            CommunityEvent(
+                id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+                start: .instant(SampleSession.instant("2027-03-05T16:00:00+01:00")),
+                end: .instant(SampleSession.instant("2027-03-05T18:00:00+01:00"))
+            ),
+            SampleSession.gameNight,
+        ], refresh: refresh)
+        store.finish(failed: false, canManage: true)
+        sample.port.calendar.occurrences[SampleSession.gameNight.id] = [
+            SampleSession.gameNight(on: "2027-03-05T19:00:00+01:00", until: "2027-03-05T22:00:00+01:00"),
+        ]
+        let events = NavigationStack {
+            EventsView(
+                clock: SampleSession.instant("2027-03-05T17:00:00+01:00"),
+                selecting: SampleSession.selectedEventDay
+            )
+        }
+        try await assertScreenSnapshot(of: pinned(sample.host(events)), size: Self.screen)
+    }
+
+    func testNewEventWithTheDefaultDuration() async throws {
+        let sample = SampleSession()
+        var form = EventForm(on: SampleSession.selectedEventDay, now: SampleSession.eventsClock, timeZone: SampleSession.oslo)
+        form.title = "Design critique"
+        XCTAssertEqual(form.duration, .thirtyMinutes)
+        try await assertScreenSnapshot(
+            of: pinned(sample.host(EventEditorSheet(form: form))), size: Self.editor, asSheet: true
+        )
+    }
+
+    func testEditingAnEventWithACustomDuration() async throws {
+        let sample = SampleSession()
+        let event = CommunityEvent(
+            id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+            start: .instant(SampleSession.instant("2027-03-05T10:00:00+01:00")),
+            end: .instant(SampleSession.instant("2027-03-05T10:45:00+01:00"))
+        )
+        let form = EventForm(editing: event, now: SampleSession.eventsClock, timeZone: SampleSession.oslo)
+        XCTAssertEqual(form.duration, .custom)
+        try await assertScreenSnapshot(
+            of: pinned(sample.host(EventEditorSheet(form: form))), size: Self.editor, asSheet: true
+        )
+    }
+
     private func assertEvents(_ sample: SampleSession, testName: String = #function) async throws {
         let events = NavigationStack {
             EventsView(clock: SampleSession.eventsClock, selecting: SampleSession.selectedEventDay)

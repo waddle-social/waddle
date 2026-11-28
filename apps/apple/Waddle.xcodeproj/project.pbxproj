@@ -410,6 +410,7 @@
 		72AC2A52622C83BCA72CBC1E /* ComposerEmojiButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */; };
 		72BF2323DB6162CE85B3B904 /* FFIInbound+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7FB5AF7B9D4A6EE940FB440 /* FFIInbound+Events.swift */; };
 		72CDFC656763FEDCE9B3C6A0 /* CallReactionsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D977790CF58430C6CE7A850 /* CallReactionsOverlay.swift */; };
+		72F1467F1E399CC3E6EEE0C4 /* EventDurationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */; };
 		732FD319DF2653317D2F49D3 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66FCE4A2E446F8397C801AC /* SignInView.swift */; };
 		734C19E459C749D10F71A258 /* SettingsMessageOrderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */; };
 		7355CAB20544B36178D0F7D9 /* ComposerPasteContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E00651FCAAF785065B02539 /* ComposerPasteContent.swift */; };
@@ -877,6 +878,7 @@
 		ECD087DA082AB83A2FC8E538 /* CallFloatingSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9E297D815BDDA5996A4FD88 /* CallFloatingSnapshotTests.swift */; };
 		ED1E74B2407A48AE9AA1BCC6 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */; };
 		ED502C50B87BB729743286AF /* ConversationDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BC3620DC7095A2FBB42549 /* ConversationDetailsView.swift */; };
+		EDBB23094F0D6E9110982422 /* EventDurationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */; };
 		EDE1EF6091E72F2C9CCC4375 /* PeerSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77153D8945E831391049BFF9 /* PeerSharingSection.swift */; };
 		EDE44043376FFD1D40BAAE0B /* RoomManagementSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE1B270EB92BCD6313BCE33 /* RoomManagementSections.swift */; };
 		EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
@@ -1362,6 +1364,7 @@
 		E59EE209E5B4695E1D06D233 /* CallShortcutKeysTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallShortcutKeysTests.swift; sourceTree = "<group>"; };
 		E5E693082B761CBC48B8E7AE /* FFIInbound+Notify.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Notify.swift"; sourceTree = "<group>"; };
 		E5EB80193A96E8F2BC698C32 /* MessageAttachmentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAttachmentsView.swift; sourceTree = "<group>"; };
+		E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventDurationRows.swift; sourceTree = "<group>"; };
 		E72E154AC39A146AFA6A40E0 /* CallSettingsSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallSettingsSnapshotTests.swift; sourceTree = "<group>"; };
 		E7ACA7D569146655E5BCC497 /* FFIXmppPort+Events.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+Events.swift"; sourceTree = "<group>"; };
 		E81704B7DBD86ABF17B4778B /* FakePort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakePort.swift; sourceTree = "<group>"; };
@@ -2467,6 +2470,7 @@
 			isa = PBXGroup;
 			children = (
 				6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */,
+				E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */,
 				4FD3364EDD46C6BC806C8958 /* EventEditorParts.swift */,
 				B9EC4DD4A44AFCE3C7C39AD3 /* EventEditorSheet.swift */,
 				8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */,
@@ -2863,6 +2867,7 @@
 				1F9F2572E8FA76304F2E7682 /* EncryptedAttachmentView.swift in Sources */,
 				7600496F6FBAC6CB368C6220 /* EncryptedFileDownloader.swift in Sources */,
 				8664008B93095E14C304354A /* EventDetailSheet.swift in Sources */,
+				72F1467F1E399CC3E6EEE0C4 /* EventDurationRows.swift in Sources */,
 				B5E01FEDC9B9B8A708B104C0 /* EventEditorParts.swift in Sources */,
 				5AFA94C0F8AFB92F61A8294C /* EventEditorSheet.swift in Sources */,
 				5EBA8910814DD582CCBF6C34 /* EventReplyCard.swift in Sources */,
@@ -3326,6 +3331,7 @@
 				69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */,
 				C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */,
 				B5750785D1B02D35D2BAC85B /* EventDetailSheet.swift in Sources */,
+				EDBB23094F0D6E9110982422 /* EventDurationRows.swift in Sources */,
 				931FD6FD6BAE478301997F66 /* EventEditorParts.swift in Sources */,
 				6C05CDEEC2CC3CD7341BEC21 /* EventEditorSheet.swift in Sources */,
 				8DBF6088EA2475D63056580F /* EventReplyCard.swift in Sources */,
