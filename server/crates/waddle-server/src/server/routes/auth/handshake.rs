@@ -375,10 +375,16 @@ mod tests {
         AuthHandshakeStore::new(DbActor::spawn(DbActor::new(db)))
     }
 
+    fn test_tenant() -> waddle_broker_core::identity::TenantId {
+        waddle_broker_core::identity::TenantId::parse("example.test").expect("valid tenant id")
+    }
+
     fn make_pending(state: &str, created_minutes_ago: i64) -> PendingAuthorization {
         PendingAuthorization {
             state: state.to_string(),
+            tenant_id: test_tenant(),
             provider_id: "p".to_string(),
+            issuer: Some("https://idp.example.test".to_string()),
             nonce: "n".to_string(),
             code_verifier: "cv".to_string(),
             redirect_uri: "https://example.test/cb".to_string(),
@@ -495,6 +501,7 @@ mod tests {
         DeviceAuthorization {
             device_code: code.to_string(),
             user_code: format!("USER-{code}"),
+            tenant_id: test_tenant(),
             provider_id: "p".to_string(),
             expires_at: Utc::now() + Duration::minutes(expires_minutes_from_now),
             status: DeviceAuthStatus::Pending,

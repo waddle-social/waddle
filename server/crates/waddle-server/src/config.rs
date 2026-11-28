@@ -2380,10 +2380,6 @@ impl ServerConfig {
         }
     }
 
-    pub fn auth_enabled(&self) -> bool {
-        self.mode.auth_broker_allowed() && !self.auth.providers.is_empty()
-    }
-
     pub fn log_config(&self) {
         info!("Running in {} mode", self.mode);
         info!("Base URL: {}", self.base_url);
@@ -2391,13 +2387,16 @@ impl ServerConfig {
             "Per-process WebSocket connection limit: {}",
             self.max_websocket_connections.get()
         );
-        info!("Auth providers configured: {}", self.auth.providers.len());
+        info!(
+            "Server-wide auth providers (single-tenant mode; tenant manifests declare their own): {}",
+            self.auth.providers.len()
+        );
         info!(
             "HTTP auth broker: {}",
-            if self.auth_enabled() {
-                "enabled"
+            if self.mode.auth_broker_allowed() {
+                "allowed"
             } else {
-                "disabled"
+                "disabled by server mode"
             }
         );
     }

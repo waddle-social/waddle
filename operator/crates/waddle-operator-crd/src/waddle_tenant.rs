@@ -7,7 +7,7 @@ use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::dependencies::{LocalObjectRef, SecretKeyRef};
+use crate::dependencies::LocalObjectRef;
 use crate::identifiers::{ResourceName, XmppDomain};
 use crate::server_config::IngressSpec;
 use crate::waddle_server::conditions_schema;
@@ -256,9 +256,10 @@ pub struct WaddleTenantSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<String>,
 
-    /// Optional same-namespace Secret key holding `WADDLE_AUTH_PROVIDERS_JSON` for this tenant.
+    /// Sign-in providers for this tenant. A tenant without providers has
+    /// sign-in disabled; it never inherits server-wide providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_providers_secret_ref: Option<SecretKeyRef>,
+    pub auth: Option<TenantAuthSpec>,
 
     /// Optional per-tenant connection, room, storage, and inference spend quotas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,6 +293,116 @@ impl WaddleTenantSpec {
             }
         }
         vec![self.tenant_id.clone()]
+    }
+}
+
+/// Sign-in configuration for a `WaddleTenant`.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantAuthSpec {
+    /// OIDC or OAuth2 providers users of this tenant can sign in with.
+    #[serde(default)]
+    #[schemars(length(max = 8))]
+    pub providers: Vec<TenantAuthProvider>,
+}
+
+/// Protocol spoken by a tenant sign-in provider.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenantAuthProviderKind {
+    /// OpenID Connect (discovery, ID token).
+    #[serde(rename = "oidc")]
+    Oidc,
+    /// Plain OAuth2 (token + userinfo endpoints).
+    #[serde(rename = "oauth2")]
+    OAuth2,
+}
+
+/// A public (PKCE) sign-in client for a tenant. Client secrets are not
+/// supported: a static client authenticates with PKCE only, and a dynamically
+/// registered client uses the method its provider assigns.
+#[derive(JsonSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantAuthProvider {
+    /// Provider identifier, unique within the tenant (used in sign-in URLs).
+    #[schemars(length(min = 1, max = 64))]
+    pub id: String,
+    /// Name shown on the sign-in button.
+    #[schemars(length(min = 1, max = 128))]
+    pub display_name: String,
+    /// Provider protocol.
+    pub kind: TenantAuthProviderKind,
+    /// Register a client with the provider at runtime (RFC 7591) instead of
+    /// using `clientId`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dynamic_client_registration: bool,
+    /// Pre-registered public client ID (required unless
+    /// `dynamicClientRegistration` is set).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(length(max = 256))]
+    pub client_id: String,
+    /// Bind tokens with DPoP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_dpop: bool,
+    /// Requested scopes (OIDC providers must include `openid`).
+    #[schemars(length(min = 1, max = 16), inner(length(max = 128)))]
+    pub scopes: Vec<String>,
+    /// HTTPS issuer URL (OIDC discovery base).
+    #[schemars(length(max = 512))]
+    pub issuer: String,
+    /// Authorization endpoint override (required for `oauth2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512))]
+    pub authorization_endpoint: Option<String>,
+    /// Token endpoint override (required for `oauth2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512))]
+    pub token_endpoint: Option<String>,
+    /// Userinfo endpoint override (required for `oauth2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512))]
+    pub userinfo_endpoint: Option<String>,
+    /// JWKS URI override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 512))]
+    pub jwks_uri: Option<String>,
+    /// Claim holding the stable subject identifier (default `sub`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
+    pub subject_claim: Option<String>,
+    /// Claim used as the username / XMPP localpart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
+    pub username_claim: Option<String>,
+    /// Claim holding the email address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
+    pub email_claim: Option<String>,
+}
+
+impl TenantAuthProvider {
+    fn is_valid(&self) -> bool {
+        let non_empty = |v: &str| !v.trim().is_empty();
+        let https = |v: &str| v.starts_with("https://") && v.len() > "https://".len();
+        let optional_https = |v: &Option<String>| v.as_deref().is_none_or(https);
+        let kind_ok = match self.kind {
+            TenantAuthProviderKind::Oidc => self.scopes.iter().any(|s| s == "openid"),
+            TenantAuthProviderKind::OAuth2 => {
+                self.authorization_endpoint.is_some()
+                    && self.token_endpoint.is_some()
+                    && self.userinfo_endpoint.is_some()
+            }
+        };
+        non_empty(&self.id)
+            && non_empty(&self.display_name)
+            && (self.dynamic_client_registration || non_empty(&self.client_id))
+            && !self.scopes.is_empty()
+            && self.scopes.iter().all(|s| non_empty(s))
+            && https(&self.issuer)
+            && optional_https(&self.authorization_endpoint)
+            && optional_https(&self.token_endpoint)
+            && optional_https(&self.userinfo_endpoint)
+            && optional_https(&self.jwks_uri)
+            && kind_ok
     }
 }
 
@@ -360,8 +471,10 @@ pub enum TenantValidationViolation {
     InvalidServerRefName,
     /// `tenantId` is not a valid canonical lower-case DNS domain.
     InvalidTenantId,
-    /// `authProvidersSecretRef` contains an invalid Secret name or empty key.
-    InvalidAuthProvidersSecretRef,
+    /// An `auth.providers` entry is incomplete or uses a non-HTTPS URL.
+    InvalidAuthProvider,
+    /// `auth.providers` contains duplicate provider ids.
+    DuplicateAuthProviderId,
     /// One or more `owners` entries were empty or whitespace-only.
     EmptyOwnerEntry,
     /// One or more `ingress.hostnames` entries failed canonical lower-case FQDN validation.
@@ -385,10 +498,15 @@ impl fmt::Display for TenantValidationViolation {
                     "spec.tenantId must be a valid canonical lower-case DNS domain"
                 )
             }
-            Self::InvalidAuthProvidersSecretRef => write!(
+            Self::InvalidAuthProvider => write!(
                 f,
-                "spec.authProvidersSecretRef must specify a valid Secret name and non-empty key"
+                "spec.auth.providers entries need an id, displayName, scopes (openid for oidc), \
+                 an HTTPS issuer, a clientId unless dynamicClientRegistration is set, and the \
+                 authorization/token/userinfo endpoints for oauth2"
             ),
+            Self::DuplicateAuthProviderId => {
+                write!(f, "spec.auth.providers ids must be unique")
+            }
             Self::EmptyOwnerEntry => {
                 write!(
                     f,
@@ -455,9 +573,13 @@ pub fn validate_tenant_spec(spec: &WaddleTenantSpec) -> Result<XmppDomain, Tenan
         }
     };
 
-    if let Some(secret_ref) = &spec.auth_providers_secret_ref {
-        if ResourceName::try_new(&secret_ref.name).is_err() || secret_ref.key.trim().is_empty() {
-            violations.push(TenantValidationViolation::InvalidAuthProvidersSecretRef);
+    if let Some(auth) = &spec.auth {
+        if auth.providers.iter().any(|p| !p.is_valid()) {
+            violations.push(TenantValidationViolation::InvalidAuthProvider);
+        }
+        let mut ids = BTreeSet::new();
+        if !auth.providers.iter().all(|p| ids.insert(p.id.as_str())) {
+            violations.push(TenantValidationViolation::DuplicateAuthProviderId);
         }
     }
 
@@ -636,6 +758,30 @@ mod tests {
 
     use super::*;
 
+    fn rka_provider() -> TenantAuthProvider {
+        TenantAuthProvider {
+            id: "rawkode-academy".to_owned(),
+            display_name: "Rawkode Academy".to_owned(),
+            kind: TenantAuthProviderKind::Oidc,
+            dynamic_client_registration: false,
+            client_id: "waddle-rawkode-chat".to_owned(),
+            require_dpop: false,
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
+            issuer: "https://id.rawkode.academy".to_owned(),
+            authorization_endpoint: None,
+            token_endpoint: None,
+            userinfo_endpoint: None,
+            jwks_uri: None,
+            subject_claim: None,
+            username_claim: Some("preferred_username".to_owned()),
+            email_claim: Some("email".to_owned()),
+        }
+    }
+
     fn sample_tenant_spec() -> WaddleTenantSpec {
         WaddleTenantSpec {
             server_ref: LocalObjectRef {
@@ -648,7 +794,9 @@ mod tests {
                 "icepuma".to_owned(),
                 "randax".to_owned(),
             ],
-            auth_providers_secret_ref: None,
+            auth: Some(TenantAuthSpec {
+                providers: vec![rka_provider()],
+            }),
             quotas: Some(TenantQuotasSpec {
                 max_concurrent_connections: Some(1000),
                 max_rooms: Some(500),
@@ -740,9 +888,11 @@ mod tests {
         bad.server_ref.name = "INVALID_NAME".to_owned();
         bad.tenant_id = "https://waddle.social".to_owned();
         bad.owners.push("   ".to_owned());
-        bad.auth_providers_secret_ref = Some(SecretKeyRef {
-            name: "BAD".to_owned(),
-            key: "".to_owned(),
+        let mut no_openid = rka_provider();
+        no_openid.id = "no-openid".to_owned();
+        no_openid.scopes = vec!["profile".to_owned()];
+        bad.auth = Some(TenantAuthSpec {
+            providers: vec![rka_provider(), rka_provider(), no_openid],
         });
 
         let report = validate_tenant_spec(&bad).expect_err("invalid tenant spec must fail");
@@ -757,7 +907,56 @@ mod tests {
             .contains(&TenantValidationViolation::EmptyOwnerEntry));
         assert!(report
             .violations()
-            .contains(&TenantValidationViolation::InvalidAuthProvidersSecretRef));
+            .contains(&TenantValidationViolation::InvalidAuthProvider));
+        assert!(report
+            .violations()
+            .contains(&TenantValidationViolation::DuplicateAuthProviderId));
+    }
+
+    #[test]
+    fn tenant_auth_provider_validation_rejects_incomplete_or_insecure_providers() {
+        type Mutation = fn(&mut TenantAuthProvider);
+        let cases: Vec<(&str, Mutation)> = vec![
+            ("plain http issuer", |p| {
+                p.issuer = "http://id.rawkode.academy".to_owned()
+            }),
+            ("static client without client id", |p| p.client_id.clear()),
+            ("empty display name", |p| p.display_name = " ".to_owned()),
+            ("oauth2 without endpoints", |p| {
+                p.kind = TenantAuthProviderKind::OAuth2;
+            }),
+            ("insecure jwks override", |p| {
+                p.jwks_uri = Some("http://id.rawkode.academy/jwks".to_owned());
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut provider = rka_provider();
+            mutate(&mut provider);
+            assert!(!provider.is_valid(), "{name} must be rejected");
+        }
+
+        let mut dcr = rka_provider();
+        dcr.client_id.clear();
+        dcr.dynamic_client_registration = true;
+        assert!(dcr.is_valid(), "dynamic registration needs no client id");
+    }
+
+    #[test]
+    fn tenant_auth_provider_serializes_to_the_server_manifest_shape() {
+        let json = serde_json::to_value(rka_provider()).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "rawkode-academy",
+                "displayName": "Rawkode Academy",
+                "kind": "oidc",
+                "clientId": "waddle-rawkode-chat",
+                "scopes": ["openid", "profile", "email"],
+                "issuer": "https://id.rawkode.academy",
+                "usernameClaim": "preferred_username",
+                "emailClaim": "email"
+            })
+        );
     }
 
     fn enabled_server_ingress() -> IngressSpec {

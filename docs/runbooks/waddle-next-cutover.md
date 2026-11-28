@@ -212,7 +212,7 @@ Expected:
 - `WaddleServer/waddle`: `status.phase == Ready`, `status.readySummary == 1/1`, OpenFGA + Turso + Secrets dependencies all `Ready`.
 - `WaddleTenant/waddle-social`: `status.phase == Ready`, non-empty `status.openfgaStoreId` and `status.openfgaModelId`.
 - `ConfigMap/waddle-config` sets `WADDLE_TENANTS_DIR=/etc/waddle/tenants`, where `ConfigMap/waddle-tenants` is mounted read-only into `deploy/waddle`.
-- Both the per-tenant projection ConfigMap (`waddle-tenant-waddle-social`) and the server-aggregated ConfigMap (`waddle-tenants`) contain key `waddle.social.json` holding a camelCase JSON document (`TenantProjectionSpec`) with `"tenantId": "waddle.social"`, `"serverName": "waddle"`, `"placementMode": "SharedPool"`, `"owners"`, `"openfgaStoreId"`, `"openfgaModelId"`, `"authProvidersSecretRef"`, `"quotas"`, and `"extensions"`.
+- Both the per-tenant projection ConfigMap (`waddle-tenant-waddle-social`) and the server-aggregated ConfigMap (`waddle-tenants`) contain key `waddle.social.json` holding a camelCase JSON document (`TenantProjectionSpec`) with `"tenantId": "waddle.social"`, `"serverName": "waddle"`, `"placementMode": "SharedPool"`, `"owners"`, `"openfgaStoreId"`, `"openfgaModelId"`, `"authProviders"` (the tenant's `spec.auth.providers`; multi-tenant servers ignore `WADDLE_AUTH_PROVIDERS_JSON`), `"quotas"`, and `"extensions"`.
 
 ### 3.4 Verify OpenFGA store and authorization model
 

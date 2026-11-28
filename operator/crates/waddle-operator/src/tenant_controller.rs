@@ -14,9 +14,9 @@ use kube::{Client, Resource, ResourceExt};
 use serde::Serialize;
 use serde_json::json;
 use waddle_operator_crd::{
-    validate_tenant_ingress_against_server, validate_tenant_spec, AuthzBackendKind, SecretKeyRef,
-    TenantExtensionsSpec, TenantPlacementMode, TenantQuotasSpec, WaddleServer, WaddleServerPhase,
-    WaddleTenant, WaddleTenantPhase, WaddleTenantStatus,
+    validate_tenant_ingress_against_server, validate_tenant_spec, AuthzBackendKind,
+    TenantAuthProvider, TenantExtensionsSpec, TenantPlacementMode, TenantQuotasSpec, WaddleServer,
+    WaddleServerPhase, WaddleTenant, WaddleTenantPhase, WaddleTenantStatus,
 };
 
 use crate::error::OperatorError;
@@ -70,9 +70,9 @@ pub struct TenantProjectionSpec {
     /// Provisioned immutable OpenFGA authorization model ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openfga_model_id: Option<String>,
-    /// Optional reference to per-tenant auth providers Secret.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_providers_secret_ref: Option<SecretKeyRef>,
+    /// Tenant sign-in providers (omitted when none: sign-in is disabled).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_providers: Vec<TenantAuthProvider>,
     /// Optional tenant quotas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quotas: Option<TenantQuotasSpec>,
@@ -441,7 +441,12 @@ pub async fn reconcile_tenant(
         owners: wt.spec.owners.clone(),
         openfga_store_id: store_id.clone(),
         openfga_model_id: model_id.clone(),
-        auth_providers_secret_ref: wt.spec.auth_providers_secret_ref.clone(),
+        auth_providers: wt
+            .spec
+            .auth
+            .as_ref()
+            .map(|auth| auth.providers.clone())
+            .unwrap_or_default(),
         quotas: wt.spec.quotas.clone(),
         extensions: wt.spec.extensions.clone(),
         hostnames: resolved_ingress.hostnames.clone(),

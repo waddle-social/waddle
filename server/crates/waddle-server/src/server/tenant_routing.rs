@@ -30,6 +30,7 @@ use waddle_broker_core::identity::TenantId;
 use waddle_broker_core::permission::PermissionBackend;
 use waddle_xmpp::identity::CanonicalDomain;
 
+use crate::auth::ProviderRegistry;
 use crate::db::tenant_registry::ServerTenantRegistry;
 use crate::server::routes::websocket::XmppServiceDomains;
 use crate::server::tenancy_bootstrap::{
@@ -194,6 +195,8 @@ pub enum TenantRoutingError {
         hostname: String,
         reason: String,
     },
+    #[error("invalid auth providers for tenant '{tenant_id}': {reason}")]
+    InvalidAuthProviders { tenant_id: String, reason: String },
     #[error(
         "duplicate hostname '{hostname}' claimed by both '{existing_tenant}' and '{conflicting_tenant}'"
     )]
@@ -210,6 +213,10 @@ pub struct TenantRoutingTable {
     by_host: HashMap<String, ResolvedTenant>,
     tenants: HashSet<TenantId>,
     allowed_origins: HashSet<Origin>,
+    /// Sign-in providers declared by each tenant manifest. Swapped together
+    /// with the host map so a request never sees hosts and providers from
+    /// different manifest generations.
+    auth_providers: HashMap<TenantId, Arc<ProviderRegistry>>,
 }
 
 impl TenantRoutingTable {
@@ -227,6 +234,12 @@ impl TenantRoutingTable {
 
     pub fn host_count(&self) -> usize {
         self.by_host.len()
+    }
+
+    /// Sign-in providers declared for `tenant_id`, or `None` when its
+    /// manifest declares none.
+    pub fn auth_providers(&self, tenant_id: &TenantId) -> Option<Arc<ProviderRegistry>> {
+        self.auth_providers.get(tenant_id).map(Arc::clone)
     }
 }
 
@@ -257,6 +270,7 @@ impl TenantHostResolver {
                 by_host,
                 tenants,
                 allowed_origins,
+                auth_providers: HashMap::new(),
             })),
         }
     }
@@ -274,6 +288,7 @@ impl TenantHostResolver {
                 by_host: HashMap::new(),
                 tenants: HashSet::new(),
                 allowed_origins: HashSet::new(),
+                auth_providers: HashMap::new(),
             })),
         };
         let table = resolver.build_table(manifests)?;
@@ -417,6 +432,7 @@ impl TenantHostResolver {
         let mut by_host: HashMap<String, ResolvedTenant> = HashMap::new();
         let mut tenants: HashSet<TenantId> = HashSet::new();
         let mut allowed_origins: HashSet<Origin> = HashSet::new();
+        let mut auth_providers: HashMap<TenantId, Arc<ProviderRegistry>> = HashMap::new();
 
         for spec in manifests {
             let tenant_id = TenantId::parse(&spec.tenant_id).map_err(|err| {
@@ -458,6 +474,15 @@ impl TenantHostResolver {
             };
 
             tenants.insert(tenant_id.clone());
+
+            if !spec.auth_providers.is_empty() {
+                let registry = ProviderRegistry::try_from_tenant_specs(spec.auth_providers.clone())
+                    .map_err(|err| TenantRoutingError::InvalidAuthProviders {
+                        tenant_id: spec.tenant_id.clone(),
+                        reason: err.to_string(),
+                    })?;
+                auth_providers.insert(tenant_id.clone(), Arc::new(registry));
+            }
 
             for raw_host in raw_hosts {
                 let canonical_host = normalize_manifest_hostname(raw_host).map_err(|reason| {
@@ -509,6 +534,7 @@ impl TenantHostResolver {
             by_host,
             tenants,
             allowed_origins,
+            auth_providers,
         })
     }
 }

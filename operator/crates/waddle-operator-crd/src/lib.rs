@@ -41,8 +41,9 @@ pub use waddle_server::{
 };
 pub use waddle_tenant::{
     validate_tenant_ingress_against_server, validate_tenant_spec, ResolvedIngressMode,
-    ResolvedTenantIngress, TenantExtensionsSpec, TenantIngressError, TenantIngressMode,
-    TenantIngressSpec, TenantPlacementMode, TenantQuotasSpec, TenantValidationReport,
-    TenantValidationViolation, WaddleTenant, WaddleTenantPhase, WaddleTenantSpec,
-    WaddleTenantStatus, BUILTIN_RESERVED_SUBDOMAINS,
+    ResolvedTenantIngress, TenantAuthProvider, TenantAuthProviderKind, TenantAuthSpec,
+    TenantExtensionsSpec, TenantIngressError, TenantIngressMode, TenantIngressSpec,
+    TenantPlacementMode, TenantQuotasSpec, TenantValidationReport, TenantValidationViolation,
+    WaddleTenant, WaddleTenantPhase, WaddleTenantSpec, WaddleTenantStatus,
+    BUILTIN_RESERVED_SUBDOMAINS,
 };

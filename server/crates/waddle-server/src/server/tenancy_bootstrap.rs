@@ -34,6 +34,11 @@ pub struct TenantManifestSpec {
     pub placement_mode: Option<String>,
     #[serde(default)]
     pub hostnames: Vec<String>,
+    /// Sign-in providers for this tenant. In multi-tenant mode a tenant
+    /// without providers has sign-in disabled; it never inherits the
+    /// server-wide `WADDLE_AUTH_PROVIDERS_JSON` set.
+    #[serde(default)]
+    pub auth_providers: Vec<crate::auth::TenantAuthProviderSpec>,
 }
 
 /// Computes a deterministic SHA-256 digest over all sorted `*.json` files in

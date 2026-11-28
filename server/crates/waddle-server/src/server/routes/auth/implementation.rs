@@ -20,11 +20,17 @@ use super::{DbExecute, DbQueryOne};
 use super::{Deserialize, Serialize};
 use super::{Extension, Query, State};
 use super::{IntoResponse, Json, Redirect, Response};
+use waddle_broker_core::identity::TenantId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingAuthorization {
     pub state: String,
+    /// Tenant the sign-in started on; the callback must arrive on it.
+    pub tenant_id: TenantId,
     pub provider_id: String,
+    /// Issuer of the provider at start time. The callback refuses to
+    /// finish if a manifest reload has since changed it.
+    pub issuer: Option<String>,
     pub nonce: String,
     pub code_verifier: String,
     pub redirect_uri: String,
@@ -89,6 +95,9 @@ impl BrowserSessionTransport {
 pub struct DeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
+    /// Tenant the device code was issued on; only that tenant may verify
+    /// or approve it.
+    pub tenant_id: TenantId,
     pub provider_id: String,
     pub expires_at: DateTime<Utc>,
     pub status: DeviceAuthStatus,
@@ -351,9 +360,13 @@ pub(in crate::server::routes::auth) async fn load_avatar_url(
     }
 }
 
-#[instrument(skip(state))]
-pub async fn list_providers_handler(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
-    (StatusCode::OK, Json(state.providers.list()))
+#[instrument(skip(state, tenant))]
+pub async fn list_providers_handler(
+    State(state): State<Arc<AuthState>>,
+    tenant: Option<Extension<ResolvedTenant>>,
+) -> impl IntoResponse {
+    let tenant = state.tenant_or_fallback(tenant);
+    (StatusCode::OK, Json(state.providers_for(&tenant).list()))
 }
 
 #[instrument(skip(state, tenant, query))]
@@ -366,7 +379,8 @@ pub async fn start_handler(
     let trusted_origins = state
         .trusted_web_origins
         .with_tenant_base(&tenant.public_base_url);
-    let provider = match state.providers.get(&query.provider) {
+    let providers = state.providers_for(&tenant);
+    let provider = match providers.get(&query.provider) {
         Some(p) => p,
         None => {
             record_auth_failure("unknown", None, AuthFailure::AuthorizationInvalidClient);

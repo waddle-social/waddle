@@ -24,7 +24,10 @@ pub type ProfilePublishHook = Arc<dyn Fn(jid::BareJid, ProfileSource) + Send + S
 pub struct AuthState {
     pub session_manager: SessionManager,
     pub identity_service: IdentityService,
-    pub providers: ProviderRegistry,
+    /// Providers from `WADDLE_AUTH_PROVIDERS_JSON`. Used only in
+    /// single-tenant mode; multi-tenant requests resolve providers from
+    /// their tenant manifest via [`Self::providers_for`].
+    pub single_tenant_providers: Arc<ProviderRegistry>,
     pub base_url: String,
     /// Where a browser sign-in may return to; see
     /// [`crate::auth::redirect::TrustedWebOrigins`].
@@ -67,8 +70,10 @@ impl AuthState {
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         let identity_service = IdentityService::new(app_state.db_pool.global_actor().clone());
-        let providers = ProviderRegistry::try_new(server_config.auth.providers.clone())
-            .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
+        let single_tenant_providers = Arc::new(
+            ProviderRegistry::try_new(server_config.auth.providers.clone())
+                .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e)),
+        );
 
         let xmpp_domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
@@ -107,7 +112,7 @@ impl AuthState {
         Self {
             session_manager,
             identity_service,
-            providers,
+            single_tenant_providers,
             base_url,
             trusted_web_origins: server_config.trusted_web_origins.clone(),
             public_xmpp_websocket_url: public_xmpp_websocket_url.clone(),
@@ -134,6 +139,20 @@ impl AuthState {
         }
     }
 
+    /// Sign-in providers for `tenant`. In multi-tenant mode these come only
+    /// from the tenant's manifest (none declared means sign-in is disabled);
+    /// in single-tenant mode they come from `WADDLE_AUTH_PROVIDERS_JSON`.
+    pub fn providers_for(&self, tenant: &ResolvedTenant) -> Arc<ProviderRegistry> {
+        if !self.tenant_resolver.is_multi_tenant() {
+            return Arc::clone(&self.single_tenant_providers);
+        }
+        self.tenant_resolver
+            .snapshot()
+            .ok()
+            .and_then(|table| table.auth_providers(&tenant.tenant_id))
+            .unwrap_or_default()
+    }
+
     /// Returns `true` when `user_jid` belongs to `tenant` in multi-tenant mode
     /// (enforcing strict cross-tenant credential isolation), or unconditionally
     /// in single-tenant mode where only one deployment exists.
@@ -158,7 +177,14 @@ impl AuthState {
         discovery: &oidc::OidcDiscovery,
         redirect_uri: &str,
     ) -> Result<oidc::DynamicClientRegistration, AuthError> {
-        let cache_key = format!("{}\0{}", provider.id, redirect_uri);
+        // Keyed by issuer too: a manifest reload may point the same provider
+        // id at a different issuer, whose clients are not interchangeable.
+        let cache_key = format!(
+            "{}\0{}\0{}",
+            provider.id,
+            provider.issuer.as_deref().unwrap_or_default(),
+            redirect_uri
+        );
         if let Some(cached) = self.dynamic_oidc_clients.get(&cache_key) {
             return Ok(cached.clone());
         }
@@ -324,7 +350,9 @@ impl AuthState {
         self.auth_handshake
             .insert_pending(&PendingAuthorization {
                 state,
+                tenant_id: tenant.tenant_id.clone(),
                 provider_id: provider.id.clone(),
+                issuer: provider.issuer.clone(),
                 nonce,
                 code_verifier,
                 redirect_uri,
