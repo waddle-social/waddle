@@ -6,7 +6,7 @@ struct EventReplyCard: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.locale) private var locale
     let event: CommunityEvent
-    @State private var errorMessage: String?
+    @State private var replyAction = EventReplyAction(feedback: .inline)
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.m) {
@@ -21,14 +21,10 @@ struct EventReplyCard: View {
                 }
             }
             HuddleSegmentedControl(
-                selection: selection,
+                selection: replyAction.selection(for: event.id, in: session),
                 segments: EventReply.allCases.map { .init(value: $0, title: EventsCopy.label(for: $0)) }
             )
-            if let errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle")
-                    .huddleText(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Colors.dangerText)
-            }
+            replyAction.inlineFailure
             HuddleDivider()
             replies
         }
@@ -36,24 +32,6 @@ struct EventReplyCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .huddleSurface(.card, radius: Theme.Radius.card)
         .environment(\.huddleGround, Theme.Colors.surface)
-    }
-
-    /// The user's reply. Choosing it again keeps it.
-    private var selection: Binding<EventReply?> {
-        Binding(
-            get: { session.events.myReply(to: event.id) },
-            set: { reply in
-                guard let reply else { return }
-                errorMessage = nil
-                Task {
-                    do {
-                        try await session.reply(reply, to: event.id)
-                    } catch {
-                        errorMessage = ActionErrorCopy.message(for: error, fallback: "Couldn't send your answer. Try again.")
-                    }
-                }
-            }
-        )
     }
 
     @ViewBuilder

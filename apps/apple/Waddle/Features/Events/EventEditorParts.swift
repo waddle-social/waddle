@@ -1,7 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// All day, start and end.
+/// All day, start and duration or end date.
 struct EventWhenCard: View {
     @Binding var form: EventForm
 
@@ -22,7 +22,15 @@ struct EventWhenCard: View {
                         .datePickerStyle(.compact)
                 }
                 HuddleDivider()
-                EventEditorRow("Ends") { end }
+                if form.isAllDay {
+                    EventEditorRow("Ends") {
+                        DatePicker("Ends", selection: $form.lastDay, in: form.start..., displayedComponents: [.date])
+                            .labelsHidden()
+                            .datePickerStyle(.compact)
+                    }
+                } else {
+                    EventDurationRows(form: $form)
+                }
                 if form.bringsBackCancelledDates() {
                     HuddleDivider()
                     Label("Moving the start brings back the dates cancelled in this series.", systemImage: "info.circle")
@@ -46,35 +54,6 @@ struct EventWhenCard: View {
 
     private var start: Binding<Date> {
         Binding(get: { form.start }, set: { form.moveStart(to: $0) })
-    }
-
-    @ViewBuilder
-    private var end: some View {
-        if form.isAllDay || form.hasEnd {
-            HStack(spacing: Theme.Spacing.s) {
-                DatePicker("Ends", selection: $form.end, in: form.start..., displayedComponents: components)
-                    .labelsHidden()
-                    .datePickerStyle(.compact)
-                if !form.isAllDay {
-                    Button {
-                        form.hasEnd = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(Theme.Colors.fgSoft)
-                    }
-                    .buttonStyle(.plain)
-                    .huddleTouchTarget()
-                    .help("No end time")
-                    .accessibilityLabel(Text("Remove end time"))
-                }
-            }
-        } else {
-            Button("Add end time") {
-                form.end = form.start.addingTimeInterval(3600)
-                form.hasEnd = true
-            }
-            .buttonStyle(.huddle(size: .small))
-        }
     }
 }
 

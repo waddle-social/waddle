@@ -3,8 +3,8 @@ import XCTest
 @testable import Waddle
 @testable import WaddleKit
 
-/// Night and Daylight goldens for Events: the month with its agenda, the
-/// calendar with nothing planned, a repeating event open, and the editor
+/// Night and Daylight goldens for Events: the month with its agenda, seven
+/// days with and without events, a repeating event open, and the editor
 /// with Weekly picked. These screens have no design frame; they are drawn
 /// from the styleguide's components. Dates are shown in Oslo, in British
 /// English with weeks starting on Monday, whatever the machine is set to.
@@ -40,6 +40,79 @@ final class EventsSnapshotTests: XCTestCase {
         try await assertEvents(sample)
     }
 
+    func testEventsInSevenDays() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        let refresh = store.begin()
+        store.publish(events: [
+            CommunityEvent(
+                id: "offsite", uid: "offsite", title: "Winter offsite", location: "Geilo",
+                organizer: SampleSession.priya,
+                start: .day(CalendarDay(year: 2027, month: 3, day: 2)),
+                end: .day(CalendarDay(year: 2027, month: 3, day: 5))
+            ),
+            CommunityEvent(
+                id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+                start: .instant(SampleSession.instant("2027-03-03T10:00:00+01:00"))
+            ),
+        ], refresh: refresh)
+        store.finish(failed: false, canManage: true)
+        try await assertEvents(sample, showing: .week)
+    }
+
+    func testSevenDaysWithNothingScheduled() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        _ = store.begin()
+        store.finish(failed: false, canManage: true)
+        try await assertEvents(sample, showing: .week)
+    }
+
+    func testSevenDaysWithNoMatchingReplies() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        // Book club falls on the seventh day, and Ana hasn't replied.
+        try await assertEvents(
+            sample, filtering: .goingOrMaybe, showing: .week,
+            clock: SampleSession.instant("2027-04-10T09:00:00+02:00")
+        )
+    }
+
+    func testAgendaFilteredToGoingOrMaybe() async throws {
+        let sample = SampleSession()
+        sample.seedEvents()
+        try await assertEvents(
+            sample, selecting: CalendarDay(year: 2027, month: 3, day: 3), filtering: .goingOrMaybe
+        )
+    }
+
+    func testAgendaWithNoMatchingReplies() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        try await assertEvents(
+            sample, selecting: CalendarDay(year: 2027, month: 4, day: 3), filtering: .goingOrMaybe
+        )
+    }
+
+    func testAgendaCardWithRSVP() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        let occurrence = SampleSession.gameNight(on: "2027-03-05T19:00:00+01:00", until: "2027-03-05T22:00:00+01:00")
+        let day = SampleSession.selectedEventDay
+        let now = SampleSession.instant("2027-03-05T12:00:00+01:00")
+        let agenda = ScrollView {
+            EventsAgenda(
+                occurrences: [occurrence], from: day, today: day, now: now,
+                undated: [], filter: .all, onOpen: { _ in }
+            ) {
+                EmptyView()
+            }
+            .padding(Theme.Spacing.l)
+        }
+        .background(Theme.Colors.bg)
+        try await assertScreenSnapshot(of: pinned(sample.host(agenda)), size: Self.screen)
+    }
+
     func testARepeatingEvent() async throws {
         let sample = SampleSession()
         sample.seedEvents()
@@ -58,9 +131,65 @@ final class EventsSnapshotTests: XCTestCase {
         )
     }
 
-    private func assertEvents(_ sample: SampleSession, testName: String = #function) async throws {
+    func testAgendaWithEventsUnderwayAndStartingSoon() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        let refresh = store.begin()
+        store.publish(events: [
+            CommunityEvent(
+                id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+                start: .instant(SampleSession.instant("2027-03-05T16:00:00+01:00")),
+                end: .instant(SampleSession.instant("2027-03-05T18:00:00+01:00"))
+            ),
+            SampleSession.gameNight,
+        ], refresh: refresh)
+        store.finish(failed: false, canManage: true)
+        sample.port.calendar.occurrences[SampleSession.gameNight.id] = [
+            SampleSession.gameNight(on: "2027-03-05T19:00:00+01:00", until: "2027-03-05T22:00:00+01:00"),
+        ]
         let events = NavigationStack {
-            EventsView(clock: SampleSession.eventsClock, selecting: SampleSession.selectedEventDay)
+            EventsView(
+                clock: SampleSession.instant("2027-03-05T17:00:00+01:00"),
+                selecting: SampleSession.selectedEventDay
+            )
+        }
+        try await assertScreenSnapshot(of: pinned(sample.host(events)), size: Self.screen)
+    }
+
+    func testNewEventWithTheDefaultDuration() async throws {
+        let sample = SampleSession()
+        var form = EventForm(on: SampleSession.selectedEventDay, now: SampleSession.eventsClock, timeZone: SampleSession.oslo)
+        form.title = "Design critique"
+        XCTAssertEqual(form.duration, .thirtyMinutes)
+        try await assertScreenSnapshot(
+            of: pinned(sample.host(EventEditorSheet(form: form))), size: Self.editor, asSheet: true
+        )
+    }
+
+    func testEditingAnEventWithACustomDuration() async throws {
+        let sample = SampleSession()
+        let event = CommunityEvent(
+            id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+            start: .instant(SampleSession.instant("2027-03-05T10:00:00+01:00")),
+            end: .instant(SampleSession.instant("2027-03-05T10:45:00+01:00"))
+        )
+        let form = EventForm(editing: event, now: SampleSession.eventsClock, timeZone: SampleSession.oslo)
+        XCTAssertEqual(form.duration, .custom)
+        try await assertScreenSnapshot(
+            of: pinned(sample.host(EventEditorSheet(form: form))), size: Self.editor, asSheet: true
+        )
+    }
+
+    private func assertEvents(
+        _ sample: SampleSession,
+        selecting day: CalendarDay? = nil,
+        filtering filter: EventFilter = .all,
+        showing mode: EventsView.Mode = .month,
+        clock: Date = SampleSession.eventsClock,
+        testName: String = #function
+    ) async throws {
+        let events = NavigationStack {
+            EventsView(clock: clock, selecting: day ?? SampleSession.selectedEventDay, filtering: filter, showing: mode)
         }
         try await assertScreenSnapshot(of: pinned(sample.host(events)), size: Self.screen, testName: testName)
     }

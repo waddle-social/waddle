@@ -212,6 +212,10 @@ public struct EventOccurrence: Hashable, Sendable, Identifiable {
     /// it is on the clock (one that ends at midnight does not reach the
     /// next day); an all-day one its dates, the end being exclusive.
     public func days(in timeZone: TimeZone) -> ClosedRange<CalendarDay> {
+        days(in: timeZone, endingAt: end)
+    }
+
+    func days(in timeZone: TimeZone, endingAt end: CalendarMoment?) -> ClosedRange<CalendarDay> {
         let first = start.day(in: timeZone)
         let last: CalendarDay
         switch (start, end) {
@@ -228,6 +232,10 @@ public struct EventOccurrence: Hashable, Sendable, Identifiable {
     /// Whether any of it falls in `range`; an instant counts at the start
     /// of the range.
     public func overlaps(_ range: Range<Date>, in timeZone: TimeZone) -> Bool {
+        overlaps(range, in: timeZone, endingAt: end)
+    }
+
+    func overlaps(_ range: Range<Date>, in timeZone: TimeZone, endingAt end: CalendarMoment?) -> Bool {
         let begin = start.date(in: timeZone)
         let finish: Date = switch (start, end) {
         case let (.day(day), nil): day.advanced(by: 1).start(in: timeZone)
