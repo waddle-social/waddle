@@ -51,7 +51,7 @@ name the issue that tracks them.
 | `/me` actions | 0245 | ❌ | ✅ | Rendered as "* Name action" in italics, keeping the action's markup, mentions and links; conversation-list, reply and VoiceOver previews match |
 | @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references and, in rooms, offers people with no presence from the XEP-0055 user directory; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
 | Nick colors | 0392 | ❌ | ❌ | Not rendered: avatars use static tints and names use foreground colors. Linux and web chat render XEP-0392 colors |
-| Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
+| Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications. If a notification mode or preview change fails in conversation details, the previous value is restored and the form shows the web's room, direct-message, or retry guidance. |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |
 | Unread overview (Inbox) | 0430, 0313 | ❌ | ✅ | Matches web `/unread`: one card per room with unread room or thread rows, newest first, with their unread messages and unread thread replies (Waddle MAM thread filter); pull to refresh; mark all read on the server, room and thread rows. A sub-thread with unread replies is its own thread row, as the server keys it and web's Threads view lists it, and opens that sub-thread. A tab on iPhone, a sidebar destination on iPad and Mac |
 | Room create | 0045 | ❌ | ✅ | Baseline: `createChannel` was a stub returning nil |

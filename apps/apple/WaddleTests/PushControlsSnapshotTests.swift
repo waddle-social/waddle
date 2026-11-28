@@ -39,6 +39,32 @@ final class PushControlsSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(view), size: Self.details)
     }
 
+    #if os(macOS)
+    func testRoomNotificationSaveFailure() async throws {
+        try await assertNotificationSaveFailure(for: .room(SampleSession.general), testName: #function)
+    }
+
+    func testDirectNotificationSaveFailure() async throws {
+        try await assertNotificationSaveFailure(for: .direct(SampleSession.priya), testName: #function)
+    }
+
+    private func assertNotificationSaveFailure(
+        for conversation: ConversationID, testName: String, line: UInt = #line
+    ) async throws {
+        let sample = SampleSession()
+        sample.port.notifySettingsWriteResult = .failure(.notificationSettingsStorageMismatch)
+        let save = NotificationSettingsSave()
+        await save.perform(for: conversation) {
+            try await sample.coordinator.setShowsMessagesInPush(true, for: conversation)
+        }
+        let view = Form {
+            NotificationModeSection(conversation: conversation, save: save)
+        }
+        .huddleForm()
+        try await assertScreenSnapshot(of: sample.host(view), size: Self.details, testName: testName, line: line)
+    }
+    #endif
+
     private func assertSettings(
         notificationsEnabled: Bool, testName: String = #function, line: UInt = #line
     ) async throws {

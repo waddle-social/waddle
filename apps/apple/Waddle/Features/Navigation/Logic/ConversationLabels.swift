@@ -86,7 +86,7 @@ enum ActionErrorCopy {
         case .timeout: return "The server took too long to answer. Try again."
         case .rejected: return "The server declined this request."
         case .invalidRequest: return "That doesn't look right. Check it and try again."
-        case .failed: return fallback
+        case .notificationSettingsStorageMismatch, .failed: return fallback
         }
     }
 }

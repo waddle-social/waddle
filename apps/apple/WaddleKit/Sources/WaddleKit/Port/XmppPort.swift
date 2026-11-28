@@ -7,6 +7,8 @@ public enum PortError: Error, Equatable, Sendable {
     case timeout
     /// The server answered with an error (forbidden, not-allowed, …).
     case rejected
+    /// A notification setting could not be saved to the existing bookmark storage.
+    case notificationSettingsStorageMismatch
     /// The request itself was malformed (bad JID, empty value).
     case invalidRequest
     case failed

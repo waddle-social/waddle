@@ -10,7 +10,11 @@ extension FFIXmppPort {
             let outcome = try await mappingPortErrors {
                 try await client.setRoomNotificationMode(roomJid: jid, mode: ffiMode, name: nil, richPayloadOptIn: showsMessagesInPush)
             }
-            guard case .ok = outcome else { throw PortError.rejected }
+            switch outcome {
+            case .ok: break
+            case .nodeConfigMismatch: throw PortError.notificationSettingsStorageMismatch
+            case .error: throw PortError.rejected
+            }
         } else {
             let outcome = try await mappingPortErrors {
                 try await client.setDmNotificationMode(dmJid: jid, mode: ffiMode, richPayloadOptIn: showsMessagesInPush)
@@ -19,7 +23,8 @@ extension FFIXmppPort {
             // default, so the sparse DM node dropped its override item.
             switch outcome {
             case .ok, .removed: break
-            case .nodeConfigMismatch, .error: throw PortError.rejected
+            case .nodeConfigMismatch: throw PortError.notificationSettingsStorageMismatch
+            case .error: throw PortError.rejected
             }
         }
     }
