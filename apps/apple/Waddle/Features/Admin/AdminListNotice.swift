@@ -87,9 +87,8 @@ struct AdminListCopy {
         loadingTitle: "Loading spaces",
         offlineMessage: "Spaces show up here when you're connected.",
         failedTitle: "Spaces didn't load",
-        noMatches: { query, _ in "No space's name starts with “\(query)”." },
-        emptyTitle: "No spaces yet",
-        emptyMessage: "Make one to group rooms together.",
+        noMatches: { query, _ in "No spaces match “\(query)”." },
+        emptyTitle: "No spaces yet. Create one to get started.",
         searchPrompt: "Search spaces",
         newTitle: "New space"
     )
@@ -115,6 +114,8 @@ struct AdminListNoticeView: View {
             EmptyStateView(title: copy.failedTitle, message: "Refresh to try again.", symbol: "exclamationmark.triangle")
         case .noMatches where section == .users:
             status("No users match “\(query)”.")
+        case .noMatches where section == .spaces:
+            status(copy.noMatches(query, nil))
         case .noMatches:
             EmptyStateView(title: "No matches", message: copy.noMatches(query, space?.name), symbol: "magnifyingglass")
         case .empty:

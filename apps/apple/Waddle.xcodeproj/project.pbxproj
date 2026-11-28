@@ -75,6 +75,7 @@
 		150013A0BA548F34390BB59C /* SettingsAccountSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0E6E5628B78C6A1CC7ABFA3 /* SettingsAccountSection.swift */; };
 		15BD6E9E3AA7AC85B17AE416 /* ThreadHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F17DF0FE07E8A1BF34248A8 /* ThreadHeaderView.swift */; };
 		16783C49DC411BB9DE667B3D /* CurrentCallCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6C585DB56C772E8827CBC07 /* CurrentCallCard.swift */; };
+		169606A17F7E117691A82476 /* AdminRoleMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088485546D051AEAF5B35694 /* AdminRoleMenu.swift */; };
 		16C0F0284896F85A8930CB9E /* SampleSession+Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6009AA80D2B5C4F556B429E0 /* SampleSession+Conversation.swift */; };
 		17284313FB00CCACE976A05B /* GalleryScrollWheel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD8D712F370BDB26FB52F901 /* GalleryScrollWheel.swift */; };
 		176B1EC5F559B521A383868C /* CallMicrophoneProcessing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E65DBE7EC80564A03D00EF4 /* CallMicrophoneProcessing.swift */; };
@@ -298,6 +299,7 @@
 		522D1B3B49D89C4BBBB78A65 /* MessageSafetyScoresButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FB3CC66C2E14BDDAD64BBC5 /* MessageSafetyScoresButton.swift */; };
 		526E665FAD488A3AD4B454AA /* ComposerEmojiButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */; };
 		52A0BE747A59A9D5E51F3273 /* CurrentCallCardSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F381020847C865A6A8848E2C /* CurrentCallCardSnapshotTests.swift */; };
+		54CD0C062FEDA31B2BAE42C4 /* AdminNameFields.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1142A9F303BC9F05BCEAA63F /* AdminNameFields.swift */; };
 		54CD31F69B304A1D9F09D689 /* FFIEventListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF317440D44D33577F844A73 /* FFIEventListener.swift */; };
 		54D0C3FA4CCB166F8D35E511 /* TimelineFeedLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D6A2286FEDA8D46D8F81698 /* TimelineFeedLayout.swift */; };
 		5523BCDDBB5F3CE40B5A3B86 /* MessageAttachmentKind.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3BB6D526A2162EF2F947DF7 /* MessageAttachmentKind.swift */; };
@@ -444,6 +446,7 @@
 		7869CA33877C16E2041AA076 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0F38B78980F7FA0414198A /* Theme.swift */; };
 		78922B2D1F7F4E27662D5E6A /* SignInCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC2B3686BB5095FCFF4D16F /* SignInCard.swift */; };
 		78A3ACA5F07D87E0264F5F09 /* TestClip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EDBC92BE8EEC9FB0A30B31 /* TestClip.swift */; };
+		792E3C7CBCE5B23A58C407D2 /* AdminPeopleSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB40C271793683DB9AF190A /* AdminPeopleSection.swift */; };
 		7963CE39E2EB3651F155BBFD /* DesignSystemSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05730B55BE90EC1B6DA2330B /* DesignSystemSnapshotTests.swift */; };
 		79E2DD395DB7F3896CE88A4E /* ThreadScreenSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07143C4C647180CA4F906E6 /* ThreadScreenSnapshotTests.swift */; };
 		79EBA043FC1C5A46F5F8980D /* ProfileAvatarControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904925AEBAB6740443CAC7F3 /* ProfileAvatarControls.swift */; };
@@ -504,6 +507,7 @@
 		87EB3DE837882035D5415692 /* ConversationTimelineContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54712F0FA18CFCF76016E596 /* ConversationTimelineContainer.swift */; };
 		88006BA76FC05C795F23AB98 /* ComposerCommandPresentations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 601116D6B535017B344EB136 /* ComposerCommandPresentations.swift */; };
 		88217DEEB8B68D79BEB98F48 /* MemberRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24FC01964BF3C9A444AC8C8C /* MemberRows.swift */; };
+		88B9144AD2F3CEFA40C758E5 /* AdminSheetList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */; };
 		88CB2E770489DF42DD51E711 /* ProfileSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 212084C0987439901E238C8C /* ProfileSharingSection.swift */; };
 		88F2CD9DE93781F62A736BAC /* FFIXmppPort+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D11CE815C69A00FE73107E4B /* FFIXmppPort+Directory.swift */; };
 		892B98BE7AC490E051D1646B /* CallChromeFading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5EC1FB3595E641FF542F11 /* CallChromeFading.swift */; };
@@ -608,6 +612,7 @@
 		9F394219DF8DEF1D0E961EB2 /* FFIInbound+Directory.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */; };
 		9F3B012A4B596DF133BAA3A8 /* SettingsMessageOrderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */; };
 		9FE8153F5FECF33DD3E16F75 /* SystemMicrophoneMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = E471963434E9C86A9DCF154E /* SystemMicrophoneMode.swift */; };
+		A00E02C6B8DDC5F06535FB7A /* AdminNameFields.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1142A9F303BC9F05BCEAA63F /* AdminNameFields.swift */; };
 		A0389EB12E71697A54A80C9E /* TimelineHistoryHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DADAA8D894F156291483A5 /* TimelineHistoryHeader.swift */; };
 		A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */; };
 		A1C4325F49D2C90564505CC5 /* ComposerLinkPreviewSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7ED43C5B0F34CEAE731CE642 /* ComposerLinkPreviewSnapshotTests.swift */; };
@@ -678,6 +683,7 @@
 		B5EC668F289847698EE1931C /* FakePort+Blocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */; };
 		B5F0EBCC119D5D6F09C757C6 /* ComposerFormattingBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 445292EC7FEEB6C65592321C /* ComposerFormattingBubble.swift */; };
 		B5F6928CE905C8F82637003C /* QuickSwitcherResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0EC3BBBD56E38C392A73A0 /* QuickSwitcherResults.swift */; };
+		B633D2F281B3B7294BF6BCA8 /* AdminRoleMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088485546D051AEAF5B35694 /* AdminRoleMenu.swift */; };
 		B6C7F240EA0F8EFA2D22F0FF /* LinkPreviewBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 757EE95BDE8E91E1117418F5 /* LinkPreviewBridgeTests.swift */; };
 		B6D6E074559E4E2AA65FFD19 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C0B6BD5F8A7D842A008370 /* RootView.swift */; };
 		B6FA7A0D0880626FB61A1770 /* PinnedMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 463B2FA03157B7332CE180CB /* PinnedMessagesView.swift */; };
@@ -721,11 +727,13 @@
 		C12E3E77DC676A8AD52468DB /* CallStageCommandsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FFAC8832FCE2CF8EA78C0F7 /* CallStageCommandsTests.swift */; };
 		C130A4F16967752B6E065AE6 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */; };
 		C15F7C3A0ECDBEE0C085E688 /* MessageLinkPreviewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7DE06D193D75C8FB0D94FA /* MessageLinkPreviewCard.swift */; };
+		C1E701D9E20A60D0037C995F /* AdminPersonChoiceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C8AF0EBA564AF00F0383F8 /* AdminPersonChoiceRow.swift */; };
 		C20359B2300D7293652AFD43 /* FeedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A02DE6A87AC803C9D1A2F526 /* FeedView.swift */; };
 		C2389B0935538BFBE4AE8582 /* SampleSession+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0E0370F3AF85FAA38E9CCD /* SampleSession+Calls.swift */; };
 		C2BD72AA9F5694E2ADACA7A5 /* ExtensionCommandCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB24A68F639E15A8EF908C6 /* ExtensionCommandCopy.swift */; };
 		C33EB30DA6A8237F195C5F1A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7DB82B1A228C6DF0FC1AD4 /* SettingsView.swift */; };
 		C39C57E5BEF775B86C005DA2 /* ConversationLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B7A4AB14D9CCBB80E6E1D64 /* ConversationLink.swift */; };
+		C3AF5F99ABE3D83BD0E2F69D /* AdminPeopleSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB40C271793683DB9AF190A /* AdminPeopleSection.swift */; };
 		C3E474AA78AF4EA32F5FE006 /* NotificationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93EB94A6DDD9F6A80D3D74C7 /* NotificationController.swift */; };
 		C4062D8E0424408C289E66A6 /* StoryReactionBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDB37A953D9479EB1369A9B /* StoryReactionBar.swift */; };
 		C462ED1A2BFA239F22297D75 /* ComposerModel+LinkPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DB75C053840B2AC091B285 /* ComposerModel+LinkPreview.swift */; };
@@ -857,6 +865,7 @@
 		E63D2FB927535144B3E9FD6D /* ThreadHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F17DF0FE07E8A1BF34248A8 /* ThreadHeaderView.swift */; };
 		E68A5B8CCDE1DAEDBBD98259 /* InboxFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59E50FF8B354FCD1CB6CF95E /* InboxFeed.swift */; };
 		E6A4E192A6FEABE94AC3B5C4 /* PushRegistrationStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23FF35670E13DC9446E3D547 /* PushRegistrationStoreTests.swift */; };
+		E6C52482994B45668665FB0B /* AdminSheetList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */; };
 		E6F035620B04948CE18CF1D0 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
 		E739B9FECB2AC7745DB88294 /* ComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */; };
 		E744C6724CAAEF1C80F86C6B /* AtkinsonHyperlegibleNext.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 3BE9DD9529CAE359ABA29C06 /* AtkinsonHyperlegibleNext.ttf */; };
@@ -892,6 +901,7 @@
 		EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
 		EE5334C044F9B88142368D3F /* ComposerFormattingButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFFC353A7E7DCD927FFDC7F /* ComposerFormattingButtons.swift */; };
 		EEC166182965A5C078ADF1CF /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
+		EF141C4A4F427DE100840C30 /* AdminPersonChoiceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C8AF0EBA564AF00F0383F8 /* AdminPersonChoiceRow.swift */; };
 		EF16198E05B173AE961CBB3A /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
 		EF83BCC26D2F81A17215E594 /* MessageRowAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E1834763C0720FA59B5FF6C /* MessageRowAccessibility.swift */; };
 		F041208CE1D9A68003CB43FF /* CallStageRedrawTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0D65230C6007672A41EB65 /* CallStageRedrawTests.swift */; };
@@ -980,6 +990,7 @@
 		079CAAA4C12136A21EC6B831 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
 		07BC38BD586BF667F9FB3E85 /* CallDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDockView.swift; sourceTree = "<group>"; };
 		07E26B6F690A6F7903447AD7 /* WaddleXmppClientFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = WaddleXmppClientFFI.xcframework; path = "$(SRCROOT)/Generated/WaddleXmppClientFFI.xcframework"; sourceTree = "<group>"; };
+		088485546D051AEAF5B35694 /* AdminRoleMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoleMenu.swift; sourceTree = "<group>"; };
 		08A1A7D43A647C716A146493 /* RoomDetailsForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomDetailsForm.swift; sourceTree = "<group>"; };
 		091EB080EAF2106CAFFD409E /* WithheldMediaCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WithheldMediaCard.swift; sourceTree = "<group>"; };
 		097A7976BC4F84384A7159AB /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
@@ -994,6 +1005,7 @@
 		0F17DF0FE07E8A1BF34248A8 /* ThreadHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadHeaderView.swift; sourceTree = "<group>"; };
 		10DF6D38D25636949B8CF01E /* RoomSymbolTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomSymbolTile.swift; sourceTree = "<group>"; };
 		11105E8B11D4C7F2CB3ED289 /* CommunitySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommunitySnapshotTests.swift; sourceTree = "<group>"; };
+		1142A9F303BC9F05BCEAA63F /* AdminNameFields.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminNameFields.swift; sourceTree = "<group>"; };
 		116C44D1284E56359FA8FCC3 /* CallShortcutKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallShortcutKeys.swift; sourceTree = "<group>"; };
 		11B35AA012A5570BDC2F1FD5 /* CallTonePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallTonePlayer.swift; sourceTree = "<group>"; };
 		11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Blocking.swift"; sourceTree = "<group>"; };
@@ -1021,6 +1033,7 @@
 		205413AB053B4EB81D79F03C /* AddPeopleSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddPeopleSheet.swift; sourceTree = "<group>"; };
 		212084C0987439901E238C8C /* ProfileSharingSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSharingSection.swift; sourceTree = "<group>"; };
 		2126DCBE7C2DCC8744EA459B /* CallDockParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallDockParts.swift; sourceTree = "<group>"; };
+		21C8AF0EBA564AF00F0383F8 /* AdminPersonChoiceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPersonChoiceRow.swift; sourceTree = "<group>"; };
 		2332CD38A176C8F75EC9933C /* FFIOutbound+Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIOutbound+Call.swift"; sourceTree = "<group>"; };
 		23892C2B3A078BA52981F443 /* SplitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitShell.swift; sourceTree = "<group>"; };
 		23AFF4304F80E6FFEF87843B /* FakePort+LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+LinkPreview.swift"; sourceTree = "<group>"; };
@@ -1136,6 +1149,7 @@
 		6AE1B270EB92BCD6313BCE33 /* RoomManagementSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomManagementSections.swift; sourceTree = "<group>"; };
 		6B29DD3714530193F8075A65 /* RoomManagementCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomManagementCopy.swift; sourceTree = "<group>"; };
 		6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerEmojiButton.swift; sourceTree = "<group>"; };
+		6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSheetList.swift; sourceTree = "<group>"; };
 		6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsCopy.swift; sourceTree = "<group>"; };
 		6DC9776C06EC9C735E95BE71 /* CallStageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallStageView.swift; sourceTree = "<group>"; };
 		6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSectionView.swift; sourceTree = "<group>"; };
@@ -1198,6 +1212,7 @@
 		88F1EEE932C6FA66B13B5E60 /* CallChromeFaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallChromeFaderTests.swift; sourceTree = "<group>"; };
 		8985AE7B9B97E668463FBFE8 /* RoomMembersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomMembersView.swift; sourceTree = "<group>"; };
 		8AB1A681F60A49913FEC6A38 /* waddle_xmpp_clientFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = waddle_xmpp_clientFFI.modulemap; sourceTree = "<group>"; };
+		8AB40C271793683DB9AF190A /* AdminPeopleSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPeopleSection.swift; sourceTree = "<group>"; };
 		8B0FAACD816C6A978A19A66D /* StoryComposerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryComposerSheet.swift; sourceTree = "<group>"; };
 		8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventReplyCard.swift; sourceTree = "<group>"; };
 		8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionModelTests.swift; sourceTree = "<group>"; };
@@ -1868,11 +1883,16 @@
 				0BF02B5177916234A7F29298 /* AdminConsoleHeader.swift */,
 				2A10EB7EC60CEDBE9FA79A1A /* AdminListNotice.swift */,
 				ADDA6993C32C2D3C68B4B6D5 /* AdminListPanel.swift */,
+				1142A9F303BC9F05BCEAA63F /* AdminNameFields.swift */,
+				8AB40C271793683DB9AF190A /* AdminPeopleSection.swift */,
+				21C8AF0EBA564AF00F0383F8 /* AdminPersonChoiceRow.swift */,
 				3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */,
+				088485546D051AEAF5B35694 /* AdminRoleMenu.swift */,
 				CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */,
 				ACFC9BD024E32EA9E049D2A8 /* AdminRoomRow.swift */,
 				455C82774C67753D8BFC905B /* AdminRoomSheet.swift */,
 				6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */,
+				6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */,
 				C549BD9188E9A12524E82C5E /* AdminSheetScaffold.swift */,
 				06527FE40737212DA821400F /* AdminSpaceRow.swift */,
 				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
@@ -2750,11 +2770,16 @@
 				D58D2168E3A1545E90938751 /* AdminConsoleHeader.swift in Sources */,
 				5EC16D690DF849D4AE86C637 /* AdminListNotice.swift in Sources */,
 				39F54DD4417FC746ABBBF4DB /* AdminListPanel.swift in Sources */,
+				A00E02C6B8DDC5F06535FB7A /* AdminNameFields.swift in Sources */,
+				792E3C7CBCE5B23A58C407D2 /* AdminPeopleSection.swift in Sources */,
+				EF141C4A4F427DE100840C30 /* AdminPersonChoiceRow.swift in Sources */,
 				2465D67CE94262E3039F8915 /* AdminPersonPicker.swift in Sources */,
+				B633D2F281B3B7294BF6BCA8 /* AdminRoleMenu.swift in Sources */,
 				E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */,
 				4DBCD4080C891BA4AD2A93DB /* AdminRoomRow.swift in Sources */,
 				A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */,
 				C5B0213BDD7A27A402DAEE74 /* AdminSectionView.swift in Sources */,
+				88B9144AD2F3CEFA40C758E5 /* AdminSheetList.swift in Sources */,
 				C7EDD535A7EF98D9FB01E109 /* AdminSheetScaffold.swift in Sources */,
 				7F71BD4A95C45D3C1FC34F5D /* AdminSpaceRow.swift in Sources */,
 				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
@@ -3218,11 +3243,16 @@
 				7D013B6E388C1B12D8FB27E8 /* AdminConsoleHeader.swift in Sources */,
 				4CB83002BD5B4F605F2B305C /* AdminListNotice.swift in Sources */,
 				E60DE53555311D34459829DF /* AdminListPanel.swift in Sources */,
+				54CD0C062FEDA31B2BAE42C4 /* AdminNameFields.swift in Sources */,
+				C3AF5F99ABE3D83BD0E2F69D /* AdminPeopleSection.swift in Sources */,
+				C1E701D9E20A60D0037C995F /* AdminPersonChoiceRow.swift in Sources */,
 				A79414F65F48C7CC84FAAF53 /* AdminPersonPicker.swift in Sources */,
+				169606A17F7E117691A82476 /* AdminRoleMenu.swift in Sources */,
 				BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */,
 				D2475AFFB418A5C696E4E53D /* AdminRoomRow.swift in Sources */,
 				33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */,
 				AE84CEC44CB525F976B86E81 /* AdminSectionView.swift in Sources */,
+				E6C52482994B45668665FB0B /* AdminSheetList.swift in Sources */,
 				5FFA43B73688F559510C72AF /* AdminSheetScaffold.swift in Sources */,
 				8D479E5D6FF48C2845B5E610 /* AdminSpaceRow.swift in Sources */,
 				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,

@@ -25,21 +25,25 @@ struct AdminSpaceSheet: View {
         _description = State(initialValue: opened?.description ?? "")
     }
 
-    private static let copy = AdminSheetScaffold<AdminNameFields, AnyView>.Copy(
-        newTitle: "New space",
-        title: "Space",
-        saveFailure: "Couldn't save the space. Try again.",
-        deleteTitle: "Delete space",
-        deleteQuestion: "Delete space?",
-        deleteFailure: "Couldn't delete the space. Try again.",
-        newMinHeight: 320,
-        minHeight: 560
-    )
+    private var copy: AdminSheetScaffold<AdminNameFields, AnyView>.Copy {
+        .init(
+            newTitle: "New space",
+            title: opened?.name ?? "Space",
+            saveFailure: "Couldn't save the space. Try again.",
+            deleteTitle: "Delete space",
+            deleteQuestion: "Delete space?",
+            deleteFailure: "Couldn't delete the space. Try again.",
+            newMinHeight: 320,
+            minHeight: 560,
+            createTitle: "Create space",
+            saveTitle: "Save changes"
+        )
+    }
 
     var body: some View {
         AdminSheetScaffold(
             isNew: opened == nil,
-            copy: Self.copy,
+            copy: copy,
             deleteWarning: AdminSpaceCopy.deleteWarning(name: opened?.name ?? "", rooms: opened?.roomCount ?? 0),
             canSave: canSave,
             isChanging: !changing.isEmpty,
@@ -49,10 +53,11 @@ struct AdminSpaceSheet: View {
             AdminNameFields(
                 name: $name,
                 description: $description,
-                namePrompt: "Space name",
-                descriptionPrompt: "What is it for? (optional)",
+                namePrompt: opened == nil ? "Engineering" : "Space name",
+                descriptionPrompt: "What's this space for?",
                 keepsOldDescription: opened?.description != nil && draft?.description == nil,
-                submit: submit
+                submit: submit,
+                descriptionTitle: opened == nil ? "Description (optional)" : "Description"
             )
         } lists: {
             AnyView(membersSection)

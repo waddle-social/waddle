@@ -47,22 +47,32 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
         NavigationStack {
             Form {
                 Section {
-                    Picker("Role", selection: $role) {
-                        ForEach(roles, id: \.self) { Text(roleTitle($0)).tag($0) }
+                    LabeledContent {
+                        AdminRoleMenu(role: role, choices: roles, title: roleTitle, choose: { role = $0 })
+                            .accessibilityLabel(Text("Role"))
+                    } label: {
+                        Text("Role")
+                            .huddleText(Theme.Typography.label)
+                            .foregroundStyle(Theme.Colors.fg)
                     }
+                    .listRowBackground(Theme.Colors.surface)
                 }
                 Section {
                     TextField("Search", text: $query, prompt: Text("Search users"))
                         .labelsHidden()
                         .autocorrectionDisabled()
+                        .huddleField()
+                        .listRowBackground(Theme.Colors.bg)
                     people
+                        .listRowBackground(Theme.Colors.surface)
                 } header: {
-                    Text("Person")
+                    FormSectionHeader("Person")
                 } footer: {
-                    Text("People who already have a role are changed from their own row.")
+                    FormSectionFooter("People who already have a role are changed from their own row.")
                 }
             }
-            .formStyle(.grouped)
+            .huddleForm()
+            .tint(Theme.Colors.actionText)
             .navigationTitle(title)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -70,6 +80,7 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .buttonStyle(.huddle(size: .small))
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(confirmTitle) {
@@ -77,6 +88,7 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
                         choose(person, role)
                         dismiss()
                     }
+                    .buttonStyle(.huddle(.primary, size: .small))
                     .disabled(person == nil)
                 }
             }
@@ -106,12 +118,15 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
         } else if heldFailed {
             HStack {
                 Text("Couldn't load who already has a role.")
+                    .huddleText(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.dangerText)
                 Spacer(minLength: Theme.Spacing.xs)
                 Button("Try again") { Task { await loadHeld() } }
-                    .adminRowControl()
+                    .buttonStyle(.huddle(size: .small))
             }
         } else {
             Text("Loading…")
+                .huddleText(Theme.Typography.body)
                 .foregroundStyle(Theme.Colors.fgMuted)
         }
     }
@@ -147,45 +162,5 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
 
     private func emptyText(_ users: AdminList<AdminUser>) -> String {
         users.query.isEmpty ? "No users yet." : AdminListCopy.users.noMatches(users.query, nil)
-    }
-}
-
-/// Someone who can be picked: name and address, and whether they are
-/// picked. Someone who holds a role shows it and cannot be picked.
-private struct AdminPersonChoiceRow: View {
-    let user: AdminUser
-    let role: String?
-    let isPicked: Bool
-    let pick: () -> Void
-
-    var body: some View {
-        Button(action: pick) {
-            HStack(spacing: Theme.Spacing.s) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                    Text(user.name)
-                        .foregroundStyle(Theme.Colors.fg)
-                        .lineLimit(1)
-                    Text(user.jid.description)
-                        .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.fgMuted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: Theme.Spacing.xs)
-                if let role {
-                    HuddleTag(role)
-                } else {
-                    Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(isPicked ? Theme.Colors.action : Theme.Colors.fgSoft)
-                        .imageScale(.large)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(role != nil)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text([user.name, user.jid.description, role.map { "already \($0)" }].compactMap { $0 }.joined(separator: ", ")))
-        .accessibilityAddTraits(isPicked ? [.isButton, .isSelected] : [.isButton])
     }
 }
