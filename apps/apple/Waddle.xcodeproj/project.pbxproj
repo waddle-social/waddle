@@ -203,6 +203,7 @@
 		3969C52801321874826F0EA8 /* RoomManagementSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */; };
 		39A334574173EF578C4E2D45 /* Surfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = A681AA1E99DFA6786DF6F7BF /* Surfaces.swift */; };
 		39C387955122514D97C6723B /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BC57272670658BD2403BA4E3 /* Localizable.strings */; };
+		39F54DD4417FC746ABBBF4DB /* AdminListPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADDA6993C32C2D3C68B4B6D5 /* AdminListPanel.swift */; };
 		3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */; };
 		3BED28B913CADEB301B04E80 /* SettingsPreferenceSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2FCD21C5931F86CC13AF643 /* SettingsPreferenceSections.swift */; };
 		3BF90258E14DB45EFDF789E3 /* ManagementSheetParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85176CCA7895C14E3FAF17FE /* ManagementSheetParts.swift */; };
@@ -270,6 +271,7 @@
 		4C62E03C642CA3F42A717F84 /* EventsCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */; };
 		4C6E9FD161D0A865A74C1C69 /* DirectListSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F435E3C7C4A4FAB7F71FD870 /* DirectListSection.swift */; };
 		4C993B61964E19446AA16AE8 /* RoomMembersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8985AE7B9B97E668463FBFE8 /* RoomMembersView.swift */; };
+		4CB83002BD5B4F605F2B305C /* AdminListNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A10EB7EC60CEDBE9FA79A1A /* AdminListNotice.swift */; };
 		4D16FB7B30A9CB5CC1BBF7FF /* ComposerSuggestionDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6FD7AC05282AD54AEDFD4BC /* ComposerSuggestionDirectory.swift */; };
 		4D270761A871BBF4F7C3F44B /* SettingsPreferenceSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2FCD21C5931F86CC13AF643 /* SettingsPreferenceSections.swift */; };
 		4D4C469D0802030C681BCB7E /* ShellScreenSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CE564FF3A2D80291A80B47B /* ShellScreenSnapshotTests.swift */; };
@@ -331,6 +333,7 @@
 		5E8F6B82D60AA012464E9DA0 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
 		5E9324CFA5AB9954D2988F71 /* CallBackgroundProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75CFC732C3C96CF967BF4C /* CallBackgroundProcessor.swift */; };
 		5EBA8910814DD582CCBF6C34 /* EventReplyCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */; };
+		5EC16D690DF849D4AE86C637 /* AdminListNotice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A10EB7EC60CEDBE9FA79A1A /* AdminListNotice.swift */; };
 		5F232C96BC1CD10719B0C19F /* StickerPicture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB3D7558A7826834460EB7EA /* StickerPicture.swift */; };
 		5F812C59A7F45BDFBA251506 /* PDFAttachmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5A159C7819053E0FE2AC68 /* PDFAttachmentStore.swift */; };
 		5FBFF1EDA4006854FB2903A2 /* GroupAddPeopleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */; };
@@ -378,6 +381,7 @@
 		67C6549885771E688B8C5C0D /* StoryComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FAB2DD62669F8525DDD3EBC /* StoryComposerTests.swift */; };
 		67F8AE9A32757F8FBEAE2B61 /* CallCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 509B5D0D27D9243EFB82276E /* CallCover.swift */; };
 		6805D8D692C48657C3C875CC /* ThreadHeaderTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8814A3DEAB39DF9D10327B8 /* ThreadHeaderTextTests.swift */; };
+		68AAACB6373159D0FEEECC1F /* AdminUserRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490F63B9770395CF3F4815DE /* AdminUserRow.swift */; };
 		68B215A564BC09CC57DDC6FB /* StickerPackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE1700792B12197DDDE03183 /* StickerPackSheet.swift */; };
 		68F7C65E87AA6BE5C65E25C3 /* PDFAttachmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC5A159C7819053E0FE2AC68 /* PDFAttachmentStore.swift */; };
 		69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B82914D2AA80BAD09040F2E /* EncryptedAttachmentView.swift */; };
@@ -463,6 +467,7 @@
 		7C1EE48BCFB516D87C50BDD8 /* CallScreenShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EA10C0C1E1D79C66B825A09 /* CallScreenShare.swift */; };
 		7C9374CBD4353B7C1098AB0C /* GalleryScrollWheel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD8D712F370BDB26FB52F901 /* GalleryScrollWheel.swift */; };
 		7CAD8CAC67DA319750BD38F3 /* NavigationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 864B273BE4F9A184AE17B490 /* NavigationModel.swift */; };
+		7D013B6E388C1B12D8FB27E8 /* AdminConsoleHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BF02B5177916234A7F29298 /* AdminConsoleHeader.swift */; };
 		7D5CE48E72C10334D6A64D75 /* MessageMediaSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D23784705AC4F5938022FB0 /* MessageMediaSnapshotTests.swift */; };
 		7D6901D3604D40F229A5A5FE /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F196595EE7E003001AB22B89 /* InboxView.swift */; };
 		7DA1F5573360ED743EC26C20 /* SampleSession+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B80439B4A5C829C9077615C /* SampleSession+Events.swift */; };
@@ -511,6 +516,7 @@
 		8AC1D9BC64BFCCD6AED35DC8 /* FFIXmppPort+Messaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FAF9D1EF92D4E9E28ECE577 /* FFIXmppPort+Messaging.swift */; };
 		8B07563CA0B531D2A8A1D72D /* MembersSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA83F0AA7B26489823FBA69F /* MembersSnapshotTests.swift */; };
 		8BE6BBD378D0419DEB203C75 /* LiveKitCallCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2E1EC1B9B95833E1590D4A /* LiveKitCallCaptureTests.swift */; };
+		8C3665D66FBCCDA5DC391297 /* AdminUserRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490F63B9770395CF3F4815DE /* AdminUserRow.swift */; };
 		8C46B344AE4EC22E08DFF82F /* MessageAccessibilityText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B85879D67EF49761A46A414D /* MessageAccessibilityText.swift */; };
 		8C4C9EEFC89E448A36BCBFA8 /* CallBackgroundProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75CFC732C3C96CF967BF4C /* CallBackgroundProcessor.swift */; };
 		8C5BC5DCF477149BBC6EC719 /* OutboundBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202B94DA013CDD78783E5B8B /* OutboundBridgeTests.swift */; };
@@ -644,6 +650,7 @@
 		AD6F2C86D0458AC176F13400 /* SignInServerRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 763C66AFC397A7466126D6EC /* SignInServerRow.swift */; };
 		ADAFE2045C22A3B2E83423F8 /* GalleryOriginal.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA39E1683EA4D22BA5CA2A4B /* GalleryOriginal.swift */; };
 		AE76D38C0FA8F43E301012E2 /* RoomSettingsEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F369DB872C487E705FA53810 /* RoomSettingsEditor.swift */; };
+		AE84CEC44CB525F976B86E81 /* AdminSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */; };
 		AE8720665BBCB04B94B32A63 /* ComposerAttachmentPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91522280F469CB96697C8D7 /* ComposerAttachmentPickers.swift */; };
 		AEAC3248473A2F45ED84CB7D /* AnimatedImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C26A1114C848081879D77F1F /* AnimatedImageDecoder.swift */; };
 		AED444887591BFB95BACF6E2 /* InlineMediaPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 345D23B940C30496643292CC /* InlineMediaPlayback.swift */; };
@@ -729,6 +736,7 @@
 		C521691A686F452F8FE7A6EC /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 079CAAA4C12136A21EC6B831 /* Preferences.swift */; };
 		C567AD660ED4E217DBAD4D3A /* AttachmentLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27ACBD9D98C0C8D658496DCA /* AttachmentLoader.swift */; };
 		C594B7D2DDE895945BEAFB16 /* CallOnStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6087F6B4F1325A892FCCC8DB /* CallOnStage.swift */; };
+		C5B0213BDD7A27A402DAEE74 /* AdminSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */; };
 		C66EABE79654CE25384DBFDA /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */; };
 		C6A7C94F2E27EFFB803ACB5B /* GifPickerCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AAB432448E9CD2053D3212F /* GifPickerCell.swift */; };
 		C6EFB1E1BEB985D8189E6B71 /* RoomSymbolTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10DF6D38D25636949B8CF01E /* RoomSymbolTile.swift */; };
@@ -787,6 +795,7 @@
 		D4EF484C6BD57E36552D9EFD /* BricolageGrotesque.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5EEC783B635229A72D9E9111 /* BricolageGrotesque.ttf */; };
 		D5600BA079A4415FC5884B5D /* PushTokenRegistrarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74D8F9F8580CF2FA58D4DC9A /* PushTokenRegistrarTests.swift */; };
 		D56262205062FBDB1F827792 /* ProfileMoodCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A857EFDE807DD88C1AEA1EF1 /* ProfileMoodCatalog.swift */; };
+		D58D2168E3A1545E90938751 /* AdminConsoleHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BF02B5177916234A7F29298 /* AdminConsoleHeader.swift */; };
 		D5AF773DD1FED4CD1BA215AC /* CallScreenShareViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35B3C9127F189D70369EFE2C /* CallScreenShareViews.swift */; };
 		D5AF7EC41F43FB274E107D5B /* AttachmentImageInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */; };
 		D5B7118690B54736F98C480D /* FFIXmppPort+Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74DC91F2EF32ECBD7BC25238 /* FFIXmppPort+Notify.swift */; };
@@ -842,6 +851,7 @@
 		E54A01480F2E4DE8E3379706 /* CallSessionWiring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 418A2A3955635719E53F1FBE /* CallSessionWiring.swift */; };
 		E5DD736D84E5F2C80FE2B75B /* CommunityCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA4AF57ED24C8ED289B82220 /* CommunityCopy.swift */; };
 		E5DDD6C332E7724E06B71AE1 /* ComposerPlusMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = D98A14703F39AB98C5E790EF /* ComposerPlusMenu.swift */; };
+		E60DE53555311D34459829DF /* AdminListPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADDA6993C32C2D3C68B4B6D5 /* AdminListPanel.swift */; };
 		E632BEB3B53794AB5F1A5CDB /* PDFAttachmentCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8FBA96AF5929434631DFFDE /* PDFAttachmentCard.swift */; };
 		E63CE6643B1722A4D3AAC40F /* NewMessageToolbarButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F31978C444F8E69FEE0AA7A /* NewMessageToolbarButton.swift */; };
 		E63D2FB927535144B3E9FD6D /* ThreadHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F17DF0FE07E8A1BF34248A8 /* ThreadHeaderView.swift */; };
@@ -977,6 +987,7 @@
 		0A63C3BBFC87A3DDBF3CC24D /* LeftRoomsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeftRoomsSheet.swift; sourceTree = "<group>"; };
 		0AF35F3B8809B8EB7231AAAF /* CallPushToTalkKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallPushToTalkKeys.swift; sourceTree = "<group>"; };
 		0B0545ED80133096390785CE /* LiveKitCallMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveKitCallMediaTests.swift; sourceTree = "<group>"; };
+		0BF02B5177916234A7F29298 /* AdminConsoleHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminConsoleHeader.swift; sourceTree = "<group>"; };
 		0D647ED03AFE3A20784943F9 /* RoomCallBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomCallBanner.swift; sourceTree = "<group>"; };
 		0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTimelineList.swift; sourceTree = "<group>"; };
 		0EE5E6851B5F743A7B849559 /* CallRoomPicture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallRoomPicture.swift; sourceTree = "<group>"; };
@@ -1021,6 +1032,7 @@
 		295B8A0A46A4BAEE509334B6 /* StoryRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryRail.swift; sourceTree = "<group>"; };
 		29ABBFC816B163EFFA2FD289 /* FakePort+Community.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Community.swift"; sourceTree = "<group>"; };
 		29BE4AC666A56853887B32B9 /* GifPickerFooter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifPickerFooter.swift; sourceTree = "<group>"; };
+		2A10EB7EC60CEDBE9FA79A1A /* AdminListNotice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminListNotice.swift; sourceTree = "<group>"; };
 		2A24803E67A2932C18014F56 /* NavigationModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationModelTests.swift; sourceTree = "<group>"; };
 		2ACF126A87B69DBEE632B1E1 /* SidebarAccountBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarAccountBar.swift; sourceTree = "<group>"; };
 		2C4C5589906A2053A7CA1626 /* ServerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSettings.swift; sourceTree = "<group>"; };
@@ -1072,6 +1084,7 @@
 		463B2FA03157B7332CE180CB /* PinnedMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedMessagesView.swift; sourceTree = "<group>"; };
 		467769E03D180224C2EB64BD /* CallBackgroundProcessorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallBackgroundProcessorTests.swift; sourceTree = "<group>"; };
 		48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCard.swift; sourceTree = "<group>"; };
+		490F63B9770395CF3F4815DE /* AdminUserRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminUserRow.swift; sourceTree = "<group>"; };
 		49C114E8607FE4BC5DC460FB /* ComposerAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerAttachment.swift; sourceTree = "<group>"; };
 		4B80439B4A5C829C9077615C /* SampleSession+Events.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SampleSession+Events.swift"; sourceTree = "<group>"; };
 		4B8CC3B9552CCA3481F65409 /* VoIPPushRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoIPPushRegistry.swift; sourceTree = "<group>"; };
@@ -1125,6 +1138,7 @@
 		6B43F1415E0FF5F7685033CE /* ComposerEmojiButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerEmojiButton.swift; sourceTree = "<group>"; };
 		6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsCopy.swift; sourceTree = "<group>"; };
 		6DC9776C06EC9C735E95BE71 /* CallStageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallStageView.swift; sourceTree = "<group>"; };
+		6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSectionView.swift; sourceTree = "<group>"; };
 		6E389D8FF37A6F61A5761275 /* NavigationRowChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationRowChrome.swift; sourceTree = "<group>"; };
 		6E45EB2101AB889951F4F632 /* MessageContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageContextMenu.swift; sourceTree = "<group>"; };
 		6F31978C444F8E69FEE0AA7A /* NewMessageToolbarButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageToolbarButton.swift; sourceTree = "<group>"; };
@@ -1248,6 +1262,7 @@
 		ACFC9BD024E32EA9E049D2A8 /* AdminRoomRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoomRow.swift; sourceTree = "<group>"; };
 		AD72F7A7D24219C643093BB7 /* OFL-atkinson-hyperlegible-mono.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-atkinson-hyperlegible-mono.txt"; sourceTree = "<group>"; };
 		AD8D712F370BDB26FB52F901 /* GalleryScrollWheel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryScrollWheel.swift; sourceTree = "<group>"; };
+		ADDA6993C32C2D3C68B4B6D5 /* AdminListPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminListPanel.swift; sourceTree = "<group>"; };
 		B0BADFB9DF0EC716C5BF2841 /* Waddle-iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Waddle-iOS.entitlements"; sourceTree = "<group>"; };
 		B0DC7EF989C84CD50FE8B750 /* NavigationSectionHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationSectionHeader.swift; sourceTree = "<group>"; };
 		B16D87BBE11A6EE95142654E /* AuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthModels.swift; sourceTree = "<group>"; };
@@ -1850,13 +1865,18 @@
 		57010325BE4CB572D63BE4DA /* Admin */ = {
 			isa = PBXGroup;
 			children = (
+				0BF02B5177916234A7F29298 /* AdminConsoleHeader.swift */,
+				2A10EB7EC60CEDBE9FA79A1A /* AdminListNotice.swift */,
+				ADDA6993C32C2D3C68B4B6D5 /* AdminListPanel.swift */,
 				3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */,
 				CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */,
 				ACFC9BD024E32EA9E049D2A8 /* AdminRoomRow.swift */,
 				455C82774C67753D8BFC905B /* AdminRoomSheet.swift */,
+				6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */,
 				C549BD9188E9A12524E82C5E /* AdminSheetScaffold.swift */,
 				06527FE40737212DA821400F /* AdminSpaceRow.swift */,
 				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
+				490F63B9770395CF3F4815DE /* AdminUserRow.swift */,
 				05A4701A3A1BB24DC5BDC9BF /* AdminView.swift */,
 			);
 			path = Admin;
@@ -2727,13 +2747,18 @@
 			files = (
 				1F366FF69DD8074B6316F8CA /* AccountSignOutButton.swift in Sources */,
 				95A048455B91E894F7E470A0 /* AddPeopleSheet.swift in Sources */,
+				D58D2168E3A1545E90938751 /* AdminConsoleHeader.swift in Sources */,
+				5EC16D690DF849D4AE86C637 /* AdminListNotice.swift in Sources */,
+				39F54DD4417FC746ABBBF4DB /* AdminListPanel.swift in Sources */,
 				2465D67CE94262E3039F8915 /* AdminPersonPicker.swift in Sources */,
 				E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */,
 				4DBCD4080C891BA4AD2A93DB /* AdminRoomRow.swift in Sources */,
 				A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */,
+				C5B0213BDD7A27A402DAEE74 /* AdminSectionView.swift in Sources */,
 				C7EDD535A7EF98D9FB01E109 /* AdminSheetScaffold.swift in Sources */,
 				7F71BD4A95C45D3C1FC34F5D /* AdminSpaceRow.swift in Sources */,
 				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
+				8C3665D66FBCCDA5DC391297 /* AdminUserRow.swift in Sources */,
 				802554785F689417C3ED30DC /* AdminView.swift in Sources */,
 				5FF74D9CAA9E5256B21392AA /* AnimatedImageDecoder.swift in Sources */,
 				34584E0FB63C7B23B895B6B9 /* AnimatedImageRepresentable.swift in Sources */,
@@ -3190,13 +3215,18 @@
 			files = (
 				2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */,
 				050ABC1E2E9DE9D7A16AB906 /* AddPeopleSheet.swift in Sources */,
+				7D013B6E388C1B12D8FB27E8 /* AdminConsoleHeader.swift in Sources */,
+				4CB83002BD5B4F605F2B305C /* AdminListNotice.swift in Sources */,
+				E60DE53555311D34459829DF /* AdminListPanel.swift in Sources */,
 				A79414F65F48C7CC84FAAF53 /* AdminPersonPicker.swift in Sources */,
 				BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */,
 				D2475AFFB418A5C696E4E53D /* AdminRoomRow.swift in Sources */,
 				33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */,
+				AE84CEC44CB525F976B86E81 /* AdminSectionView.swift in Sources */,
 				5FFA43B73688F559510C72AF /* AdminSheetScaffold.swift in Sources */,
 				8D479E5D6FF48C2845B5E610 /* AdminSpaceRow.swift in Sources */,
 				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,
+				68AAACB6373159D0FEEECC1F /* AdminUserRow.swift in Sources */,
 				353717E9E3E485089D172673 /* AdminView.swift in Sources */,
 				AEAC3248473A2F45ED84CB7D /* AnimatedImageDecoder.swift in Sources */,
 				D39E3DCCA5E5950B512ABFF8 /* AnimatedImageRepresentable.swift in Sources */,
