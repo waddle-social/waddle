@@ -214,6 +214,29 @@ struct EventsTimeTests {
         #expect(CalendarDay(picks.lastDay, in: oslo) == day(2027, 2, 8))
     }
 
+    @Test func aCustomEndMustBeAfterTheStartToSave() {
+        var picks = form(start: "2027-02-05T19:00:00+01:00", end: "2027-02-05T19:00:00+01:00")
+        #expect(picks.draft() == nil)
+
+        picks.customEnd = at("2027-02-05T18:30:00+01:00")
+        #expect(picks.draft() == nil)
+
+        picks.customEnd = at("2027-02-05T19:30:00+01:00")
+        #expect(picks.draft() != nil)
+
+        picks.moveStart(to: at("2027-02-05T20:00:00+01:00"))
+        #expect(picks.draft() == nil)
+    }
+
+    @Test func savingAnEditToATimedEventWithNoEndWritesAThirtyMinuteEnd() throws {
+        let start = at("2027-02-05T19:00:00+01:00")
+        let event = fetched(nil, start: .instant(start))
+        let picks = EventForm(editing: event, now: start, timeZone: oslo)
+
+        #expect(picks.duration == .thirtyMinutes)
+        #expect(try #require(picks.draft()).end == .instant(at("2027-02-05T19:30:00+01:00")))
+    }
+
     @Test func movingAWeeklySeriesMovesItsWeekday() throws {
         var picks = form(start: "2027-02-08T19:00:00+01:00", repeats: .weekly)
         picks.duration = .twoHours

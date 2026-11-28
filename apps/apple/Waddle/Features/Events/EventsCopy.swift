@@ -46,9 +46,9 @@ struct EventsCopy {
         CalendarDay(year: year, month: month, day: 1).start(in: timeZone).formatted(style.month(.wide).year())
     }
 
-    /// "19:00".
+    /// "7:00 PM" or "19:00", depending on the locale.
     func time(_ date: Date) -> String {
-        date.formatted(style.hour().minute())
+        date.formatted(EventTimeLabel.formatStyle(calendar: calendar, locale: locale))
     }
 
     /// "Friday 5 February 2027".

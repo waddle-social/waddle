@@ -3,6 +3,7 @@ import WaddleKit
 
 /// A timed event's preset and the end time shown for Custom.
 struct EventDurationRows: View {
+    @Environment(\.eventsCalendar) private var calendar
     @Binding var form: EventForm
 
     var body: some View {
@@ -29,7 +30,7 @@ struct EventDurationRows: View {
             HuddleDivider()
             EventEditorRow("Ends") {
                 if let end = Binding($form.customEnd) {
-                    DatePicker("Ends", selection: end, displayedComponents: [.date, .hourAndMinute])
+                    DatePicker("Ends", selection: end, in: earliestEnd..., displayedComponents: [.date, .hourAndMinute])
                         .labelsHidden()
                         .datePickerStyle(.compact)
                 } else {
@@ -38,5 +39,9 @@ struct EventDurationRows: View {
                 }
             }
         }
+    }
+
+    private var earliestEnd: Date {
+        calendar.dateInterval(of: .minute, for: form.start)?.end ?? form.start.addingTimeInterval(60)
     }
 }

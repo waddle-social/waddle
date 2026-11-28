@@ -44,17 +44,28 @@ struct EventsWeekTests {
         #expect(sections.flatMap(\.entries).map(\.occurrence.title) == ["A", "B", "D", "C"])
     }
 
-    @Test func aTimedEventWithNoEndIsListedThroughItsStartInstant() {
+    @Test func aTimedEventWithNoEndIsListedForItsOneHourLiveWindow() {
         let start = at("2027-03-27T10:00:00+01:00")
         let event = timed("check-in", "2027-03-27T10:00:00+01:00")
-        let atStart = EventsWeek(now: start, timeZone: oslo)
-        let afterStart = EventsWeek(now: start.addingTimeInterval(1), timeZone: oslo)
+        let ongoing = EventsWeek(now: start.addingTimeInterval(3599), timeZone: oslo)
+        let finished = EventsWeek(now: start.addingTimeInterval(3600), timeZone: oslo)
 
-        #expect(atStart.sections(for: [event], locale: locale).count == 1)
-        #expect(afterStart.sections(for: [event], locale: locale).isEmpty)
+        #expect(ongoing.sections(for: [event], locale: locale).first?.entries.first?.status == .happeningNow)
+        #expect(finished.sections(for: [event], locale: locale).isEmpty)
     }
 
-    @Test func dayHeadingsAndCardTimesDescribeWhatIsVisibleOnThatDay() throws {
+    @Test func anEventWithNoEndCanCarryOverFromYesterday() {
+        let week = EventsWeek(now: at("2027-03-27T00:15:00+01:00"), timeZone: oslo)
+        let event = timed("check-in", "2027-03-26T23:30:00+01:00")
+        let queried = [event].filter { $0.overlaps(week.range, in: oslo) }
+
+        let sections = week.sections(for: queried, locale: locale)
+
+        #expect(sections.map(\.day.iso) == ["2027-03-27"])
+        #expect(sections.first?.entries.first?.timeLabel == "Happening now · continues")
+    }
+
+    @Test func dayHeadingsAndCardTimesDescribeWhatIsVisibleOnThatDay() {
         let week = EventsWeek(now: at("2027-03-27T10:00:00+01:00"), timeZone: oslo)
         let overnight = timed("overnight", "2027-03-26T22:00:00+01:00", "2027-03-28T03:30:00+02:00")
         let offsite = allDay("offsite", from: "2027-03-27")
@@ -67,10 +78,16 @@ struct EventsWeekTests {
             ["All day", "Happening now · continues", "Starting soon · 11:00"],
             ["Happening now · continues until 03:30"],
         ])
-        let startsInTheMorning = timed("morning", "2027-03-28T09:00:00+02:00")
-        let morning = try #require(week.sections(for: [startsInTheMorning], locale: Locale(identifier: "en_US"))
-            .first?.entries.first)
-        #expect(morning.timeLabel == "09:00")
+    }
+
+    @Test func aTwelveHourLocaleUsesAMAndPMOnCards() {
+        let week = EventsWeek(now: at("2027-03-27T10:00:00+01:00"), timeZone: oslo)
+        let overnight = timed("overnight", "2027-03-27T14:00:00+01:00", "2027-03-28T03:30:00+02:00")
+
+        let labels = week.sections(for: [overnight], locale: Locale(identifier: "en_US"))
+            .flatMap(\.entries).map { $0.timeLabel.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+
+        #expect(labels == ["2:00 PM", "continues until 3:30 AM"])
     }
 
     @Test func theEmptyWeekCopyExplainsTheFilterOrWhatToDoNext() {
