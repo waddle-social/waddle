@@ -12,20 +12,22 @@ struct Sidebar: View {
     @Environment(NavigationModel.self) private var navigation
     @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
     @State private var query = ""
-    @State private var spaceID: String?
+    private let spaceExpansion: SidebarSpaceExpansion
+
+    init(spaceExpansion: SidebarSpaceExpansion? = nil) {
+        self.spaceExpansion = spaceExpansion ?? .device
+    }
 
     var body: some View {
         let sections = currentSections
         VStack(spacing: 0) {
-            SidebarHeader(spaces: session.directory.spaces, spaceID: $spaceID)
+            SidebarHeader(name: session.directory.spaces.first?.name ?? "Waddle")
             SidebarSearchField(text: $query)
                 .padding(.horizontal, Theme.Spacing.m)
                 .padding(.bottom, Theme.Spacing.s)
             List {
-                if !isSearching {
-                    destinations
-                }
-                ChannelListSection(channels: sections.channels, style: .sidebar, isSearching: isSearching)
+                if !isSearching { destinations }
+                SidebarRoomsSection(expansion: spaceExpansion, searchResults: isSearching ? sections.channels : nil)
                 GroupChatListSection(groups: sections.groupDMs, style: .sidebar)
                 DirectListSection(directs: sections.directs, style: .sidebar, isSearching: isSearching)
             }
@@ -50,6 +52,7 @@ struct Sidebar: View {
             layout?.sidebarIsOnScreen = isOnScreen
         }
         .onDisappear { layout?.sidebarIsOnScreen = false }
+        .modifier(RevealSidebarRoom(expansion: spaceExpansion))
         .navigationTitle("")
         #if os(iOS)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -117,7 +120,7 @@ struct Sidebar: View {
     private var currentSections: NavigationSections {
         let directory = session.directory
         return NavigationSections.build(
-            channels: directory.channels(in: SpaceScope.resolved(spaceID, in: directory.spaces)),
+            channels: directory.channels,
             groupDMs: directory.groupDMs,
             directs: directory.directConversations,
             query: query
@@ -125,24 +128,18 @@ struct Sidebar: View {
     }
 }
 
-/// The community's mark and name, the space switcher when there is more
-/// than one space, and the button that starts a new message.
+/// The community's mark and name, and the button that starts a new message.
 private struct SidebarHeader: View {
     @Environment(NavigationModel.self) private var navigation
-    let spaces: [Space]
-    @Binding var spaceID: String?
+    let name: String
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
             WaddleBrandMark(size: 28)
-            if SpaceScope.showsPicker(spaceCount: spaces.count) {
-                SpacePickerMenu(spaces: spaces, selection: $spaceID)
-            } else {
-                Text(spaces.first?.name ?? "Waddle")
-                    .huddleText(Theme.Typography.channel)
-                    .foregroundStyle(Theme.Colors.fg)
-                    .lineLimit(1)
-            }
+            Text(name)
+                .huddleText(Theme.Typography.channel)
+                .foregroundStyle(Theme.Colors.fg)
+                .lineLimit(1)
             Spacer(minLength: 0)
             Button {
                 navigation.sheet = .newMessage

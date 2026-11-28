@@ -5,7 +5,7 @@ import SwiftUI
 struct NavigationSectionHeader<Accessory: View>: View {
     let title: String
     let addLabel: String
-    let action: () -> Void
+    let action: (() -> Void)?
     @ViewBuilder let accessory: () -> Accessory
 
     var body: some View {
@@ -16,12 +16,14 @@ struct NavigationSectionHeader<Accessory: View>: View {
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             accessory()
-            Button(action: action) {
-                NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
+            if let action {
+                Button(action: action) {
+                    NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(addLabel))
+                .help(addLabel)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text(addLabel))
-            .help(addLabel)
         }
         .padding(.leading, Theme.Spacing.m)
         .navigationListRow(top: Theme.Spacing.m)

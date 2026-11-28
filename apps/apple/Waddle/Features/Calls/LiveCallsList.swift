@@ -125,11 +125,12 @@ struct LiveCallsHost: View {
                 let list = LiveCallsList(calls: calls, choose: choose)
                     .padding(.horizontal, Theme.Spacing.m)
                     .padding(.vertical, Theme.Spacing.s)
-                ViewThatFits(in: .vertical) {
-                    list
-                    ScrollView { list }
+                HeightUpTo(limit: Self.maxHeight) {
+                    ViewThatFits(in: .vertical) {
+                        list.fixedSize(horizontal: false, vertical: true)
+                        ScrollView { list }
+                    }
                 }
-                .frame(maxHeight: Self.maxHeight)
                 .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }

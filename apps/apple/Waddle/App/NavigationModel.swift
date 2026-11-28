@@ -43,6 +43,7 @@ enum Route: Hashable {
 enum SheetRoute: Identifiable, Hashable {
     case newMessage
     case newChannel
+    case newChannelInSpace(Space)
     case leftRooms
     case profile
     case settings

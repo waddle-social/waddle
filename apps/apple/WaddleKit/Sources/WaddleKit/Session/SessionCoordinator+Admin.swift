@@ -116,9 +116,37 @@ extension SessionCoordinator {
         }
     }
 
-    public func createAdminRoom(_ draft: AdminRoomDraft) async throws {
-        try await whileOnline { try await port.createAdminRoom(draft) }
+    @discardableResult
+    public func createAdminRoom(_ draft: AdminRoomDraft) async throws -> BareJID {
+        let room = try await whileOnline { try await port.createAdminRoom(draft) }
         await refreshDirectory(joiningOnlyNewRooms: true)
+        return room
+    }
+
+    /// Creates a room on the server with its space membership in the same request.
+    public func createChannel(name: String, summary: String?, in space: Space) async throws -> ConversationID {
+        guard isCommunityOwner, let service = space.serviceJID else { throw PortError.rejected }
+        let epoch = connectionEpoch
+        let spaces = adminSpacesList()
+        await spaces.loadEveryPage()
+        try Task.checkCancellation()
+        guard epoch == connectionEpoch else { throw PortError.notConnected }
+        guard let target = spaces.rows.first(where: { $0.node == space.id && $0.service.domain == service.domain }) else {
+            throw spaces.failure ?? spaces.moreFailure ?? PortError.rejected
+        }
+        guard let draft = AdminRoomDraft(name: name, description: summary ?? "", kind: .text, access: .open, space: target) else {
+            throw PortError.invalidRequest
+        }
+        let room = try await createAdminRoom(draft)
+        // The write succeeded even if discovery could not show the new bookmark yet.
+        if epoch == connectionEpoch, directory.channel(for: room) == nil, !isFenced(room),
+           directory.spaces.contains(where: { $0.id == space.id && $0.serviceJID == service }) {
+            upsertChannel(Channel(
+                roomJID: room, name: draft.name, summary: draft.description, position: directory.channels.count,
+                spaceID: space.id, autojoin: false, membersOnly: false
+            ))
+        }
+        return .room(room)
     }
 
     /// Answers with the room as the server now holds it.

@@ -1,8 +1,7 @@
 import SwiftUI
 import WaddleKit
 
-/// Creates a channel: name, optional description and a live address
-/// preview.
+/// Creates a room with a name and an optional description.
 struct NewChannelSheet: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
@@ -13,35 +12,68 @@ struct NewChannelSheet: View {
     @State private var errorMessage: String?
     @FocusState private var isNameFocused: Bool
 
-    init() {}
+    let space: Space?
+
+    init(space: Space? = nil) {
+        self.space = space
+    }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("Name", text: $name, prompt: Text("e.g. design reviews"))
-                        .focused($isNameFocused)
-                        .onSubmit { create() }
-                    TextField("Description", text: $summary, prompt: Text("What is it about? (optional)"), axis: .vertical)
-                        .lineLimit(2...4)
-                } footer: {
-                    ChannelAddressPreview(name: name)
-                }
-                if let errorMessage {
-                    Section {
-                        Label(errorMessage, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(Theme.Colors.dangerText)
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            .disabled(isCreating)
-            .navigationTitle("New room")
-            .toolbar { sheetToolbar }
+            styledForm
+                .disabled(isCreating)
+                .navigationTitle("New room")
+                .toolbar { sheetToolbar }
         }
         .interactiveDismissDisabled(isCreating)
         .onAppear { isNameFocused = true }
         .newChannelSheetFrame()
+    }
+
+    @ViewBuilder
+    private var styledForm: some View {
+        if space == nil {
+            form.formStyle(.grouped)
+        } else {
+            form.huddleForm()
+        }
+    }
+
+    private var form: some View {
+        Form {
+            Section {
+                styledField(
+                    TextField("Name", text: $name, prompt: Text("e.g. design reviews"))
+                        .focused($isNameFocused)
+                        .onSubmit { create() }
+                )
+                styledField(
+                    TextField("Description", text: $summary, prompt: Text("What is it about? (optional)"), axis: .vertical)
+                        .lineLimit(2...4)
+                )
+            } footer: {
+                if let space {
+                    FormSectionFooter("This room will appear in \(space.name).")
+                } else {
+                    ChannelAddressPreview(name: name)
+                }
+            }
+            if let errorMessage {
+                Section {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.Colors.dangerText)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func styledField(_ field: some View) -> some View {
+        if space != nil {
+            field.huddleField()
+        } else {
+            field
+        }
     }
 
     @ToolbarContentBuilder
@@ -56,27 +88,34 @@ struct NewChannelSheet: View {
                     .controlSize(.small)
             } else {
                 Button("Create") { create() }
-                    .disabled(slug == nil)
+                    .disabled(!canCreate)
             }
         }
     }
 
-    private var slug: String? {
-        RoomLocalpart.make(from: name.trimmingCharacters(in: .whitespacesAndNewlines))
+    private var canCreate: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if space != nil {
+            return !trimmed.isEmpty && !AdminName.isTooLong(trimmed)
+        }
+        return RoomLocalpart.make(from: trimmed) != nil
     }
 
     private func create() {
-        guard slug != nil, !isCreating else { return }
+        guard canCreate, !isCreating else { return }
         let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let channelName = name
         isCreating = true
         errorMessage = nil
         Task {
             do {
-                let conversation = try await session.createChannel(
-                    name: channelName,
-                    summary: trimmedSummary.isEmpty ? nil : trimmedSummary
-                )
+                let description = trimmedSummary.isEmpty ? nil : trimmedSummary
+                let conversation: ConversationID
+                if let space {
+                    conversation = try await session.createChannel(name: channelName, summary: description, in: space)
+                } else {
+                    conversation = try await session.createChannel(name: channelName, summary: description)
+                }
                 navigation.open(conversation)
                 dismiss()
             } catch {

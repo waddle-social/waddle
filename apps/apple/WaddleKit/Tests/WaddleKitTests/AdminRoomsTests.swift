@@ -239,6 +239,41 @@ struct AdminRoomsTests {
         #expect(port.topologyRequests == 1)
     }
 
+    @Test func creatingFromTheSidebarResolvesTheSpaceAndOpensTheReturnedRoom() async throws {
+        let (coordinator, port) = online()
+        coordinator.isCommunityOwner = true
+        let space = Space(id: "design/lab", serviceJID: bare("spaces.waddle.test"), name: "Design Lab", summary: nil)
+        coordinator.directory.apply(Topology(spaces: [space], channels: []))
+        let adminSpace = AdminSpace(
+            service: bare(#"design\2flab@spaces.waddle.test"#),
+            node: space.id, name: space.name, description: nil, roomCount: 0, memberCount: 0
+        )
+        port.admin.spaces[.init()] = .success(AdminPage(rows: [], nextCursor: "more"))
+        port.admin.spaces[.init(cursor: "more")] = .success(AdminPage(rows: [adminSpace], nextCursor: nil))
+        port.topologyFailure = .timeout
+        let created = try await coordinator.createChannel(name: "Sketches", summary: "Ideas", in: space)
+
+        #expect(created == .room(port.admin.createdRoom))
+        #expect(coordinator.directory.channels(in: space.id).map(\.roomJID) == [port.admin.createdRoom])
+        #expect(port.admin.roomWrites == [.create(try draft("Sketches", description: "Ideas", space: adminSpace))])
+        #expect(port.topologyRequests == 1)
+    }
+
+    @Test func creatingFromTheSidebarRefusesNonOwnersAndAnUnlistedSpace() async throws {
+        let (coordinator, port) = online()
+        let space = Space(id: "design", serviceJID: bare("spaces.waddle.test"), name: "Design", summary: nil)
+        coordinator.directory.apply(Topology(spaces: [space], channels: []))
+
+        await #expect(throws: PortError.rejected) {
+            try await coordinator.createChannel(name: "Sketches", summary: nil, in: space)
+        }
+        coordinator.isCommunityOwner = true
+        await #expect(throws: PortError.rejected) {
+            try await coordinator.createChannel(name: "Sketches", summary: nil, in: space)
+        }
+        #expect(port.admin.roomWrites.isEmpty)
+    }
+
     /// The answer has no counts; they stay as they were.
     @Test func changingARoomAnswersWithWhatTheServerHolds() async throws {
         let (coordinator, port) = online()
