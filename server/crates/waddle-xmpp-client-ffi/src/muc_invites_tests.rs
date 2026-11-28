@@ -60,6 +60,7 @@ impl WaddleEventListener for Listener {
 #[test]
 fn xep0045_invite_and_decline_reach_the_ffi_listener() {
     let listener = Listener::default();
+    let account = "user@example.com".parse().unwrap();
     for xml in [
         "<message xmlns='jabber:client' from='coven@chat.example'>\
             <x xmlns='http://jabber.org/protocol/muc#user'>\
@@ -71,7 +72,7 @@ fn xep0045_invite_and_decline_reach_the_ffi_listener() {
                 <decline from='bob@example.com'><reason>Busy</reason></decline>\
             </x></message>",
     ] {
-        for event in parse_muc_invitation_events(&xml.parse().unwrap()) {
+        for event in parse_muc_invitation_events(&xml.parse().unwrap(), &account) {
             dispatch_event(
                 ClientEvent::MucInvitation(event),
                 "user@example.com",

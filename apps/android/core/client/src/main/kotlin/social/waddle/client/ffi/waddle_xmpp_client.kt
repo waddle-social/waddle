@@ -11983,6 +11983,9 @@ public object FfiConverterTypeWaddleMood: FfiConverterRustBuffer<WaddleMood> {
 
 /**
  * An invitation to join a room, relayed by that room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `inviter`.
  */
 data class WaddleMucInvitation (
     var `room`: BareJid
@@ -12075,6 +12078,9 @@ public object FfiConverterTypeWaddleMucInvitationContinuation: FfiConverterRustB
 
 /**
  * An invitee's decline, relayed to the inviter by the room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `invitee`.
  */
 data class WaddleMucInvitationDecline (
     var `room`: BareJid
@@ -15872,6 +15878,9 @@ sealed class WaddleClientEvent {
 
     /**
      * XEP-0045 mediated room invitation or decline received by this session.
+     *
+     * The room address is unverified. Verify that it belongs to a known room
+     * service before trusting the invitation's `inviter`.
      */
     data class MucInvitation(
         val `event`: social.waddle.client.ffi.WaddleMucInvitationEvent) : WaddleClientEvent()

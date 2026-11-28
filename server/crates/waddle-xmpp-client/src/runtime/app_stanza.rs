@@ -92,7 +92,7 @@ impl XmppRuntime {
                         };
                     }
                     if direction == CarbonDirection::Received {
-                        let invitations = muc_invitation_events(&inner);
+                        let invitations = muc_invitation_events(&inner, self.account_bare_jid());
                         if !invitations.is_empty() {
                             return invitations;
                         }
@@ -140,7 +140,7 @@ impl XmppRuntime {
                     .collect();
             }
 
-            let invitations = muc_invitation_events(element);
+            let invitations = muc_invitation_events(element, self.account_bare_jid());
             if !invitations.is_empty() {
                 return invitations;
             }
@@ -175,8 +175,8 @@ impl XmppRuntime {
     }
 }
 
-fn muc_invitation_events(message: &Element) -> Vec<ClientEvent> {
-    parse_muc_invitation_events(message)
+fn muc_invitation_events(message: &Element, account: &BareJid) -> Vec<ClientEvent> {
+    parse_muc_invitation_events(message, account)
         .into_iter()
         .map(ClientEvent::MucInvitation)
         .collect()

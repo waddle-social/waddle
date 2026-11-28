@@ -109,11 +109,15 @@ fn invitation_message(room: &BareJid, payload: MucUser) -> Message {
 
 /// Parse relayed invitations and declines from a normal message, in wire order.
 ///
-/// A room relays both from its own bare JID (XEP-0045 §7.8.2). A message from
-/// an occupant JID is a private message and carries no invitation, whatever
-/// its payload says.
+/// A room relays both from its own bare JID (XEP-0045 §7.8.2). The sender must
+/// have a localpart and differ from the account's bare JID. The caller must
+/// verify that the sender belongs to a known room service before trusting the
+/// inviter or invitee.
 #[must_use]
-pub fn parse_muc_invitation_events(message: &Element) -> Vec<MucInvitationEvent> {
+pub fn parse_muc_invitation_events(
+    message: &Element,
+    account: &BareJid,
+) -> Vec<MucInvitationEvent> {
     if !message.is("message", NS_CLIENT) || !matches!(message.attr("type"), None | Some("normal")) {
         return Vec::new();
     }
@@ -126,10 +130,13 @@ pub fn parse_muc_invitation_events(message: &Element) -> Vec<MucInvitationEvent>
     else {
         return Vec::new();
     };
-    if !sender.is_bare() {
+    if !sender.is_bare() || sender.node().is_none() {
         return Vec::new();
     }
     let room = sender.into_bare();
+    if &room == account {
+        return Vec::new();
+    }
     payload
         .children()
         .filter_map(|child| {

@@ -39,6 +39,9 @@ pub enum ClientEvent {
     /// A trusted XEP-0191 block-list push.
     BlockListChanged(BlockingPush),
     /// A live XEP-0045 mediated room invitation or decline.
+    ///
+    /// The room address is unverified. Verify that it belongs to a known room
+    /// service before trusting the invitation's `inviter`.
     MucInvitation(MucInvitationEvent),
     /// Typed inbound A/V call control event.
     Call(Box<InboundCallEvent>),

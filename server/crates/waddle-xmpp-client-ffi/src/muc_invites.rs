@@ -8,6 +8,9 @@ use crate::error::client_error_to_waddle;
 use crate::{WaddleClient, WaddleError};
 
 /// An invitation to join a room, relayed by that room.
+///
+/// The room address is unverified. Verify that it belongs to a known room
+/// service before trusting `inviter`.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleMucInvitation {
     pub room: BareJid,
@@ -24,6 +27,9 @@ pub struct WaddleMucInvitationContinuation {
 }
 
 /// An invitee's decline, relayed to the inviter by the room.
+///
+/// The room address is unverified. Verify that it belongs to a known room
+/// service before trusting `invitee`.
 #[derive(uniffi::Record, Clone)]
 pub struct WaddleMucInvitationDecline {
     pub room: BareJid,

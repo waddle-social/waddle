@@ -5,6 +5,34 @@ use crate::muc_invites::MucInvitationEvent;
 use crate::{ClientEvent, XmppRuntime};
 
 #[test]
+fn xep0045_rejects_invitation_from_domain_only_sender() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let stanza = "<message xmlns='jabber:client' from='chat.example'>\
+        <x xmlns='http://jabber.org/protocol/muc#user'>\
+            <invite from='bob@example.com'/></x></message>"
+        .parse()
+        .unwrap();
+    assert!(!runtime
+        .handle_app_stanza(&stanza)
+        .iter()
+        .any(|event| matches!(event, ClientEvent::MucInvitation(_))));
+}
+
+#[test]
+fn xep0045_rejects_invitation_from_own_bare_jid() {
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
+    let stanza = "<message xmlns='jabber:client' from='alice@example.com'>\
+        <x xmlns='http://jabber.org/protocol/muc#user'>\
+            <invite from='bob@example.com'/></x></message>"
+        .parse()
+        .unwrap();
+    assert!(!runtime
+        .handle_app_stanza(&stanza)
+        .iter()
+        .any(|event| matches!(event, ClientEvent::MucInvitation(_))));
+}
+
+#[test]
 fn mediated_invite_and_decline_are_not_chat_messages() {
     let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let [invite, decline] = [

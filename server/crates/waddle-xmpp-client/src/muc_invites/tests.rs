@@ -57,7 +57,8 @@ fn xep0045_continuation_keeps_empty_flag_and_thread_id() {
       </x></message>"
         .parse()
         .unwrap();
-    let events = parse_muc_invitation_events(&stanza);
+    let account = "me@example.com".parse().unwrap();
+    let events = parse_muc_invitation_events(&stanza, &account);
     let [MucInvitationEvent::Invited(threaded), MucInvitationEvent::Invited(continued), MucInvitationEvent::Invited(plain)] =
         events.as_slice()
     else {
@@ -91,6 +92,7 @@ fn xep0045_continuation_keeps_empty_flag_and_thread_id() {
 
 #[test]
 fn xep0045_non_mediated_messages_do_not_produce_invitation_events() {
+    let account = "me@example.com".parse().unwrap();
     for xml in [
         "<message xmlns='jabber:client' from='coven@chat.example/nick' type='chat'>\
             <body>Private message</body><x xmlns='http://jabber.org/protocol/muc#user'/></message>",
@@ -107,6 +109,9 @@ fn xep0045_non_mediated_messages_do_not_produce_invitation_events() {
         "<message xmlns='jabber:client' from='coven@chat.example'>\
             <x xmlns='urn:example:unrelated'><invite from='bob@example.com'/></x></message>",
     ] {
-        assert!(parse_muc_invitation_events(&xml.parse().unwrap()).is_empty(), "{xml}");
+        assert!(
+            parse_muc_invitation_events(&xml.parse().unwrap(), &account).is_empty(),
+            "{xml}"
+        );
     }
 }

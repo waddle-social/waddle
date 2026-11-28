@@ -11042,6 +11042,9 @@ public func FfiConverterTypeWaddleMood_lower(_ value: WaddleMood) -> RustBuffer 
 
 /**
  * An invitation to join a room, relayed by that room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `inviter`.
  */
 public struct WaddleMucInvitation: Equatable, Hashable {
     public var room: BareJid
@@ -11164,6 +11167,9 @@ public func FfiConverterTypeWaddleMucInvitationContinuation_lower(_ value: Waddl
 
 /**
  * An invitee's decline, relayed to the inviter by the room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `invitee`.
  */
 public struct WaddleMucInvitationDecline: Equatable, Hashable {
     public var room: BareJid
@@ -16073,6 +16079,9 @@ public enum WaddleClientEvent: Equatable, Hashable {
     )
     /**
      * XEP-0045 mediated room invitation or decline received by this session.
+     *
+     * The room address is unverified. Verify that it belongs to a known room
+     * service before trusting the invitation's `inviter`.
      */
     case mucInvitation(event: WaddleMucInvitationEvent
     )
