@@ -38,8 +38,7 @@ struct ConversationHeaderText: Hashable {
                 summary: session.directory.channel(for: conversation.jid)?.summary
             )
         }
-        let contact = session.presence.contacts[conversation.jid]
-        return directSubtitle(availability: contact?.availability ?? .offline, status: contact?.status)
+        return session.presence.directStatusLine(for: conversation.jid)
     }
 
     /// Member count while joined, else the channel summary.
@@ -49,19 +48,5 @@ struct ConversationHeaderText: Hashable {
         }
         let trimmed = summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// RFC 6121 availability in words, with the status message when set.
-    static func directSubtitle(availability: Availability, status: String?) -> String {
-        let word: String
-        switch availability {
-        case .available, .chat: word = "Online"
-        case .away: word = "Away"
-        case .extendedAway: word = "Away for a while"
-        case .doNotDisturb: word = "Do not disturb"
-        case .offline: word = "Offline"
-        }
-        let trimmed = status?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? word : "\(word) · \(trimmed)"
     }
 }

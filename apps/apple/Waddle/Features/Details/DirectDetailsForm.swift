@@ -12,17 +12,20 @@ struct DirectDetailsForm: View {
 
     var body: some View {
         let presence = session.presence.contacts[peer]
+        let isInCall = session.presence.isInCall(peer)
         Form {
             Section {
                 DirectPeerHeader(
                     peer: peer,
                     name: session.directory.title(for: .direct(peer)),
-                    presence: presence
+                    presence: presence,
+                    isInCall: isInCall
                 )
             }
             PeerSharingSection(
                 status: session.liveSharedStatus(of: peer, lookedUp: shared),
-                isOnline: presence?.availability.isOnline ?? false
+                isOnline: presence?.availability.isOnline ?? false,
+                showsCallInHeader: isInCall
             )
             if let details {
                 PeerDetailsSection(details: details)
@@ -48,6 +51,7 @@ struct DirectPeerHeader: View {
     let peer: BareJID
     let name: String
     let presence: PresenceStore.ContactPresence?
+    let isInCall: Bool
 
     var body: some View {
         PeerHeader(
@@ -55,7 +59,8 @@ struct DirectPeerHeader: View {
             jid: peer,
             availability: presence?.availability ?? .offline,
             status: presence?.status,
-            idleSince: presence?.idleSince
+            idleSince: presence?.idleSince,
+            isInCall: isInCall
         )
     }
 }
@@ -68,6 +73,7 @@ struct PeerHeader: View {
     let availability: Availability
     let status: String?
     let idleSince: Date?
+    let isInCall: Bool
     /// Their role in the room the profile was opened from.
     var role: MemberRoleLine?
 
@@ -87,9 +93,10 @@ struct PeerHeader: View {
             if let role {
                 role
             }
-            Text(AvailabilityTitle.title(availability))
+            Text(isInCall ? "In a call" : AvailabilityTitle.title(availability))
                 .huddleText(Theme.Typography.label)
                 .foregroundStyle(Theme.Colors.fgMuted)
+                .accessibilityHidden(isInCall) // The badge announces the same text.
             if let statusText {
                 Text(statusText)
                     .huddleText(Theme.Typography.body)
@@ -108,7 +115,9 @@ struct PeerHeader: View {
     }
 
     private var avatar: some View {
-        PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Theme.Size.profileAvatar)
+        PeerPresenceAvatar(
+            jid: jid, name: name, availability: availability, size: Theme.Size.profileAvatar, isInCall: isInCall
+        )
     }
 
     private var statusText: String? {
@@ -131,6 +140,7 @@ struct PeerProfileSheet: View {
 
     var body: some View {
         let presence = PeerProfilePresence.resolve(profile, session: session)
+        let isInCall = profile.jid.map { session.presence.isInCall($0) } ?? false
         NavigationStack {
             Form {
                 Section {
@@ -140,6 +150,7 @@ struct PeerProfileSheet: View {
                         availability: presence.availability,
                         status: presence.status,
                         idleSince: presence.idleSince,
+                        isInCall: isInCall,
                         role: roomRole
                     )
                     if let peer = messageablePeer {
@@ -157,7 +168,8 @@ struct PeerProfileSheet: View {
                 }
                 PeerSharingSection(
                     status: profile.jid.flatMap { session.liveSharedStatus(of: $0, lookedUp: shared) },
-                    isOnline: presence.availability.isOnline
+                    isOnline: presence.availability.isOnline,
+                    showsCallInHeader: isInCall
                 )
                 if let details {
                     PeerDetailsSection(details: details)

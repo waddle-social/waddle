@@ -8,9 +8,10 @@ struct PeerSharingSection: View {
     /// What they share, as looked up; nil until it is known.
     let status: SharedStatus?
     let isOnline: Bool
+    var showsCallInHeader = false
 
     var body: some View {
-        if let shown = status?.shown(isOnline: isOnline), !shown.isEmpty {
+        if let shown = shownStatus, !shown.isEmpty {
             Section {
                 if let mood = shown.mood {
                     ProfileSharingLabel(
@@ -38,6 +39,14 @@ struct PeerSharingSection: View {
                 FormSectionHeader("Right now")
             }
         }
+    }
+
+    private var shownStatus: SharedStatus? {
+        guard var shown = status?.shown(isOnline: isOnline) else { return nil }
+        if showsCallInHeader, shown.activity?.showsACall == true {
+            shown.activity = nil
+        }
+        return shown
     }
 }
 

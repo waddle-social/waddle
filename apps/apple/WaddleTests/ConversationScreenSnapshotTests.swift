@@ -1,12 +1,31 @@
 import SwiftUI
 import XCTest
 @testable import Waddle
+@testable import WaddleKit
 
 /// Night and Daylight goldens for a conversation: the room on the phone
 /// stack on iOS, in the split view on macOS. Compared on the OS the
 /// goldens were recorded on; see `assertScreenSnapshot`.
 @MainActor
 final class ConversationScreenSnapshotTests: XCTestCase {
+    func testDirectWithPeerInACall() async throws {
+        let sample = SampleSession()
+        sample.seedTheo()
+        sample.coordinator.handle(.activityChanged(
+            jid: SampleSession.theo, activity: UserActivity(general: "talking", specific: "on_video_phone")
+        ))
+        let direct = ConversationID.direct(SampleSession.theo)
+        XCTAssertEqual(ConversationHeaderText.subtitle(for: direct, session: sample.coordinator), "In a call")
+        #if os(iOS)
+        sample.navigation.tab = .directMessages
+        sample.navigation.directPath = [.conversation(direct)]
+        try await assertScreenSnapshot(of: sample.host(PhoneShell()), size: .phone)
+        #else
+        sample.navigation.selection = direct
+        try await assertScreenSnapshot(of: sample.host(SplitShell()), size: .desktop)
+        #endif
+    }
+
     #if os(iOS)
     func testPhoneRoom() async throws {
         let sample = SampleSession()
