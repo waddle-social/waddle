@@ -37,6 +37,7 @@ final class FakeAdmin {
     var occupants: [PageRequest: Result<AdminPage<AdminRoomOccupant>, PortError>] = [:]
     var roomMembers: [PageRequest: Result<AdminPage<AdminRoomMember>, PortError>] = [:]
     var roomWrites: [RoomWrite] = []
+    var createdRoom = bare("sketches-e92f42ad@muc.waddle.test")
 
     fileprivate func write(_ write: RoomWrite) throws {
         roomWrites.append(write)
@@ -117,8 +118,9 @@ extension FakePort {
         return try answer.get()
     }
 
-    func createAdminRoom(_ draft: AdminRoomDraft) async throws {
+    func createAdminRoom(_ draft: AdminRoomDraft) async throws -> BareJID {
         try admin.write(.create(draft))
+        return admin.createdRoom
     }
 
     func updateAdminRoom(_ room: AdminRoom, to draft: AdminRoomDraft) async throws -> AdminRoom {

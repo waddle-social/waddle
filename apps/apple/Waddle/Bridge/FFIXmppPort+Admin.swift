@@ -128,14 +128,16 @@ extension FFIXmppPort {
         return AdminPage(rows: rooms, nextCursor: page.nextCursor)
     }
 
-    func createAdminRoom(_ draft: AdminRoomDraft) async throws {
-        _ = try await mappingPortErrors {
+    func createAdminRoom(_ draft: AdminRoomDraft) async throws -> BareJID {
+        let created = try await mappingPortErrors {
             try await client.adminChannelsCreate(args: WaddleAdminChannelsCreateArgs(
                 name: draft.name, topic: draft.description, channelType: Self.wire(draft.kind),
                 spaceJid: draft.space?.service.description, spaceNode: draft.space?.node,
                 isPublic: draft.access.isListed, membersOnly: draft.access.isMembersOnly
             ))
         }
+        guard let room = FFIInbound.bareJID(created.channelJid) else { throw PortError.failed }
+        return room
     }
 
     /// The server leaves what is not sent as it is, and refuses a kind it

@@ -140,6 +140,8 @@ private struct SheetHost: View {
             NewMessageSheet()
         case .newChannel:
             NewChannelSheet()
+        case let .newChannelInSpace(space):
+            NewChannelSheet(space: space)
         case .leftRooms:
             LeftRoomsSheet()
         case .profile:

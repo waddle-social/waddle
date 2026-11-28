@@ -100,6 +100,23 @@ final class NavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.homePath, [.conversation(lobby)])
     }
 
+    func testBrowseRoomsOpensOnBothShellsAndBackReturnsToIt() {
+        let navigation = NavigationModel()
+        navigation.open(lobby)
+
+        navigation.show(.browseRooms)
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.homePath, [.browseRooms])
+
+        navigation.open(design, returningTo: .browseRooms)
+        XCTAssertEqual(navigation.selection, design)
+        XCTAssertEqual(navigation.homePath, [.browseRooms, .conversation(design)])
+
+        navigation.homePath.removeLast()
+        XCTAssertNil(navigation.selection)
+        XCTAssertEqual(navigation.splitSection, .browseRooms)
+    }
+
     // MARK: - Sub-threads
 
     func testASubThreadReplacesItsParentInTheInspectorAndBack() {

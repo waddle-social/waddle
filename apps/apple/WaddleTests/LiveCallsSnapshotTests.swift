@@ -30,8 +30,7 @@ final class LiveCallsSnapshotTests: XCTestCase {
                 .padding(.vertical, Theme.Spacing.s)
                 .frame(width: sidebar)
                 .background(Theme.Colors.bgRail)
-                .environment(\.huddleGround, Theme.Colors.bgRail)
-                .environment(\.colorScheme, .dark),
+                .environment(\.huddleGround, Theme.Colors.bgRail),
             width: sidebar + 2 * Theme.Spacing.l,
             testName: testName,
             line: line
@@ -61,7 +60,10 @@ final class LiveCallsSnapshotTests: XCTestCase {
 
     func testALongRoomNameInTheNarrowestSidebar() {
         assertList(
-            [call("quarterly planning and retrospective", people("Ada", "Linus", "Grace"), video: true)],
+            [
+                call("quarterly planning and retrospective", people("Ada", "Linus", "Grace"), video: true),
+                call("design", people("Priya"), action: .open),
+            ],
             sidebar: Self.narrowestSidebar
         )
     }

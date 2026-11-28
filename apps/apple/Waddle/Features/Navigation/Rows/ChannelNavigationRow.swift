@@ -6,11 +6,14 @@ struct ChannelNavigationRow: View {
     @Environment(SessionCoordinator.self) private var session
     let channel: Channel
     let style: ConversationLinkStyle
+    var huddleParticipantCount = 0
+    var leadingIndent: CGFloat = 0
 
     var body: some View {
         let attention = ConversationAttention(session: session, conversation: channel.conversation)
         ConversationLink(conversation: channel.conversation, style: style) {
-            ChannelRowLabel(channel: channel, attention: attention)
+            ChannelRowLabel(channel: channel, attention: attention, huddleParticipantCount: huddleParticipantCount)
+                .padding(.leading, leadingIndent)
         }
         .conversationRowActions(channel.conversation, style: style)
     }
@@ -20,6 +23,7 @@ struct ChannelNavigationRow: View {
 struct ChannelRowLabel: View {
     let channel: Channel
     let attention: ConversationAttention
+    let huddleParticipantCount: Int
 
     var body: some View {
         NavigationRowLabel(title: channel.name, isEmphasised: attention.isUnread, isDimmed: attention.isDimmed) {
@@ -27,9 +31,22 @@ struct ChannelRowLabel: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(attention.isUnread ? Theme.Colors.fgMuted : Theme.Colors.fgSoft)
         } trailing: {
-            ConversationRowTrailing(attention: attention)
+            if huddleParticipantCount > 0 {
+                HStack(spacing: Theme.Spacing.xs) {
+                    SidebarHuddleCount(count: huddleParticipantCount)
+                    ConversationRowTrailing(attention: attention)
+                }
+            } else {
+                ConversationRowTrailing(attention: attention)
+            }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(attention.accessibilityLabel(title: channel.name)))
+        .accessibilityLabel(Text(accessibilityLabel))
+    }
+
+    private var accessibilityLabel: String {
+        let label = attention.accessibilityLabel(title: channel.name)
+        guard huddleParticipantCount > 0 else { return label }
+        return "\(label), \(SidebarHuddleCount.description(for: huddleParticipantCount))"
     }
 }

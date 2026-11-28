@@ -2,10 +2,11 @@ import SwiftUI
 
 /// A section label in a navigation list, with a trailing "+".
 /// It is an ordinary row, so it scrolls with its section and never floats.
-struct NavigationSectionHeader: View {
+struct NavigationSectionHeader<Accessory: View>: View {
     let title: String
     let addLabel: String
-    let action: () -> Void
+    let action: (() -> Void)?
+    @ViewBuilder let accessory: () -> Accessory
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
@@ -14,15 +15,24 @@ struct NavigationSectionHeader: View {
                 .foregroundStyle(Theme.Colors.fgSoft)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
-            Button(action: action) {
-                NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
+            accessory()
+            if let action {
+                Button(action: action) {
+                    NavigationIconLabel(symbol: "plus", color: Theme.Colors.fgSoft)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(addLabel))
+                .help(addLabel)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text(addLabel))
-            .help(addLabel)
         }
         .padding(.leading, Theme.Spacing.m)
         .navigationListRow(top: Theme.Spacing.m)
+    }
+}
+
+extension NavigationSectionHeader where Accessory == EmptyView {
+    init(title: String, addLabel: String, action: @escaping () -> Void) {
+        self.init(title: title, addLabel: addLabel, action: action) { EmptyView() }
     }
 }
 

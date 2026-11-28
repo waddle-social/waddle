@@ -70,6 +70,8 @@ extension View {
                 EventsView()
             case .feed:
                 FeedView()
+            case .browseRooms:
+                BrowseRoomsView()
             }
         }
     }

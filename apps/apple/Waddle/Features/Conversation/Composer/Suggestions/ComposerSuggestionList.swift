@@ -44,22 +44,6 @@ struct ComposerSuggestionList: View {
     }
 }
 
-/// As tall as its content, up to a limit. A frame with a maximum height would take the whole
-/// limit whenever it is offered, and leave a short list floating in an empty box.
-private struct HeightUpTo: Layout {
-    let limit: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache _: inout ()) -> CGSize {
-        guard let content = subviews.first else { return .zero }
-        let height = min(limit, proposal.height ?? limit)
-        return content.sizeThatFits(ProposedViewSize(width: proposal.width, height: height))
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal _: ProposedViewSize, subviews: Subviews, cache _: inout ()) {
-        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
-    }
-}
-
 private struct ComposerSuggestionRow: View {
     let row: SuggestionRowContent
     let isSelected: Bool

@@ -346,7 +346,7 @@ public protocol AdminPort: AnyObject, Sendable {
     /// `space` when there is one.
     func adminRooms(matching prefix: String?, in space: AdminSpace?, after cursor: String?) async throws -> AdminPage<AdminRoom>
 
-    func createAdminRoom(_ draft: AdminRoomDraft) async throws
+    func createAdminRoom(_ draft: AdminRoomDraft) async throws -> BareJID
 
     /// Answers with the room as the server now holds it. A draft without
     /// a description leaves the one it has; a kind that cannot be chosen

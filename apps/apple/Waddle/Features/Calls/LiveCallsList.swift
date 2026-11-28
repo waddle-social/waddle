@@ -125,11 +125,12 @@ struct LiveCallsHost: View {
                 let list = LiveCallsList(calls: calls, choose: choose)
                     .padding(.horizontal, Theme.Spacing.m)
                     .padding(.vertical, Theme.Spacing.s)
-                ViewThatFits(in: .vertical) {
-                    list
-                    ScrollView { list }
+                HeightUpTo(limit: Self.maxHeight) {
+                    ViewThatFits(in: .vertical) {
+                        list.fixedSize(horizontal: false, vertical: true)
+                        ScrollView { list }
+                    }
                 }
-                .frame(maxHeight: Self.maxHeight)
                 .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -172,9 +173,11 @@ struct LiveCallsHost: View {
     }
 
     private func choose(_ call: LiveCall) {
-        navigation.open(call.conversation)
-        guard call.action == .join, call.kind == .room else { return }
-        // As the room's own banner joins: with the microphone, and the camera for the person to turn on.
-        Task { await session.joinGroupCall(in: call.conversation.jid, video: false) }
+        switch call.action {
+        case .join:
+            Task { await session.joinLiveRoomCall(in: call.conversation.jid) }
+        case .open:
+            navigation.open(call.conversation)
+        }
     }
 }

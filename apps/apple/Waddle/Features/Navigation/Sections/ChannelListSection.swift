@@ -10,9 +10,16 @@ struct ChannelListSection: View {
     let isSearching: Bool
 
     var body: some View {
-        NavigationSectionHeader(title: "Rooms", addLabel: "New room") {
-            navigation.sheet = .newChannel
-        }
+        NavigationSectionHeader(
+            title: "Rooms",
+            addLabel: "New room",
+            action: { navigation.sheet = .newChannel },
+            accessory: {
+                if style == .sidebar && !isSearching {
+                    BrowseRoomsSidebarLink()
+                }
+            }
+        )
         if channels.isEmpty && !isSearching {
             emptyContent
         }
