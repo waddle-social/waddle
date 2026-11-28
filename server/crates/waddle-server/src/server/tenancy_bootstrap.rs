@@ -39,6 +39,11 @@ pub struct TenantManifestSpec {
     /// server-wide `WADDLE_AUTH_PROVIDERS_JSON` set.
     #[serde(default)]
     pub auth_providers: Vec<crate::auth::TenantAuthProviderSpec>,
+    /// Extra browser origins trusted for this tenant only: allowed by CORS
+    /// and as sign-in return URLs (e.g. a web client served from another
+    /// host than the tenant's server hostnames).
+    #[serde(default, alias = "cors_origins")]
+    pub cors_origins: Vec<String>,
 }
 
 /// Computes a deterministic SHA-256 digest over all sorted `*.json` files in

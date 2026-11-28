@@ -26,7 +26,7 @@ use url::{Host, Origin, Position, Url};
 pub enum RedirectError {
     #[error("WADDLE_BASE_URL must be an absolute http(s) URL")]
     InvalidBaseUrl,
-    #[error("WADDLE_CORS_ORIGINS entry {entry:?} is not an http(s) origin")]
+    #[error("trusted web origin {entry:?} is not an http(s) origin")]
     InvalidTrustedOrigin { entry: String },
     #[error("sign-in return URL is not a valid URL")]
     UnparseableReturnUrl,
@@ -45,6 +45,25 @@ pub enum RedirectError {
     InvalidCodeChallenge,
     #[error("code_challenge_method must be S256")]
     UnsupportedChallengeMethod,
+}
+
+/// Parse one trusted web origin entry (`WADDLE_CORS_ORIGINS` or a tenant's
+/// `corsOrigins`): an absolute http(s) URL with no path, query, fragment or
+/// userinfo.
+pub fn parse_trusted_origin(entry: &str) -> Result<Origin, RedirectError> {
+    let invalid = || RedirectError::InvalidTrustedOrigin {
+        entry: entry.to_string(),
+    };
+    let url = Url::parse(entry).map_err(|_| invalid())?;
+    let is_bare_origin = (url.path().is_empty() || url.path() == "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    if !is_http_scheme(&url) || !is_bare_origin {
+        return Err(invalid());
+    }
+    Ok(url.origin())
 }
 
 /// Origins a browser sign-in may return to: the server's own origin plus
@@ -72,19 +91,7 @@ impl TrustedWebOrigins {
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
         {
-            let invalid = || RedirectError::InvalidTrustedOrigin {
-                entry: entry.to_string(),
-            };
-            let url = Url::parse(entry).map_err(|_| invalid())?;
-            let is_bare_origin = (url.path().is_empty() || url.path() == "/")
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && url.username().is_empty()
-                && url.password().is_none();
-            if !is_http_scheme(&url) || !is_bare_origin {
-                return Err(invalid());
-            }
-            let origin = url.origin();
+            let origin = parse_trusted_origin(entry)?;
             if !origins.contains(&origin) {
                 origins.push(origin);
             }
@@ -96,10 +103,20 @@ impl TrustedWebOrigins {
     /// Return a tenant-scoped copy whose own origin is `tenant_base_url` while
     /// retaining configured `WADDLE_CORS_ORIGINS`.
     pub fn with_tenant_base(&self, tenant_base_url: &Url) -> Self {
+        self.with_tenant(tenant_base_url, &[])
+    }
+
+    /// Return a tenant-scoped copy whose own origin is `tenant_base_url`,
+    /// additionally trusting the tenant's own `corsOrigins` (the web apps
+    /// deployed for that tenant), while retaining configured
+    /// `WADDLE_CORS_ORIGINS`.
+    pub fn with_tenant(&self, tenant_base_url: &Url, tenant_origins: &[Origin]) -> Self {
         let mut origins = self.origins.clone();
-        let tenant_origin = tenant_base_url.origin();
-        if !origins.contains(&tenant_origin) {
-            origins.push(tenant_origin);
+        for origin in std::iter::once(tenant_base_url.origin()).chain(tenant_origins.iter().cloned())
+        {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
         }
         Self {
             base_url: tenant_base_url.clone(),
