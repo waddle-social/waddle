@@ -13,8 +13,10 @@ import XCTest
 final class AdminSnapshotTests: XCTestCase {
     #if os(iOS)
     private static let size = CGSize(width: 393, height: 600)
+    private static let sheetSize = CGSize.phone
     #else
     private static let size = CGSize(width: 480, height: 600)
+    private static let sheetSize = size
     #endif
 
     /// An owner, three members (one without a display name) and more to load.
@@ -81,7 +83,7 @@ final class AdminSnapshotTests: XCTestCase {
             nextCursor: "after-mika"
         ))
         let sheet = AdminSpaceSheet(subject: .existing(Self.design), spaces: sample.coordinator.adminSpacesList())
-        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
+        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.sheetSize, asSheet: true)
     }
 
     /// Adding a member: the role to give, and everyone with an account.
@@ -108,13 +110,13 @@ final class AdminSnapshotTests: XCTestCase {
             role: .member, roleTitle: AdminSpaceCopy.title,
             holders: sample.coordinator.adminSpaceMembersList(of: Self.design), roleOf: \.role
         ) { _, _ in }
-        try await assertScreenSnapshot(of: sample.host(picker), size: Self.size)
+        try await assertScreenSnapshot(of: sample.host(picker), size: Self.sheetSize, asSheet: true)
     }
 
     func testNewSpace() async throws {
         let sample = SampleSession()
         let sheet = AdminSpaceSheet(subject: .new, spaces: sample.coordinator.adminSpacesList())
-        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
+        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.sheetSize, asSheet: true)
     }
 
     private static let lounge = AdminRoom(
@@ -181,7 +183,9 @@ final class AdminSnapshotTests: XCTestCase {
             nextCursor: nil
         ))
         let sheet = AdminRoomSheet(subject: .existing(Self.lounge), rooms: sample.coordinator.adminRoomsList())
-        try await assertScreenSnapshot(of: sample.host(sheet), size: CGSize(width: Self.size.width, height: 1000))
+        try await assertScreenSnapshot(
+            of: sample.host(sheet), size: CGSize(width: Self.sheetSize.width, height: 1000), asSheet: true
+        )
     }
 
     /// A new room, with the spaces it can go in.
@@ -189,7 +193,7 @@ final class AdminSnapshotTests: XCTestCase {
         let sample = SampleSession()
         sample.port.admin.spaces[.init()] = .success(AdminPage(rows: [Self.design], nextCursor: nil))
         let sheet = AdminRoomSheet(subject: .new, rooms: sample.coordinator.adminRoomsList())
-        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.size)
+        try await assertScreenSnapshot(of: sample.host(sheet), size: Self.sheetSize, asSheet: true)
     }
 
     #if os(macOS)

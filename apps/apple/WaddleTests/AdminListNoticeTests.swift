@@ -20,6 +20,10 @@ final class AdminListNoticeTests: XCTestCase {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: true, failure: nil, query: "ada"), .noMatches)
     }
 
+    func testUserSearchWithNoMatchesNamesTheQuery() {
+        XCTAssertEqual(AdminListCopy.users.noMatches("ada", nil), "No users match “ada”.")
+    }
+
     func testSomeoneWhoIsNotAnOwnerIsToldSo() {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: false, failure: .rejected, query: ""), .notAllowed)
     }
@@ -183,10 +187,10 @@ final class AdminRoomCopyTests: XCTestCase {
 
     func testNoMatchesNamesTheTextAndTheSpace() {
         let noMatches = AdminListCopy.rooms.noMatches
-        XCTAssertEqual(noMatches("lo", nil), "No room's name starts with “lo”.")
-        XCTAssertEqual(noMatches("lo", "Design"), "No room in Design has a name that starts with “lo”.")
+        XCTAssertEqual(noMatches("lo", nil), "No rooms match “lo”.")
+        XCTAssertEqual(noMatches("lo", "Design"), "No rooms in Design match “lo”.")
         XCTAssertEqual(
-            AdminListCopy.rooms.emptyInSpace?("Design"), "Design has no rooms yet. Make one to get people talking."
+            AdminListCopy.rooms.emptyInSpace?("Design"), "No rooms in Design yet."
         )
     }
 

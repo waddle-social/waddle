@@ -94,7 +94,7 @@ final class DesignSystemSnapshotTests: XCTestCase {
                 Button("Following", action: Self.noAction).buttonStyle(.huddleChip())
             }
             HStack(spacing: Theme.Spacing.s) {
-                HuddleTag("Owner")
+                HuddleTag("Owner", tone: .gold)
                 HuddleTag("Bot")
                 HuddleTag("Forum")
             }
@@ -103,6 +103,13 @@ final class DesignSystemSnapshotTests: XCTestCase {
                 UnreadBadge(count: 12)
                 UnreadBadge(count: 140, isMention: true)
             }
+        })
+    }
+
+    func testPickers() {
+        assertHuddleSnapshot(of: HuddlePicker(title: "Type", valueTitle: "Chat", selection: .constant("chat")) {
+            Text("Chat").tag("chat")
+            Text("Announcements").tag("announcement")
         })
     }
 

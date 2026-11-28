@@ -47,7 +47,10 @@ struct AdminSpaceRow: View {
             NavigationRowChrome {
                 HStack(spacing: Theme.Spacing.m) {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                        NavigationRowTitle(title: space.name, isEmphasised: true)
+                        Text(space.name)
+                            .huddleText(Theme.Typography.author)
+                            .foregroundStyle(Theme.Colors.fg)
+                            .lineLimit(1)
                         if let description = space.description {
                             Text(description)
                                 .huddleText(Theme.Typography.caption)
@@ -55,14 +58,16 @@ struct AdminSpaceRow: View {
                                 .lineLimit(1)
                         }
                     }
-                    Spacer(minLength: Theme.Spacing.xs)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     Text(counts)
                         .huddleText(Theme.Typography.caption)
                         .foregroundStyle(Theme.Colors.fgMuted)
-                        .lineLimit(1)
+                        .monospacedDigit()
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
                         .layoutPriority(1)
                 }
-                .padding(.vertical, Theme.Spacing.s)
+                .padding(.vertical, Theme.Spacing.m)
             }
         }
         .buttonStyle(.plain)

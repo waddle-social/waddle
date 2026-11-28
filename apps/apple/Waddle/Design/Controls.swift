@@ -240,22 +240,43 @@ struct HuddleIconButton: View {
 
 /// A small outlined label for a role or state (web `tag`).
 struct HuddleTag: View {
-    let title: String
+    enum Tone {
+        case neutral
+        case gold
 
-    init(_ title: String) {
+        var text: Color {
+            switch self {
+            case .neutral: return Theme.Colors.fgMuted
+            case .gold: return Theme.Colors.goldText
+            }
+        }
+
+        var border: Color {
+            switch self {
+            case .neutral: return Theme.Colors.border
+            case .gold: return Theme.Colors.gold
+            }
+        }
+    }
+
+    let title: String
+    private let tone: Tone
+
+    init(_ title: String, tone: Tone = .neutral) {
         self.title = title
+        self.tone = tone
     }
 
     var body: some View {
         Text(title)
             .huddleText(Theme.Typography.tag)
             .lineLimit(1)
-            .foregroundStyle(Theme.Colors.fgMuted)
+            .foregroundStyle(tone.text)
             .padding(.horizontal, WaddleTokens.Spacing.s2)
             .frame(minHeight: 22)
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .strokeBorder(Theme.Colors.border, lineWidth: WaddleTokens.BorderWidth.hair)
+                    .strokeBorder(tone.border, lineWidth: WaddleTokens.BorderWidth.hair)
             )
     }
 }

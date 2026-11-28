@@ -1,5 +1,4 @@
 import SwiftUI
-import WaddleKit
 
 /// What a sheet of the console is about: something new, or a row of the
 /// list it was opened from.
@@ -31,6 +30,8 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
         let deleteFailure: String
         let newMinHeight: CGFloat
         let minHeight: CGFloat
+        var createTitle = "Create"
+        var saveTitle = "Save"
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -61,6 +62,7 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
                 if let saveError {
                     Section {
                         ManagementErrorLabel(message: saveError)
+                            .listRowBackground(Theme.Colors.surface)
                     }
                 }
                 if !isNew {
@@ -68,13 +70,24 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
                     deleteSection
                 }
             }
-            .formStyle(.grouped)
+            .huddleForm()
+            .tint(Theme.Colors.actionText)
             .disabled(isBusy)
             .navigationTitle(isNew ? copy.newTitle : copy.title)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { toolbar }
+            .toolbar {
+                AdminSheetToolbar(
+                    dismissTitle: isNew ? "Cancel" : "Close",
+                    confirmTitle: isNew ? copy.createTitle : copy.saveTitle,
+                    canDismiss: !isWaiting,
+                    canConfirm: canSave && !isChanging,
+                    isWorking: isBusy,
+                    onDismiss: { dismiss() },
+                    onConfirm: submit
+                )
+            }
         }
         .interactiveDismissDisabled(isWaiting)
         .confirmationDialog(copy.deleteQuestion, isPresented: $confirmsDelete, titleVisibility: .visible) {
@@ -92,34 +105,20 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
 
     private var isWaiting: Bool { isBusy || isChanging }
 
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            Button(isNew ? "Cancel" : "Close") { dismiss() }
-                .disabled(isWaiting)
-        }
-        ToolbarItem(placement: .confirmationAction) {
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel(Text("Working"))
-            } else {
-                Button(isNew ? "Create" : "Save", action: submit)
-                    .disabled(!canSave || isChanging)
-            }
-        }
-    }
-
     private var deleteSection: some View {
         Section {
-            Button(copy.deleteTitle, role: .destructive) { confirmsDelete = true }
-                .foregroundStyle(Theme.Colors.dangerText)
-                .disabled(isChanging)
+            FormActionButton(title: copy.deleteTitle, symbol: "trash", isDestructive: true) {
+                confirmsDelete = true
+            }
+            .disabled(isChanging)
+            .opacity(isChanging || isBusy ? 0.5 : 1)
+            .listRowBackground(Theme.Colors.surface)
             if let deleteError {
                 ManagementErrorLabel(message: deleteError)
+                    .listRowBackground(Theme.Colors.surface)
             }
         } footer: {
-            Text(deleteWarning)
+            FormSectionFooter(deleteWarning)
         }
     }
 
@@ -142,149 +141,5 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
             }
             isBusy = false
         }
-    }
-}
-
-/// The name and description of a space or a room.
-struct AdminNameFields: View {
-    @Binding var name: String
-    @Binding var description: String
-    let namePrompt: String
-    let descriptionPrompt: String
-    /// It has a description and the field is blank: the server reads a
-    /// blank one as "leave it".
-    let keepsOldDescription: Bool
-    let submit: () -> Void
-
-    var body: some View {
-        Section {
-            TextField("Name", text: $name, prompt: Text(namePrompt))
-                .labelsHidden()
-                .onSubmit(submit)
-        } header: {
-            Text("Name")
-        } footer: {
-            if AdminName.isTooLong(name) {
-                Text("A name can be up to \(AdminName.maxLength) characters.")
-                    .foregroundStyle(Theme.Colors.dangerText)
-            }
-        }
-        Section {
-            TextField("Description", text: $description, prompt: Text(descriptionPrompt), axis: .vertical)
-                .labelsHidden()
-                .lineLimit(2...5)
-        } header: {
-            Text("Description")
-        } footer: {
-            if keepsOldDescription {
-                Text("A description can be changed, but not removed yet.")
-            }
-        }
-    }
-}
-
-/// A section of people in a sheet: what went wrong with the last change
-/// to one of them, then the list, or that it is on its way, and a way to
-/// add someone.
-struct AdminPeopleSection<Row: Identifiable & Sendable, RowView: View>: View {
-    let title: String
-    var footer: String?
-    let list: AdminList<Row>?
-    /// What the rows are, for "Couldn't refresh the …".
-    let noun: String
-    let emptyText: String
-    var error: String?
-    /// "Add member", and what it does; nil for a list nothing is added to.
-    var addTitle: String?
-    var add: (() -> Void)?
-    @ViewBuilder let row: (Row) -> RowView
-
-    var body: some View {
-        Section {
-            if let error {
-                ManagementErrorLabel(message: error)
-            }
-            if let list {
-                AdminSheetList(list: list, noun: noun, emptyText: emptyText, row: row)
-            } else {
-                Text("Loading…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-            if let addTitle, let add {
-                Button(action: add) {
-                    Label(addTitle, systemImage: "plus")
-                }
-                .adminRowControl()
-                .disabled(list == nil)
-            }
-        } header: {
-            Text(title)
-        } footer: {
-            if let footer {
-                Text(footer)
-            }
-        }
-    }
-}
-
-/// A list inside a sheet's form: its rows, what it says while loading,
-/// when empty or when it failed, and a way to load more.
-///
-/// It is one row of the form whatever it holds. A grouped form on macOS
-/// draws its cards wrongly when the number of rows in a section changes
-/// after a load, so the rows are stacked here.
-struct AdminSheetList<Row: Identifiable & Sendable, RowView: View>: View {
-    let list: AdminList<Row>
-    /// What the rows are, for "Couldn't refresh the …".
-    let noun: String
-    let emptyText: String
-    @ViewBuilder let row: (Row) -> RowView
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-            if list.failure != nil {
-                HStack {
-                    Text(list.rows.isEmpty ? "Couldn't load the \(noun)." : "Couldn't refresh the \(noun).")
-                    Spacer(minLength: Theme.Spacing.xs)
-                    Button("Try again") { Task { await list.reload() } }
-                        .adminRowControl()
-                        .disabled(list.isLoading)
-                }
-            } else if list.rows.isEmpty {
-                Text(list.hasLoaded ? emptyText : "Loading…")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-            ForEach(Array(list.rows.enumerated()), id: \.element.id) { index, item in
-                if index > 0 || list.failure != nil { Divider() }
-                row(item)
-            }
-            if list.hasMore {
-                Button(list.isLoadingMore ? "Loading…" : "Load more") {
-                    Task { await list.loadMore() }
-                }
-                .adminRowControl()
-                .disabled(list.isLoadingMore)
-            }
-            if list.moreFailure != nil {
-                Text("Couldn't load more. Try again.")
-                    .foregroundStyle(Theme.Colors.fgMuted)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-extension View {
-    /// A button or menu inside a row of a sheet's list. iOS sends a tap
-    /// anywhere in a form's cell to every default-style button in it, and
-    /// these rows stack several people in one cell, so each control takes
-    /// only its own taps there. A Mac form has no such cell taps, and its
-    /// controls keep their look.
-    func adminRowControl() -> some View {
-        #if os(iOS)
-        buttonStyle(.borderless)
-        #else
-        self
-        #endif
     }
 }
