@@ -108,7 +108,8 @@ xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destinatio
 xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination 'platform=iOS Simulator,name=<an iPhone>' test
 ```
 
-`WaddleTests` renders every design-system component in Night and Daylight
+`WaddleTests` renders every design-system component (including `HuddlePicker`
+and the gold `HuddleTag`) in Night and Daylight
 and compares it with the goldens in `WaddleTests/__Snapshots__`, one set per
 platform. After an intended visual change, delete the affected goldens and
 run the tests once to record new ones (that run fails), then commit them.

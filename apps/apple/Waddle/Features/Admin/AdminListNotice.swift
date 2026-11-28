@@ -55,7 +55,7 @@ struct AdminListCopy {
         loadingTitle: "Loading users",
         offlineMessage: "Users show up here when you're connected.",
         failedTitle: "Users didn't load",
-        noMatches: { query, _ in "No one's name or address starts with “\(query)”." },
+        noMatches: { query, _ in "No users match “\(query)”." },
         emptyTitle: "No users registered yet.",
         searchPrompt: "Search users"
     )
@@ -110,8 +110,6 @@ struct AdminListNoticeView: View {
             EmptyStateView(title: "You're offline", message: copy.offlineMessage, symbol: copy.symbol)
         case .failed:
             EmptyStateView(title: copy.failedTitle, message: "Refresh to try again.", symbol: "exclamationmark.triangle")
-        case .noMatches where section == .users:
-            status("No users match “\(query)”.")
         case .noMatches:
             status(copy.noMatches(query, space?.name))
         case .empty:

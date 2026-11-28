@@ -38,7 +38,7 @@ struct AdminRoomSettings: View {
     private var kindRow: some View {
         if kind.canBeChosen {
             selectionRow("Type") {
-                HuddlePicker(title: "Kind", valueTitle: AdminRoomCopy.title(kind), selection: $kind) {
+                HuddlePicker(title: "Type", valueTitle: AdminRoomCopy.title(kind), selection: $kind) {
                     ForEach(AdminRoomKind.choices, id: \.self) { choice in
                         Text(AdminRoomCopy.title(choice)).tag(choice)
                     }
@@ -46,7 +46,6 @@ struct AdminRoomSettings: View {
             }
         } else {
             FormValueRow(title: "Type", value: AdminRoomCopy.title(kind))
-                .accessibilityLabel(Text("Kind"))
         }
     }
 

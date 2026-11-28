@@ -243,6 +243,20 @@ struct HuddleTag: View {
     enum Tone {
         case neutral
         case gold
+
+        var text: Color {
+            switch self {
+            case .neutral: return Theme.Colors.fgMuted
+            case .gold: return Theme.Colors.goldText
+            }
+        }
+
+        var border: Color {
+            switch self {
+            case .neutral: return Theme.Colors.border
+            case .gold: return Theme.Colors.gold
+            }
+        }
     }
 
     let title: String
@@ -257,15 +271,12 @@ struct HuddleTag: View {
         Text(title)
             .huddleText(Theme.Typography.tag)
             .lineLimit(1)
-            .foregroundStyle(tone == .gold ? Theme.Colors.goldText : Theme.Colors.fgMuted)
+            .foregroundStyle(tone.text)
             .padding(.horizontal, WaddleTokens.Spacing.s2)
             .frame(minHeight: 22)
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
-                    .strokeBorder(
-                        tone == .gold ? Theme.Colors.gold : Theme.Colors.border,
-                        lineWidth: WaddleTokens.BorderWidth.hair
-                    )
+                    .strokeBorder(tone.border, lineWidth: WaddleTokens.BorderWidth.hair)
             )
     }
 }

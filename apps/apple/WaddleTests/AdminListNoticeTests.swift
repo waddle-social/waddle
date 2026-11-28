@@ -20,6 +20,10 @@ final class AdminListNoticeTests: XCTestCase {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: true, failure: nil, query: "ada"), .noMatches)
     }
 
+    func testUserSearchWithNoMatchesNamesTheQuery() {
+        XCTAssertEqual(AdminListCopy.users.noMatches("ada", nil), "No users match “ada”.")
+    }
+
     func testSomeoneWhoIsNotAnOwnerIsToldSo() {
         XCTAssertEqual(AdminListNotice(isEmpty: true, hasLoaded: false, failure: .rejected, query: ""), .notAllowed)
     }
