@@ -156,6 +156,11 @@ pub struct LeaderGuard {
 impl LeaderGuard {
     /// Waits until this process acquires the Kubernetes Lease or `shutdown` triggers.
     ///
+    /// `on_standby` runs after every attempt that reached the API server and found the
+    /// Lease validly held by another replica. Such a replica is a healthy standby; callers
+    /// use the hook to report readiness so a rolling update can make progress while the
+    /// previous leader still holds the Lease.
+    ///
     /// Returns `Ok(None)` if shutdown occurred before leadership was acquired.
     ///
     /// # Errors
@@ -164,6 +169,7 @@ impl LeaderGuard {
         client: &Client,
         config: LeaderConfig,
         mut shutdown: watch::Receiver<bool>,
+        mut on_standby: impl FnMut(),
     ) -> Result<Option<Self>, OperatorError> {
         let api: Api<Lease> = Api::namespaced(client.clone(), &config.namespace);
         let lease_duration =
@@ -187,6 +193,7 @@ impl LeaderGuard {
                 );
                 break;
             }
+            on_standby();
 
             tokio::select! {
                 () = tokio::time::sleep(config.retry_interval) => {}

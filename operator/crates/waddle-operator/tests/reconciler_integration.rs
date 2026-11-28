@@ -1735,7 +1735,7 @@ async fn spicedb_generation_drift_service_pg_secret_rotation_ownership_and_lease
     cfg.renew_interval = Duration::from_millis(100);
     cfg.retry_interval = Duration::from_millis(50);
 
-    let mut guard = LeaderGuard::acquire(&cluster.client(), cfg, shutdown_rx)
+    let mut guard = LeaderGuard::acquire(&cluster.client(), cfg, shutdown_rx, || {})
         .await
         .expect("acquire lease")
         .expect("lease guard returned");
@@ -2615,5 +2615,94 @@ async fn tenant_managed_subdomain_and_byo_custom_domain_ingress_lifecycle_and_sa
             ))
             .is_none(),
         "BYO HTTPS route deleted"
+    );
+}
+
+/// Regression: a replica waiting on another replica's Lease must report ready as a
+/// standby. If readiness waited for leadership, a `RollingUpdate` Deployment would
+/// deadlock: the new pod never becomes ready, so the old leader is never terminated
+/// and never releases the Lease.
+#[tokio::test]
+async fn standby_replica_reports_ready_and_takes_over_when_leader_releases() {
+    let cluster = MockCluster::start().await;
+    let ns = "standby-ns";
+
+    let leader_cfg = |holder: &str| {
+        let mut cfg = LeaderConfig::new(ns.to_owned(), "op-leader".to_owned(), holder.to_owned());
+        cfg.lease_duration_secs = 30;
+        cfg.renew_interval = Duration::from_millis(200);
+        cfg.retry_interval = Duration::from_millis(50);
+        cfg
+    };
+
+    let (_leader_shutdown_tx, leader_shutdown_rx) = tokio::sync::watch::channel(false);
+    let leader = LeaderGuard::acquire(
+        &cluster.client(),
+        leader_cfg("pod-old"),
+        leader_shutdown_rx,
+        || panic!("first replica must acquire the free Lease without standing by"),
+    )
+    .await
+    .expect("acquire lease")
+    .expect("lease guard returned");
+
+    let health = Arc::new(HealthState::new(Arc::new(OperatorMetrics::new())));
+    assert!(!health.is_ready(), "health starts not ready");
+
+    let (standby_tx, mut standby_rx) = tokio::sync::mpsc::unbounded_channel();
+    let standby_health = Arc::clone(&health);
+    let (_standby_shutdown_tx, standby_shutdown_rx) = tokio::sync::watch::channel(false);
+    let client = cluster.client();
+    let standby = tokio::spawn(async move {
+        LeaderGuard::acquire(
+            &client,
+            leader_cfg("pod-new"),
+            standby_shutdown_rx,
+            move || {
+                standby_health.set_ready(true);
+                let _ = standby_tx.send(());
+            },
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(3), standby_rx.recv())
+        .await
+        .expect("standby hook must run while another replica holds the Lease")
+        .expect("standby notification delivered");
+    assert!(
+        health.is_ready(),
+        "standby replica must report ready so the rollout can progress"
+    );
+    let ready = probe_router(Arc::clone(&health))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("readyz request"),
+        )
+        .await
+        .expect("readyz response");
+    assert_eq!(
+        ready.status(),
+        StatusCode::OK,
+        "/readyz is 200 for a standby"
+    );
+    assert!(
+        !standby.is_finished(),
+        "standby must not acquire a held Lease"
+    );
+
+    leader.release().await;
+
+    let promoted = tokio::time::timeout(Duration::from_secs(3), standby)
+        .await
+        .expect("standby must acquire the Lease after the leader releases it")
+        .expect("standby task joined")
+        .expect("standby acquire succeeded")
+        .expect("standby acquired leadership");
+    assert!(
+        promoted.fence().is_valid(),
+        "promoted standby holds a valid leadership fence"
     );
 }
