@@ -86,6 +86,9 @@ final class AppState {
         notifications.onAuthorizationResult = { [weak self] isGranted in
             self?.notificationPermissionGranted = isGranted
         }
+        notifications.isDoNotDisturb = { [weak self] in
+            self?.session?.coordinator.status.availability == .doNotDisturb
+        }
         notifications.hasLiveSession = { [weak self] account in
             guard let coordinator = self?.session?.coordinator else { return false }
             return coordinator.account.jid == account && coordinator.connection == .online

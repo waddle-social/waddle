@@ -15,6 +15,8 @@ final class NotificationController: NSObject {
     var onAnswerCall: ((BareJID, String) async -> Void)?
     var onDeclineCall: ((BareJID, String) async -> Void)?
     var showsPreviews = true
+    var notificationsEnabled = true
+    var isDoNotDisturb: () -> Bool = { false }
 
     /// Whether the app is frontmost. Set by the scene phase.
     var isAppActive = true
@@ -124,6 +126,8 @@ final class NotificationController: NSObject {
     /// Posts `alert` for `account` unless the user is already looking at it.
     func post(_ alert: IncomingAlert, for account: BareJID, isVisible: Bool) {
         guard !isVisible else { return }
+        let policy = policy(for: .message)
+        guard policy.showAlert else { return }
         let content = UNMutableNotificationContent()
         if alert.conversation.isRoom {
             content.title = "#\(alert.conversationTitle)"
@@ -132,7 +136,7 @@ final class NotificationController: NSObject {
             content.title = alert.senderName
         }
         content.body = showsPreviews ? alert.body : Self.hiddenPreview(mentionsMe: alert.mentionsMe)
-        content.sound = messageSounds.isEnabled ? .default : nil
+        content.sound = policy.playSound ? .default : nil
         content.threadIdentifier = alert.conversation.description
         content.categoryIdentifier = Identifier.category
         content.userInfo = [
@@ -172,6 +176,15 @@ final class NotificationController: NSObject {
 
     func setBadge(_ count: Int) {
         center.setBadgeCount(count)
+    }
+
+    private func policy(for kind: NotificationPolicy.Kind) -> NotificationPolicy {
+        NotificationPolicy(
+            kind: kind,
+            isDoNotDisturb: isDoNotDisturb(),
+            notificationsEnabled: notificationsEnabled,
+            messageSoundsEnabled: messageSounds.isEnabled
+        )
     }
 
     private static func hiddenPreview(mentionsMe: Bool) -> String {
@@ -217,25 +230,32 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        if notification.request.trigger is UNPushNotificationTrigger {
-            let userInfo = notification.request.content.userInfo
-            let target = Self.target(from: userInfo)
+        let content = notification.request.content
+        let isPush = notification.request.trigger is UNPushNotificationTrigger
+        let target = isPush ? Self.target(from: content.userInfo) : nil
+        let hasSound = content.sound != nil
+        let kind: NotificationPolicy.Kind
+        if isPush {
+            let userInfo = content.userInfo
             let route = userInfo[Identifier.pushRoutingKey] as? [String: Any]
-            let isMissedCall = route?["class"] as? String == "missed_call"
-            return await MainActor.run {
-                // A matching live session posts a richer local message alert.
-                if self.isAppActive, let target {
-                    let hasLiveSession = if let owner = target.owner {
-                        self.hasLivePushSession?(owner) == true
-                    } else {
-                        self.hasLiveSession?(target.account) == true
-                    }
-                    if hasLiveSession { return [] }
-                }
-                return isMissedCall || self.messageSounds.isEnabled ? [.banner, .sound, .list] : [.banner, .list]
-            }
+            kind = route?["class"] as? String == "missed_call" ? .missedCall : .message
+        } else {
+            kind = content.categoryIdentifier == Identifier.callCategory ? .incomingCall : .message
         }
-        return [.banner, .sound, .list]
+        return await MainActor.run {
+            // A matching live session posts a richer local message alert.
+            if self.isAppActive, let target {
+                let hasLiveSession = if let owner = target.owner {
+                    self.hasLivePushSession?(owner) == true
+                } else {
+                    self.hasLiveSession?(target.account) == true
+                }
+                if hasLiveSession { return [] }
+            }
+            let policy = self.policy(for: kind)
+            guard policy.showAlert else { return [] }
+            return policy.playSound && hasSound ? [.banner, .sound, .list] : [.banner, .list]
+        }
     }
 
     nonisolated func userNotificationCenter(
