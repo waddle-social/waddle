@@ -77,7 +77,17 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { toolbar }
+            .toolbar {
+                AdminSheetToolbar(
+                    dismissTitle: isNew ? "Cancel" : "Close",
+                    confirmTitle: isNew ? copy.createTitle : copy.saveTitle,
+                    canDismiss: !isWaiting,
+                    canConfirm: canSave && !isChanging,
+                    isWorking: isBusy,
+                    onDismiss: { dismiss() },
+                    onConfirm: submit
+                )
+            }
         }
         .interactiveDismissDisabled(isWaiting)
         .confirmationDialog(copy.deleteQuestion, isPresented: $confirmsDelete, titleVisibility: .visible) {
@@ -94,27 +104,6 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
     }
 
     private var isWaiting: Bool { isBusy || isChanging }
-
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
-            Button(isNew ? "Cancel" : "Close") { dismiss() }
-                .buttonStyle(.huddle(size: .small))
-                .disabled(isWaiting)
-        }
-        ToolbarItem(placement: .confirmationAction) {
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.Colors.action)
-                    .accessibilityLabel(Text("Working"))
-            } else {
-                Button(isNew ? copy.createTitle : copy.saveTitle, action: submit)
-                    .buttonStyle(.huddle(.primary, size: .small))
-                    .disabled(!canSave || isChanging)
-            }
-        }
-    }
 
     private var deleteSection: some View {
         Section {

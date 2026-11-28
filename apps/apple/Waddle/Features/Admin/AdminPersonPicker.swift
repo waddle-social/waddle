@@ -78,18 +78,15 @@ struct AdminPersonPicker<Holder: Identifiable & Sendable, Role: Hashable>: View 
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                        .buttonStyle(.huddle(size: .small))
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(confirmTitle) {
-                        guard let person else { return }
-                        choose(person, role)
-                        dismiss()
-                    }
-                    .buttonStyle(.huddle(.primary, size: .small))
-                    .disabled(person == nil)
+                AdminSheetToolbar(
+                    dismissTitle: "Cancel",
+                    confirmTitle: confirmTitle,
+                    canConfirm: person != nil,
+                    onDismiss: { dismiss() }
+                ) {
+                    guard let person else { return }
+                    choose(person, role)
+                    dismiss()
                 }
             }
             .task(id: query) {

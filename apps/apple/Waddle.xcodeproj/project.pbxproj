@@ -153,6 +153,7 @@
 		2C7C2C0365E2BDF13790BD90 /* MessageActionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C3FC76B6AA85AAC8DF37039 /* MessageActionModel.swift */; };
 		2CD66CED28CE6DF68F3CF07A /* ProfileTuneEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A90CEBC8D4243B9B47D345C /* ProfileTuneEditor.swift */; };
 		2D1AE49C2586E8011EEEF699 /* GroupAddPeopleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */; };
+		2D2AFDD9D8BF825EE7479498 /* AdminSheetToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AD20A24B5163EA1C236E9E /* AdminSheetToolbar.swift */; };
 		2D366B2F3F1DBB09FD6F2FA3 /* CallRinger.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6249154B3A2973B96B79CEA /* CallRinger.swift */; };
 		2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */; };
 		2DDA5514F992810F06C5B939 /* FFIEventListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF317440D44D33577F844A73 /* FFIEventListener.swift */; };
@@ -376,6 +377,7 @@
 		665D572F4F368852A707DA59 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66FCE4A2E446F8397C801AC /* SignInView.swift */; };
 		6677C38210F890FFCD989E0D /* ComposerCommandCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF3F0EF8F7344EF314C694C /* ComposerCommandCenter.swift */; };
 		6683E5E8D5798E7AFCD98878 /* CallRemoteVolumes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4495B288A97476E32F59EB /* CallRemoteVolumes.swift */; };
+		66CCF88BFF19F0669F089117 /* AdminSheetToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AD20A24B5163EA1C236E9E /* AdminSheetToolbar.swift */; };
 		66E38053AACC4ABA2CC45EB4 /* Fixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F693E2124F7171597B578129 /* Fixtures.swift */; };
 		674E3FE61343AE620C34BA8E /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C0B6BD5F8A7D842A008370 /* RootView.swift */; };
 		675C3CD3358BDA8C6A27331B /* ProfileStatusChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */; };
@@ -1329,6 +1331,7 @@
 		C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifSearchClient.swift; sourceTree = "<group>"; };
 		C06B7010B667045F63391C16 /* SettingsTilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTilePicker.swift; sourceTree = "<group>"; };
 		C07143C4C647180CA4F906E6 /* ThreadScreenSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadScreenSnapshotTests.swift; sourceTree = "<group>"; };
+		C0AD20A24B5163EA1C236E9E /* AdminSheetToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSheetToolbar.swift; sourceTree = "<group>"; };
 		C14B65E512A4E0390FEC7C4E /* AttachmentImageInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImageInfo.swift; sourceTree = "<group>"; };
 		C17FDCF989480841F5BBE106 /* StoryClipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryClipTests.swift; sourceTree = "<group>"; };
 		C18D276868295C8A8ADB00CF /* FakePort+Stickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Stickers.swift"; sourceTree = "<group>"; };
@@ -1908,6 +1911,7 @@
 				6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */,
 				6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */,
 				C549BD9188E9A12524E82C5E /* AdminSheetScaffold.swift */,
+				C0AD20A24B5163EA1C236E9E /* AdminSheetToolbar.swift */,
 				8B2FA8E057693171DB96E6FF /* AdminSpaceFilter.swift */,
 				06527FE40737212DA821400F /* AdminSpaceRow.swift */,
 				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
@@ -2799,6 +2803,7 @@
 				C5B0213BDD7A27A402DAEE74 /* AdminSectionView.swift in Sources */,
 				88B9144AD2F3CEFA40C758E5 /* AdminSheetList.swift in Sources */,
 				C7EDD535A7EF98D9FB01E109 /* AdminSheetScaffold.swift in Sources */,
+				66CCF88BFF19F0669F089117 /* AdminSheetToolbar.swift in Sources */,
 				00157AED2CA56509AB6195A1 /* AdminSpaceFilter.swift in Sources */,
 				7F71BD4A95C45D3C1FC34F5D /* AdminSpaceRow.swift in Sources */,
 				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
@@ -3276,6 +3281,7 @@
 				AE84CEC44CB525F976B86E81 /* AdminSectionView.swift in Sources */,
 				E6C52482994B45668665FB0B /* AdminSheetList.swift in Sources */,
 				5FFA43B73688F559510C72AF /* AdminSheetScaffold.swift in Sources */,
+				2D2AFDD9D8BF825EE7479498 /* AdminSheetToolbar.swift in Sources */,
 				B1AB56268ED39121AD088564 /* AdminSpaceFilter.swift in Sources */,
 				8D479E5D6FF48C2845B5E610 /* AdminSpaceRow.swift in Sources */,
 				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,
