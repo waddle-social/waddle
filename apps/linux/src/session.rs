@@ -1419,6 +1419,9 @@ pub(crate) mod tests {
                 forum,
             ],
             bookmarks_loaded: true,
+            muc_service: None,
+            spaces_service: None,
+            components: Vec::new(),
         });
         let names: Vec<&str> = rooms.iter().map(|room| room.name.as_str()).collect();
         assert_eq!(names, ["general", "random", "ideas", "dm-ann-bob"]);
@@ -1438,6 +1441,9 @@ pub(crate) mod tests {
             spaces: Vec::new(),
             channels: vec![group],
             bookmarks_loaded: true,
+            muc_service: None,
+            spaces_service: None,
+            components: Vec::new(),
         });
         assert_eq!(rooms[0].name, "Group chat");
     }
