@@ -7,6 +7,7 @@ struct EventsView: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.eventsCalendar) private var calendar
     @State private var selection: CalendarDay?
+    @State private var filter: EventFilter
     @State private var month: EventsMonth?
     @State private var openEvent: OpenEvent?
     @State private var isAddingEvent = false
@@ -15,9 +16,10 @@ struct EventsView: View {
     /// A fixed clock, for snapshots; the app follows the real one.
     var clock: Date?
 
-    init(clock: Date? = nil, selecting day: CalendarDay? = nil) {
+    init(clock: Date? = nil, selecting day: CalendarDay? = nil, filtering filter: EventFilter = .all) {
         self.clock = clock
         _selection = State(initialValue: day)
+        _filter = State(initialValue: filter)
     }
 
     /// How far the agenda looks ahead of the selected day.
@@ -81,7 +83,7 @@ struct EventsView: View {
         let agendaEnd = selected.advanced(by: Self.agendaDays)
         let from = min(grid.lowerBound, selected).start(in: timeZone)
         let to = max(grid.upperBound.advanced(by: 1), agendaEnd).start(in: timeZone)
-        let occurrences = session.eventOccurrences(in: from..<to, timeZone: timeZone)
+        let occurrences = session.eventOccurrences(in: from..<to, timeZone: timeZone, filter: filter)
         let monthCard = EventsMonthCard(
             month: shown,
             days: grid,
@@ -97,13 +99,15 @@ struct EventsView: View {
             from: selected,
             today: today,
             now: now,
-            undated: session.events.undated,
+            undated: filter.apply(to: session.events.undated, for: session.account.jid),
+            filter: filter,
             onOpen: { openEvent = $0 }
         ) {
             placeholder
         }
         return ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.l) {
+                EventsFilterChip(filter: $filter)
                 if session.events.failed {
                     notice("Events didn't load. Refresh to try again.")
                 }

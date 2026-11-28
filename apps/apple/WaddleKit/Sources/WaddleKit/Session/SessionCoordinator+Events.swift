@@ -68,10 +68,12 @@ extension SessionCoordinator {
         }
     }
 
-    /// Every date of every event that falls in `range` as seen in
-    /// `timeZone`, earliest first, all-day ones first on their day.
-    public func eventOccurrences(in range: Range<Date>, timeZone: TimeZone) -> [EventOccurrence] {
-        events.events
+    /// Every date of the matching events in `range` as seen in `timeZone`,
+    /// earliest first, all-day ones first on their day.
+    public func eventOccurrences(
+        in range: Range<Date>, timeZone: TimeZone, filter: EventFilter = .all
+    ) -> [EventOccurrence] {
+        filter.apply(to: events.events, for: account.jid)
             .filter { $0.start != nil }
             .flatMap { port.occurrences(of: $0, in: range) }
             .filter { $0.overlaps(range, in: timeZone) }

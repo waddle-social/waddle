@@ -12,6 +12,7 @@ struct EventsAgenda<Placeholder: View>: View {
     let today: CalendarDay
     let now: Date
     let undated: [CommunityEvent]
+    let filter: EventFilter
     let onOpen: (OpenEvent) -> Void
     /// Shown while there are no events at all.
     @ViewBuilder let placeholder: Placeholder
@@ -55,7 +56,11 @@ struct EventsAgenda<Placeholder: View>: View {
     }
 
     private var nothingPlanned: some View {
-        Text("Nothing planned for the four weeks from \(copy.dayTitle(from)).")
+        let day = copy.dayTitle(from)
+        let message: LocalizedStringKey = filter == .goingOrMaybe
+            ? "Nothing you're going to in the four weeks from \(day)."
+            : "Nothing planned for the four weeks from \(day)."
+        return Text(message)
             .huddleText(Theme.Typography.body)
             .foregroundStyle(Theme.Colors.fgMuted)
             .frame(maxWidth: .infinity, alignment: .leading)

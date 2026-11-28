@@ -592,6 +592,7 @@
 		9D3021C05FAF1933C8BA59FF /* ExtensionCommandFormSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF3C366FF15AFD0089E2F96 /* ExtensionCommandFormSheet.swift */; };
 		9D40CE72A6A52C009422BE9E /* ProfileAvatarControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904925AEBAB6740443CAC7F3 /* ProfileAvatarControls.swift */; };
 		9D90003806BC9B327D9027EB /* BridgeLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745E4D7A386971E4AA451053 /* BridgeLog.swift */; };
+		9D9789923A882837BB991CEE /* EventsFilterChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD417A02E178BAC94318C79F /* EventsFilterChip.swift */; };
 		9E3509A7546C4654530CD1C5 /* WaddleTokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4760529BA1CEC777DB33513 /* WaddleTokens.swift */; };
 		9E4DF034CFBDAA62B5384A99 /* ComposerSelectionEditMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1599EC8700840508564B3A54 /* ComposerSelectionEditMenu.swift */; };
 		9E9BBCA72D50BB3C8C973D70 /* HuddleAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA8595D2DD6CCC3566D4CD27 /* HuddleAppearance.swift */; };
@@ -822,6 +823,7 @@
 		DFD2F55B262BD093BC9E3E86 /* PDFAttachmentCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8FBA96AF5929434631DFFDE /* PDFAttachmentCard.swift */; };
 		E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */; };
 		E05876F9DDB418B292F5A62C /* MessageActionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */; };
+		E07D3A0653DBF3264AF636B9 /* EventsFilterChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD417A02E178BAC94318C79F /* EventsFilterChip.swift */; };
 		E09527622E3752A1BE3E40F8 /* NewChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C3E2364E067CC95BB2F1DA /* NewChannelSheet.swift */; };
 		E2251A92756F306038DB1872 /* WaddleCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F3BC43606C47023AC920E8 /* WaddleCommands.swift */; };
 		E2B059E77108F5B554615800 /* SettingsAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */; };
@@ -1321,6 +1323,7 @@
 		CC9686E713C0F3912EE63F29 /* RoomManagementSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomManagementSnapshotTests.swift; sourceTree = "<group>"; };
 		CC997873DAE9A651374CF652 /* ComposerMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetrics.swift; sourceTree = "<group>"; };
 		CCD57FC833D7E2D91021DE12 /* DecryptedFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecryptedFileStore.swift; sourceTree = "<group>"; };
+		CD417A02E178BAC94318C79F /* EventsFilterChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventsFilterChip.swift; sourceTree = "<group>"; };
 		CE45B32DD61D60EA5A8A4EE0 /* RemoteMediaBytes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMediaBytes.swift; sourceTree = "<group>"; };
 		CEAC3BF4BC05953E2758EBBF /* MessageBodySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBodySnapshotTests.swift; sourceTree = "<group>"; };
 		CF317440D44D33577F844A73 /* FFIEventListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIEventListener.swift; sourceTree = "<group>"; };
@@ -2476,6 +2479,7 @@
 				8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */,
 				7FDDC6F055B97ED2BE7C8BCE /* EventsAgenda.swift */,
 				6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */,
+				CD417A02E178BAC94318C79F /* EventsFilterChip.swift */,
 				B1E7E39EA47A416B372A8FED /* EventsMonthCard.swift */,
 				749944689EAAD79B60977AEA /* EventsView.swift */,
 			);
@@ -2873,6 +2877,7 @@
 				5EBA8910814DD582CCBF6C34 /* EventReplyCard.swift in Sources */,
 				CF6763A9A38B8CBFBA58F610 /* EventsAgenda.swift in Sources */,
 				4C62E03C642CA3F42A717F84 /* EventsCopy.swift in Sources */,
+				E07D3A0653DBF3264AF636B9 /* EventsFilterChip.swift in Sources */,
 				3E2474D5731B381730C76A68 /* EventsMonthCard.swift in Sources */,
 				FF57199F25C36E3793972072 /* EventsView.swift in Sources */,
 				9F2008C79FBA790799CEE806 /* ExtensionCommandActionBar.swift in Sources */,
@@ -3337,6 +3342,7 @@
 				8DBF6088EA2475D63056580F /* EventReplyCard.swift in Sources */,
 				09FD245D216203374756C959 /* EventsAgenda.swift in Sources */,
 				DE21C84C1350FC446AC673F5 /* EventsCopy.swift in Sources */,
+				9D9789923A882837BB991CEE /* EventsFilterChip.swift in Sources */,
 				DFA7DE3704EC28F288DA07D9 /* EventsMonthCard.swift in Sources */,
 				C0B09BD020C0F063F87B732E /* EventsView.swift in Sources */,
 				0F6C62C1D85D923088847233 /* ExtensionCommandActionBar.swift in Sources */,

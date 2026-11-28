@@ -40,6 +40,22 @@ final class EventsSnapshotTests: XCTestCase {
         try await assertEvents(sample)
     }
 
+    func testAgendaFilteredToGoingOrMaybe() async throws {
+        let sample = SampleSession()
+        sample.seedEvents()
+        try await assertEvents(
+            sample, selecting: CalendarDay(year: 2027, month: 3, day: 3), filtering: .goingOrMaybe
+        )
+    }
+
+    func testAgendaWithNoMatchingReplies() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        try await assertEvents(
+            sample, selecting: CalendarDay(year: 2027, month: 4, day: 3), filtering: .goingOrMaybe
+        )
+    }
+
     func testARepeatingEvent() async throws {
         let sample = SampleSession()
         sample.seedEvents()
@@ -107,9 +123,14 @@ final class EventsSnapshotTests: XCTestCase {
         )
     }
 
-    private func assertEvents(_ sample: SampleSession, testName: String = #function) async throws {
+    private func assertEvents(
+        _ sample: SampleSession,
+        selecting day: CalendarDay? = nil,
+        filtering filter: EventFilter = .all,
+        testName: String = #function
+    ) async throws {
         let events = NavigationStack {
-            EventsView(clock: SampleSession.eventsClock, selecting: SampleSession.selectedEventDay)
+            EventsView(clock: SampleSession.eventsClock, selecting: day ?? SampleSession.selectedEventDay, filtering: filter)
         }
         try await assertScreenSnapshot(of: pinned(sample.host(events)), size: Self.screen, testName: testName)
     }
