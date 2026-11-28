@@ -849,6 +849,10 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_di
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_decline_room_invitation(
+): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_room(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_terminate(
@@ -1157,6 +1161,10 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_supports_mds_p
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_direct_message(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_unpin_message(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_decline_room_invitation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviterJid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_room(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviteeJid`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_muji_session_initiate(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`initiatorFullJid`: RustBuffer.ByValue,`sid`: RustBuffer.ByValue,`video`: Byte,
 ): Long
@@ -1660,6 +1668,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_decline_room_invitation() != 9170) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_room() != 11860) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate() != 54171) {
@@ -2948,6 +2962,17 @@ public interface WaddleClientInterface {
      * rules as [`Self::pin_message`].
      */
     suspend fun `unpinMessage`(`roomJid`: kotlin.String, `targetStanzaId`: kotlin.String): kotlin.Boolean
+
+    /**
+     * Send a decline to the room that relayed the invitation.
+     */
+    suspend fun `declineRoomInvitation`(`roomJid`: kotlin.String, `inviterJid`: kotlin.String, `reason`: kotlin.String?)
+
+    /**
+     * Send a mediated invitation to the room. Use a bare invitee JID for Waddle rooms.
+     * Failure reported by the server arrives as a message rejection event.
+     */
+    suspend fun `inviteToRoom`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `reason`: kotlin.String?)
 
     /**
      * XEP-0272 over Waddle's SFU: send the Muji-bearing Jingle
@@ -5667,6 +5692,57 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         { FfiConverterBoolean.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
+     * Send a decline to the room that relayed the invitation.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `declineRoomInvitation`(`roomJid`: kotlin.String, `inviterJid`: kotlin.String, `reason`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_decline_room_invitation(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviterJid`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * Send a mediated invitation to the room. Use a bare invitee JID for Waddle rooms.
+     * Failure reported by the server arrives as a message rejection event.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `inviteToRoom`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `reason`: kotlin.String?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_room(
+                uniffiHandle,
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviteeJid`),FfiConverterOptionalString.lower(`reason`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+
+        // Error FFI converter
+        WaddleException.ErrorHandler,
     )
     }
 
@@ -11906,6 +11982,150 @@ public object FfiConverterTypeWaddleMood: FfiConverterRustBuffer<WaddleMood> {
 
 
 /**
+ * An invitation to join a room, relayed by that room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `inviter`.
+ */
+data class WaddleMucInvitation (
+    var `room`: BareJid
+    ,
+    var `inviter`: Jid
+    ,
+    var `reason`: kotlin.String?
+    ,
+    var `password`: kotlin.String?
+    ,
+    var `continuation`: WaddleMucInvitationContinuation?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMucInvitation: FfiConverterRustBuffer<WaddleMucInvitation> {
+    override fun read(buf: ByteBuffer): WaddleMucInvitation {
+        return WaddleMucInvitation(
+            FfiConverterTypeBareJid.read(buf),
+            FfiConverterTypeJid.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeWaddleMucInvitationContinuation.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMucInvitation) = (
+            FfiConverterTypeBareJid.allocationSize(value.`room`) +
+            FfiConverterTypeJid.allocationSize(value.`inviter`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`) +
+            FfiConverterOptionalString.allocationSize(value.`password`) +
+            FfiConverterOptionalTypeWaddleMucInvitationContinuation.allocationSize(value.`continuation`)
+    )
+
+    override fun write(value: WaddleMucInvitation, buf: ByteBuffer) {
+            FfiConverterTypeBareJid.write(value.`room`, buf)
+            FfiConverterTypeJid.write(value.`inviter`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+            FfiConverterOptionalString.write(value.`password`, buf)
+            FfiConverterOptionalTypeWaddleMucInvitationContinuation.write(value.`continuation`, buf)
+    }
+}
+
+
+
+/**
+ * The invitation asks to continue a private conversation in the room.
+ */
+data class WaddleMucInvitationContinuation (
+    var `thread`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMucInvitationContinuation: FfiConverterRustBuffer<WaddleMucInvitationContinuation> {
+    override fun read(buf: ByteBuffer): WaddleMucInvitationContinuation {
+        return WaddleMucInvitationContinuation(
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMucInvitationContinuation) = (
+            FfiConverterOptionalString.allocationSize(value.`thread`)
+    )
+
+    override fun write(value: WaddleMucInvitationContinuation, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`thread`, buf)
+    }
+}
+
+
+
+/**
+ * An invitee's decline, relayed to the inviter by the room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `invitee`.
+ */
+data class WaddleMucInvitationDecline (
+    var `room`: BareJid
+    ,
+    var `invitee`: Jid
+    ,
+    var `reason`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMucInvitationDecline: FfiConverterRustBuffer<WaddleMucInvitationDecline> {
+    override fun read(buf: ByteBuffer): WaddleMucInvitationDecline {
+        return WaddleMucInvitationDecline(
+            FfiConverterTypeBareJid.read(buf),
+            FfiConverterTypeJid.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMucInvitationDecline) = (
+            FfiConverterTypeBareJid.allocationSize(value.`room`) +
+            FfiConverterTypeJid.allocationSize(value.`invitee`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: WaddleMucInvitationDecline, buf: ByteBuffer) {
+            FfiConverterTypeBareJid.write(value.`room`, buf)
+            FfiConverterTypeJid.write(value.`invitee`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+/**
  * Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
  * extension (XEP-0272).
  */
@@ -15656,6 +15876,21 @@ sealed class WaddleClientEvent {
         companion object
     }
 
+    /**
+     * XEP-0045 mediated room invitation or decline received by this session.
+     *
+     * The room address is unverified. Verify that it belongs to a known room
+     * service before trusting the invitation's `inviter`.
+     */
+    data class MucInvitation(
+        val `event`: social.waddle.client.ffi.WaddleMucInvitationEvent) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
 
 
 
@@ -15719,6 +15954,9 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 )
             16 -> WaddleClientEvent.BlockListChanged(
                 FfiConverterTypeWaddleBlockListChange.read(buf),
+                )
+            17 -> WaddleClientEvent.MucInvitation(
+                FfiConverterTypeWaddleMucInvitationEvent.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -15839,6 +16077,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 + FfiConverterTypeWaddleBlockListChange.allocationSize(value.`change`)
             )
         }
+        is WaddleClientEvent.MucInvitation -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleMucInvitationEvent.allocationSize(value.`event`)
+            )
+        }
     }
 
     override fun write(value: WaddleClientEvent, buf: ByteBuffer) {
@@ -15923,6 +16168,11 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
             is WaddleClientEvent.BlockListChanged -> {
                 buf.putInt(16)
                 FfiConverterTypeWaddleBlockListChange.write(value.`change`, buf)
+                Unit
+            }
+            is WaddleClientEvent.MucInvitation -> {
+                buf.putInt(17)
+                FfiConverterTypeWaddleMucInvitationEvent.write(value.`event`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -16897,6 +17147,92 @@ public object FfiConverterTypeWaddleMucAffiliation: FfiConverterRustBuffer<Waddl
 
     override fun write(value: WaddleMucAffiliation, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * The room-mediated invitation traffic received by this session.
+ */
+sealed class WaddleMucInvitationEvent {
+
+    data class Invited(
+        val `invitation`: social.waddle.client.ffi.WaddleMucInvitation) : WaddleMucInvitationEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class Declined(
+        val `decline`: social.waddle.client.ffi.WaddleMucInvitationDecline) : WaddleMucInvitationEvent()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMucInvitationEvent : FfiConverterRustBuffer<WaddleMucInvitationEvent>{
+    override fun read(buf: ByteBuffer): WaddleMucInvitationEvent {
+        return when(buf.getInt()) {
+            1 -> WaddleMucInvitationEvent.Invited(
+                FfiConverterTypeWaddleMucInvitation.read(buf),
+                )
+            2 -> WaddleMucInvitationEvent.Declined(
+                FfiConverterTypeWaddleMucInvitationDecline.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleMucInvitationEvent) = when(value) {
+        is WaddleMucInvitationEvent.Invited -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleMucInvitation.allocationSize(value.`invitation`)
+            )
+        }
+        is WaddleMucInvitationEvent.Declined -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleMucInvitationDecline.allocationSize(value.`decline`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleMucInvitationEvent, buf: ByteBuffer) {
+        when(value) {
+            is WaddleMucInvitationEvent.Invited -> {
+                buf.putInt(1)
+                FfiConverterTypeWaddleMucInvitation.write(value.`invitation`, buf)
+                Unit
+            }
+            is WaddleMucInvitationEvent.Declined -> {
+                buf.putInt(2)
+                FfiConverterTypeWaddleMucInvitationDecline.write(value.`decline`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -19334,6 +19670,38 @@ public object FfiConverterOptionalTypeWaddleMood: FfiConverterRustBuffer<WaddleM
         } else {
             buf.put(1)
             FfiConverterTypeWaddleMood.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWaddleMucInvitationContinuation: FfiConverterRustBuffer<WaddleMucInvitationContinuation?> {
+    override fun read(buf: ByteBuffer): WaddleMucInvitationContinuation? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleMucInvitationContinuation.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleMucInvitationContinuation?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleMucInvitationContinuation.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleMucInvitationContinuation?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleMucInvitationContinuation.write(value, buf)
         }
     }
 }

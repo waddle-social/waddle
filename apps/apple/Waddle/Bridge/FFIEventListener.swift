@@ -37,6 +37,9 @@ final class FFIEventListener: WaddleEventListener {
         case .mamResult:
             // Pages come back from the fetch and search calls.
             return nil
+        case .mucInvitation:
+            // Room invitations have no screen yet (#2461).
+            return nil
         case let .blockListChanged(change):
             switch change {
             case let .blocked(jids):

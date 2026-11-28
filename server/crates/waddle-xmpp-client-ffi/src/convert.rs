@@ -111,6 +111,11 @@ pub(super) fn dispatch_event(
                 change: change.into(),
             });
         }
+        ClientEvent::MucInvitation(event) => {
+            listener.on_event(WaddleClientEvent::MucInvitation {
+                event: event.into(),
+            });
+        }
         ClientEvent::StatusPreferenceChanged(preference) => {
             listener.on_event(WaddleClientEvent::StatusPreferenceChanged {
                 preference: crate::status_preference::status_preference_to_ffi(preference),

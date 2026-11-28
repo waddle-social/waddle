@@ -11,6 +11,7 @@ use crate::bootstrap::{
 use crate::inbox::InboxStreamEntry;
 use crate::mam::ArchivedMessage;
 use crate::messaging::{InboundCallEvent, MessageRejection, MessagingEvent};
+use crate::muc_invites::MucInvitationEvent;
 use crate::pep::UserActivity;
 use crate::pubsub_event::{PubsubAttachmentSummaryUpdate, PubsubRetractedItems};
 use crate::request::StanzaId;
@@ -37,6 +38,11 @@ pub enum ClientEvent {
     Messaging(MessagingEvent),
     /// A trusted XEP-0191 block-list push.
     BlockListChanged(BlockingPush),
+    /// A live XEP-0045 mediated room invitation or decline.
+    ///
+    /// The room address is unverified. Verify that it belongs to a known room
+    /// service before trusting the invitation's `inviter`.
+    MucInvitation(MucInvitationEvent),
     /// Typed inbound A/V call control event.
     Call(Box<InboundCallEvent>),
     /// Typed MAM archived message from an active history query.

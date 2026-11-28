@@ -1159,6 +1159,17 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func unpinMessage(roomJid: String, targetStanzaId: String) async  -> Bool
 
     /**
+     * Send a decline to the room that relayed the invitation.
+     */
+    func declineRoomInvitation(roomJid: String, inviterJid: String, reason: String?) async throws
+
+    /**
+     * Send a mediated invitation to the room. Use a bare invitee JID for Waddle rooms.
+     * Failure reported by the server arrives as a message rejection event.
+     */
+    func inviteToRoom(roomJid: String, inviteeJid: String, reason: String?) async throws
+
+    /**
      * XEP-0272 over Waddle's SFU: send the Muji-bearing Jingle
      * `session-initiate` to `calls.<own-domain>`. Resolves on the
      * EMPTY IQ-result ack (XEP-0166 §6.3); the actual
@@ -3551,6 +3562,47 @@ open func unpinMessage(roomJid: String, targetStanzaId: String)async  -> Bool  {
             liftFunc: FfiConverterBool.lift,
             errorHandler: nil
 
+        )
+}
+
+    /**
+     * Send a decline to the room that relayed the invitation.
+     */
+open func declineRoomInvitation(roomJid: String, inviterJid: String, reason: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_decline_room_invitation(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(inviterJid),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * Send a mediated invitation to the room. Use a bare invitee JID for Waddle rooms.
+     * Failure reported by the server arrives as a message rejection event.
+     */
+open func inviteToRoom(roomJid: String, inviteeJid: String, reason: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_room(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(inviteeJid),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
 
@@ -10989,6 +11041,195 @@ public func FfiConverterTypeWaddleMood_lower(_ value: WaddleMood) -> RustBuffer 
 
 
 /**
+ * An invitation to join a room, relayed by that room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `inviter`.
+ */
+public struct WaddleMucInvitation: Equatable, Hashable {
+    public var room: BareJid
+    public var inviter: Jid
+    public var reason: String?
+    public var password: String?
+    public var continuation: WaddleMucInvitationContinuation?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(room: BareJid, inviter: Jid, reason: String?, password: String?, continuation: WaddleMucInvitationContinuation?) {
+        self.room = room
+        self.inviter = inviter
+        self.reason = reason
+        self.password = password
+        self.continuation = continuation
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMucInvitation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucInvitation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucInvitation {
+        return
+            try WaddleMucInvitation(
+                room: FfiConverterTypeBareJid.read(from: &buf),
+                inviter: FfiConverterTypeJid.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf),
+                password: FfiConverterOptionString.read(from: &buf),
+                continuation: FfiConverterOptionTypeWaddleMucInvitationContinuation.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMucInvitation, into buf: inout [UInt8]) {
+        FfiConverterTypeBareJid.write(value.room, into: &buf)
+        FfiConverterTypeJid.write(value.inviter, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.password, into: &buf)
+        FfiConverterOptionTypeWaddleMucInvitationContinuation.write(value.continuation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitation_lift(_ buf: RustBuffer) throws -> WaddleMucInvitation {
+    return try FfiConverterTypeWaddleMucInvitation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitation_lower(_ value: WaddleMucInvitation) -> RustBuffer {
+    return FfiConverterTypeWaddleMucInvitation.lower(value)
+}
+
+
+/**
+ * The invitation asks to continue a private conversation in the room.
+ */
+public struct WaddleMucInvitationContinuation: Equatable, Hashable {
+    public var thread: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(thread: String?) {
+        self.thread = thread
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMucInvitationContinuation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucInvitationContinuation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucInvitationContinuation {
+        return
+            try WaddleMucInvitationContinuation(
+                thread: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMucInvitationContinuation, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.thread, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationContinuation_lift(_ buf: RustBuffer) throws -> WaddleMucInvitationContinuation {
+    return try FfiConverterTypeWaddleMucInvitationContinuation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationContinuation_lower(_ value: WaddleMucInvitationContinuation) -> RustBuffer {
+    return FfiConverterTypeWaddleMucInvitationContinuation.lower(value)
+}
+
+
+/**
+ * An invitee's decline, relayed to the inviter by the room.
+ *
+ * The room address is unverified. Verify that it belongs to a known room
+ * service before trusting `invitee`.
+ */
+public struct WaddleMucInvitationDecline: Equatable, Hashable {
+    public var room: BareJid
+    public var invitee: Jid
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(room: BareJid, invitee: Jid, reason: String?) {
+        self.room = room
+        self.invitee = invitee
+        self.reason = reason
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMucInvitationDecline: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucInvitationDecline: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucInvitationDecline {
+        return
+            try WaddleMucInvitationDecline(
+                room: FfiConverterTypeBareJid.read(from: &buf),
+                invitee: FfiConverterTypeJid.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMucInvitationDecline, into buf: inout [UInt8]) {
+        FfiConverterTypeBareJid.write(value.room, into: &buf)
+        FfiConverterTypeJid.write(value.invitee, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationDecline_lift(_ buf: RustBuffer) throws -> WaddleMucInvitationDecline {
+    return try FfiConverterTypeWaddleMucInvitationDecline.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationDecline_lower(_ value: WaddleMucInvitationDecline) -> RustBuffer {
+    return FfiConverterTypeWaddleMucInvitationDecline.lower(value)
+}
+
+
+/**
  * Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
  * extension (XEP-0272).
  */
@@ -15836,6 +16077,14 @@ public enum WaddleClientEvent: Equatable, Hashable {
      */
     case blockListChanged(change: WaddleBlockListChange
     )
+    /**
+     * XEP-0045 mediated room invitation or decline received by this session.
+     *
+     * The room address is unverified. Verify that it belongs to a known room
+     * service before trusting the invitation's `inviter`.
+     */
+    case mucInvitation(event: WaddleMucInvitationEvent
+    )
 
 
 
@@ -15901,6 +16150,9 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         )
 
         case 16: return .blockListChanged(change: try FfiConverterTypeWaddleBlockListChange.read(from: &buf)
+        )
+
+        case 17: return .mucInvitation(event: try FfiConverterTypeWaddleMucInvitationEvent.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -15991,6 +16243,11 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case let .blockListChanged(change):
             writeInt(&buf, Int32(16))
             FfiConverterTypeWaddleBlockListChange.write(change, into: &buf)
+
+
+        case let .mucInvitation(event):
+            writeInt(&buf, Int32(17))
+            FfiConverterTypeWaddleMucInvitationEvent.write(event, into: &buf)
 
         }
     }
@@ -17742,6 +17999,82 @@ public func FfiConverterTypeWaddleMucAffiliation_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeWaddleMucAffiliation_lower(_ value: WaddleMucAffiliation) -> RustBuffer {
     return FfiConverterTypeWaddleMucAffiliation.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The room-mediated invitation traffic received by this session.
+ */
+
+public enum WaddleMucInvitationEvent: Equatable, Hashable {
+
+    case invited(invitation: WaddleMucInvitation
+    )
+    case declined(decline: WaddleMucInvitationDecline
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMucInvitationEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMucInvitationEvent: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucInvitationEvent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMucInvitationEvent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .invited(invitation: try FfiConverterTypeWaddleMucInvitation.read(from: &buf)
+        )
+
+        case 2: return .declined(decline: try FfiConverterTypeWaddleMucInvitationDecline.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleMucInvitationEvent, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .invited(invitation):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeWaddleMucInvitation.write(invitation, into: &buf)
+
+
+        case let .declined(decline):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWaddleMucInvitationDecline.write(decline, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationEvent_lift(_ buf: RustBuffer) throws -> WaddleMucInvitationEvent {
+    return try FfiConverterTypeWaddleMucInvitationEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMucInvitationEvent_lower(_ value: WaddleMucInvitationEvent) -> RustBuffer {
+    return FfiConverterTypeWaddleMucInvitationEvent.lower(value)
 }
 
 
@@ -20578,6 +20911,30 @@ fileprivate struct FfiConverterOptionTypeWaddleMood: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleMucInvitationContinuation: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMucInvitationContinuation?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleMucInvitationContinuation.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleMucInvitationContinuation.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleMujiPresence: FfiConverterRustBuffer {
     typealias SwiftType = WaddleMujiPresence?
 
@@ -23176,6 +23533,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_unpin_message() != 64602) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_decline_room_invitation() != 9170) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_room() != 11860) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_muji_session_initiate() != 54171) {
