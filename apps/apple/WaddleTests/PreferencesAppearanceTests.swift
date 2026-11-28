@@ -1,13 +1,25 @@
 import XCTest
 @testable import Waddle
+import WaddleKit
 
-/// Settings lists the appearances in the web's order; a new one must not
-/// drop out of it.
 final class PreferencesAppearanceTests: XCTestCase {
-    func testSettingsListsEveryAppearanceOnce() {
-        let order = Preferences.Appearance.settingsOrder
-        XCTAssertEqual(order.count, Preferences.Appearance.allCases.count)
-        XCTAssertEqual(Set(order), Set(Preferences.Appearance.allCases))
-        XCTAssertEqual(order.map(\.title), ["System", "Night", "Daylight"])
+    func testSettingsListsAppearancesInWebOrder() {
+        XCTAssertEqual(AppearancePreference.allCases.map(\.title), ["System", "Night", "Daylight"])
+    }
+
+    @MainActor
+    func testCyclingUsesTheExistingSavedAppearance() throws {
+        let suite = "appearance-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let key = "waddle.apple.appearance"
+        defaults.set("dark", forKey: key)
+
+        let preferences = Preferences(defaults: defaults)
+        XCTAssertEqual(preferences.appearance, .dark)
+        preferences.appearance = preferences.appearance.next
+
+        XCTAssertEqual(defaults.string(forKey: key), "light")
+        XCTAssertEqual(Preferences(defaults: defaults).appearance, .light)
     }
 }

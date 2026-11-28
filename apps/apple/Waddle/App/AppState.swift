@@ -40,14 +40,14 @@ final class AppState {
     private(set) var isLoadingProviders = false
     var errorMessage: String?
     var pushRegistrationStatus: PushRegistrationStatus = .waiting
-    private(set) var notificationPermissionGranted: Bool?
+    private(set) var notificationPermission: NotificationControl.Permission = .undetermined
     private(set) var session: ActiveSession?
     @ObservationIgnored var finishPendingPushRegistration: (@MainActor (SessionCoordinator) async -> Void)?
 
     @ObservationIgnored var restartPushRegistration: (@MainActor () -> Void)?
     @ObservationIgnored var setVoIPPushEnabled: (@MainActor (Bool) -> Void)?
 
-    let notifications = NotificationController()
+    let notifications: NotificationController
     @ObservationIgnored private let userInput = UserInputMonitor()
     @ObservationIgnored private let pdfAttachments = PDFAttachmentStore.shared
     @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
@@ -58,7 +58,7 @@ final class AppState {
     @ObservationIgnored private var finishedCallPushes: [CallPush] = []
     @ObservationIgnored private var pendingCallDeclines: [String: CallPush] = [:]
     #endif
-    let preferences = Preferences()
+    let preferences: Preferences
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var isBootstrapping = false
@@ -69,6 +69,9 @@ final class AppState {
     @ObservationIgnored private var client: AuthClient
 
     init() {
+        let preferences = Preferences()
+        self.preferences = preferences
+        notifications = NotificationController(preferences: preferences)
         let server = ServerSettings.current
         self.server = server
         self.client = AuthClient(baseURL: server)
@@ -80,8 +83,11 @@ final class AppState {
             Task { await coordinator.refreshOwnPresence() }
         }
         userInput.start()
-        notifications.onAuthorizationResult = { [weak self] isGranted in
-            self?.notificationPermissionGranted = isGranted
+        notifications.onAuthorizationResult = { [weak self] permission in
+            self?.notificationPermission = permission
+        }
+        notifications.isDoNotDisturb = { [weak self] in
+            self?.session?.coordinator.status.availability == .doNotDisturb
         }
         notifications.hasLiveSession = { [weak self] account in
             guard let coordinator = self?.session?.coordinator else { return false }
@@ -488,6 +494,22 @@ final class AppState {
         Task { await coordinator.setAppActive(isActive) }
     }
 
+    func performNotificationAction(_ action: NotificationControl.Action) {
+        switch action {
+        case .requestPermission:
+            let enablesOnGrant = !preferences.notificationsEnabled
+            let revision = preferences.notificationPreferenceRevision
+            Task {
+                let permission = await notifications.requestAuthorization()
+                if enablesOnGrant, permission == .granted, revision == preferences.notificationPreferenceRevision {
+                    preferences.notificationsEnabled = true
+                }
+            }
+        case .setEnabled(let enabled):
+            preferences.notificationsEnabled = enabled
+        }
+    }
+
     // MARK: - Server
 
     func changeServer(to input: String) async {
@@ -620,7 +642,11 @@ final class AppState {
         followCalls(of: active)
         followConnection(of: active)
         active.coordinator.start()
-        notifications.requestAuthorizationIfNeeded()
+        if preferences.notificationsEnabled {
+            Task { await notifications.requestAuthorization() }
+        } else {
+            notifications.refreshAuthorizationStatus()
+        }
         // Actions queued for another account (a failed restore followed by
         // a different sign-in) are dropped, never replayed as this one.
         let pending = pendingNotificationActions.filter { $0.owner == PushRegistrationStore.Owner(server: server, account: account) }

@@ -3,8 +3,8 @@ import XCTest
 @testable import Waddle
 @testable import WaddleKit
 
-/// Night and Daylight goldens for the push controls: the Notifications
-/// settings with push on and off, and a conversation whose notifications
+/// Night and Daylight goldens for the notification controls: the Notifications
+/// settings with notifications on and off, and a conversation whose notifications
 /// show messages. Forms only draw in a real window, so these are screen
 /// snapshots (see `assertScreenSnapshot`).
 ///
@@ -22,12 +22,12 @@ final class PushControlsSnapshotTests: XCTestCase {
     #endif
 
     func testNotificationSettingsWithPushOn() async throws {
-        try await assertSettings(receivesPush: true)
+        try await assertSettings(notificationsEnabled: true)
     }
 
     /// The registration row goes away: there is nothing to register.
     func testNotificationSettingsWithPushOff() async throws {
-        try await assertSettings(receivesPush: false)
+        try await assertSettings(notificationsEnabled: false)
     }
 
     func testDetailsOfAConversationShowingMessages() async throws {
@@ -39,20 +39,46 @@ final class PushControlsSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(view), size: Self.details)
     }
 
+    #if os(macOS)
+    func testRoomNotificationSaveFailure() async throws {
+        try await assertNotificationSaveFailure(for: .room(SampleSession.general), testName: #function)
+    }
+
+    func testDirectNotificationSaveFailure() async throws {
+        try await assertNotificationSaveFailure(for: .direct(SampleSession.priya), testName: #function)
+    }
+
+    private func assertNotificationSaveFailure(
+        for conversation: ConversationID, testName: String, line: UInt = #line
+    ) async throws {
+        let sample = SampleSession()
+        sample.port.notifySettingsWriteResult = .failure(.notificationSettingsStorageMismatch)
+        let save = NotificationSettingsSave()
+        await save.perform(for: conversation) {
+            try await sample.coordinator.setShowsMessagesInPush(true, for: conversation)
+        }
+        let view = Form {
+            NotificationModeSection(conversation: conversation, save: save)
+        }
+        .huddleForm()
+        try await assertScreenSnapshot(of: sample.host(view), size: Self.details, testName: testName, line: line)
+    }
+    #endif
+
     private func assertSettings(
-        receivesPush: Bool, testName: String = #function, line: UInt = #line
+        notificationsEnabled: Bool, testName: String = #function, line: UInt = #line
     ) async throws {
         let suite = "push-controls-snapshots"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = Preferences(defaults: defaults)
-        preferences.receivesPush = receivesPush
+        preferences.notificationsEnabled = notificationsEnabled
         let view = Form {
             SettingsNotificationsSection(
                 preferences: preferences,
                 pushRegistrationStatus: .registered,
-                notificationPermissionGranted: true
+                notificationPermission: .granted
             )
         }
         .huddleForm()

@@ -23,7 +23,8 @@ public enum CallAlert: Hashable, Sendable {
     /// none has picked up, so the tone never claims more than we know.
     public init?(state: CallState, isDoNotDisturb: Bool) {
         switch state {
-        case .incoming(let call) where !call.isAccepting && !isDoNotDisturb:
+        case .incoming(let call) where !call.isAccepting:
+            guard NotificationPolicy(kind: .incomingCall, isDoNotDisturb: isDoNotDisturb).playSound else { return nil }
             self = .ring(IncomingRing(sid: call.sid, from: call.from.bare, isVideo: call.media.video))
         case .outgoing(let call) where call.isRinging && call.responder == nil:
             self = .ringback(sid: call.sid)

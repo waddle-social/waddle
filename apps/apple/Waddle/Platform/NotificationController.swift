@@ -15,18 +15,20 @@ final class NotificationController: NSObject {
     var onAnswerCall: ((BareJID, String) async -> Void)?
     var onDeclineCall: ((BareJID, String) async -> Void)?
     var showsPreviews = true
+    var isDoNotDisturb: () -> Bool = { false }
 
     /// Whether the app is frontmost. Set by the scene phase.
     var isAppActive = true
     /// Only a live session for the push's account can replace its alert with
     /// the richer local XMPP notification.
     var hasLiveSession: ((BareJID) -> Bool)?
-    var onAuthorizationResult: ((Bool) -> Void)?
+    var onAuthorizationResult: ((NotificationControl.Permission) -> Void)?
     var hasLivePushSession: (@MainActor (PushRegistrationStore.Owner) -> Bool)?
     var onPushAction: (@MainActor (PushRegistrationStore.Owner, AppState.NotificationAction) async -> Void)?
 
     private let center = UNUserNotificationCenter.current()
-    private var hasRequestedAuthorization = false
+    private let preferences: Preferences
+    private var authorizationRequest: Task<NotificationControl.Permission, Never>?
 
     private enum Identifier {
         static let category = "waddle.message"
@@ -43,7 +45,8 @@ final class NotificationController: NSObject {
         static let pushRoutingKey = "waddle"
     }
 
-    override init() {
+    init(preferences: Preferences) {
+        self.preferences = preferences
         super.init()
         center.delegate = self
         // Foreground: the app must be running with a live session to send;
@@ -96,32 +99,46 @@ final class NotificationController: NSObject {
         }
     }
 
-    func requestAuthorizationIfNeeded() {
-        guard !hasRequestedAuthorization else { return }
-        hasRequestedAuthorization = true
-        Task {
+    func requestAuthorization() async -> NotificationControl.Permission {
+        if let authorizationRequest { return await authorizationRequest.value }
+        let request = Task {
+            let permission = await currentPermission()
+            guard permission == .undetermined else { return permission }
             _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
-            await updateAuthorizationStatus()
+            return await currentPermission()
         }
+        authorizationRequest = request
+        let permission = await request.value
+        authorizationRequest = nil
+        onAuthorizationResult?(permission)
+        return permission
     }
 
     func refreshAuthorizationStatus() {
-        Task { await updateAuthorizationStatus() }
+        Task {
+            let permission = await currentPermission()
+            guard authorizationRequest == nil else { return }
+            onAuthorizationResult?(permission)
+        }
     }
 
-    private func updateAuthorizationStatus() async {
+    private func currentPermission() async -> NotificationControl.Permission {
         let settings = await center.notificationSettings()
-        var isGranted = settings.authorizationStatus == .authorized
-            || settings.authorizationStatus == .provisional
+        switch settings.authorizationStatus {
+        case .notDetermined: return .undetermined
+        case .authorized, .provisional: return .granted
         #if os(iOS)
-        isGranted = isGranted || settings.authorizationStatus == .ephemeral
+        case .ephemeral: return .granted
         #endif
-        onAuthorizationResult?(isGranted)
+        default: return .denied
+        }
     }
 
     /// Posts `alert` for `account` unless the user is already looking at it.
     func post(_ alert: IncomingAlert, for account: BareJID, isVisible: Bool) {
         guard !isVisible else { return }
+        let policy = policy(for: .message)
+        guard policy.showAlert else { return }
         let content = UNMutableNotificationContent()
         if alert.conversation.isRoom {
             content.title = "#\(alert.conversationTitle)"
@@ -130,7 +147,7 @@ final class NotificationController: NSObject {
             content.title = alert.senderName
         }
         content.body = showsPreviews ? alert.body : Self.hiddenPreview(mentionsMe: alert.mentionsMe)
-        content.sound = .default
+        content.sound = policy.playSound ? .default : nil
         content.threadIdentifier = alert.conversation.description
         content.categoryIdentifier = Identifier.category
         content.userInfo = [
@@ -170,6 +187,15 @@ final class NotificationController: NSObject {
 
     func setBadge(_ count: Int) {
         center.setBadgeCount(count)
+    }
+
+    private func policy(for kind: NotificationPolicy.Kind) -> NotificationPolicy {
+        NotificationPolicy(
+            kind: kind,
+            isDoNotDisturb: isDoNotDisturb(),
+            notificationsEnabled: preferences.notificationsEnabled,
+            messageSoundsEnabled: preferences.messageSounds.isEnabled
+        )
     }
 
     private static func hiddenPreview(mentionsMe: Bool) -> String {
@@ -215,19 +241,32 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        if notification.request.trigger is UNPushNotificationTrigger {
-            let target = Self.target(from: notification.request.content.userInfo)
-            let hasLiveSession = await MainActor.run {
-                guard self.isAppActive, let target else { return false }
-                if let owner = target.owner { return self.hasLivePushSession?(owner) == true }
-                return self.hasLiveSession?(target.account) == true
-            }
-            // The matching live XMPP session posts a richer local alert for
-            // messages it receives. When that session is absent, keep the
-            // APNs banner visible instead of suppressing the only alert.
-            return hasLiveSession ? [] : [.banner, .sound, .list]
+        let content = notification.request.content
+        let isPush = notification.request.trigger is UNPushNotificationTrigger
+        let target = isPush ? Self.target(from: content.userInfo) : nil
+        let hasSound = content.sound != nil
+        let kind: NotificationPolicy.Kind
+        if isPush {
+            let userInfo = content.userInfo
+            let route = userInfo[Identifier.pushRoutingKey] as? [String: Any]
+            kind = route?["class"] as? String == "missed_call" ? .missedCall : .message
+        } else {
+            kind = content.categoryIdentifier == Identifier.callCategory ? .incomingCall : .message
         }
-        return [.banner, .sound, .list]
+        return await MainActor.run {
+            // A matching live session posts a richer local message alert.
+            if self.isAppActive, let target {
+                let hasLiveSession = if let owner = target.owner {
+                    self.hasLivePushSession?(owner) == true
+                } else {
+                    self.hasLiveSession?(target.account) == true
+                }
+                if hasLiveSession { return [] }
+            }
+            let policy = self.policy(for: kind)
+            guard policy.showAlert else { return [] }
+            return policy.playSound && hasSound ? [.banner, .sound, .list] : [.banner, .list]
+        }
     }
 
     nonisolated func userNotificationCenter(

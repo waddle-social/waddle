@@ -26,7 +26,7 @@ private struct SettingsTabs: View {
         TabView {
             SettingsTabForm {
                 SettingsAppearanceSection(preferences: app.preferences)
-                SettingsMessageOrderSection(preferences: app.preferences)
+                SettingsMessagesSection(preferences: app.preferences)
                 SettingsPrivacySection(preferences: app.preferences)
                 SettingsAboutSection()
             }
@@ -36,7 +36,7 @@ private struct SettingsTabs: View {
                 SettingsNotificationsSection(
                     preferences: app.preferences,
                     pushRegistrationStatus: app.pushRegistrationStatus,
-                    notificationPermissionGranted: app.notificationPermissionGranted
+                    notificationPermission: app.notificationPermission
                 )
             }
             .tabItem { Label("Notifications", systemImage: "bell.badge") }
@@ -70,11 +70,11 @@ private struct SettingsForm: View {
     var body: some View {
         Form {
             SettingsAppearanceSection(preferences: app.preferences)
-            SettingsMessageOrderSection(preferences: app.preferences)
+            SettingsMessagesSection(preferences: app.preferences)
             SettingsNotificationsSection(
                 preferences: app.preferences,
                 pushRegistrationStatus: app.pushRegistrationStatus,
-                notificationPermissionGranted: app.notificationPermissionGranted
+                notificationPermission: app.notificationPermission
             )
             SettingsPrivacySection(preferences: app.preferences)
             SettingsBlockedSection(app: app)

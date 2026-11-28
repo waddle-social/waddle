@@ -20,6 +20,7 @@ struct ProfileView: View {
             Section {
                 ProfileHeader()
                 ProfileAvatarControls()
+                ProfileNotificationButton()
             }
             ProfileAboutSection()
             ProfileStatusSection()

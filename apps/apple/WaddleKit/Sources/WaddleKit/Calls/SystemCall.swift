@@ -211,6 +211,7 @@ public struct SystemCallTracker {
     public mutating func update(
         state: CallState, isMediaConnected: Bool, isMuted: Bool = false, isDoNotDisturb: Bool = false
     ) -> [SystemCallUpdate] {
+        let showsIncomingCall = NotificationPolicy(kind: .incomingCall, isDoNotDisturb: isDoNotDisturb).showAlert
         var updates: [SystemCallUpdate] = []
         let live = state.isLive ? state.sid : nil
         carryOverReplacedSession(to: state)
@@ -221,7 +222,7 @@ public struct SystemCallTracker {
                 managed = nil
             } else {
                 managed?.isAwaitingSlot = false
-                if state.isIncoming, isDoNotDisturb, !current.isAnswerPending {
+                if state.isIncoming, !showsIncomingCall, !current.isAnswerPending {
                     updates.append(.end(current.call.id, .unanswered))
                     managed = nil
                     unmanagedSid = current.call.sid
@@ -241,7 +242,7 @@ public struct SystemCallTracker {
         }
         guard let sid = live, unmanagedSid == nil else { return updates }
         if managed == nil {
-            guard let call = newCall(for: state, sid: sid, isDoNotDisturb: isDoNotDisturb) else {
+            guard let call = newCall(for: state, sid: sid, showsIncomingCall: showsIncomingCall) else {
                 unmanagedSid = sid
                 return updates
             }
@@ -276,9 +277,9 @@ public struct SystemCallTracker {
 
     /// Only a call seen from its start is reported: ringing, being placed
     /// or being joined.
-    private func newCall(for state: CallState, sid: String, isDoNotDisturb: Bool) -> SystemCall? {
+    private func newCall(for state: CallState, sid: String, showsIncomingCall: Bool) -> SystemCall? {
         switch state {
-        case .incoming(let call) where !call.isAccepting && !isDoNotDisturb:
+        case .incoming(let call) where !call.isAccepting && showsIncomingCall:
             SystemCall(id: newID(), sid: sid, direction: .incoming, conversation: .direct(call.from.bare), isVideo: call.media.video)
         case .outgoing(let call):
             SystemCall(id: newID(), sid: sid, direction: .outgoing, conversation: .direct(call.to), isVideo: call.media.video)

@@ -11,6 +11,9 @@ struct Sidebar: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(NavigationModel.self) private var navigation
     @Environment(CallWindowLayout.self) private var layout: CallWindowLayout?
+    #if os(macOS)
+    @Environment(\.colorScheme) private var appColorScheme
+    #endif
     @State private var query = ""
     @State private var spaceID: String?
 
@@ -37,7 +40,11 @@ struct Sidebar: View {
             }
             LiveCallsHost()
             CurrentCallCardHost()
+            #if os(macOS)
+            SidebarAccountBar(menuColorScheme: appColorScheme)
+            #else
             SidebarAccountBar()
+            #endif
         }
         .background(Theme.Colors.bgRail.ignoresSafeArea())
         .environment(\.huddleGround, Theme.Colors.bgRail)

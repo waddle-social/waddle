@@ -52,7 +52,7 @@ final class AccountSnapshotTests: XCTestCase {
         preferences.appearance = .light
         let view = Form {
             SettingsAppearanceSection(preferences: preferences)
-            SettingsMessageOrderSection(preferences: preferences)
+            SettingsMessagesSection(preferences: preferences)
             SettingsPrivacySection(preferences: preferences)
         }
         .huddleForm()
