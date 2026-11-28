@@ -785,6 +785,25 @@ fn resolve_component_services_accepts_conference_identity_as_muc_fallback() {
 }
 
 #[test]
+fn resolve_component_services_excludes_audio_video_from_home_muc() {
+    let items = [(
+        bare("calls.waddle.test"),
+        Some(info(
+            "calls.waddle.test",
+            &[MUC_NS],
+            &[("conference", "audio-video")],
+        )),
+    )];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("calls.waddle.test"));
+    assert_eq!(resolved.home_services.muc, None);
+}
+
+#[test]
 fn resolve_component_services_does_not_pick_generic_pubsub_as_spaces() {
     // Waddle's extensions component is also pubsub. Selecting it
     // for "Spaces" would route every space query at the wrong
@@ -1359,6 +1378,40 @@ mod room_discovery {
                 bare("groups.example.net"),
                 bare("files.example.net")
             ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_lists_each_component_once_by_bare_jid() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='files.example.net' node='uploads'/>
+                        <item jid='calls.example.net/mixer'/>
+                        <item jid='files.example.net' node='downloads'/>
+                        <item jid='calls.example.net/bridge'/>
+                    </query>
+                </iq>"#,
+                Some("files.example.net") => return Err(stanza_error()),
+                Some("muc.example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                None => return Ok(bookmarks_response(BOOKMARKS_NS, vec![])),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+
+        assert_eq!(
+            topology.home_services.components,
+            [bare("files.example.net"), bare("calls.example.net")]
         );
     }
 

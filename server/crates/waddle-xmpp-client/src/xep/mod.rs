@@ -12,6 +12,8 @@ pub mod reply;
 pub mod safety_scores;
 pub mod thread;
 pub mod threads;
+#[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+pub(crate) mod xep0030;
 pub mod xep0045_owner;
 pub mod xep0050;
 pub mod xep0215;

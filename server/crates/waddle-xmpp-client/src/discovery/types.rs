@@ -51,6 +51,20 @@ impl DiscoInfoResult {
     }
 
     #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+    pub(super) fn has_identity(&self, category: &str, identity_type: &str) -> bool {
+        self.identities.iter().any(|identity| {
+            identity.category == category && identity.identity_type == identity_type
+        })
+    }
+
+    #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+    pub(super) fn has_identity_category(&self, category: &str) -> bool {
+        self.identities
+            .iter()
+            .any(|identity| identity.category == category)
+    }
+
+    #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
     pub(super) fn room_flags(&self) -> (bool, Option<bool>) {
         let is_group_dm = self.has_feature(super::WADDLE_GROUP_DM_FEATURE_NS);
         let members_only = self.has_feature(crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY);

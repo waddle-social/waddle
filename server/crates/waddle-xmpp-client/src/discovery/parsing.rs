@@ -156,7 +156,8 @@ pub fn room_bots_from_disco_items(items: Vec<DiscoItem>) -> Vec<RoomBot> {
 /// chat web client uses; see `chat/src/lib/xmpp/discovery.ts`).
 ///
 /// Catalog routes keep their first-match and fallback behavior. Home-service
-/// evidence records the first feature-confirmed match and all listed JIDs.
+/// evidence records the first feature-confirmed match and each listed bare JID
+/// in first-seen order.
 ///
 /// Gated to the native non-wasm build (where `discovery::ext` is
 /// compiled) plus the test build (which exercises this helper
@@ -171,13 +172,25 @@ pub fn resolve_component_services(
     fallback_muc: jid::BareJid,
     fallback_spaces: jid::BareJid,
 ) -> super::types::DiscoveredComponentServices {
+    use std::collections::HashSet;
+
+    use crate::xep::xep0030::{
+        CATEGORY_CONFERENCE, CATEGORY_PUBSUB, TYPE_AUDIO_VIDEO, TYPE_SERVICE,
+    };
+
     use super::types::DiscoveredHomeServices;
     use super::MUC_NS;
 
     let mut muc = None;
     let mut spaces = None;
+    let mut listed = HashSet::new();
     let mut home_services = DiscoveredHomeServices {
-        components: items.iter().map(|(jid, _)| jid.clone()).collect(),
+        components: items
+            .iter()
+            .map(|(jid, _)| jid)
+            .filter(|&jid| listed.insert(jid))
+            .cloned()
+            .collect(),
         ..DiscoveredHomeServices::default()
     };
     for (jid, info_opt) in items {
@@ -185,28 +198,15 @@ pub fn resolve_component_services(
             continue;
         };
         let has_muc_feature = info.has_feature(MUC_NS);
-        if has_muc_feature
-            || info
-                .identities
-                .iter()
-                .any(|identity| identity.category == "conference")
-        {
+        if has_muc_feature || info.has_identity_category(CATEGORY_CONFERENCE) {
             muc.get_or_insert_with(|| jid.clone());
-            if has_muc_feature
-                && !info.identities.iter().any(|identity| {
-                    identity.category == "conference" && identity.identity_type == "audio-video"
-                })
-            {
+            if has_muc_feature && !info.has_identity(CATEGORY_CONFERENCE, TYPE_AUDIO_VIDEO) {
                 home_services.muc.get_or_insert_with(|| jid.clone());
             }
         }
         if info.has_feature(SPACES_NS) {
             spaces.get_or_insert_with(|| jid.clone());
-            if info.has_feature(PUBSUB_NS)
-                && info.identities.iter().any(|identity| {
-                    identity.category == "pubsub" && identity.identity_type == "service"
-                })
-            {
+            if info.has_feature(PUBSUB_NS) && info.has_identity(CATEGORY_PUBSUB, TYPE_SERVICE) {
                 home_services.spaces.get_or_insert_with(|| jid.clone());
             }
         }
