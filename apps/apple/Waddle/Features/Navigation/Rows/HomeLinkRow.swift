@@ -2,7 +2,7 @@ import SwiftUI
 import WaddleKit
 
 /// The rows at the top of the phone's Home that open what the split view
-/// lists in its sidebar: Calendar, People and Feed, in the sidebar's order.
+/// lists in its sidebar: Calendar, People, Feed and Browse rooms.
 struct HomeLinkRows: View {
     @Environment(SessionCoordinator.self) private var session
 
@@ -16,6 +16,7 @@ struct HomeLinkRows: View {
             detail: here > 0 ? "\(here) here" : nil
         )
         HomeLinkRow(title: "Feed", symbol: "newspaper", route: .feed)
+        HomeLinkRow(title: "Browse rooms", symbol: "safari", route: .browseRooms)
     }
 }
 

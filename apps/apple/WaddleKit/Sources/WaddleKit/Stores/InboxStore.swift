@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Server-authoritative XEP-0430 inbox state.
 ///
@@ -13,6 +14,7 @@ import Foundation
 /// It also remembers which newest-message ids the server already counted,
 /// so a live message the push covered does not increment unread twice.
 @MainActor
+@Observable
 public final class InboxStore {
     private struct Key: Hashable {
         let partner: BareJID
@@ -20,11 +22,11 @@ public final class InboxStore {
     }
 
     private var entries: [Key: InboxEntry] = [:]
-    private var barriers: [Key: String] = [:]
+    @ObservationIgnored private var barriers: [Key: String] = [:]
     /// Rows whose last server report counted unread, before any local
     /// read clamped them: the server still needs a `<mark-read/>`.
-    private var unreadOnServer: Set<Key> = []
-    private var accounted: [BareJID: [String]] = [:]
+    @ObservationIgnored private var unreadOnServer: Set<Key> = []
+    @ObservationIgnored private var accounted: [BareJID: [String]] = [:]
     private let accountedCap = 20
 
     public init() {}
@@ -48,6 +50,24 @@ public final class InboxStore {
 
     public func entry(for partner: BareJID, threadID: String? = nil) -> InboxEntry? {
         entries[Key(partner: partner, threadID: threadID)]
+    }
+
+    /// Latest activity in each room, including its threads. On a tie the
+    /// room row comes first, then threads by ID.
+    func latestRoomEntries() -> [BareJID: InboxEntry] {
+        var latest: [BareJID: InboxEntry] = [:]
+        for entry in entries.values where entry.kind == .room {
+            if let previous = latest[entry.partner] {
+                let time = entry.lastUpdated ?? .min
+                let previousTime = previous.lastUpdated ?? .min
+                if time < previousTime { continue }
+                if time == previousTime, let thread = entry.threadID {
+                    guard let previousThread = previous.threadID, thread < previousThread else { continue }
+                }
+            }
+            latest[entry.partner] = entry
+        }
+        return latest
     }
 
     /// Local read: zero unread and arm the barrier. Returns the newest

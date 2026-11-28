@@ -85,6 +85,8 @@ struct SplitShell: View {
                 EventsView()
             case .people:
                 PeopleView()
+            case .browseRooms:
+                BrowseRoomsView()
             case .admin:
                 AdminView()
             }

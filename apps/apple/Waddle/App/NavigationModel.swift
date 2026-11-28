@@ -13,13 +13,15 @@ enum Route: Hashable {
     case calendar
     /// The community feed and stories; pushed on the phone's Home.
     case feed
+    /// The room directory; pushed on the phone's Home.
+    case browseRooms
 
     /// The conversation the screen belongs to, if it belongs to one.
     var conversation: ConversationID? {
         switch self {
         case let .conversation(conversation), let .thread(conversation, _), let .details(conversation):
             return conversation
-        case .people, .calendar, .feed:
+        case .people, .calendar, .feed, .browseRooms:
             return nil
         }
     }
@@ -31,6 +33,7 @@ enum Route: Hashable {
         case .people: .people
         case .calendar: .events
         case .feed: .feed
+        case .browseRooms: .browseRooms
         case .conversation, .thread, .details: nil
         }
     }
@@ -83,6 +86,8 @@ enum SplitSection: Hashable {
     case events
     /// Everyone the account knows by address.
     case people
+    /// The room directory.
+    case browseRooms
     /// The admin console, for community owners.
     case admin
 }
@@ -166,13 +171,13 @@ final class NavigationModel {
     /// Consumed by the conversation screen showing `conversation`.
     var focusRequest: FocusRequest?
 
-    func open(_ conversation: ConversationID) {
+    func open(_ conversation: ConversationID, returningTo route: Route? = nil) {
         selection = conversation
         inspector = nil
         switch conversation.kind {
         case .room:
             tab = .home
-            homePath = [.conversation(conversation)]
+            homePath = (route.map { [$0] } ?? []) + [.conversation(conversation)]
         case .direct:
             tab = .directMessages
             directPath = [.conversation(conversation)]
@@ -203,6 +208,9 @@ final class NavigationModel {
         case .people:
             tab = .home
             homePath = [.people]
+        case .browseRooms:
+            tab = .home
+            homePath = [.browseRooms]
         case .admin:
             tab = .you
             youPath = [.admin]
