@@ -93,9 +93,11 @@ struct BrowseRoomsView: View {
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
         return LazyVStack(spacing: 0) {
             ForEach(rows) { row in
-                RoomBrowseRow(row: row, isJoining: model.joining == row.id, showsFaces: !isCompact) {
-                    Task { await model.open(row.id, using: session, navigation: navigation) }
-                }
+                RoomBrowseRow(
+                    row: row, isJoining: model.joining == row.id, showsFaces: !isCompact,
+                    openRoom: { Task { await model.open(row.id, using: session, navigation: navigation) } },
+                    joinCall: { Task { await session.joinLiveRoomCall(in: row.id) } }
+                )
                 if row.id != rows.last?.id {
                     Rectangle()
                         .fill(Theme.Colors.borderSoft)

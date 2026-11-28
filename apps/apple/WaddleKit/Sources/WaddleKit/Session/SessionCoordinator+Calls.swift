@@ -49,4 +49,11 @@ public extension SessionCoordinator {
         let nick = presence.selfNicks[room] ?? account.nick
         return await calls.joinGroupCall(in: room, media: CallMedia(audio: true, video: video), nick: nick)
     }
+
+    /// Joins from a live call list, with the camera off as in the room banner.
+    /// A stale row must not start a new call after the last participant leaves.
+    func joinLiveRoomCall(in room: BareJID) async {
+        guard calls.groupPresence.hasCall(in: room) else { return }
+        await joinGroupCall(in: room, video: false)
+    }
 }

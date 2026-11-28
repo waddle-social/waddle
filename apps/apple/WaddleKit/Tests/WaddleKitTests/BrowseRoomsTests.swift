@@ -38,17 +38,51 @@ struct BrowseRoomsTests {
         let regular = room("Regular")
         let groupDM = room("Private", isGroupDM: true)
         let session = session(with: [joined, discoverable, left, regular, groupDM])
-        _ = session.presence.apply(
-            WirePresence(
-                from: joined.roomJID.with(resource: "Ana")!, kind: .available,
-                occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])
-            ))
+        markJoined(joined, session: session)
         session.directory.touchDirect(BareJID(parsing: "ada@waddle.test")!, at: .now, preview: "Hi!")
 
         let rows = BrowseRooms(session: session).rows
         #expect(rows.map(\.channel.name) == ["Discoverable", "Joined", "Left", "Regular"])
-        #expect(rows.map(\.action) == [.join, .open, .join, .open])
+        #expect(rows.map(\.action) == [.joinRoom, .open, .joinRoom, .open])
         #expect(rows.first(where: { $0.id == joined.roomJID })?.metadata == "Room · 1 here")
+    }
+
+    @Test func aLiveHuddleInAnOccupiedRoomOffersToJoinTheCall() {
+        let general = room("General", autojoin: false)
+        let session = session(with: [general])
+        session.status.connection = .online
+        markJoined(general, session: session)
+        advertiseCall(in: general, nick: "Jo", video: true, session: session)
+
+        let row = BrowseRooms(session: session).rows.first
+        #expect(row?.action == .joinCall)
+        #expect(row?.action.title == "Join")
+        #expect(row?.action.accessibilityLabel(roomName: general.name) == "Join the huddle in General")
+    }
+
+    @Test func aLiveHuddleOffersOpenWhenWeHaveNotEnteredItsRoomOrAreOffline() {
+        let general = room("General", autojoin: false)
+        let session = session(with: [general])
+        session.status.connection = .online
+        advertiseCall(in: general, nick: "Jo", session: session)
+        #expect(BrowseRooms(session: session).rows.first?.action == .open)
+
+        markJoined(general, session: session)
+        session.status.connection = .signedOut
+        #expect(BrowseRooms(session: session).rows.first?.action == .open)
+    }
+
+    @Test func aLiveHuddleOffersOpenWhileTheCallSlotIsTaken() async {
+        let general = room("General")
+        let session = session(with: [general])
+        session.status.connection = .online
+        markJoined(general, session: session)
+        advertiseCall(in: general, nick: "Jo", session: session)
+        let peer = BareJID(parsing: "jo@waddle.test")!
+        #expect(await session.calls.startCall(to: peer, media: CallMedia(audio: true, video: false)))
+
+        #expect(BrowseRooms(session: session).rows.first?.action == .open)
+        session.calls.clear()
     }
 
     @Test func newestThreadCanSupplyThePreviewWithoutAddingItsUnreadAgain() {
@@ -106,6 +140,14 @@ struct BrowseRoomsTests {
             InboxEntry(
                 partner: channel.roomJID, kind: .room, lastStanzaID: "message-\(time)",
                 lastUpdated: time, unread: 0, preview: preview
+            ))
+    }
+
+    private func markJoined(_ channel: Channel, session: SessionCoordinator) {
+        _ = session.presence.apply(
+            WirePresence(
+                from: channel.roomJID.with(resource: "Ana")!, kind: .available,
+                occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])
             ))
     }
 

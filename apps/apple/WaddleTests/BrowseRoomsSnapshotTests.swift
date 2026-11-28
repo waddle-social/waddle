@@ -15,19 +15,25 @@ final class BrowseRoomsSnapshotTests: XCTestCase {
             Channel(
                 roomJID: BareJID(parsing: "workshop@rooms.waddle.test")!, name: "workshop", autojoin: false
             ))
-        for (nick, peer) in [("Priya", SampleSession.priya), ("Jo", SampleSession.jo)] {
+        for (room, nick, peer) in [
+            (SampleSession.general, "Priya", SampleSession.priya),
+            (SampleSession.general, "Jo", SampleSession.jo),
+            (SampleSession.releaseTrain, "Mika", SampleSession.mika),
+        ] {
             let presence = WirePresence(
-                from: SampleSession.general.with(resource: nick)!, kind: .available,
+                from: room.with(resource: nick)!, kind: .available,
                 occupant: .init(affiliation: .member, role: .participant, realJID: peer.with(resource: "desktop"), statusCodes: []),
                 groupCall: GroupCallMarker(isPreparing: false, media: CallMedia(audio: true, video: true))
             )
             session.calls.groupPresence.apply(presence)
         }
-        _ = session.presence.apply(
-            WirePresence(
-                from: SampleSession.designCritique.with(resource: "Ana")!, kind: .available,
-                occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])
-            ))
+        for room in [SampleSession.general, SampleSession.designCritique] {
+            _ = session.presence.apply(
+                WirePresence(
+                    from: room.with(resource: "Ana")!, kind: .available,
+                    occupant: .init(affiliation: .member, role: .participant, realJID: nil, statusCodes: [110])
+                ))
+        }
         preview("Notes from the huddle are in the thread.", in: SampleSession.general, session: session)
         preview("Jo: @ana, can you check the release notes?", in: SampleSession.releaseTrain, session: session)
         preview("The new icons are ready to review.", in: SampleSession.design, session: session)

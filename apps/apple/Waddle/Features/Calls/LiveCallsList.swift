@@ -172,9 +172,11 @@ struct LiveCallsHost: View {
     }
 
     private func choose(_ call: LiveCall) {
-        navigation.open(call.conversation)
-        guard call.action == .join, call.kind == .room else { return }
-        // As the room's own banner joins: with the microphone, and the camera for the person to turn on.
-        Task { await session.joinGroupCall(in: call.conversation.jid, video: false) }
+        switch call.action {
+        case .join:
+            Task { await session.joinLiveRoomCall(in: call.conversation.jid) }
+        case .open:
+            navigation.open(call.conversation)
+        }
     }
 }

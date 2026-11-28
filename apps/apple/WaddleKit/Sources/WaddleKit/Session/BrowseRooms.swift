@@ -3,9 +3,25 @@ import Foundation
 /// A snapshot of the room directory ordered by what's happening in each room.
 public struct BrowseRooms: Sendable {
     public struct Row: Identifiable, Sendable {
-        public enum Action: String, Sendable {
-            case join = "Join"
-            case open = "Open"
+        public enum Action: Equatable, Sendable {
+            case open
+            case joinRoom
+            case joinCall
+
+            public var title: String {
+                switch self {
+                case .open: "Open"
+                case .joinRoom, .joinCall: "Join"
+                }
+            }
+
+            public func accessibilityLabel(roomName: String) -> String {
+                switch self {
+                case .open: "Open \(roomName)"
+                case .joinRoom: "Join \(roomName)"
+                case .joinCall: "Join the huddle in \(roomName)"
+                }
+            }
         }
 
         public let channel: Channel
@@ -65,9 +81,14 @@ public struct BrowseRooms: Sendable {
         } else {
             metadata = "Room · quiet"
         }
+        let action: Row.Action = if !people.isEmpty {
+            session.canJoinGroupCall(in: room) ? .joinCall : .open
+        } else {
+            !channel.hasLeft && (channel.autojoin || joined) ? .open : .joinRoom
+        }
         return Row(
             channel: channel,
-            action: !channel.hasLeft && (channel.autojoin || joined) ? .open : .join,
+            action: action,
             people: people,
             unread: unread,
             mentionsMe: mentionsMe,

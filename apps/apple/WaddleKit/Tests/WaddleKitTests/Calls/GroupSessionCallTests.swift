@@ -64,6 +64,42 @@ import Testing
         coordinator.calls.clear()
     }
 
+    @Test func joiningAnAdvertisedCallUsesTheExistingRoomOccupantAndLeavesTheCameraOff() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        coordinator.handle(.presence(activePresence))
+
+        let joining = Task { await coordinator.joinLiveRoomCall(in: groupRoom) }
+        await eventually { !port.callSends.isEmpty }
+        #expect(port.callSends == [.groupPresence(groupRoom, "ali", .init(state: .preparing))])
+        guard case .joiningGroup(let attempt) = coordinator.calls.state else {
+            Issue.record("Expected to be joining the advertised call")
+            coordinator.calls.clear()
+            _ = await joining.value
+            return
+        }
+        #expect(attempt.media == CallMedia(audio: true, video: false))
+        coordinator.calls.clear()
+        _ = await joining.value
+    }
+
+    @Test func joiningFromAStaleRowDoesNotStartANewCall() async {
+        let (coordinator, port) = session(handlesCalls: true)
+        coordinator.status.connection = .online
+        coordinator.handle(.presence(WirePresence(from: JID(parsing: "room@muc.waddle.test/ali")!, kind: .available,
+            occupant: .init(affiliation: nil, role: nil, realJID: callOwn, statusCodes: [110]))))
+        coordinator.handle(.presence(activePresence))
+        #expect(coordinator.calls.groupPresence.hasCall(in: groupRoom))
+        coordinator.handle(.presence(WirePresence(from: activePresence.from, kind: .unavailable)))
+
+        await coordinator.joinLiveRoomCall(in: groupRoom)
+
+        #expect(port.callSends.isEmpty)
+        #expect(coordinator.calls.state == .idle)
+    }
+
     @Test func optedOutSessionIgnoresRoomCallPresence() async {
         let (coordinator, port) = session(handlesCalls: false)
         coordinator.start()

@@ -6,9 +6,11 @@ struct RoomBrowseRow: View {
     let row: BrowseRooms.Row
     let isJoining: Bool
     let showsFaces: Bool
-    let action: () -> Void
+    let openRoom: () -> Void
+    let joinCall: () -> Void
 
     var body: some View {
+        let joinsCall = row.action == .joinCall
         let layout =
             typeSize.isAccessibilitySize
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: Theme.Spacing.s))
@@ -25,9 +27,9 @@ struct RoomBrowseRow: View {
                         .controlSize(.small)
                         .accessibilityLabel(Text("Joining \(row.channel.name)"))
                 } else {
-                    Button(row.action.rawValue, action: action)
-                        .buttonStyle(.huddle(size: .small))
-                        .accessibilityLabel(Text("\(row.action.rawValue) \(row.channel.name)"))
+                    Button(row.action.title, action: joinsCall ? joinCall : openRoom)
+                        .buttonStyle(.huddle(joinsCall ? .live : .secondary, size: .small))
+                        .accessibilityLabel(Text(row.action.accessibilityLabel(roomName: row.channel.name)))
                 }
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -39,7 +41,7 @@ struct RoomBrowseRow: View {
     }
 
     private var titleButton: some View {
-        Button(action: action) {
+        Button(action: openRoom) {
             HStack(spacing: Theme.Spacing.m) {
                 Image(systemName: ChannelSymbol.name(for: row.channel))
                     .huddleText(Theme.Typography.subtitle)

@@ -6,9 +6,9 @@ import Foundation
 public struct LiveCall: Identifiable, Equatable, Sendable {
     /// What choosing the call does.
     public enum Action: Equatable, Sendable {
-        /// Joins the call and opens its room.
+        /// Joins the call from the sidebar.
         case join
-        /// Opens its room only: we are in another call, or offline.
+        /// Opens the conversation when this device cannot join the call.
         case open
 
         public var title: String {
