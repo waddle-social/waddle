@@ -5,6 +5,7 @@ import WaddleKit
 struct EventAgendaCard<Header: View>: View {
     @Environment(SessionCoordinator.self) private var session
     let eventID: String
+    var insetsFooter = true
     let onReplyError: (String) -> Void
     @ViewBuilder let header: Header
 
@@ -26,8 +27,8 @@ struct EventAgendaCard<Header: View>: View {
                         }
                     }
                 }
-                .padding(.horizontal, Theme.Spacing.l)
-                .padding(.bottom, Theme.Spacing.m)
+                .padding(.horizontal, insetsFooter ? Theme.Spacing.l : 0)
+                .padding(.bottom, insetsFooter ? Theme.Spacing.m : 0)
             }
         }
     }

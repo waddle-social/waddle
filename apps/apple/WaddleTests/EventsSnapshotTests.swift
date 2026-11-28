@@ -3,8 +3,8 @@ import XCTest
 @testable import Waddle
 @testable import WaddleKit
 
-/// Night and Daylight goldens for Events: the month with its agenda, the
-/// calendar with nothing planned, a repeating event open, and the editor
+/// Night and Daylight goldens for Events: the month with its agenda, seven
+/// days with and without events, a repeating event open, and the editor
 /// with Weekly picked. These screens have no design frame; they are drawn
 /// from the styleguide's components. Dates are shown in Oslo, in British
 /// English with weeks starting on Monday, whatever the machine is set to.
@@ -38,6 +38,44 @@ final class EventsSnapshotTests: XCTestCase {
         _ = store.begin()
         store.finish(failed: false, canManage: false)
         try await assertEvents(sample)
+    }
+
+    func testEventsInSevenDays() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        let refresh = store.begin()
+        store.publish(events: [
+            CommunityEvent(
+                id: "offsite", uid: "offsite", title: "Winter offsite", location: "Geilo",
+                organizer: SampleSession.priya,
+                start: .day(CalendarDay(year: 2027, month: 3, day: 2)),
+                end: .day(CalendarDay(year: 2027, month: 3, day: 5))
+            ),
+            CommunityEvent(
+                id: "critique", uid: "critique", title: "Design critique", location: "Studio",
+                start: .instant(SampleSession.instant("2027-03-03T10:00:00+01:00"))
+            ),
+        ], refresh: refresh)
+        store.finish(failed: false, canManage: true)
+        try await assertEvents(sample, showing: .week)
+    }
+
+    func testSevenDaysWithNothingScheduled() async throws {
+        let sample = SampleSession()
+        let store = sample.coordinator.events
+        _ = store.begin()
+        store.finish(failed: false, canManage: true)
+        try await assertEvents(sample, showing: .week)
+    }
+
+    func testSevenDaysWithNoMatchingReplies() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        // Book club falls on the seventh day, and Ana hasn't replied.
+        try await assertEvents(
+            sample, filtering: .goingOrMaybe, showing: .week,
+            clock: SampleSession.instant("2027-04-10T09:00:00+02:00")
+        )
     }
 
     func testAgendaFilteredToGoingOrMaybe() async throws {
@@ -146,10 +184,12 @@ final class EventsSnapshotTests: XCTestCase {
         _ sample: SampleSession,
         selecting day: CalendarDay? = nil,
         filtering filter: EventFilter = .all,
+        showing mode: EventsView.Mode = .month,
+        clock: Date = SampleSession.eventsClock,
         testName: String = #function
     ) async throws {
         let events = NavigationStack {
-            EventsView(clock: SampleSession.eventsClock, selecting: day ?? SampleSession.selectedEventDay, filtering: filter)
+            EventsView(clock: clock, selecting: day ?? SampleSession.selectedEventDay, filtering: filter, showing: mode)
         }
         try await assertScreenSnapshot(of: pinned(sample.host(events)), size: Self.screen, testName: testName)
     }
