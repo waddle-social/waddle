@@ -62,7 +62,11 @@ struct RoomDetailsForm: View {
     /// which owners and admins load with the members.
     private func groupMembers() -> Set<BareJID> {
         let present = (session.presence.occupants[room] ?? [:]).values.compactMap(\.realJID)
-        let members = model.members?.filter { $0.affiliation != .outcast }.map(\.jid) ?? []
-        return Set(present + members + [session.account.jid])
+        return Self.groupMemberJIDs(present: present, members: model.members, account: session.account.jid)
+    }
+
+    static func groupMemberJIDs(present: [BareJID], members: [RoomMember]?, account: BareJID) -> Set<BareJID> {
+        let memberJIDs = members?.filter { $0.affiliation != .outcast }.map(\.jid) ?? []
+        return Set(present + memberJIDs + [account])
     }
 }

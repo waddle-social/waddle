@@ -191,6 +191,18 @@ final class RoomManagementModelTests: XCTestCase {
         XCTAssertEqual(model.excluded, [SampleSession.jo])
     }
 
+    func testGroupDetailsExcludesBannedMembers() {
+        let members = [
+            RoomMember(jid: SampleSession.theo, nick: "Theo", affiliation: .outcast),
+            RoomMember(jid: SampleSession.jo, nick: "Jo", affiliation: .member),
+        ]
+
+        let groupMembers = RoomDetailsForm.groupMemberJIDs(
+            present: [], members: members, account: SampleSession.ana.jid)
+
+        XCTAssertEqual(groupMembers, [SampleSession.jo, SampleSession.ana.jid])
+    }
+
     func testAddPeopleCarriesOnWhenTheMemberListFails() async {
         let model = GroupAddPeopleModel(room: Self.group, excluded: [SampleSession.jo])
 
