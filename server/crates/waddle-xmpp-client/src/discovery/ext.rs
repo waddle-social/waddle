@@ -1,7 +1,8 @@
 //! Native client service-discovery and roster request operations.
 
 use futures::stream::{self, StreamExt};
-use jid::BareJid;
+use jid::{BareJid, Jid};
+use minidom::Element;
 use std::collections::HashSet;
 
 use crate::client::ClientHandle;
@@ -20,7 +21,9 @@ use super::types::{
     DiscoveredComponentServices, DiscoveredSpace, DiscoveredTopology, RoomBot, SpaceNode,
     UploadSlot,
 };
-use super::{STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE};
+use super::{
+    DISCO_INFO_NS, DISCO_ITEMS_NS, STANDALONE_SPACE_ID, UPLOAD_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
+};
 
 const DISCO_CONCURRENCY: usize = 8;
 
@@ -34,6 +37,19 @@ fn parse_error() -> ClientError {
         text: Some("response could not be parsed".to_string()),
         application_condition: None,
     })
+}
+
+fn is_root_disco_reply(reply: &Element, target: &Jid, server: &Jid, namespace: &str) -> bool {
+    // IQ IDs correlate requests. The sender and root query establish which
+    // entity's discovery answer can supply home-service evidence.
+    let from_target = match reply.attr("from") {
+        Some(from) => from.parse::<Jid>().is_ok_and(|from| from == *target),
+        None => target == server,
+    };
+    from_target
+        && reply
+            .get_child("query", namespace)
+            .is_some_and(|query| query.attr("node").is_none())
 }
 
 // ── Extension trait ──────────────────────────────────────────────────────────
@@ -153,7 +169,7 @@ pub trait DiscoveryExt {
         space_id: &'a SpaceNode,
     ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoveredChannel>>> + Send + 'a;
 
-    /// Resolve the MUC and Spaces service JIDs against `server_domain`
+    /// Resolve the MUC and Spaces service JIDs against the account's `server_domain`
     /// via `disco#items` + `disco#info`. Falls back to the conventional
     /// `muc.<domain>` and `spaces.<domain>` subdomains when the
     /// server does not explicitly advertise the relevant features
@@ -359,28 +375,38 @@ impl DiscoveryExt for ClientHandle {
                     })
                 })?;
 
-        // Best-effort: if disco#items fails on the server domain (some
-        // small servers reject it), fall back to the conventional
-        // subdomains rather than refusing to load the topology entirely.
-        let Ok(items) = self.discover_items(server_domain, None).await else {
-            return Ok(DiscoveredComponentServices {
-                muc: fallback_muc,
-                spaces: fallback_spaces,
-            });
-        };
+        // If server discovery fails, the catalog may still use the
+        // conventional routes. An unread list supplies no home evidence.
+        let server_jid = server_domain.parse::<Jid>().map_err(|_| parse_error())?;
+        let items = self
+            .send_iq(build_disco_items_iq(server_jid.as_str(), None))
+            .await
+            .ok()
+            .filter(|reply| is_root_disco_reply(reply, &server_jid, &server_jid, DISCO_ITEMS_NS))
+            .as_ref()
+            .and_then(parse_disco_items_result)
+            .unwrap_or_default();
 
         // Hydrate each disco#items entry with its disco#info so the
         // service-selection logic can dispatch on advertised features.
         // Disco#info failures are tolerated: they downgrade the entry
         // to "feature unknown", which never wins against the fallback.
-        let valid_items: Vec<(BareJid, String)> = items
+        let candidates = items
             .into_iter()
-            .filter_map(|item| item.jid.parse::<BareJid>().ok().map(|jid| (jid, item.jid)))
-            .collect();
-        let hydrated: Vec<(BareJid, Option<DiscoInfoResult>)> = stream::iter(valid_items)
-            .map(|(jid, raw_jid)| async move {
-                let info = self.discover_info(&raw_jid, None).await.ok();
-                (jid, info)
+            .filter_map(|item| item.jid.parse::<Jid>().ok());
+        let server_jid = &server_jid;
+        let hydrated: Vec<_> = stream::iter(candidates)
+            .map(|jid| async move {
+                let info = if jid.is_bare() {
+                    self.send_iq(build_disco_info_iq(jid.as_str(), None))
+                        .await
+                        .ok()
+                        .filter(|reply| is_root_disco_reply(reply, &jid, server_jid, DISCO_INFO_NS))
+                        .and_then(|reply| parse_disco_info_result(&reply, jid.as_str()))
+                } else {
+                    None
+                };
+                (jid.into_bare(), info)
             })
             .buffered(DISCO_CONCURRENCY)
             .collect()
@@ -536,6 +562,7 @@ impl DiscoveryExt for ClientHandle {
             spaces,
             channels,
             bookmarks_loaded,
+            home_services: services.home_services,
         })
     }
 }

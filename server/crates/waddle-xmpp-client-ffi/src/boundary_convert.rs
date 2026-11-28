@@ -12,6 +12,9 @@ pub(crate) fn empty_topology() -> WaddleTopology {
         spaces: Vec::new(),
         channels: Vec::new(),
         bookmarks_loaded: false,
+        muc_service: None,
+        spaces_service: None,
+        components: Vec::new(),
     }
 }
 
@@ -53,6 +56,9 @@ pub(crate) fn topology_to_ffi(
             })
             .collect(),
         bookmarks_loaded: topology.bookmarks_loaded,
+        muc_service: topology.home_services.muc,
+        spaces_service: topology.home_services.spaces,
+        components: topology.home_services.components,
     }
 }
 
@@ -97,12 +103,33 @@ pub(crate) fn upload_slot_to_ffi(
 #[cfg(test)]
 mod tests {
     use waddle_xmpp_client::discovery::{
-        DiscoveredChannel, DiscoveredChannelType, DiscoveredTopology, SpaceNode,
+        DiscoveredChannel, DiscoveredChannelType, DiscoveredHomeServices, DiscoveredTopology,
+        SpaceNode,
     };
     use waddle_xmpp_client::xep::xep0045_owner::RoomPinPermission;
 
     use super::topology_to_ffi;
     use crate::WaddlePinPermission;
+
+    #[test]
+    fn discovered_home_service_jids_cross_the_ffi_even_without_catalog_entries() {
+        let topology = topology_to_ffi(DiscoveredTopology {
+            spaces: vec![],
+            channels: vec![],
+            bookmarks_loaded: false,
+            home_services: DiscoveredHomeServices {
+                muc: Some("rooms.example.net".parse().expect("MUC service JID")),
+                spaces: None,
+                components: vec!["files.example.net".parse().expect("component JID")],
+            },
+        });
+        assert_eq!(
+            topology.muc_service.as_ref().map(|jid| jid.as_str()),
+            Some("rooms.example.net")
+        );
+        assert_eq!(topology.spaces_service, None);
+        assert_eq!(topology.components[0].as_str(), "files.example.net");
+    }
 
     fn channel(jid: &str, pin_permission: Option<RoomPinPermission>) -> DiscoveredChannel {
         DiscoveredChannel {
@@ -136,6 +163,7 @@ mod tests {
                 channel("unknown@muc.waddle.test", None),
             ],
             bookmarks_loaded: true,
+            home_services: DiscoveredHomeServices::default(),
         });
         let pins: Vec<_> = topology
             .channels

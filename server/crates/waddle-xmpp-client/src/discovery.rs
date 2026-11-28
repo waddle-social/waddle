@@ -31,9 +31,9 @@ pub use parsing::{
 };
 pub use types::{
     DiscoDataField, DiscoDataForm, DiscoFeature, DiscoIdentity, DiscoInfoResult, DiscoItem,
-    DiscoveredChannel, DiscoveredChannelType, DiscoveredComponentServices, DiscoveredSpace,
-    DiscoveredTopology, MucAdminAffiliationItem, RoomBot, RosterResult, SpaceNode, UploadSlot,
-    UserBookmark, UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult,
+    DiscoveredChannel, DiscoveredChannelType, DiscoveredComponentServices, DiscoveredHomeServices,
+    DiscoveredSpace, DiscoveredTopology, MucAdminAffiliationItem, RoomBot, RosterResult, SpaceNode,
+    UploadSlot, UserBookmark, UserSearchForm, UserSearchItem, UserSearchQuery, UserSearchResult,
     WaddleInboxMarkRead,
 };
 

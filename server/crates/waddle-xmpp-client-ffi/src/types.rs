@@ -788,6 +788,16 @@ pub struct WaddleTopology {
     /// `false`, no channel's `has_left` says which rooms the user left.
     #[uniffi(default = true)]
     pub bookmarks_loaded: bool,
+    /// Home MUC service identified by disco#info, or `None` when unknown.
+    #[uniffi(default = None)]
+    pub muc_service: Option<BareJid>,
+    /// Home Spaces service identified by disco#info, or `None` when unknown.
+    #[uniffi(default = None)]
+    pub spaces_service: Option<BareJid>,
+    /// Components listed by the account domain's disco#items, including
+    /// components that did not answer disco#info. Empty if the list was unavailable.
+    #[uniffi(default = [])]
+    pub components: Vec<BareJid>,
 }
 
 /// XEP-0084 user avatar fetched from the `urn:xmpp:avatar` PEP nodes.

@@ -244,7 +244,14 @@ impl WaddleClient {
         let Some(handle) = self.clone_handle().await else {
             return empty_topology();
         };
-        let server_domain = jid_domain(&self.config.jid);
+        let account = match self.account_bare_jid() {
+            Ok(account) => account,
+            Err(e) => {
+                self.emit_error(format!("discover_topology failed: {e}"));
+                return empty_topology();
+            }
+        };
+        let server_domain = account.domain().as_str();
 
         match handle.discover_topology(server_domain).await {
             Ok(topology) => topology_to_ffi(topology),

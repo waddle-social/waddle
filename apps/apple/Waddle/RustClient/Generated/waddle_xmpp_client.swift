@@ -13927,6 +13927,19 @@ public struct WaddleTopology: Equatable, Hashable {
      * `false`, no channel's `has_left` says which rooms the user left.
      */
     public var bookmarksLoaded: Bool
+    /**
+     * Home MUC service identified by disco#info, or `None` when unknown.
+     */
+    public var mucService: BareJid?
+    /**
+     * Home Spaces service identified by disco#info, or `None` when unknown.
+     */
+    public var spacesService: BareJid?
+    /**
+     * Components listed by the account domain's disco#items, including
+     * components that did not answer disco#info. Empty if the list was unavailable.
+     */
+    public var components: [BareJid]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -13934,10 +13947,23 @@ public struct WaddleTopology: Equatable, Hashable {
         /**
          * Whether the user's own XEP-0402 bookmarks were read. When
          * `false`, no channel's `has_left` says which rooms the user left.
-         */bookmarksLoaded: Bool = true) {
+         */bookmarksLoaded: Bool = true,
+        /**
+         * Home MUC service identified by disco#info, or `None` when unknown.
+         */mucService: BareJid? = nil,
+        /**
+         * Home Spaces service identified by disco#info, or `None` when unknown.
+         */spacesService: BareJid? = nil,
+        /**
+         * Components listed by the account domain's disco#items, including
+         * components that did not answer disco#info. Empty if the list was unavailable.
+         */components: [BareJid] = []) {
         self.spaces = spaces
         self.channels = channels
         self.bookmarksLoaded = bookmarksLoaded
+        self.mucService = mucService
+        self.spacesService = spacesService
+        self.components = components
     }
 
 
@@ -13958,7 +13984,10 @@ public struct FfiConverterTypeWaddleTopology: FfiConverterRustBuffer {
             try WaddleTopology(
                 spaces: FfiConverterSequenceTypeWaddleSpace.read(from: &buf),
                 channels: FfiConverterSequenceTypeWaddleChannel.read(from: &buf),
-                bookmarksLoaded: FfiConverterBool.read(from: &buf)
+                bookmarksLoaded: FfiConverterBool.read(from: &buf),
+                mucService: FfiConverterOptionTypeBareJid.read(from: &buf),
+                spacesService: FfiConverterOptionTypeBareJid.read(from: &buf),
+                components: FfiConverterSequenceTypeBareJid.read(from: &buf)
         )
     }
 
@@ -13966,6 +13995,9 @@ public struct FfiConverterTypeWaddleTopology: FfiConverterRustBuffer {
         FfiConverterSequenceTypeWaddleSpace.write(value.spaces, into: &buf)
         FfiConverterSequenceTypeWaddleChannel.write(value.channels, into: &buf)
         FfiConverterBool.write(value.bookmarksLoaded, into: &buf)
+        FfiConverterOptionTypeBareJid.write(value.mucService, into: &buf)
+        FfiConverterOptionTypeBareJid.write(value.spacesService, into: &buf)
+        FfiConverterSequenceTypeBareJid.write(value.components, into: &buf)
     }
 }
 
@@ -21274,6 +21306,30 @@ fileprivate struct FfiConverterOptionSequenceTypeWaddleMdsDisplayedEntry: FfiCon
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeBareJid: FfiConverterRustBuffer {
+    typealias SwiftType = BareJid?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeBareJid.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeBareJid.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeJid: FfiConverterRustBuffer {
     typealias SwiftType = Jid?
 
@@ -22640,6 +22696,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleWeekday.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeBareJid: FfiConverterRustBuffer {
+    typealias SwiftType = [BareJid]
+
+    public static func write(_ value: [BareJid], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeBareJid.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BareJid] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [BareJid]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeBareJid.read(from: &buf))
         }
         return seq
     }

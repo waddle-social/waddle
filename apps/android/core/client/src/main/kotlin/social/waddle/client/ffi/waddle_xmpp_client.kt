@@ -14155,6 +14155,22 @@ data class WaddleTopology (
      * `false`, no channel's `has_left` says which rooms the user left.
      */
     var `bookmarksLoaded`: kotlin.Boolean = true
+    ,
+    /**
+     * Home MUC service identified by disco#info, or `None` when unknown.
+     */
+    var `mucService`: BareJid? = null
+    ,
+    /**
+     * Home Spaces service identified by disco#info, or `None` when unknown.
+     */
+    var `spacesService`: BareJid? = null
+    ,
+    /**
+     * Components listed by the account domain's disco#items, including
+     * components that did not answer disco#info. Empty if the list was unavailable.
+     */
+    var `components`: List<BareJid> = listOf()
 
 ){
 
@@ -14174,19 +14190,28 @@ public object FfiConverterTypeWaddleTopology: FfiConverterRustBuffer<WaddleTopol
             FfiConverterSequenceTypeWaddleSpace.read(buf),
             FfiConverterSequenceTypeWaddleChannel.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeBareJid.read(buf),
+            FfiConverterOptionalTypeBareJid.read(buf),
+            FfiConverterSequenceTypeBareJid.read(buf),
         )
     }
 
     override fun allocationSize(value: WaddleTopology) = (
             FfiConverterSequenceTypeWaddleSpace.allocationSize(value.`spaces`) +
             FfiConverterSequenceTypeWaddleChannel.allocationSize(value.`channels`) +
-            FfiConverterBoolean.allocationSize(value.`bookmarksLoaded`)
+            FfiConverterBoolean.allocationSize(value.`bookmarksLoaded`) +
+            FfiConverterOptionalTypeBareJid.allocationSize(value.`mucService`) +
+            FfiConverterOptionalTypeBareJid.allocationSize(value.`spacesService`) +
+            FfiConverterSequenceTypeBareJid.allocationSize(value.`components`)
     )
 
     override fun write(value: WaddleTopology, buf: ByteBuffer) {
             FfiConverterSequenceTypeWaddleSpace.write(value.`spaces`, buf)
             FfiConverterSequenceTypeWaddleChannel.write(value.`channels`, buf)
             FfiConverterBoolean.write(value.`bookmarksLoaded`, buf)
+            FfiConverterOptionalTypeBareJid.write(value.`mucService`, buf)
+            FfiConverterOptionalTypeBareJid.write(value.`spacesService`, buf)
+            FfiConverterSequenceTypeBareJid.write(value.`components`, buf)
     }
 }
 
@@ -20272,6 +20297,38 @@ public object FfiConverterOptionalSequenceTypeWaddleMdsDisplayedEntry: FfiConver
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeBareJid: FfiConverterRustBuffer<BareJid?> {
+    override fun read(buf: ByteBuffer): BareJid? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeBareJid.read(buf)
+    }
+
+    override fun allocationSize(value: BareJid?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeBareJid.allocationSize(value)
+        }
+    }
+
+    override fun write(value: BareJid?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeBareJid.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeJid: FfiConverterRustBuffer<Jid?> {
     override fun read(buf: ByteBuffer): Jid? {
         if (buf.get().toInt() == 0) {
@@ -21806,6 +21863,34 @@ public object FfiConverterSequenceTypeWaddleWeekday: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleWeekday.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeBareJid: FfiConverterRustBuffer<List<BareJid>> {
+    override fun read(buf: ByteBuffer): List<BareJid> {
+        val len = buf.getInt()
+        return List<BareJid>(len) {
+            FfiConverterTypeBareJid.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<BareJid>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeBareJid.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<BareJid>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeBareJid.write(it, buf)
         }
     }
 }

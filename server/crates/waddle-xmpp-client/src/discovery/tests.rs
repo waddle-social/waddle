@@ -785,6 +785,25 @@ fn resolve_component_services_accepts_conference_identity_as_muc_fallback() {
 }
 
 #[test]
+fn resolve_component_services_excludes_audio_video_from_home_muc() {
+    let items = [(
+        bare("calls.waddle.test"),
+        Some(info(
+            "calls.waddle.test",
+            &[MUC_NS],
+            &[("conference", "audio-video")],
+        )),
+    )];
+    let resolved = resolve_component_services(
+        &items,
+        bare("muc-fallback.waddle.test"),
+        bare("spaces-fallback.waddle.test"),
+    );
+    assert_eq!(resolved.muc, bare("calls.waddle.test"));
+    assert_eq!(resolved.home_services.muc, None);
+}
+
+#[test]
 fn resolve_component_services_does_not_pick_generic_pubsub_as_spaces() {
     // Waddle's extensions component is also pubsub. Selecting it
     // for "Spaces" would route every space query at the wrong
@@ -1279,7 +1298,7 @@ mod room_discovery {
     use super::super::types::DiscoveredTopology;
     use super::super::DiscoveryExt;
     use super::bookmark_merge::{bookmark, bookmarks_response, disco_info_response, stanza_error};
-    use super::{DiscoveredChannel, Element, SpaceNode, BOOKMARKS_NS, MUC_NS};
+    use super::{bare, DiscoveredChannel, Element, SpaceNode, BOOKMARKS_NS, DISCO_INFO_NS, MUC_NS};
     use crate::xep::xep0402::BookmarkItem;
     use crate::xep::xep0492::{merge_notify_into_extensions, NotifyMode, RichPushSummary};
 
@@ -1301,6 +1320,177 @@ mod room_discovery {
             }
         });
         (handle, driver)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_exposes_the_home_servers_discovered_services() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com") => r#"<iq xmlns='jabber:client' type='result' from='example.com'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='chat.example.net'/>
+                        <item jid='groups.example.net'/>
+                        <item jid='files.example.net'/>
+                    </query>
+                </iq>"#,
+                Some("chat.example.net") if iq.get_child("query", DISCO_INFO_NS).is_some() => {
+                    r#"<iq xmlns='jabber:client' type='result' from='chat.example.net'>
+                        <query xmlns='http://jabber.org/protocol/disco#info'>
+                            <feature var='http://jabber.org/protocol/muc'/>
+                        </query>
+                    </iq>"#
+                }
+                Some("groups.example.net") if iq.get_child("query", DISCO_INFO_NS).is_some() => {
+                    r#"<iq xmlns='jabber:client' type='result' from='groups.example.net'>
+                        <query xmlns='http://jabber.org/protocol/disco#info'>
+                            <identity category='pubsub' type='service'/>
+                            <feature var='http://jabber.org/protocol/pubsub'/>
+                            <feature var='urn:xmpp:spaces:0'/>
+                        </query>
+                    </iq>"#
+                }
+                Some("files.example.net") => return Err(stanza_error()),
+                Some("chat.example.net" | "groups.example.net") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                None => return Ok(bookmarks_response(BOOKMARKS_NS, vec![])),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+
+        assert!(topology.spaces.is_empty());
+        assert_eq!(topology.home_services.muc, Some(bare("chat.example.net")));
+        assert_eq!(
+            topology.home_services.spaces,
+            Some(bare("groups.example.net"))
+        );
+        assert_eq!(
+            topology.home_services.components,
+            [
+                bare("chat.example.net"),
+                bare("groups.example.net"),
+                bare("files.example.net")
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_lists_each_component_once_by_bare_jid() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='files.example.net' node='uploads'/>
+                        <item jid='calls.example.net/mixer'/>
+                        <item jid='files.example.net' node='downloads'/>
+                        <item jid='calls.example.net/bridge'/>
+                    </query>
+                </iq>"#,
+                Some("files.example.net") => return Err(stanza_error()),
+                Some("muc.example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                None => return Ok(bookmarks_response(BOOKMARKS_NS, vec![])),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+
+        assert_eq!(
+            topology.home_services.components,
+            [bare("files.example.net"), bare("calls.example.net")]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_keeps_fallback_routes_out_of_home_services() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com") => r#"<iq xmlns='jabber:client' type='result'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='chat.example.net'/>
+                        <item jid='groups.example.net'/>
+                    </query>
+                </iq>"#,
+                Some("chat.example.net") if iq.get_child("query", DISCO_INFO_NS).is_some() => {
+                    r#"<iq xmlns='jabber:client' type='result' from='chat.example.net'>
+                        <query xmlns='http://jabber.org/protocol/disco#info'>
+                            <identity category='conference' type='text'/>
+                        </query>
+                    </iq>"#
+                }
+                Some("groups.example.net") if iq.get_child("query", DISCO_INFO_NS).is_some() => {
+                    r#"<iq xmlns='jabber:client' type='result' from='other.example.org'>
+                        <query xmlns='http://jabber.org/protocol/disco#info'>
+                            <identity category='pubsub' type='service'/>
+                            <feature var='http://jabber.org/protocol/pubsub'/>
+                            <feature var='urn:xmpp:spaces:0'/>
+                        </query>
+                    </iq>"#
+                }
+                Some("chat.example.net" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                None => return Ok(bookmarks_response(BOOKMARKS_NS, vec![])),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+
+        assert_eq!(topology.home_services.muc, None);
+        assert_eq!(topology.home_services.spaces, None);
+        assert_eq!(
+            topology.home_services.components,
+            [bare("chat.example.net"), bare("groups.example.net")]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn topology_rejects_components_listed_by_a_different_sender() {
+        let (handle, driver) = mock_client(|iq| {
+            let response = match iq.attr("to") {
+                Some("example.com") => r#"<iq xmlns='jabber:client' type='result' from='other.example.org'>
+                    <query xmlns='http://jabber.org/protocol/disco#items'>
+                        <item jid='files.example.net'/>
+                    </query>
+                </iq>"#,
+                Some("muc.example.com" | "spaces.example.com") => {
+                    "<iq xmlns='jabber:client' type='result'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
+                }
+                None => return Ok(bookmarks_response(BOOKMARKS_NS, vec![])),
+                target => panic!("unexpected discovery target: {target:?}"),
+            };
+            Ok(response.parse().expect("valid discovery response"))
+        });
+        let topology = handle
+            .discover_topology("example.com")
+            .await
+            .expect("discovered topology");
+        drop(handle);
+        driver.await.expect("mock driver completed");
+
+        assert_eq!(topology.home_services.muc, None);
+        assert_eq!(topology.home_services.spaces, None);
+        assert!(topology.home_services.components.is_empty());
     }
 
     async fn discover_test_space_channels(

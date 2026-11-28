@@ -155,8 +155,9 @@ pub fn room_bots_from_disco_items(items: Vec<DiscoItem>) -> Vec<RoomBot> {
 /// also pubsub but unrelated to spaces (this is the same shape the
 /// chat web client uses; see `chat/src/lib/xmpp/discovery.ts`).
 ///
-/// The first matching service wins for each component; subsequent
-/// matches are ignored.
+/// Catalog routes keep their first-match and fallback behavior. Home-service
+/// evidence records the first feature-confirmed match and each listed bare JID
+/// in first-seen order.
 ///
 /// Gated to the native non-wasm build (where `discovery::ext` is
 /// compiled) plus the test build (which exercises this helper
@@ -171,30 +172,49 @@ pub fn resolve_component_services(
     fallback_muc: jid::BareJid,
     fallback_spaces: jid::BareJid,
 ) -> super::types::DiscoveredComponentServices {
-    use super::{MUC_NS, SPACES_NS};
+    use std::collections::HashSet;
 
-    let mut muc: Option<jid::BareJid> = None;
-    let mut spaces: Option<jid::BareJid> = None;
+    use crate::xep::xep0030::{
+        CATEGORY_CONFERENCE, CATEGORY_PUBSUB, TYPE_AUDIO_VIDEO, TYPE_SERVICE,
+    };
+
+    use super::types::DiscoveredHomeServices;
+    use super::MUC_NS;
+
+    let mut muc = None;
+    let mut spaces = None;
+    let mut listed = HashSet::new();
+    let mut home_services = DiscoveredHomeServices {
+        components: items
+            .iter()
+            .map(|(jid, _)| jid)
+            .filter(|&jid| listed.insert(jid))
+            .cloned()
+            .collect(),
+        ..DiscoveredHomeServices::default()
+    };
     for (jid, info_opt) in items {
         let Some(info) = info_opt else {
             continue;
         };
-        if muc.is_none()
-            && (info.has_feature(MUC_NS)
-                || info
-                    .identities
-                    .iter()
-                    .any(|identity| identity.category == "conference"))
-        {
-            muc = Some(jid.clone());
+        let has_muc_feature = info.has_feature(MUC_NS);
+        if has_muc_feature || info.has_identity_category(CATEGORY_CONFERENCE) {
+            muc.get_or_insert_with(|| jid.clone());
+            if has_muc_feature && !info.has_identity(CATEGORY_CONFERENCE, TYPE_AUDIO_VIDEO) {
+                home_services.muc.get_or_insert_with(|| jid.clone());
+            }
         }
-        if spaces.is_none() && info.has_feature(SPACES_NS) {
-            spaces = Some(jid.clone());
+        if info.has_feature(SPACES_NS) {
+            spaces.get_or_insert_with(|| jid.clone());
+            if info.has_feature(PUBSUB_NS) && info.has_identity(CATEGORY_PUBSUB, TYPE_SERVICE) {
+                home_services.spaces.get_or_insert_with(|| jid.clone());
+            }
         }
     }
     super::types::DiscoveredComponentServices {
         muc: muc.unwrap_or(fallback_muc),
         spaces: spaces.unwrap_or(fallback_spaces),
+        home_services,
     }
 }
 

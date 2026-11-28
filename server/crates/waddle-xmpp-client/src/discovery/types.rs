@@ -51,6 +51,20 @@ impl DiscoInfoResult {
     }
 
     #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+    pub(super) fn has_identity(&self, category: &str, identity_type: &str) -> bool {
+        self.identities.iter().any(|identity| {
+            identity.category == category && identity.identity_type == identity_type
+        })
+    }
+
+    #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
+    pub(super) fn has_identity_category(&self, category: &str) -> bool {
+        self.identities
+            .iter()
+            .any(|identity| identity.category == category)
+    }
+
+    #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test))]
     pub(super) fn room_flags(&self) -> (bool, Option<bool>) {
         let is_group_dm = self.has_feature(super::WADDLE_GROUP_DM_FEATURE_NS);
         let members_only = self.has_feature(crate::xep::xep0045_owner::FEATURE_MUC_MEMBERS_ONLY);
@@ -311,6 +325,20 @@ pub struct DiscoveredTopology {
     /// `false` every [`DiscoveredChannel::user_bookmark`] is `None`
     /// and says nothing about which rooms the user left.
     pub bookmarks_loaded: bool,
+    /// Services identified or listed by the account server.
+    pub home_services: DiscoveredHomeServices,
+}
+
+/// Evidence from XEP-0030 discovery on the account domain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveredHomeServices {
+    /// MUC service identified by its disco#info feature.
+    pub muc: Option<BareJid>,
+    /// Spaces service identified by its disco#info features and identity.
+    pub spaces: Option<BareJid>,
+    /// Bare JIDs listed in the account domain's disco#items, including
+    /// components whose own disco#info was unavailable.
+    pub components: Vec<BareJid>,
 }
 
 /// Service JIDs hosting the MUC and Spaces components for a Waddle
@@ -322,10 +350,12 @@ pub struct DiscoveredTopology {
 /// builds where the components share the bare domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredComponentServices {
-    /// Discovered multi-user chat service address.
+    /// Address to use for MUC catalog queries, including legacy fallbacks.
     pub muc: BareJid,
-    /// Spaces returned by the discovery or listing operation.
+    /// Address to use for Spaces catalog queries, including the conventional fallback.
     pub spaces: BareJid,
+    /// Services identified or listed by discovery.
+    pub home_services: DiscoveredHomeServices,
 }
 
 /// Waddle-private `<mark-read/>` IQ-set parameters carried under
