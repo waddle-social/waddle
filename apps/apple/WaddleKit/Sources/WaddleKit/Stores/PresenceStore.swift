@@ -124,6 +124,22 @@ public final class PresenceStore {
         availability(of: jid).isOnline && activities[jid]?.showsACall == true
     }
 
+    /// The status line under a direct conversation's title.
+    public func directStatusLine(for peer: BareJID) -> String {
+        if isInCall(peer) { return "In a call" }
+        let contact = contacts[peer]
+        let word: String
+        switch contact?.availability ?? .offline {
+        case .available, .chat: word = "Online"
+        case .away: word = "Away"
+        case .extendedAway: word = "Away for a while"
+        case .doNotDisturb: word = "Do not disturb"
+        case .offline: word = "Offline"
+        }
+        let status = contact?.status?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return status.isEmpty ? word : "\(word) · \(status)"
+    }
+
     /// Where `activities` stands for `jid`, for `activityLookedUp`.
     func activityStamp(of jid: BareJID) -> Int {
         max(activityChangedAt[jid] ?? 0, activitiesClearedAt)

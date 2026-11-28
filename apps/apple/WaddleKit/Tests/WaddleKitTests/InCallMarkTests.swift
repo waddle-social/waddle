@@ -31,6 +31,24 @@ struct InCallMarkTests {
         coordinator.handle(.presence(WirePresence(from: jid("bob@waddle.test/\(device)"), kind: .unavailable)))
     }
 
+    @Test func directStatusLineShowsACallInPlaceOfPresence() {
+        let presence = PresenceStore { _ in false }
+        let phone = jid("bob@waddle.test/phone")
+        presence.apply(WirePresence(from: phone, kind: .available, show: "away", status: "  Back soon  "))
+        presence.activityChanged(call, of: bob)
+        #expect(presence.directStatusLine(for: bob) == "In a call")
+
+        presence.activityChanged(coding, of: bob)
+        #expect(presence.directStatusLine(for: bob) == "Away · Back soon")
+    }
+
+    @Test func directStatusLineIgnoresCallActivityForAnOfflinePeer() {
+        let presence = PresenceStore { _ in false }
+        presence.activityChanged(call, of: bob)
+
+        #expect(presence.directStatusLine(for: bob) == "Offline")
+    }
+
     @Test(arguments: ["on_the_phone", "on_video_phone"])
     func someoneOnlineWhoseActivityShowsACallIsInACall(_ specific: String) async {
         let (coordinator, _) = await connected()

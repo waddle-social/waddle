@@ -40,6 +40,15 @@ final class MembersSnapshotTests: XCTestCase {
         try await assertScreenSnapshot(of: sample.host(PeerProfileSheet(profile: route)), size: Self.sheet, asSheet: true)
     }
 
+    func testProfileInACall() async throws {
+        let sample = SampleSession()
+        sample.coordinator.handle(.activityChanged(
+            jid: SampleSession.priya, activity: UserActivity(general: "talking", specific: "on_the_phone")
+        ))
+        let route = PeerProfileRoute(name: "Priya", jid: SampleSession.priya, room: nil, nick: nil)
+        try await assertScreenSnapshot(of: sample.host(PeerProfileSheet(profile: route)), size: Self.sheet, asSheet: true)
+    }
+
     /// #design: four people here (us, Priya away with a hat, Jo, Theo on
     /// do not disturb), Mika online elsewhere, Sam offline, Mallory banned,
     /// and the Herald bot. The lists load before the screen draws.
