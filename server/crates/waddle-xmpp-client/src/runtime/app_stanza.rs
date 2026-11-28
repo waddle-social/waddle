@@ -9,6 +9,7 @@ use crate::carbons::NS_CARBONS;
 use crate::messaging::CarbonDirection;
 use crate::messaging::MessageRejection;
 use crate::messaging::MessagingEvent;
+use crate::muc_invites::parse_muc_invitation_events;
 
 use crate::event::{ClientEvent, ConnectionEvent};
 use crate::transport::TransportMessage;
@@ -23,7 +24,7 @@ impl XmppRuntime {
     /// driver can route them to its IQ correlation map without broadcasting them on
     /// the public event bus.  Message stanzas are dispatched to the typed protocol
     /// handlers in priority order: message errors, trusted carbons, inbox/MAM
-    /// results, PEP events, calls, then general messaging. Unrecognised stanzas fall through to
+    /// results, mediated invitations, PEP events, calls, then general messaging. Unrecognised stanzas fall through to
     /// [`ClientEvent::UnhandledStanza`].
     pub fn handle_app_stanza(&mut self, element: &minidom::Element) -> Vec<ClientEvent> {
         use crate::{caps, inbox, mam, messaging, pep};
@@ -90,6 +91,12 @@ impl XmppRuntime {
                             messaging::CarbonDirection::Sent => Vec::new(),
                         };
                     }
+                    if direction == CarbonDirection::Received {
+                        let invitations = muc_invitation_events(&inner);
+                        if !invitations.is_empty() {
+                            return invitations;
+                        }
+                    }
                     if let Some(call_event) = messaging::parse_call_event(&inner) {
                         return vec![ClientEvent::Call(Box::new(call_event))];
                     }
@@ -133,6 +140,11 @@ impl XmppRuntime {
                     .collect();
             }
 
+            let invitations = muc_invitation_events(element);
+            if !invitations.is_empty() {
+                return invitations;
+            }
+
             if let Some((jid, activity)) =
                 pep::parse_activity_notification(element, self.account_bare_jid())
             {
@@ -161,6 +173,13 @@ impl XmppRuntime {
         events.push(ClientEvent::UnhandledStanza(element.clone()));
         events
     }
+}
+
+fn muc_invitation_events(message: &Element) -> Vec<ClientEvent> {
+    parse_muc_invitation_events(message)
+        .into_iter()
+        .map(ClientEvent::MucInvitation)
+        .collect()
 }
 
 fn handle_blocking_push(element: &Element, account: &BareJid) -> Vec<ClientEvent> {

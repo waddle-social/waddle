@@ -25,6 +25,7 @@ mod inbox_verbs;
 mod jid_parts;
 mod messaging;
 mod messaging_verbs;
+mod muc_invites;
 mod muji;
 mod notify_settings;
 mod ping;
@@ -61,6 +62,8 @@ mod group_dm_tests;
 mod inbox_tests;
 #[cfg(test)]
 mod messaging_verbs_tests;
+#[cfg(test)]
+mod muc_invites_tests;
 #[cfg(test)]
 mod muji_tests;
 #[cfg(test)]
@@ -118,6 +121,10 @@ pub use event_planning::{
 pub use group_dm::WaddleGroupDmHistoryAccess;
 pub use inbox_verbs::{WaddleInboxMessageContent, WaddleInboxReadFilter};
 pub use messaging_verbs::WaddleMessageAudience;
+pub use muc_invites::{
+    WaddleMucInvitation, WaddleMucInvitationContinuation, WaddleMucInvitationDecline,
+    WaddleMucInvitationEvent,
+};
 pub use notify_settings::{
     WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleRoomMembership,
     WaddleSetDmNotificationModeOutcome, WaddleSetRoomMembershipOutcome,

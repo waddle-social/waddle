@@ -1582,6 +1582,8 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     override suspend fun blockJids(jids: List<String>): Unit = unused()
     override suspend fun unblockJids(jids: List<String>): Unit = unused()
     override suspend fun unblockAll(): Unit = unused()
+    override suspend fun inviteToRoom(roomJid: String, inviteeJid: String, reason: String?): Unit = unused()
+    override suspend fun declineRoomInvitation(roomJid: String, inviterJid: String, reason: String?): Unit = unused()
     override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean =
         push.disable(RecordedPushDisable(pushServiceJid, node, deviceId))
 

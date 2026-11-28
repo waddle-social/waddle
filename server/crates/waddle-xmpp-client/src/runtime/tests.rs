@@ -19,6 +19,8 @@ use crate::{
     UnhandledOutboundEntry,
 };
 
+mod xep0045_mediated_invites;
+
 fn config() -> ClientConfig {
     ClientConfig::try_new(
         ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),

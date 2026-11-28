@@ -1,6 +1,6 @@
 // ── Data types ───────────────────────────────────────────────────────────────
 
-use crate::{WaddleActivity, WaddleStatusPreference};
+use crate::{WaddleActivity, WaddleMucInvitationEvent, WaddleStatusPreference};
 use jid::BareJid;
 pub use jid::Jid;
 pub use waddle_xmpp_client::request::StanzaId;
@@ -1483,6 +1483,8 @@ pub enum WaddleClientEvent {
     },
     /// XEP-0191 block-list push received by this session.
     BlockListChanged { change: WaddleBlockListChange },
+    /// XEP-0045 mediated room invitation or decline received by this session.
+    MucInvitation { event: WaddleMucInvitationEvent },
 }
 
 #[uniffi::export(callback_interface)]

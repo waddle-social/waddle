@@ -27,6 +27,7 @@ pub mod inbox_ext;
 pub mod mam;
 pub mod mds;
 pub mod messaging;
+pub mod muc_invites;
 pub mod notification_settings;
 pub mod pep;
 pub mod pin;
