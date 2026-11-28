@@ -63,29 +63,18 @@ struct AdminRoomRow: View {
     var body: some View {
         Button(action: action) {
             NavigationRowChrome {
-                HStack(spacing: Theme.Spacing.m) {
-                    VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-                        NavigationRowTitle(title: room.name, isEmphasised: true)
-                        if !tags.isEmpty {
-                            HStack(spacing: Theme.Spacing.xs) {
-                                ForEach(tags, id: \.self) { HuddleTag($0).fixedSize() }
-                            }
-                        }
-                        if let description = room.description {
-                            Text(description)
-                                .huddleText(Theme.Typography.caption)
-                                .foregroundStyle(Theme.Colors.fgMuted)
-                                .lineLimit(1)
-                        }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: Theme.Spacing.m) {
+                        details
+                        Spacer(minLength: 0)
+                        countLabel
                     }
-                    Spacer(minLength: Theme.Spacing.xs)
-                    Text(counts)
-                        .huddleText(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Colors.fgMuted)
-                        .lineLimit(1)
-                        .layoutPriority(1)
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                        details
+                        countLabel
+                    }
                 }
-                .padding(.vertical, Theme.Spacing.s)
+                .padding(.vertical, Theme.Spacing.m)
             }
         }
         .buttonStyle(.plain)
@@ -93,6 +82,33 @@ struct AdminRoomRow: View {
         .accessibilityLabel(Text(([room.name] + tags + [room.description, counts].compactMap { $0 }).joined(separator: ", ")))
         .accessibilityAddTraits(.isButton)
         .accessibilityHint(Text("Opens the room"))
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+            Text(room.name)
+                .huddleText(Theme.Typography.author)
+                .foregroundStyle(Theme.Colors.fg)
+                .lineLimit(1)
+            if !tags.isEmpty {
+                HStack(spacing: Theme.Spacing.xs) {
+                    ForEach(tags, id: \.self) { HuddleTag($0) }
+                }
+            }
+            if let description = room.description {
+                Text(description)
+                    .huddleText(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Colors.fgMuted)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var countLabel: some View {
+        Text(counts)
+            .huddleText(Theme.Typography.caption)
+            .foregroundStyle(Theme.Colors.fgMuted)
+            .monospacedDigit()
     }
 
     private var tags: [String] { AdminRoomCopy.tags(for: room) }

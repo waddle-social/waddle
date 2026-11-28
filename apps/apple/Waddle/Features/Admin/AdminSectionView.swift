@@ -4,7 +4,7 @@ import WaddleKit
 /// One section of the console: its list, searched by the text typed and
 /// narrowed to a space where one is chosen, with the toolbar's refresh
 /// and "new" buttons and the sheet a row opens.
-struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View, Accessory: View>: View {
+struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View>: View {
     @Environment(SessionCoordinator.self) private var session
     let section: AdminSection
     let list: AdminList<Row>
@@ -14,12 +14,10 @@ struct AdminSectionView<Row: Identifiable & Sendable, RowView: View, Sheet: View
     /// A row, and what choosing it does.
     @ViewBuilder let row: (Row, _ open: @escaping () -> Void) -> RowView
     @ViewBuilder let sheet: (AdminSheetSubject<Row>) -> Sheet
-    /// Above the list: what narrows it.
-    @ViewBuilder let accessory: () -> Accessory
     @State private var subject: AdminSheetSubject<Row>?
 
     var body: some View {
-        AdminListPanel(list: list, section: section, refresh: { await console.refresh(section) }, accessory: accessory) { item in
+        AdminListPanel(list: list, section: section, refresh: { await console.refresh(section) }) { item in
             row(item) { subject = .existing(item) }
         }
         .task(id: Search(query: query, space: space, isOnline: session.connection == .online)) {
@@ -84,39 +82,5 @@ extension AdminList {
         }
         guard !Task.isCancelled else { return }
         await load(matching: text, in: space)
-    }
-}
-
-extension AdminSectionView where Accessory == EmptyView {
-    /// A section whose list is not narrowed.
-    init(
-        section: AdminSection, list: AdminList<Row>, console: AdminConsole, query: String,
-        @ViewBuilder row: @escaping (Row, _ open: @escaping () -> Void) -> RowView,
-        @ViewBuilder sheet: @escaping (AdminSheetSubject<Row>) -> Sheet
-    ) {
-        self.init(section: section, list: list, console: console, query: query, row: row, sheet: sheet) {
-            EmptyView()
-        }
-    }
-}
-
-/// Narrows the rooms to one space. A community without spaces has
-/// nothing to narrow to.
-struct AdminSpaceFilter: View {
-    @Bindable var console: AdminConsole
-
-    var body: some View {
-        if !console.spaceFilterChoices.isEmpty {
-            Picker("Space", selection: $console.roomsSpace) {
-                Text("All spaces").tag(AdminSpace?.none)
-                ForEach(console.spaceFilterChoices) { space in
-                    Text(space.name).tag(AdminSpace?.some(space))
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityLabel(Text("Space"))
-        }
     }
 }

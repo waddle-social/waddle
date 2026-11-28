@@ -102,7 +102,7 @@ struct AdminView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            AdminConsoleHeader(selection: shownSection, caption: caption)
+            AdminConsoleHeader(selection: shownSection, caption: caption, spaceFilter: spaceFilter)
             if let console {
                 sectionView(console)
             } else {
@@ -134,6 +134,14 @@ struct AdminView: View {
         return copy.caption
     }
 
+    private var spaceFilter: AdminSpaceFilter? {
+        guard section == .rooms, let model = console else { return nil }
+        let spaces = model.spaceFilterChoices
+        guard !spaces.isEmpty else { return nil }
+        @Bindable var console = model
+        return AdminSpaceFilter(spaces: spaces, selection: $console.roomsSpace)
+    }
+
     /// The one place that knows what each section lists, how a row of it
     /// looks and what opens from it.
     @ViewBuilder
@@ -158,8 +166,6 @@ struct AdminView: View {
                 AdminRoomRow(room: room, action: open)
             } sheet: { subject in
                 AdminRoomSheet(subject: subject, rooms: console.rooms)
-            } accessory: {
-                AdminSpaceFilter(console: console)
             }
             // On showing the rooms and on coming back online.
             .task(id: session.connection == .online) { await console.refreshSpaceChoices() }

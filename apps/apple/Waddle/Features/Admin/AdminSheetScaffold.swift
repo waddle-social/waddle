@@ -154,18 +154,3 @@ struct AdminSheetScaffold<Fields: View, Lists: View>: View {
         }
     }
 }
-
-extension View {
-    /// A button or menu inside a row of a sheet's list. iOS sends a tap
-    /// anywhere in a form's cell to every default-style button in it, and
-    /// these rows stack several people in one cell, so each control takes
-    /// only its own taps there. A Mac form has no such cell taps, and its
-    /// controls keep their look.
-    func adminRowControl() -> some View {
-        #if os(iOS)
-        buttonStyle(.borderless)
-        #else
-        self
-        #endif
-    }
-}

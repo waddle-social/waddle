@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		00004A4AE3B99F8219410887 /* ComposerActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */; };
+		00157AED2CA56509AB6195A1 /* AdminSpaceFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B2FA8E057693171DB96E6FF /* AdminSpaceFilter.swift */; };
 		00CE62706C84C894F515560E /* CallRoomPicture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE5E6851B5F743A7B849559 /* CallRoomPicture.swift */; };
 		01A6941B6BFBECE5B91D5F3E /* RoomHeaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 433E995F4C4BBEEC367DF685 /* RoomHeaderSection.swift */; };
 		021B9CAF46CDFF09DBECEC1F /* CallStageCommandsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FFAC8832FCE2CF8EA78C0F7 /* CallStageCommandsTests.swift */; };
@@ -242,6 +243,7 @@
 		43B2A0D672F1BA1CBE9DEF02 /* PushTokenRegistrar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15328F4234ABE88A84E3ECF /* PushTokenRegistrar.swift */; };
 		43B378CF5644D2EC06825509 /* EncryptedAttachmentModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F2041A37D9817BE49A37F71 /* EncryptedAttachmentModel.swift */; };
 		44C0023C47D7D8DFF8FA0326 /* RecipientResultsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA12FBAA4F2C84CE671184D8 /* RecipientResultsSection.swift */; };
+		45106CCBF77A0D84ED344ED8 /* HuddlePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D8F0584C447F2919DA451D /* HuddlePicker.swift */; };
 		451D45ED8617680D89ED95DB /* DecryptedAttachmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64E1F68278CF8DC651B6C201 /* DecryptedAttachmentViews.swift */; };
 		45236C8DF13EAE1862D4A3F2 /* HomeList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F9B6166199D282F6AAEDD0C /* HomeList.swift */; };
 		45F67B94A03661573A1FD905 /* TestSFU.swift in Sources */ = {isa = PBXBuildFile; fileRef = D126C0AA357F0B0A8D450FAC /* TestSFU.swift */; };
@@ -393,6 +395,7 @@
 		6AA8009B50AC04F20CD57658 /* RemoteMediaBytes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE45B32DD61D60EA5A8A4EE0 /* RemoteMediaBytes.swift */; };
 		6AD4B26E12D73E12E316A76C /* HomeLinkRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8015D23B02D0391D743A2D03 /* HomeLinkRow.swift */; };
 		6AD73F16367A94060654F740 /* FormParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB5E145B042E12941EC9EE6 /* FormParts.swift */; };
+		6B551A0075BE35A49B0E6183 /* HuddlePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D8F0584C447F2919DA451D /* HuddlePicker.swift */; };
 		6BCEFD523B63E8EE4535F701 /* ComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17423AC98C25904805D06B23 /* ComposerModel.swift */; };
 		6C05CDEEC2CC3CD7341BEC21 /* EventEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9EC4DD4A44AFCE3C7C39AD3 /* EventEditorSheet.swift */; };
 		6C6BE163BA5F7A1CE679F09B /* InCallMarkSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B2CA8E975141324E9ABB11 /* InCallMarkSnapshotTests.swift */; };
@@ -496,6 +499,7 @@
 		8401B5D8C618D5ADCBB2995C /* ConversationTimelineList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E5FAD529CCEAEDEACAA2877 /* ConversationTimelineList.swift */; };
 		84403245DAF3F46758BAC695 /* CallToneDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE65DBCBF636D9C3AC197602 /* CallToneDecodingTests.swift */; };
 		84565BF0C16DDF049C744AFF /* ComposerSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C058F2A191ED1FB3EF4A9387 /* ComposerSnapshotTests.swift */; };
+		84AB9DF29C44179FE8FD95C6 /* AdminRoomOccupantRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E31F3675913C2326E2E8362 /* AdminRoomOccupantRow.swift */; };
 		85221B3DD2E3642577AF64E2 /* InboxRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFDFEB1DCF16FE1667D8DFC4 /* InboxRows.swift */; };
 		8664008B93095E14C304354A /* EventDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */; };
 		8689B38C255321E21E5ED9C2 /* NavigationRowChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E389D8FF37A6F61A5761275 /* NavigationRowChrome.swift */; };
@@ -670,6 +674,7 @@
 		B0F68DE4B7DAFD8BD73D17A0 /* StoryClipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C17FDCF989480841F5BBE106 /* StoryClipTests.swift */; };
 		B16CC5A59CE4654DCACD647D /* FFIXmppPort.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */; };
 		B1A78FDC889F5E2B520F3BA3 /* HuddleFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 158C7AC1B38BBF99BFDEDE91 /* HuddleFonts.swift */; };
+		B1AB56268ED39121AD088564 /* AdminSpaceFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B2FA8E057693171DB96E6FF /* AdminSpaceFilter.swift */; };
 		B21BE95DF8953BED55981A68 /* SignInAuthorizingPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC9800CE6EF75EE311AFD2F1 /* SignInAuthorizingPanel.swift */; };
 		B2D602D90C4D276E6720E8E3 /* FFIInbound+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7FB5AF7B9D4A6EE940FB440 /* FFIInbound+Events.swift */; };
 		B2F1BF3E3CEF6DB2FCF7AB9F /* GalleryDownloadButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC53AF20786CC7BD23D60C02 /* GalleryDownloadButton.swift */; };
@@ -748,6 +753,7 @@
 		C66EABE79654CE25384DBFDA /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */; };
 		C6A7C94F2E27EFFB803ACB5B /* GifPickerCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AAB432448E9CD2053D3212F /* GifPickerCell.swift */; };
 		C6EFB1E1BEB985D8189E6B71 /* RoomSymbolTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10DF6D38D25636949B8CF01E /* RoomSymbolTile.swift */; };
+		C708EEB7A7F826F7A1879101 /* AdminRoomSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC1CF3155780E6BB223BDD /* AdminRoomSettings.swift */; };
 		C72D8128B8D946C7134D3239 /* ComposerPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAD81D3A717D8B0CDCA66A0C /* ComposerPasteboard.swift */; };
 		C762D98D0850609B2E959779 /* ConversationToolbarLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 864C9DFCA1FF7A45C3BA11AD /* ConversationToolbarLayoutTests.swift */; };
 		C76968A921D4D393D54F1A2F /* FFIXmppPort+Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DD87613035352E7E7D1112E /* FFIXmppPort+Commands.swift */; };
@@ -896,10 +902,12 @@
 		ECD087DA082AB83A2FC8E538 /* CallFloatingSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9E297D815BDDA5996A4FD88 /* CallFloatingSnapshotTests.swift */; };
 		ED1E74B2407A48AE9AA1BCC6 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6039ABBCA4C43BE7CFCF32 /* ProfileView.swift */; };
 		ED502C50B87BB729743286AF /* ConversationDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2BC3620DC7095A2FBB42549 /* ConversationDetailsView.swift */; };
+		ED59550FB009C547199ACD4F /* AdminRoomOccupantRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E31F3675913C2326E2E8362 /* AdminRoomOccupantRow.swift */; };
 		EDE1EF6091E72F2C9CCC4375 /* PeerSharingSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77153D8945E831391049BFF9 /* PeerSharingSection.swift */; };
 		EDE44043376FFD1D40BAAE0B /* RoomManagementSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE1B270EB92BCD6313BCE33 /* RoomManagementSections.swift */; };
 		EE28967E1D324F5AF95DE3F9 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ADBC59E7032ED951F1EE8A /* AuthClient.swift */; };
 		EE5334C044F9B88142368D3F /* ComposerFormattingButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFFC353A7E7DCD927FFDC7F /* ComposerFormattingButtons.swift */; };
+		EE5F6BF9FD8BB650C618F85C /* AdminRoomSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC1CF3155780E6BB223BDD /* AdminRoomSettings.swift */; };
 		EEC166182965A5C078ADF1CF /* MessageRowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D469313E9255505BEDA307 /* MessageRowParts.swift */; };
 		EF141C4A4F427DE100840C30 /* AdminPersonChoiceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21C8AF0EBA564AF00F0383F8 /* AdminPersonChoiceRow.swift */; };
 		EF16198E05B173AE961CBB3A /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
@@ -1011,6 +1019,7 @@
 		11DFCF630025FEEC71C4C557 /* FakePort+Blocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Blocking.swift"; sourceTree = "<group>"; };
 		11E556D95DAF8FB92C14A348 /* Motion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Motion.swift; sourceTree = "<group>"; };
 		12445F68EB008CA7EF03F862 /* ComposerNotice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerNotice.swift; sourceTree = "<group>"; };
+		14CC1CF3155780E6BB223BDD /* AdminRoomSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoomSettings.swift; sourceTree = "<group>"; };
 		14FB0444FBD894A06DDA6874 /* ChannelNavigationRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelNavigationRow.swift; sourceTree = "<group>"; };
 		158C7AC1B38BBF99BFDEDE91 /* HuddleFonts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleFonts.swift; sourceTree = "<group>"; };
 		1599EC8700840508564B3A54 /* ComposerSelectionEditMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerSelectionEditMenu.swift; sourceTree = "<group>"; };
@@ -1161,6 +1170,7 @@
 		6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventDetailSheet.swift; sourceTree = "<group>"; };
 		7012DBCF5AC68A26DED6AC16 /* ComposerActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerActions.swift; sourceTree = "<group>"; };
 		703EA5C6E92D95EA6C529FE8 /* CallCamera.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCamera.swift; sourceTree = "<group>"; };
+		70D8F0584C447F2919DA451D /* HuddlePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddlePicker.swift; sourceTree = "<group>"; };
 		71B981349099DC164D28D158 /* TimelineDayLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineDayLabel.swift; sourceTree = "<group>"; };
 		73FB87B353CF15E37D67B7FA /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
 		745E4D7A386971E4AA451053 /* BridgeLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeLog.swift; sourceTree = "<group>"; };
@@ -1214,6 +1224,7 @@
 		8AB1A681F60A49913FEC6A38 /* waddle_xmpp_clientFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = waddle_xmpp_clientFFI.modulemap; sourceTree = "<group>"; };
 		8AB40C271793683DB9AF190A /* AdminPeopleSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminPeopleSection.swift; sourceTree = "<group>"; };
 		8B0FAACD816C6A978A19A66D /* StoryComposerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryComposerSheet.swift; sourceTree = "<group>"; };
+		8B2FA8E057693171DB96E6FF /* AdminSpaceFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSpaceFilter.swift; sourceTree = "<group>"; };
 		8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventReplyCard.swift; sourceTree = "<group>"; };
 		8CC038FE8D50CA539F4CCDD3 /* MessageActionModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionModelTests.swift; sourceTree = "<group>"; };
 		8D4AC473C49480EAAB167B7D /* LinkPreviewWebPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewWebPlayer.swift; sourceTree = "<group>"; };
@@ -1244,6 +1255,7 @@
 		9C51C8BD0B8C9909AA64AAC0 /* BufferCaptureSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferCaptureSources.swift; sourceTree = "<group>"; };
 		9D75CFC732C3C96CF967BF4C /* CallBackgroundProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallBackgroundProcessor.swift; sourceTree = "<group>"; };
 		9D75D6A32C54D89A2B02F909 /* ThreadScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadScreen.swift; sourceTree = "<group>"; };
+		9E31F3675913C2326E2E8362 /* AdminRoomOccupantRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminRoomOccupantRow.swift; sourceTree = "<group>"; };
 		9E7D2EFE74CE0E7AA324637B /* ProfileAvatarEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileAvatarEncoder.swift; sourceTree = "<group>"; };
 		9EF3F0EF8F7344EF314C694C /* ComposerCommandCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCommandCenter.swift; sourceTree = "<group>"; };
 		A02DE6A87AC803C9D1A2F526 /* FeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedView.swift; sourceTree = "<group>"; };
@@ -1889,11 +1901,14 @@
 				3D8FDFAE1FF94353C280D9EB /* AdminPersonPicker.swift */,
 				088485546D051AEAF5B35694 /* AdminRoleMenu.swift */,
 				CF7FDE5FEE4B9FCB74A2F915 /* AdminRoleRow.swift */,
+				9E31F3675913C2326E2E8362 /* AdminRoomOccupantRow.swift */,
 				ACFC9BD024E32EA9E049D2A8 /* AdminRoomRow.swift */,
+				14CC1CF3155780E6BB223BDD /* AdminRoomSettings.swift */,
 				455C82774C67753D8BFC905B /* AdminRoomSheet.swift */,
 				6DE47B97F9F49E6B8DDC381D /* AdminSectionView.swift */,
 				6C1289B6FE84F6D52E149FB2 /* AdminSheetList.swift */,
 				C549BD9188E9A12524E82C5E /* AdminSheetScaffold.swift */,
+				8B2FA8E057693171DB96E6FF /* AdminSpaceFilter.swift */,
 				06527FE40737212DA821400F /* AdminSpaceRow.swift */,
 				B7D404A9D4843D4946D805FF /* AdminSpaceSheet.swift */,
 				490F63B9770395CF3F4815DE /* AdminUserRow.swift */,
@@ -2071,6 +2086,7 @@
 				BA8595D2DD6CCC3566D4CD27 /* HuddleAppearance.swift */,
 				17173B8296B26DFD2A19423E /* HuddleColor.swift */,
 				158C7AC1B38BBF99BFDEDE91 /* HuddleFonts.swift */,
+				70D8F0584C447F2919DA451D /* HuddlePicker.swift */,
 				11E556D95DAF8FB92C14A348 /* Motion.swift */,
 				A681AA1E99DFA6786DF6F7BF /* Surfaces.swift */,
 				FE0F38B78980F7FA0414198A /* Theme.swift */,
@@ -2776,11 +2792,14 @@
 				2465D67CE94262E3039F8915 /* AdminPersonPicker.swift in Sources */,
 				B633D2F281B3B7294BF6BCA8 /* AdminRoleMenu.swift in Sources */,
 				E003620FFA2CE7B03A511A81 /* AdminRoleRow.swift in Sources */,
+				84AB9DF29C44179FE8FD95C6 /* AdminRoomOccupantRow.swift in Sources */,
 				4DBCD4080C891BA4AD2A93DB /* AdminRoomRow.swift in Sources */,
+				C708EEB7A7F826F7A1879101 /* AdminRoomSettings.swift in Sources */,
 				A277D5F8D557882415EEED37 /* AdminRoomSheet.swift in Sources */,
 				C5B0213BDD7A27A402DAEE74 /* AdminSectionView.swift in Sources */,
 				88B9144AD2F3CEFA40C758E5 /* AdminSheetList.swift in Sources */,
 				C7EDD535A7EF98D9FB01E109 /* AdminSheetScaffold.swift in Sources */,
+				00157AED2CA56509AB6195A1 /* AdminSpaceFilter.swift in Sources */,
 				7F71BD4A95C45D3C1FC34F5D /* AdminSpaceRow.swift in Sources */,
 				3933C98840C4869A974B243E /* AdminSpaceSheet.swift in Sources */,
 				8C3665D66FBCCDA5DC391297 /* AdminUserRow.swift in Sources */,
@@ -2981,6 +3000,7 @@
 				9E9BBCA72D50BB3C8C973D70 /* HuddleAppearance.swift in Sources */,
 				3E1D9FBAA270732A4CCB5EC1 /* HuddleColor.swift in Sources */,
 				874FD52849FFBC90288F9971 /* HuddleFonts.swift in Sources */,
+				45106CCBF77A0D84ED344ED8 /* HuddlePicker.swift in Sources */,
 				4D9CC7EDE4F38A7AD0F9C9E8 /* InboxFeed.swift in Sources */,
 				85221B3DD2E3642577AF64E2 /* InboxRows.swift in Sources */,
 				7D6901D3604D40F229A5A5FE /* InboxView.swift in Sources */,
@@ -3249,11 +3269,14 @@
 				A79414F65F48C7CC84FAAF53 /* AdminPersonPicker.swift in Sources */,
 				169606A17F7E117691A82476 /* AdminRoleMenu.swift in Sources */,
 				BDEDDFDCC2BC72E4DAFC1FAD /* AdminRoleRow.swift in Sources */,
+				ED59550FB009C547199ACD4F /* AdminRoomOccupantRow.swift in Sources */,
 				D2475AFFB418A5C696E4E53D /* AdminRoomRow.swift in Sources */,
+				EE5F6BF9FD8BB650C618F85C /* AdminRoomSettings.swift in Sources */,
 				33A802453496543B15D66C36 /* AdminRoomSheet.swift in Sources */,
 				AE84CEC44CB525F976B86E81 /* AdminSectionView.swift in Sources */,
 				E6C52482994B45668665FB0B /* AdminSheetList.swift in Sources */,
 				5FFA43B73688F559510C72AF /* AdminSheetScaffold.swift in Sources */,
+				B1AB56268ED39121AD088564 /* AdminSpaceFilter.swift in Sources */,
 				8D479E5D6FF48C2845B5E610 /* AdminSpaceRow.swift in Sources */,
 				3AFB0032BA2BCCA279EE2741 /* AdminSpaceSheet.swift in Sources */,
 				68AAACB6373159D0FEEECC1F /* AdminUserRow.swift in Sources */,
@@ -3454,6 +3477,7 @@
 				D14092D809BD9D97C48F43EB /* HuddleAppearance.swift in Sources */,
 				6E511B0E6DBC3542890B31F4 /* HuddleColor.swift in Sources */,
 				B1A78FDC889F5E2B520F3BA3 /* HuddleFonts.swift in Sources */,
+				6B551A0075BE35A49B0E6183 /* HuddlePicker.swift in Sources */,
 				E68A5B8CCDE1DAEDBBD98259 /* InboxFeed.swift in Sources */,
 				F5835B9A761EFA3E995EE8A8 /* InboxRows.swift in Sources */,
 				BC91F3B709D0C72D81BC004C /* InboxView.swift in Sources */,

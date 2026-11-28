@@ -40,7 +40,6 @@ struct AdminListCopy {
     /// Why nothing answers the text and, for rooms, the space it is in.
     let noMatches: (_ query: String, _ space: String?) -> String
     let emptyTitle: String
-    var emptyMessage: String?
     let searchPrompt: String
     /// The toolbar's "new" button; nil for a list nothing is added to.
     var newTitle: String?
@@ -63,21 +62,20 @@ struct AdminListCopy {
 
     static let rooms = AdminListCopy(
         title: "Rooms",
-        caption: "Every room in this community.",
+        caption: "Open a room to edit its settings and roles, or see who's there.",
         symbol: "number",
         loadingTitle: "Loading rooms",
         offlineMessage: "Rooms show up here when you're connected.",
         failedTitle: "Rooms didn't load",
         noMatches: { query, space in
-            space.map { "No room in \($0) has a name that starts with “\(query)”." }
-                ?? "No room's name starts with “\(query)”."
+            space.map { "No rooms in \($0) match “\(query)”." }
+                ?? "No rooms match “\(query)”."
         },
-        emptyTitle: "No rooms yet",
-        emptyMessage: "Make one to get people talking.",
+        emptyTitle: "No rooms yet. Create one to get started.",
         searchPrompt: "Search rooms",
         newTitle: "New room",
         captionInSpace: { "The rooms in \($0)." },
-        emptyInSpace: { "\($0) has no rooms yet. Make one to get people talking." }
+        emptyInSpace: { "No rooms in \($0) yet." }
     )
 
     static let spaces = AdminListCopy(
@@ -114,21 +112,15 @@ struct AdminListNoticeView: View {
             EmptyStateView(title: copy.failedTitle, message: "Refresh to try again.", symbol: "exclamationmark.triangle")
         case .noMatches where section == .users:
             status("No users match “\(query)”.")
-        case .noMatches where section == .spaces:
-            status(copy.noMatches(query, nil))
         case .noMatches:
-            EmptyStateView(title: "No matches", message: copy.noMatches(query, space?.name), symbol: "magnifyingglass")
+            status(copy.noMatches(query, space?.name))
         case .empty:
-            if let emptyMessage {
-                EmptyStateView(title: copy.emptyTitle, message: emptyMessage, symbol: copy.symbol)
-            } else {
-                status(copy.emptyTitle)
-            }
+            status(emptyTitle)
         }
     }
 
-    private var emptyMessage: String? {
-        guard let space, let inSpace = copy.emptyInSpace else { return copy.emptyMessage }
+    private var emptyTitle: String {
+        guard let space, let inSpace = copy.emptyInSpace else { return copy.emptyTitle }
         return inSpace(space.name)
     }
 

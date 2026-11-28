@@ -3,18 +3,16 @@ import WaddleKit
 
 /// One list of the console: its rows a page at a time, or why there are
 /// none to show.
-struct AdminListPanel<Row: Identifiable & Sendable, RowView: View, Accessory: View>: View {
+struct AdminListPanel<Row: Identifiable & Sendable, RowView: View>: View {
     let list: AdminList<Row>
     let section: AdminSection
     /// Pull to refresh: the list, and what goes with it.
     let refresh: () async -> Void
-    @ViewBuilder let accessory: () -> Accessory
     @ViewBuilder let row: (Row) -> RowView
 
     var body: some View {
         ScrollView {
             VStack(alignment: .trailing, spacing: Theme.Spacing.l) {
-                accessory()
                 if list.failure != nil, !list.rows.isEmpty {
                     refreshNotice
                 }

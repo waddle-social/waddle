@@ -39,21 +39,25 @@ struct AdminRoomSheet: View {
         _access = State(initialValue: opened?.access ?? .open)
     }
 
-    private static let copy = AdminSheetScaffold<AnyView, AnyView>.Copy(
-        newTitle: "New room",
-        title: "Room",
-        saveFailure: "Couldn't save the room. Try again.",
-        deleteTitle: "Delete room",
-        deleteQuestion: "Delete room?",
-        deleteFailure: "Couldn't delete the room. Try again.",
-        newMinHeight: 440,
-        minHeight: 640
-    )
+    private var copy: AdminSheetScaffold<AnyView, AnyView>.Copy {
+        .init(
+            newTitle: "New room",
+            title: opened?.name ?? "Room",
+            saveFailure: "Couldn't save the room. Try again.",
+            deleteTitle: "Delete room",
+            deleteQuestion: "Delete room?",
+            deleteFailure: "Couldn't delete the room. Try again.",
+            newMinHeight: 440,
+            minHeight: 640,
+            createTitle: "Create room",
+            saveTitle: "Save changes"
+        )
+    }
 
     var body: some View {
         AdminSheetScaffold(
             isNew: opened == nil,
-            copy: Self.copy,
+            copy: copy,
             deleteWarning: Self.deleteWarning(name: opened?.name ?? ""),
             canSave: canSave,
             isChanging: !changing.isEmpty,
@@ -179,60 +183,19 @@ struct AdminRoomSheet: View {
         AdminNameFields(
             name: $name,
             description: $description,
-            namePrompt: "Room name",
-            descriptionPrompt: "What is it about? (optional)",
+            namePrompt: opened == nil ? "general" : "Room name",
+            descriptionPrompt: "What's this room for?",
             keepsOldDescription: opened?.description != nil && draft?.description == nil,
-            submit: submit
+            submit: submit,
+            descriptionTitle: opened == nil ? "Topic (optional)" : "Topic"
         )
-        Section {
-            if kind.canBeChosen {
-                Picker("Kind", selection: $kind) {
-                    ForEach(AdminRoomKind.choices, id: \.self) { kind in
-                        Text(AdminRoomCopy.title(kind)).tag(kind)
-                    }
-                }
-            } else {
-                LabeledContent("Kind", value: AdminRoomCopy.title(kind))
-            }
-            if opened == nil {
-                spacePicker
-            }
-            Toggle("People can find it", isOn: $access.isListed)
-                .onChange(of: access.isListed) { _, isListed in
-                    // Hiding a room suggests keeping it to its members;
-                    // the next toggle can say otherwise.
-                    if !isListed { access.isMembersOnly = true }
-                }
-            Toggle("Only members can join", isOn: $access.isMembersOnly)
-        } footer: {
-            if !access.isListed, !access.isMembersOnly {
-                Text("Anyone who has the room's address can join it.")
-            }
-        }
-    }
-
-    /// The space a new room goes in, from every space, not only the first
-    /// page. Create waits until the spaces have loaded or failed, so a
-    /// room is not made outside a space by accident.
-    @ViewBuilder
-    private var spacePicker: some View {
-        if let spaces, spacesAreSettled {
-            if !spaces.rows.isEmpty {
-                Picker("Space", selection: $spaceID) {
-                    Text("None").tag(AdminSpace.ID?.none)
-                    ForEach(spaces.rows) { space in
-                        Text(space.name).tag(AdminSpace.ID?.some(space.id))
-                    }
-                }
-            }
-            if spaces.failure != nil || spaces.moreFailure != nil {
-                LabeledContent(spaces.rows.isEmpty ? "Spaces didn't load" : "Some spaces didn't load") {
-                    Button("Try again") { Task { await spaces.loadEveryPage() } }
-                }
-            }
-        } else {
-            LabeledContent("Space", value: "Loading…")
-        }
+        AdminRoomSettings(
+            kind: $kind,
+            access: $access,
+            spaceSelection: opened == nil ? $spaceID : nil,
+            spaces: spaces,
+            spacesAreSettled: spacesAreSettled
+        )
     }
 
     /// Every page of spaces is in, or one could not be had, and none is
@@ -391,66 +354,6 @@ struct AdminRoomSheet: View {
                 peopleError = AdminRoomCopy.roleFailure(error, address: member.jid.description)
             }
             changing.remove(member.jid)
-        }
-    }
-}
-
-/// Someone in the room now, with a menu of their role and a way to take
-/// them out.
-private struct AdminRoomOccupantRow: View {
-    let occupant: AdminRoomOccupant
-    let choices: [RoomAffiliation]
-    let isChanging: Bool
-    let choose: (RoomAffiliation) -> Void
-    let removeRole: () -> Void
-    let remove: () -> Void
-
-    /// Side by side while the name fits whole; the controls go under it
-    /// on a narrow screen or with large text.
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: Theme.Spacing.s) {
-                name
-                Spacer(minLength: Theme.Spacing.xs)
-                controls
-            }
-            VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-                name
-                controls
-            }
-        }
-    }
-
-    private var name: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
-            Text(occupant.nick)
-                .lineLimit(1)
-            Text(occupant.jid.description)
-                .huddleText(Theme.Typography.caption)
-                .foregroundStyle(Theme.Colors.fgMuted)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(occupant.nick), \(occupant.jid.description)"))
-    }
-
-    private var controls: some View {
-        HStack(spacing: Theme.Spacing.s) {
-            AdminRoleMenu(
-                role: occupant.affiliation,
-                choices: choices,
-                title: AdminRoomCopy.title,
-                removeTitle: occupant.affiliation == .none ? nil : "Remove role",
-                isChanging: isChanging,
-                choose: choose,
-                remove: removeRole
-            )
-            .accessibilityLabel(Text("Role of \(occupant.nick)"))
-            Button("Remove", action: remove)
-                .adminRowControl()
-                .disabled(isChanging)
-                .accessibilityLabel(Text("Remove \(occupant.nick) from the room"))
         }
     }
 }
