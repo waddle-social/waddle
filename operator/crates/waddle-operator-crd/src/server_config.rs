@@ -436,6 +436,7 @@ pub struct IngressSpec {
     pub byo_http_section: Option<String>,
     /// Static target IP addresses written into `DNSEndpoint` for `ManagedSubdomain` tenants.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16), inner(length(max = 45)))]
     pub target_ips: Vec<String>,
     /// `cert-manager` `ClusterIssuer` name used for `CustomDomain` tenant `Certificate`s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -443,6 +444,7 @@ pub struct IngressSpec {
     /// Additional reserved single-label subdomains under `managedBaseDomain` (merged with
     /// the always-enforced built-in reserved floor).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 256), inner(length(max = 63)))]
     pub reserved_subdomains: Vec<String>,
 }
 

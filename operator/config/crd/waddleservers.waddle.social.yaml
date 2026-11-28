@@ -518,7 +518,9 @@ spec:
                       Additional reserved single-label subdomains under `managedBaseDomain` (merged with
                       the always-enforced built-in reserved floor).
                     items:
+                      maxLength: 63
                       type: string
+                    maxItems: 256
                     type: array
                   retryAttempts:
                     default: 5
@@ -529,7 +531,9 @@ spec:
                   targetIps:
                     description: Static target IP addresses written into `DNSEndpoint` for `ManagedSubdomain` tenants.
                     items:
+                      maxLength: 45
                       type: string
+                    maxItems: 16
                     type: array
                   tlsClusterIssuer:
                     description: '`cert-manager` `ClusterIssuer` name used for `CustomDomain` tenant `Certificate`s.'
