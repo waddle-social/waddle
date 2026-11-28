@@ -261,6 +261,14 @@ pub struct WaddleTenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<TenantAuthSpec>,
 
+    /// Extra browser origins (`https://host[:port]`) trusted for this tenant
+    /// only: allowed by CORS and as sign-in return URLs. Use this for a web
+    /// client served from a host other than the tenant's server hostnames.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16), inner(length(max = 262)))]
+    #[x_kube(validation = r#"self.all(o, o.matches('^https?://[^/?#@]+$'))"#)]
+    pub cors_origins: Vec<String>,
+
     /// Optional per-tenant connection, room, storage, and inference spend quotas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<TenantQuotasSpec>,
@@ -475,6 +483,8 @@ pub enum TenantValidationViolation {
     InvalidAuthProvider,
     /// `auth.providers` contains duplicate provider ids.
     DuplicateAuthProviderId,
+    /// A `corsOrigins` entry is not a bare http(s) origin.
+    InvalidCorsOrigin,
     /// One or more `owners` entries were empty or whitespace-only.
     EmptyOwnerEntry,
     /// One or more `ingress.hostnames` entries failed canonical lower-case FQDN validation.
@@ -507,6 +517,10 @@ impl fmt::Display for TenantValidationViolation {
             Self::DuplicateAuthProviderId => {
                 write!(f, "spec.auth.providers ids must be unique")
             }
+            Self::InvalidCorsOrigin => write!(
+                f,
+                "spec.corsOrigins entries must be bare http(s) origins (scheme://host[:port])"
+            ),
             Self::EmptyOwnerEntry => {
                 write!(
                     f,
@@ -583,6 +597,10 @@ pub fn validate_tenant_spec(spec: &WaddleTenantSpec) -> Result<XmppDomain, Tenan
         }
     }
 
+    if spec.cors_origins.iter().any(|origin| !is_bare_http_origin(origin)) {
+        violations.push(TenantValidationViolation::InvalidCorsOrigin);
+    }
+
     if spec.owners.iter().any(|owner| owner.trim().is_empty()) {
         violations.push(TenantValidationViolation::EmptyOwnerEntry);
     }
@@ -616,6 +634,21 @@ pub fn validate_tenant_spec(spec: &WaddleTenantSpec) -> Result<XmppDomain, Tenan
 
     Ok(domain
         .unwrap_or_else(|| XmppDomain::try_new("localhost").unwrap_or_else(|_| unreachable!())))
+}
+
+/// Whether `entry` is an absolute http(s) URL with a host and no path, query,
+/// fragment or userinfo (the server applies the same rule when loading the
+/// tenant manifest).
+fn is_bare_http_origin(entry: &str) -> bool {
+    url::Url::parse(entry).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some_and(|host| !host.is_empty())
+            && (url.path().is_empty() || url.path() == "/")
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
 }
 
 /// Validates and resolves a tenant's ingress mode and hostnames against its hosting
@@ -797,6 +830,7 @@ mod tests {
             auth: Some(TenantAuthSpec {
                 providers: vec![rka_provider()],
             }),
+            cors_origins: vec!["https://waddle.chat".to_owned()],
             quotas: Some(TenantQuotasSpec {
                 max_concurrent_connections: Some(1000),
                 max_rooms: Some(500),
@@ -878,6 +912,40 @@ mod tests {
                 .is_err(),
             "leading hyphen tenantId must be rejected by CEL"
         );
+    }
+
+    #[test]
+    fn tenant_cors_origins_must_be_bare_http_origins() {
+        for good in ["https://rawkode.chat", "http://localhost:4321"] {
+            let mut spec = sample_tenant_spec();
+            spec.cors_origins = vec![good.to_owned()];
+            assert!(validate_tenant_spec(&spec).is_ok(), "{good} must be accepted");
+            assert!(
+                WaddleTenant::new("cors-ok", spec).validate_cel().is_ok(),
+                "{good} must pass CEL"
+            );
+        }
+
+        for bad in [
+            "rawkode.chat",
+            "https://rawkode.chat/rooms",
+            "https://user@rawkode.chat",
+            "ftp://rawkode.chat",
+        ] {
+            let mut spec = sample_tenant_spec();
+            spec.cors_origins = vec![bad.to_owned()];
+            let report = validate_tenant_spec(&spec).expect_err("bad cors origin must fail");
+            assert!(
+                report
+                    .violations()
+                    .contains(&TenantValidationViolation::InvalidCorsOrigin),
+                "{bad} must report InvalidCorsOrigin"
+            );
+            assert!(
+                WaddleTenant::new("cors-bad", spec).validate_cel().is_err(),
+                "{bad} must be rejected by CEL"
+            );
+        }
     }
 
     #[test]

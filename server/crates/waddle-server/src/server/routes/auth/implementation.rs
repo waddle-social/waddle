@@ -378,7 +378,7 @@ pub async fn start_handler(
     let tenant = state.tenant_or_fallback(tenant);
     let trusted_origins = state
         .trusted_web_origins
-        .with_tenant_base(&tenant.public_base_url);
+        .with_tenant(&tenant.public_base_url, &tenant.cors_origins);
     let providers = state.providers_for(&tenant);
     let provider = match providers.get(&query.provider) {
         Some(p) => p,

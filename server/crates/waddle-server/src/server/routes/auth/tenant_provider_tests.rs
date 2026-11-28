@@ -61,6 +61,7 @@ fn manifest(tenant_id: &str, providers: Vec<TenantAuthProviderSpec>) -> TenantMa
         placement_mode: None,
         hostnames: vec![tenant_id.to_owned()],
         auth_providers: providers,
+        cors_origins: Vec::new(),
     }
 }
 

@@ -21,7 +21,7 @@ pub(super) async fn callback_handler(
     let tenant = state.tenant_or_fallback(tenant);
     let trusted_web_origins = state
         .trusted_web_origins
-        .with_tenant_base(&tenant.public_base_url);
+        .with_tenant(&tenant.public_base_url, &tenant.cors_origins);
     if let Some(err) = query.error {
         let msg = query
             .error_description
