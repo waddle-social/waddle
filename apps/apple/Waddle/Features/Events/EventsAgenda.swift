@@ -6,6 +6,7 @@ import WaddleKit
 struct EventsAgenda<Placeholder: View>: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.eventsCalendar) private var calendar
+    @State private var replyError: String?
     /// Each occurrence that runs on `from` or later, earliest first.
     let occurrences: [EventOccurrence]
     let from: CalendarDay
@@ -31,8 +32,10 @@ struct EventsAgenda<Placeholder: View>: View {
                     section(copy.agendaTitle(group.day, today: today)) {
                         ForEach(Array(group.occurrences.enumerated()), id: \.element.id) { index, occurrence in
                             if index > 0 { HuddleDivider() }
-                            EventsAgendaRow(occurrence: occurrence, day: group.day, status: occurrence.status(at: now)) {
-                                onOpen(OpenEvent(eventID: occurrence.eventID, occurrence: occurrence))
+                            EventAgendaCard(eventID: occurrence.eventID, onReplyError: { replyError = $0 }) {
+                                EventsAgendaRow(occurrence: occurrence, day: group.day, status: occurrence.status(at: now)) {
+                                    onOpen(OpenEvent(eventID: occurrence.eventID, occurrence: occurrence))
+                                }
                             }
                         }
                     }
@@ -41,12 +44,24 @@ struct EventsAgenda<Placeholder: View>: View {
                     section("No date yet") {
                         ForEach(Array(undated.enumerated()), id: \.element.id) { index, event in
                             if index > 0 { HuddleDivider() }
-                            EventsUndatedRow(event: event) { onOpen(OpenEvent(eventID: event.id, occurrence: nil)) }
+                            EventAgendaCard(eventID: event.id, onReplyError: { replyError = $0 }) {
+                                EventsUndatedRow(event: event) { onOpen(OpenEvent(eventID: event.id, occurrence: nil)) }
+                            }
                         }
                     }
                 }
             }
         }
+        .alert("Couldn't send your answer", isPresented: replyErrorBinding) {
+            Button("OK", role: .cancel) { replyError = nil }
+        } message: {
+            Text(replyError ?? "")
+        }
+    }
+
+    // A reply can hide the row in the Going or maybe filter while it is being sent.
+    private var replyErrorBinding: Binding<Bool> {
+        Binding(get: { replyError != nil }, set: { if !$0 { replyError = nil } })
     }
 
     /// Each occurrence once: under its first day from `from` on.
@@ -82,7 +97,7 @@ struct EventsAgenda<Placeholder: View>: View {
     }
 }
 
-/// One occurrence in the agenda: when, what, where, and the user's reply.
+/// Opens an occurrence from its time, title and location.
 private struct EventsAgendaRow: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.eventsCalendar) private var calendar
@@ -134,9 +149,6 @@ private struct EventsAgendaRow: View {
                     }
                 }
                 Spacer(minLength: Theme.Spacing.s)
-                if let reply = session.events.myReply(to: occurrence.eventID) {
-                    HuddleTag(EventsCopy.label(for: reply))
-                }
             }
             .padding(.horizontal, Theme.Spacing.l)
             .padding(.vertical, Theme.Spacing.m)

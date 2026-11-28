@@ -153,6 +153,7 @@
 		2D1AE49C2586E8011EEEF699 /* GroupAddPeopleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB304E892830B3ECA3C19DD /* GroupAddPeopleModel.swift */; };
 		2D366B2F3F1DBB09FD6F2FA3 /* CallRinger.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6249154B3A2973B96B79CEA /* CallRinger.swift */; };
 		2D777A873E32A058475FEFA7 /* AccountSignOutButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027197695AD04C246A4D2C3 /* AccountSignOutButton.swift */; };
+		2D7AB7E56EF23817B814936C /* EventAgendaCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C875470FFA9278476C14E8 /* EventAgendaCard.swift */; };
 		2DDA5514F992810F06C5B939 /* FFIEventListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF317440D44D33577F844A73 /* FFIEventListener.swift */; };
 		2E2F5F9744BBD8D9E774B6AE /* FakePort+LinkPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23AFF4304F80E6FFEF87843B /* FakePort+LinkPreview.swift */; };
 		2E561C2DD512F4DE9E7EFED2 /* InlineMediaPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 345D23B940C30496643292CC /* InlineMediaPlayback.swift */; };
@@ -605,6 +606,7 @@
 		9F3B012A4B596DF133BAA3A8 /* SettingsMessageOrderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */; };
 		9FE8153F5FECF33DD3E16F75 /* SystemMicrophoneMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = E471963434E9C86A9DCF154E /* SystemMicrophoneMode.swift */; };
 		A0389EB12E71697A54A80C9E /* TimelineHistoryHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DADAA8D894F156291483A5 /* TimelineHistoryHeader.swift */; };
+		A0AF625146E5834A469FE575 /* EventAgendaCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C875470FFA9278476C14E8 /* EventAgendaCard.swift */; };
 		A11359C8F42776D8A130CD28 /* FFISessionSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA3FAC89DAB41E26A3E53397 /* FFISessionSignals.swift */; };
 		A1C4325F49D2C90564505CC5 /* ComposerLinkPreviewSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7ED43C5B0F34CEAE731CE642 /* ComposerLinkPreviewSnapshotTests.swift */; };
 		A22D7A36B18491D6B260E5FB /* ComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DA12FB0337CB6ACC6C7756 /* ComposerCard.swift */; };
@@ -1172,6 +1174,7 @@
 		8015D23B02D0391D743A2D03 /* HomeLinkRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeLinkRow.swift; sourceTree = "<group>"; };
 		802FC9A55D416EAC683730E6 /* CallStageHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallStageHost.swift; sourceTree = "<group>"; };
 		80DAE2D489CD12DD7FE02B23 /* ProfileStatusChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStatusChoice.swift; sourceTree = "<group>"; };
+		82C875470FFA9278476C14E8 /* EventAgendaCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventAgendaCard.swift; sourceTree = "<group>"; };
 		82EDBC92BE8EEC9FB0A30B31 /* TestClip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestClip.swift; sourceTree = "<group>"; };
 		85176CCA7895C14E3FAF17FE /* ManagementSheetParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagementSheetParts.swift; sourceTree = "<group>"; };
 		8540604E3E787891DB1A8F74 /* MediaGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGalleryView.swift; sourceTree = "<group>"; };
@@ -2472,6 +2475,7 @@
 		F02DBA2CBE6426F09E6783BD /* Events */ = {
 			isa = PBXGroup;
 			children = (
+				82C875470FFA9278476C14E8 /* EventAgendaCard.swift */,
 				6FE9744EA6ECC0DFEABFE580 /* EventDetailSheet.swift */,
 				E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */,
 				4FD3364EDD46C6BC806C8958 /* EventEditorParts.swift */,
@@ -2870,6 +2874,7 @@
 				C7F79204165298E5179374B9 /* EncryptedAttachmentStatusCards.swift in Sources */,
 				1F9F2572E8FA76304F2E7682 /* EncryptedAttachmentView.swift in Sources */,
 				7600496F6FBAC6CB368C6220 /* EncryptedFileDownloader.swift in Sources */,
+				2D7AB7E56EF23817B814936C /* EventAgendaCard.swift in Sources */,
 				8664008B93095E14C304354A /* EventDetailSheet.swift in Sources */,
 				72F1467F1E399CC3E6EEE0C4 /* EventDurationRows.swift in Sources */,
 				B5E01FEDC9B9B8A708B104C0 /* EventEditorParts.swift in Sources */,
@@ -3335,6 +3340,7 @@
 				993D6DB8E4D4854D6729F56D /* EncryptedAttachmentStatusCards.swift in Sources */,
 				69CE8B51CC3606017715D808 /* EncryptedAttachmentView.swift in Sources */,
 				C9833A182130F5B789C4EBA1 /* EncryptedFileDownloader.swift in Sources */,
+				A0AF625146E5834A469FE575 /* EventAgendaCard.swift in Sources */,
 				B5750785D1B02D35D2BAC85B /* EventDetailSheet.swift in Sources */,
 				EDBB23094F0D6E9110982422 /* EventDurationRows.swift in Sources */,
 				931FD6FD6BAE478301997F66 /* EventEditorParts.swift in Sources */,

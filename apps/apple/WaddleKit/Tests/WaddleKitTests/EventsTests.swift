@@ -288,6 +288,24 @@ struct EventsTests {
 
     // MARK: Replies
 
+    @Test func agendaRSVPShowsTheWebChoicesAndCounts() {
+        let shown = event("a", replies: [
+            EventAttendee(jid: bob, reply: .going),
+            EventAttendee(jid: me.jid, reply: .maybe),
+            EventAttendee(jid: bare("carol@waddle.test"), reply: .going),
+            EventAttendee(jid: bare("dave@waddle.test"), reply: .declined),
+        ])
+        let rsvp = EventRSVP(event: shown, viewer: me.jid)
+
+        #expect(EventReply.allCases.map(EventRSVP.choiceLabel) == ["Going", "Maybe", "Can't"])
+        #expect(rsvp.selection == .maybe)
+        #expect(rsvp.countsLabel == "2 going · 1 maybe · 1 can't")
+
+        let empty = EventRSVP(event: event("b"), viewer: me.jid)
+        #expect(empty.selection == nil)
+        #expect(empty.countsLabel == "0 going · 0 maybe · 0 can't")
+    }
+
     @Test func aReplyShowsAtOnceAndIsSentAsMine() async throws {
         let (coordinator, port) = online()
         port.calendar.list = .success([event("a", replies: [EventAttendee(jid: bob, reply: .going)])])
@@ -301,6 +319,8 @@ struct EventsTests {
         #expect(coordinator.events.event("a")?.attendees == [
             EventAttendee(jid: bob, reply: .going), EventAttendee(jid: me.jid, reply: .maybe),
         ])
+        #expect(coordinator.events.event("a").map { EventRSVP(event: $0, viewer: me.jid).countsLabel }
+            == "1 going · 1 maybe · 0 can't")
         port.calendar.release()
         try await reply.value
         #expect(port.calendar.replies.map(\.uid) == ["uid-a"])
@@ -316,6 +336,8 @@ struct EventsTests {
         await #expect(throws: PortError.rejected) { try await coordinator.reply(.declined, to: "a") }
 
         #expect(coordinator.events.myReply(to: "a") == .going)
+        #expect(coordinator.events.event("a").map { EventRSVP(event: $0, viewer: me.jid).countsLabel }
+            == "1 going · 0 maybe · 0 can't")
     }
 
     @Test func aRefusedFirstReplyLeavesNoReply() async {

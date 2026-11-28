@@ -56,6 +56,25 @@ final class EventsSnapshotTests: XCTestCase {
         )
     }
 
+    func testAgendaCardWithRSVP() async throws {
+        let sample = SampleSession()
+        sample.seedEvents(canManage: false)
+        let occurrence = SampleSession.gameNight(on: "2027-03-05T19:00:00+01:00", until: "2027-03-05T22:00:00+01:00")
+        let day = SampleSession.selectedEventDay
+        let now = SampleSession.instant("2027-03-05T12:00:00+01:00")
+        let agenda = ScrollView {
+            EventsAgenda(
+                occurrences: [occurrence], from: day, today: day, now: now,
+                undated: [], filter: .all, onOpen: { _ in }
+            ) {
+                EmptyView()
+            }
+            .padding(Theme.Spacing.l)
+        }
+        .background(Theme.Colors.bg)
+        try await assertScreenSnapshot(of: pinned(sample.host(agenda)), size: Self.screen)
+    }
+
     func testARepeatingEvent() async throws {
         let sample = SampleSession()
         sample.seedEvents()
