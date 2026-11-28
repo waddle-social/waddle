@@ -146,6 +146,18 @@ spec:
                     maxItems: 8
                     type: array
                 type: object
+              corsOrigins:
+                description: |-
+                  Extra browser origins (`https://host[:port]`) trusted for this tenant
+                  only: allowed by CORS and as sign-in return URLs. Use this for a web
+                  client served from a host other than the tenant's server hostnames.
+                items:
+                  maxLength: 262
+                  type: string
+                maxItems: 16
+                type: array
+                x-kubernetes-validations:
+                - rule: self.all(o, o.matches('^https?://[^/?#@]+$'))
               extensions:
                 description: Optional per-tenant extension and inference provider allowlists.
                 nullable: true

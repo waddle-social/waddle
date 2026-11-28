@@ -73,6 +73,9 @@ pub struct TenantProjectionSpec {
     /// Tenant sign-in providers (omitted when none: sign-in is disabled).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_providers: Vec<TenantAuthProvider>,
+    /// Extra browser origins trusted for this tenant (CORS and sign-in return).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cors_origins: Vec<String>,
     /// Optional tenant quotas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quotas: Option<TenantQuotasSpec>,
@@ -447,6 +450,7 @@ pub async fn reconcile_tenant(
             .as_ref()
             .map(|auth| auth.providers.clone())
             .unwrap_or_default(),
+        cors_origins: wt.spec.cors_origins.clone(),
         quotas: wt.spec.quotas.clone(),
         extensions: wt.spec.extensions.clone(),
         hostnames: resolved_ingress.hostnames.clone(),

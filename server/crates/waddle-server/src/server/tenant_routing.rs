@@ -60,6 +60,8 @@ pub struct ResolvedTenant {
     pub spaces_jid: BareJid,
     /// Configured owner localparts for this tenant.
     pub owners: Vec<String>,
+    /// Extra browser origins trusted for this tenant (manifest `corsOrigins`).
+    pub cors_origins: Vec<Origin>,
 }
 
 impl ResolvedTenant {
@@ -89,6 +91,7 @@ impl ResolvedTenant {
             muc_domain,
             spaces_jid,
             owners,
+            cors_origins: Vec::new(),
         })
     }
 
@@ -197,6 +200,8 @@ pub enum TenantRoutingError {
     },
     #[error("invalid auth providers for tenant '{tenant_id}': {reason}")]
     InvalidAuthProviders { tenant_id: String, reason: String },
+    #[error("invalid cors origin for tenant '{tenant_id}': {reason}")]
+    InvalidCorsOrigin { tenant_id: String, reason: String },
     #[error(
         "duplicate hostname '{hostname}' claimed by both '{existing_tenant}' and '{conflicting_tenant}'"
     )]
@@ -475,6 +480,20 @@ impl TenantHostResolver {
 
             tenants.insert(tenant_id.clone());
 
+            let mut cors_origins: Vec<Origin> = Vec::new();
+            for entry in &spec.cors_origins {
+                let origin = crate::auth::redirect::parse_trusted_origin(entry.trim()).map_err(
+                    |err| TenantRoutingError::InvalidCorsOrigin {
+                        tenant_id: spec.tenant_id.clone(),
+                        reason: err.to_string(),
+                    },
+                )?;
+                if !cors_origins.contains(&origin) {
+                    cors_origins.push(origin);
+                }
+            }
+            allowed_origins.extend(cors_origins.iter().cloned());
+
             if !spec.auth_providers.is_empty() {
                 let registry = ProviderRegistry::try_from_tenant_specs(spec.auth_providers.clone())
                     .map_err(|err| TenantRoutingError::InvalidAuthProviders {
@@ -517,6 +536,7 @@ impl TenantHostResolver {
                         muc_domain: muc_domain.clone(),
                         spaces_jid: spaces_jid.clone(),
                         owners: spec.owners.clone(),
+                        cors_origins: cors_origins.clone(),
                     },
                 );
             }

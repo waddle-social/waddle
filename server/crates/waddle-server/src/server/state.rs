@@ -310,6 +310,7 @@ impl AppState {
                     muc_domain: muc_domain.clone(),
                     spaces_jid: spaces_jid.clone(),
                     owners: Vec::new(),
+                    cors_origins: Vec::new(),
                 },
             ),
         );

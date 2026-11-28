@@ -72,6 +72,7 @@ fn manifest(tenant_id: &str, hostnames: &[&str], owners: &[&str]) -> TenantManif
         placement_mode: None,
         hostnames: hostnames.iter().map(|s| (*s).to_owned()).collect(),
         auth_providers: Vec::new(),
+        cors_origins: Vec::new(),
     }
 }
 
@@ -335,6 +336,59 @@ async fn strict_host_routing_splits_operational_and_tenant_routes_and_derives_pe
     assert!(example_trusted
         .resolve_return_url(Some("https://evil.example.com/steal"))
         .is_err());
+}
+
+#[test]
+fn tenant_cors_origins_are_allowed_and_trusted_only_for_that_tenant() {
+    let rawkode = TenantManifestSpec {
+        cors_origins: vec!["https://rawkode.chat".to_owned()],
+        ..manifest("rawkode.chat", &["waddle.rawkode.chat"], &[])
+    };
+    let resolver = TenantHostResolver::multi_tenant(
+        default_fallback_tenant(),
+        &[rawkode, manifest("example.waddle.social", &[], &[])],
+    )
+    .expect("resolver");
+
+    // CORS: the web client origin is allowed alongside the tenant hostnames.
+    assert!(resolver.is_allowed_origin_str("https://rawkode.chat"));
+    assert!(resolver.is_allowed_origin_str("https://waddle.rawkode.chat"));
+    assert!(!resolver.is_allowed_origin_str("https://evil.example.com"));
+
+    let table = resolver.snapshot().expect("table");
+    let rawkode_tenant = table.get_by_host("waddle.rawkode.chat").expect("rawkode host");
+    assert_eq!(rawkode_tenant.xmpp_domain.as_str(), "rawkode.chat");
+    let example_tenant = table
+        .get_by_host("example.waddle.social")
+        .expect("example host");
+
+    // Sign-in return URLs: trusted for the declaring tenant only.
+    let base_trusted =
+        TrustedWebOrigins::try_new("https://next.apps.waddle.chat", None).expect("trusted");
+    let rawkode_trusted =
+        base_trusted.with_tenant(&rawkode_tenant.public_base_url, &rawkode_tenant.cors_origins);
+    assert!(rawkode_trusted
+        .resolve_return_url(Some("https://rawkode.chat/rooms"))
+        .is_ok());
+    let example_trusted =
+        base_trusted.with_tenant(&example_tenant.public_base_url, &example_tenant.cors_origins);
+    assert!(example_trusted
+        .resolve_return_url(Some("https://rawkode.chat/rooms"))
+        .is_err());
+}
+
+#[test]
+fn tenant_cors_origins_reject_non_origin_entries() {
+    for bad in ["https://rawkode.chat/path", "rawkode.chat", "ftp://rawkode.chat"] {
+        let spec = TenantManifestSpec {
+            cors_origins: vec![bad.to_owned()],
+            ..manifest("rawkode.chat", &["waddle.rawkode.chat"], &[])
+        };
+        assert!(
+            TenantHostResolver::multi_tenant(default_fallback_tenant(), &[spec]).is_err(),
+            "{bad} must be rejected"
+        );
+    }
 }
 
 #[tokio::test]

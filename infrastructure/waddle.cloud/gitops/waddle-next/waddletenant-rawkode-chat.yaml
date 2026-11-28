@@ -1,14 +1,16 @@
 apiVersion: waddle.social/v1alpha1
 kind: WaddleTenant
 metadata:
-  name: waddle-rawkode-chat
+  name: rawkode-chat
   namespace: waddle-next
   labels:
     app.kubernetes.io/part-of: waddle-next
 spec:
   serverRef:
     name: waddle
-  tenantId: waddle.rawkode.chat
+  # XMPP domain: users are user@rawkode.chat; the server is reached at
+  # waddle.rawkode.chat and the web client is served from rawkode.chat.
+  tenantId: rawkode.chat
   placementMode: SharedPool
   owners:
     - rawkode
@@ -25,8 +27,12 @@ spec:
           - email
         usernameClaim: preferred_username
         emailClaim: email
+  corsOrigins:
+    - https://rawkode.chat
   ingress:
     mode: CustomDomain
+    hostnames:
+      - waddle.rawkode.chat
   quotas:
     maxConcurrentConnections: 2000
     maxRooms: 1000
