@@ -10,8 +10,37 @@ import Testing
         #expect(CallMediaIssues.line(for: Report()) == nil)
     }
 
+    @Test func aFailedCaptureExplainsWhatHappenedToTheCall() {
+        let microphone = CallMediaIssue(kind: .microphone, reason: .failed)
+        let camera = CallMediaIssue(kind: .camera, reason: .failed)
+        #expect(microphone.message() == "Couldn't start your microphone — you joined as a listener.")
+        #expect(camera.message() == "Couldn't start your camera — you joined without video.")
+    }
+
+    @Test func aMissingCameraAndBusyMicrophoneSayHowToRecover() {
+        let report = Report(microphoneIssue: .inUse, cameraIssue: .missing)
+        let issues = CallMediaIssues.shown(for: report)
+        #expect(issues == [CallMediaIssue(kind: .microphone, reason: .inUse), CallMediaIssue(kind: .camera, reason: .missing)])
+        #expect(issues.map { $0.message(on: .mac) } == [
+            "Your microphone is in use by another app. Close it, then check again.",
+            "No camera detected. Connect one, then check again.",
+        ])
+        #expect(issues.allSatisfy { !$0.opensSettings && $0.retryTitle == "Check again" })
+        #expect(CallMediaIssues.line(for: report) == "Your microphone is in use by another app.")
+    }
+
+    @Test func aDifferentFailureBringsBackADismissedNotice() {
+        var report = Report(cameraIssue: .missing, refusals: [.camera: 1])
+        var dismissed = CallMediaIssues.Dismissals()
+        dismissed.dismiss(.camera, in: report)
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).isEmpty)
+        report.cameraIssue = .inUse
+        report.refusals[.camera] = 2
+        #expect(CallMediaIssues.shown(for: report, dismissed: dismissed) == [CallMediaIssue(kind: .camera, reason: .inUse)])
+    }
+
     @Test func eachBlockedDeviceHasItsOwnNoticeTheMicrophonesFirst() {
-        let issues = CallMediaIssues.shown(for: Report(isMicrophoneBlocked: true, isCameraBlocked: true, isScreenBlocked: true))
+        let issues = CallMediaIssues.shown(for: Report(microphoneIssue: .denied, cameraIssue: .denied, isScreenBlocked: true))
         #expect(issues.map(\.kind) == [.microphone, .camera, .screen])
         #expect(issues.allSatisfy { $0.reason == .denied })
     }
@@ -23,7 +52,7 @@ import Testing
     }
 
     @Test func aNoticePutAwayIsLeftOutAndTheOthersStay() {
-        let report = Report(isMicrophoneBlocked: true, isCameraBlocked: true, refusals: [.microphone: 1, .camera: 1])
+        let report = Report(microphoneIssue: .denied, cameraIssue: .denied, refusals: [.microphone: 1, .camera: 1])
         var dismissed = CallMediaIssues.Dismissals()
         dismissed.dismiss(.camera, in: report)
         #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).map(\.kind) == [.microphone])
@@ -33,7 +62,7 @@ import Testing
 
     /// Whichever surface asked: the notice knows only that the device was refused once more.
     @Test func aDeviceRefusedAgainBringsItsNoticeBack() {
-        var report = Report(isMicrophoneBlocked: true, refusals: [.microphone: 1])
+        var report = Report(microphoneIssue: .denied, refusals: [.microphone: 1])
         var dismissed = CallMediaIssues.Dismissals()
         dismissed.dismiss(.microphone, in: report)
         #expect(CallMediaIssues.shown(for: report, dismissed: dismissed).isEmpty)
@@ -71,7 +100,7 @@ import Testing
     }
 
     @Test func aSurfaceWithOneLineShowsTheFirstNoticeInWordsThatPromiseNoButton() {
-        let report = Report(isMicrophoneBlocked: true, isCameraBlocked: true)
+        let report = Report(microphoneIssue: .denied, cameraIssue: .denied)
         let line = CallMediaIssues.line(for: report)
         #expect(line == "Waddle is not allowed to use the microphone. Change that in Settings.")
         #expect(line?.contains("check again") == false)

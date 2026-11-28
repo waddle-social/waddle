@@ -74,9 +74,20 @@ final class CurrentCallCardSnapshotTests: XCTestCase {
             title: "priya",
             summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
             devices: .init(isMicrophoneOn: true, isSharingScreen: false),
-            notice: CallMediaIssues.line(for: CallMediaIssues.Report(isCameraBlocked: true)), actions: Self.actions
+            notice: CallMediaIssues.line(for: CallMediaIssues.Report(cameraIssue: .denied)), actions: Self.actions
         ))
     }
+
+    #if os(macOS)
+    func testNoCameraDetected() {
+        assertCard(CurrentCallCard(
+            title: "priya",
+            summary: CallCardSummary.line(status: .connected, kind: .direct(CallMedia(audio: true, video: true))),
+            devices: .init(isMicrophoneOn: true, isSharingScreen: false),
+            notice: CallMediaIssues.line(for: .init(cameraIssue: .missing)), actions: Self.actions
+        ))
+    }
+    #endif
 
     func testWhileSharingTheScreen() {
         assertCard(CurrentCallCard(

@@ -35,9 +35,8 @@ protocol CallMediaControls: AnyObject, Observable {
     /// Actually publishing, not merely requested.
     var isMicrophoneOn: Bool { get }
     var isCameraOn: Bool { get }
-    /// The person has refused Waddle this device, so its control cannot turn it on.
-    var isMicrophoneBlocked: Bool { get }
-    var isCameraBlocked: Bool { get }
+    /// Why the microphone or camera could not start in this call.
+    var captureIssues: [CallMediaIssue.Kind: CallMediaIssue.Reason] { get }
     /// Ours first, then join order. Empty until connected and during reconnects.
     var participants: [CallMediaParticipant] { get }
     /// For speaker promotion. Updates only when the active identities or their order change.

@@ -23,9 +23,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     private(set) var mediaUpSince: Date?
     var isMicrophoneOn: Bool { picture.isMicrophoneOn }
     var isCameraOn: Bool { picture.isCameraOn }
-    private(set) var isMicrophoneBlocked = false
-    private(set) var isCameraBlocked = false
-    /// Counted so that a notice someone put away comes back when the device is refused again.
+    var captureIssues: [CallMediaIssue.Kind: CallMediaIssue.Reason] { deviceCapture.issues }
+    /// Counted so a notice someone put away comes back when the device fails again.
     private(set) var mediaRefusals: [CallMediaIssue.Kind: Int] = [:]
     var isScreenShareOn: Bool { picture.isScreenShareOn }
     var isScreenShareBlocked: Bool { screenShare.isScreenShareBlocked }
@@ -78,7 +77,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     // MARK: - Devices
 
-    @ObservationIgnored private lazy var deviceCatalog = CallDeviceCatalog(defaults: defaults) { [weak self] in
+    @ObservationIgnored private lazy var deviceCatalog = CallDeviceCatalog(defaults: defaults, capture: capture) { [weak self] in
         guard let self else { return }
         await camera.applyCameraChoice { [weak self] in self?.captureChoices[.video] }
     }
@@ -93,6 +92,9 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     var isBackgroundFailing: Bool { camera.isBackgroundFailing }
     @ObservationIgnored private let microphoneProcessing: CallMicrophoneProcessing
     var audioProcessing: CallAudioProcessing { microphoneProcessing.audioProcessing }
+    @ObservationIgnored private lazy var deviceCapture = CallDeviceCapture(
+        roomAccess: roomAccess, sources: capture, catalog: deviceCatalog, camera: camera, microphone: microphoneProcessing
+    )
 
     init(defaults: UserDefaults = .standard, capture: any CallCaptureSources = SystemCaptureSources()) {
         self.defaults = defaults
@@ -220,7 +222,6 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     func setCamera(_ on: Bool) async {
         captureChoices[.video] = on
-        if !on { camera.cameraNoLongerWanted() }
         guard let room = roomAccess.room else { return }
         await setSource(.video, enabled: on, in: room)
     }
@@ -244,65 +245,17 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
     /// Starts what the call agreed to, unless the person has since chosen
     /// otherwise for that device.
     private func publish(_ media: CallMedia, in room: Room) async {
-        // Here and not before the room exists: a hang-up must find a room to
-        // disconnect from the moment its connect starts.
+        // Apply the chosen speaker as well, even for a receive-only call.
         await refreshDevices()
         guard roomAccess.holds(room) else { return }
         if captureChoices[.audio] ?? media.audio { await setSource(.audio, enabled: true, in: room) }
         if captureChoices[.video] ?? media.video { await setSource(.video, enabled: true, in: room) }
     }
 
-    /// Turning a device on goes through `mayCapture`; turning one off
-    /// needs no permission.
     private func setSource(_ kind: AVMediaType, enabled: Bool, in room: Room) async {
-        if enabled, !(await mayCapture(kind, in: room)) { return }
-        // The person changed their mind while a prompt or a start was pending.
-        if enabled, captureChoices[kind] == false { return }
-        if kind == .audio {
-            _ = try? await room.localParticipant.setMicrophone(enabled: enabled, captureOptions: enabled ? microphoneProcessing.audioCaptureOptions : nil)
-        } else {
-            if enabled { await camera.turnCameraOn(in: room) }
+        await deviceCapture.setSource(kind, enabled: enabled, in: room) {
+            self.captureChoices[kind] ?? enabled
         }
-        // The SDK toggles one publication per device. Off means all of them.
-        // And a device turned off while it was still starting is off: the
-        // choice as it stands now, not as it stood when the start was asked
-        // for, as when Space held to talk came up before the microphone had opened.
-        if !enabled || captureChoices[kind] == false {
-            for publication in room.callPublications(of: kind) where !publication.isMuted {
-                try? await publication.mute()
-            }
-        }
-        // The call ended while a track was starting: `disconnect()` ran
-        // before the track was published, so release it here.
-        guard roomAccess.holds(room) else {
-            await room.localParticipant.unpublishAll()
-            await room.disconnect()
-            camera.releaseBackgroundProcessors(of: room)
-            return
-        }
-        refreshTracks()
-        // The camera was started with the choice as it was when it was asked
-        // for; a choice made while it was starting applies now that it is on.
-        if kind == .video, enabled {
-            await camera.applyCameraChoice(droppingIdleTracks: false) { [weak self] in self?.captureChoices[.video] }
-        }
-        // Likewise a change to the processing made while the microphone was starting.
-        if kind == .audio, enabled { await microphoneProcessing.applyAudioProcessing() }
-    }
-
-    /// Asks for the permission, but only for a call that still owns `room`,
-    /// and checks again once the user has answered: a prompt can stay open
-    /// long after a hang-up. An ended call neither prompts nor captures.
-    private func mayCapture(_ kind: AVMediaType, in room: Room) async -> Bool {
-        guard roomAccess.holds(room) else { return false }
-        let isAllowed = await capture.requestAccess(for: kind)
-        // A prompt can be answered long after the call that asked has ended:
-        // the answer is not the idle state's, nor the next call's.
-        guard roomAccess.holds(room) else { return false }
-        // Kept for the dock, which says why the control does nothing.
-        if kind == .audio { isMicrophoneBlocked = !isAllowed } else { isCameraBlocked = !isAllowed }
-        if !isAllowed { roomAccess.recordRefusal(kind == .audio ? .microphone : .camera) }
-        return isAllowed
     }
 
     private func forgetRoom() {
@@ -317,8 +270,7 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
         mediaUpSince = nil
         // What a call could not use was that call's: the next has not been
         // asked for a camera yet, and may be allowed one by now.
-        if isMicrophoneBlocked { isMicrophoneBlocked = false }
-        if isCameraBlocked { isCameraBlocked = false }
+        deviceCapture.roomDidClose()
         if !mediaRefusals.isEmpty { mediaRefusals = [:] }
         screenShare.resetRefusals()
         connectionSettling?.cancel()
@@ -413,6 +365,8 @@ final class LiveKitCallMediaController: CallMediaController, CallMediaControls {
 
     private func refreshTracks(restoringVolumes: Bool = false) {
         let remotes = picture.refreshTracks(from: roomAccess.room, joinedIdentity: joinedIdentity)
+        if isMicrophoneOn { deviceCapture.clearIssue(.microphone) }
+        if isCameraOn { deviceCapture.clearIssue(.camera) }
         remoteVolumes.tracksChanged(remotes, restoringVolumes: restoringVolumes)
         refreshParticipants()
     }

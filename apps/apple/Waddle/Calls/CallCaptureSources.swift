@@ -12,6 +12,8 @@ import WaddleKit
 protocol CallCaptureSources {
     /// Asks the system, prompting the person the first time.
     func requestAccess(for kind: AVMediaType) async -> Bool
+    /// The cameras offered in call settings. Throws when discovery could not finish.
+    func listCameras() async throws -> [CallDevice]
     /// A camera that is not yet published or capturing, with `processor` on it from before its first frame.
     func makeCamera(options: CameraCaptureOptions?, processor: any VideoProcessor) async -> LocalVideoTrack
 
@@ -41,6 +43,17 @@ struct SystemCaptureSources: CallCaptureSources {
 
     func requestAccess(for kind: AVMediaType) async -> Bool {
         await AVCaptureDevice.requestAccess(for: kind)
+    }
+
+    func listCameras() async throws -> [CallDevice] {
+        let cameras = try await CameraCapturer.captureDevices()
+        #if os(iOS)
+        // Offer one front and one back lens rather than every lens and combination.
+        let offered = cameras.filter { $0.deviceType == .builtInWideAngleCamera || $0.deviceType == .external }
+        #else
+        let offered = cameras
+        #endif
+        return offered.map { CallDevice(id: $0.uniqueID, name: $0.localizedName) }
     }
 
     func makeCamera(options: CameraCaptureOptions?, processor: any VideoProcessor) async -> LocalVideoTrack {

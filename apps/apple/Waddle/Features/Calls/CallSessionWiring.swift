@@ -68,11 +68,10 @@ extension CallMediaControls {
     /// A share is on, or on its way: either way it is ours to stop.
     var isSharingOrStartingScreen: Bool { isScreenShareOn || isScreenShareStarting }
 
-    /// What to tell the person when Waddle may not use a device their call needs.
     /// What this call's media says about our own devices.
     var mediaReport: CallMediaIssues.Report {
         CallMediaIssues.Report(
-            isMicrophoneBlocked: isMicrophoneBlocked, isCameraBlocked: isCameraBlocked,
+            microphoneIssue: captureIssues[.microphone], cameraIssue: captureIssues[.camera],
             isScreenBlocked: isScreenShareBlocked, didScreenShareFail: didScreenShareFail,
             isBackgroundFailing: isBackgroundFailing, refusals: mediaRefusals
         )

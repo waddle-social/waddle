@@ -12,6 +12,7 @@ final class BufferCaptureSources: CallCaptureSources {
     var allows: [AVMediaType: Bool] = [.audio: true, .video: true]
     private(set) var asked: [AVMediaType] = []
     private(set) var cameras: [LocalVideoTrack] = []
+    var cameraDevices = [CallDevice(id: "buffer-camera", name: "Test camera")]
 
     var isScreenCaptureAllowed = true
     private(set) var screenPrompts = 0
@@ -40,6 +41,8 @@ final class BufferCaptureSources: CallCaptureSources {
         waitingForAnAnswer.forEach { $0.resume() }
         waitingForAnAnswer = []
     }
+
+    func listCameras() async throws -> [CallDevice] { cameraDevices }
 
     func makeCamera(options: CameraCaptureOptions?, processor: any VideoProcessor) async -> LocalVideoTrack {
         let track = await fedTrack(source: .camera)

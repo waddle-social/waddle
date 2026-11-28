@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 import WaddleKit
 
@@ -7,19 +8,23 @@ import WaddleKit
 final class CallStagePrompts {
     var screenPicker: CallScreenSources?
     var showsSettings = false
-    private(set) var checking: Set<CallMediaIssue.Kind> = []
+    private var checks: [CallMediaIssue.Kind: UUID] = [:]
+    var checking: Set<CallMediaIssue.Kind> { Set(checks.keys) }
 
     func reset() {
         screenPicker = nil
         showsSettings = false
+        checks = [:]
     }
 
-    func startChecking(_ kind: CallMediaIssue.Kind) {
-        checking.insert(kind)
+    func startChecking(_ kind: CallMediaIssue.Kind) -> UUID {
+        let check = UUID()
+        checks[kind] = check
+        return check
     }
 
-    func finishChecking(_ kind: CallMediaIssue.Kind) {
-        checking.remove(kind)
+    func finishChecking(_ kind: CallMediaIssue.Kind, check: UUID) {
+        if checks[kind] == check { checks[kind] = nil }
     }
 }
 
@@ -155,9 +160,9 @@ struct CallStageCommands {
         guard let media, !prompts.checking.contains(kind), calls.state.sid == sid,
               calls.state.isEstablished else { return }
         // Before the task: two taps in a row are one check.
-        prompts.startChecking(kind)
+        let check = prompts.startChecking(kind)
         Task {
-            defer { prompts.finishChecking(kind) }
+            defer { prompts.finishChecking(kind, check: check) }
             // The call can end, and another begin, before this runs.
             guard isThisCall, calls.state.isEstablished else { return }
             switch kind {
