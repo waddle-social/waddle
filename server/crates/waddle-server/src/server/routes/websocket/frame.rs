@@ -903,26 +903,30 @@ async fn handle_xmpp_frame_impl(
     match parsed.frame {
         InboundFrame::Open { from, to } => {
             info!(domain = %domain, "XMPP stream open requested");
-            if let Some(requested_to) = to.as_ref() {
-                if requested_to.as_str() != domain {
-                    warn!(
-                        requested_to = %requested_to,
-                        expected_domain = %domain,
-                        "Rejecting XMPP <open/> with mismatched `to` domain"
-                    );
-                    *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
-                    *stream_open_from = None;
-                    conn.begin_server_stream_open_response();
-                    return stream_open_error_response(
-                        domain,
-                        from.as_ref(),
-                        DefinedCondition::HostUnknown,
-                    );
+            let strict_multi_tenant = state.deps.app_state.tenant_resolver.is_multi_tenant();
+            if strict_multi_tenant {
+                if let Some(requested_to) = to.as_ref() {
+                    if requested_to.as_str() != domain {
+                        warn!(
+                            requested_to = %requested_to,
+                            expected_domain = %domain,
+                            "Rejecting XMPP <open/> with mismatched `to` domain"
+                        );
+                        *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                        *stream_open_from = None;
+                        conn.begin_server_stream_open_response();
+                        return stream_open_error_response(
+                            domain,
+                            from.as_ref(),
+                            DefinedCondition::HostUnknown,
+                        );
+                    }
                 }
             }
-            let mismatched_domain = from
-                .as_ref()
-                .is_some_and(|requested| requested.domain().as_str() != domain);
+            let mismatched_domain = strict_multi_tenant
+                && from
+                    .as_ref()
+                    .is_some_and(|requested| requested.domain().as_str() != domain);
             let mismatched_principal = from.as_ref().is_some_and(|requested| {
                 phase
                     .authenticated_bare_jid()
