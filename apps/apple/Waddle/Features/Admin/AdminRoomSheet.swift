@@ -49,8 +49,7 @@ struct AdminRoomSheet: View {
             deleteFailure: "Couldn't delete the room. Try again.",
             newMinHeight: 440,
             minHeight: 640,
-            createTitle: "Create room",
-            saveTitle: "Save changes"
+            createTitle: "Create room"
         )
     }
 

@@ -35,8 +35,7 @@ struct AdminSpaceSheet: View {
             deleteFailure: "Couldn't delete the space. Try again.",
             newMinHeight: 320,
             minHeight: 560,
-            createTitle: "Create space",
-            saveTitle: "Save changes"
+            createTitle: "Create space"
         )
     }
 
