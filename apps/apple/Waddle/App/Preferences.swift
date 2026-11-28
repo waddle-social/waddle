@@ -92,17 +92,22 @@ final class Preferences {
 
     let messageSounds: MessageSoundPreference
 
-    /// Whether this install registers with Apple's push service. Off
-    /// means it is only notified while Waddle is running.
-    var receivesPush: Bool {
+    /// Whether this install shows message alerts and registers for push.
+    var notificationsEnabled: Bool {
         didSet {
-            defaults.set(receivesPush, forKey: Keys.push)
-            if receivesPush != oldValue { onReceivesPushChanged?() }
+            defaults.set(notificationsEnabled, forKey: Keys.notificationsEnabled)
+            if notificationsEnabled != oldValue {
+                notificationPreferenceRevision += 1
+                onNotificationsEnabledChanged?()
+            }
         }
     }
 
+    /// Lets an authorization request defer to newer changes in Settings.
+    @ObservationIgnored private(set) var notificationPreferenceRevision = 0
+
     /// Set by the owner of the push registrations.
-    @ObservationIgnored var onReceivesPushChanged: (() -> Void)?
+    @ObservationIgnored var onNotificationsEnabledChanged: (() -> Void)?
 
     /// Denser rows: smaller avatars and tighter spacing.
     var compactMessages: Bool {
@@ -122,7 +127,7 @@ final class Preferences {
         sendsChatStates = defaults.object(forKey: Keys.chatStates) as? Bool ?? true
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
         showsNotificationPreviews = defaults.object(forKey: Keys.previews) as? Bool ?? true
-        receivesPush = defaults.object(forKey: Keys.push) as? Bool ?? true
+        notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
         compactMessages = defaults.object(forKey: Keys.compact) as? Bool ?? false
         messageOrder = defaults.string(forKey: Keys.messageOrder).flatMap(MessageOrder.init(rawValue:)) ?? .chat
     }
@@ -132,7 +137,7 @@ final class Preferences {
         static let chatStates = "waddle.apple.chat-states"
         static let readReceipts = "waddle.apple.read-receipts"
         static let previews = "waddle.apple.notification-previews"
-        static let push = "waddle.apple.receives-push"
+        static let notificationsEnabled = "waddle.apple.receives-push"
         static let compact = "waddle.apple.compact-messages"
         static let messageOrder = "waddle.apple.message-order"
     }

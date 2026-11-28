@@ -22,7 +22,7 @@ final class AppDelegate: NSObject {
 
     func attach(_ appState: AppState) {
         self.appState = appState
-        if !appState.preferences.receivesPush {
+        if !appState.preferences.notificationsEnabled {
             alertRegistrar.setEnabled(false)
             #if os(iOS)
             voipRegistrar.setEnabled(false)
@@ -32,7 +32,7 @@ final class AppDelegate: NSObject {
         #if os(iOS)
         voipRegistrar.attach(appState)
         #endif
-        appState.preferences.onReceivesPushChanged = { [weak self] in self?.applyPushPreference() }
+        appState.preferences.onNotificationsEnabledChanged = { [weak self] in self?.applyPushPreference() }
         appState.finishPendingPushRegistration = { [weak self] coordinator in
             guard let self else { return }
             await self.alertRegistrar.finishPendingRegistration(for: coordinator)
@@ -43,12 +43,12 @@ final class AppDelegate: NSObject {
         // With push off the registrars only retire what is still queued.
         appState.restartPushRegistration = { [weak self, weak appState] in
             guard let self, let appState else { return }
-            if appState.preferences.receivesPush {
+            if appState.preferences.notificationsEnabled {
                 Self.registerForRemoteNotifications()
             }
             self.alertRegistrar.startPendingRegistrationIfPossible()
             #if os(iOS)
-            if appState.preferences.receivesPush, let token = self.voipRegistry?.token {
+            if appState.preferences.notificationsEnabled, let token = self.voipRegistry?.token {
                 self.voipRegistrar.didRegister(deviceToken: token)
             }
             self.voipRegistrar.startPendingRegistrationIfPossible()
@@ -57,19 +57,20 @@ final class AppDelegate: NSObject {
         #if os(iOS)
         appState.setVoIPPushEnabled = { [weak self, weak appState] enabled in
             guard let self, let appState else { return }
-            let enabled = enabled && appState.preferences.receivesPush
+            let enabled = enabled && appState.preferences.notificationsEnabled
             self.voipRegistrar.setEnabled(enabled)
             self.voipRegistry?.setEnabled(enabled)
         }
         #endif
     }
 
-    /// Follows the "Push notifications" setting. Off retires this
+    /// Follows the "Notifications" setting. Off retires this
     /// install's registrations and stops asking Apple for tokens; on
     /// registers again.
     private func applyPushPreference() {
         guard let appState else { return }
-        if appState.preferences.receivesPush {
+        if appState.preferences.notificationsEnabled {
+            Task { await appState.notifications.requestAuthorization() }
             alertRegistrar.setEnabled(true)
             #if os(iOS)
             appState.setVoIPPushEnabled?(appState.phase != .signedOut)
@@ -92,7 +93,7 @@ final class AppDelegate: NSObject {
         #if os(iOS)
         if voipRegistry == nil {
             voipRegistry = VoIPPushRegistry(
-                isEnabled: AppState.shared.preferences.receivesPush,
+                isEnabled: AppState.shared.preferences.notificationsEnabled,
                 onToken: { [weak self] token in self?.voipRegistrar.didRegister(deviceToken: token) },
                 onInvalidated: { [weak self] in self?.voipRegistrar.invalidate() }
             )

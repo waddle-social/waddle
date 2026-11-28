@@ -36,7 +36,7 @@ private struct SettingsTabs: View {
                 SettingsNotificationsSection(
                     preferences: app.preferences,
                     pushRegistrationStatus: app.pushRegistrationStatus,
-                    notificationPermissionGranted: app.notificationPermissionGranted
+                    notificationPermission: app.notificationPermission
                 )
             }
             .tabItem { Label("Notifications", systemImage: "bell.badge") }
@@ -74,7 +74,7 @@ private struct SettingsForm: View {
             SettingsNotificationsSection(
                 preferences: app.preferences,
                 pushRegistrationStatus: app.pushRegistrationStatus,
-                notificationPermissionGranted: app.notificationPermissionGranted
+                notificationPermission: app.notificationPermission
             )
             SettingsPrivacySection(preferences: app.preferences)
             SettingsBlockedSection(app: app)

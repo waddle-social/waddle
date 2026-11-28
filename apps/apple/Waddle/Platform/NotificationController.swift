@@ -15,7 +15,6 @@ final class NotificationController: NSObject {
     var onAnswerCall: ((BareJID, String) async -> Void)?
     var onDeclineCall: ((BareJID, String) async -> Void)?
     var showsPreviews = true
-    var notificationsEnabled = true
     var isDoNotDisturb: () -> Bool = { false }
 
     /// Whether the app is frontmost. Set by the scene phase.
@@ -23,13 +22,13 @@ final class NotificationController: NSObject {
     /// Only a live session for the push's account can replace its alert with
     /// the richer local XMPP notification.
     var hasLiveSession: ((BareJID) -> Bool)?
-    var onAuthorizationResult: ((Bool) -> Void)?
+    var onAuthorizationResult: ((NotificationControl.Permission) -> Void)?
     var hasLivePushSession: (@MainActor (PushRegistrationStore.Owner) -> Bool)?
     var onPushAction: (@MainActor (PushRegistrationStore.Owner, AppState.NotificationAction) async -> Void)?
 
     private let center = UNUserNotificationCenter.current()
-    private let messageSounds: MessageSoundPreference
-    private var hasRequestedAuthorization = false
+    private let preferences: Preferences
+    private var authorizationRequest: Task<NotificationControl.Permission, Never>?
 
     private enum Identifier {
         static let category = "waddle.message"
@@ -46,8 +45,8 @@ final class NotificationController: NSObject {
         static let pushRoutingKey = "waddle"
     }
 
-    init(messageSounds: MessageSoundPreference) {
-        self.messageSounds = messageSounds
+    init(preferences: Preferences) {
+        self.preferences = preferences
         super.init()
         center.delegate = self
         // Foreground: the app must be running with a live session to send;
@@ -100,27 +99,39 @@ final class NotificationController: NSObject {
         }
     }
 
-    func requestAuthorizationIfNeeded() {
-        guard !hasRequestedAuthorization else { return }
-        hasRequestedAuthorization = true
-        Task {
+    func requestAuthorization() async -> NotificationControl.Permission {
+        if let authorizationRequest { return await authorizationRequest.value }
+        let request = Task {
+            let permission = await currentPermission()
+            guard permission == .undetermined else { return permission }
             _ = try? await center.requestAuthorization(options: [.alert, .badge, .sound])
-            await updateAuthorizationStatus()
+            return await currentPermission()
         }
+        authorizationRequest = request
+        let permission = await request.value
+        authorizationRequest = nil
+        onAuthorizationResult?(permission)
+        return permission
     }
 
     func refreshAuthorizationStatus() {
-        Task { await updateAuthorizationStatus() }
+        Task {
+            let permission = await currentPermission()
+            guard authorizationRequest == nil else { return }
+            onAuthorizationResult?(permission)
+        }
     }
 
-    private func updateAuthorizationStatus() async {
+    private func currentPermission() async -> NotificationControl.Permission {
         let settings = await center.notificationSettings()
-        var isGranted = settings.authorizationStatus == .authorized
-            || settings.authorizationStatus == .provisional
+        switch settings.authorizationStatus {
+        case .notDetermined: return .undetermined
+        case .authorized, .provisional: return .granted
         #if os(iOS)
-        isGranted = isGranted || settings.authorizationStatus == .ephemeral
+        case .ephemeral: return .granted
         #endif
-        onAuthorizationResult?(isGranted)
+        default: return .denied
+        }
     }
 
     /// Posts `alert` for `account` unless the user is already looking at it.
@@ -182,8 +193,8 @@ final class NotificationController: NSObject {
         NotificationPolicy(
             kind: kind,
             isDoNotDisturb: isDoNotDisturb(),
-            notificationsEnabled: notificationsEnabled,
-            messageSoundsEnabled: messageSounds.isEnabled
+            notificationsEnabled: preferences.notificationsEnabled,
+            messageSoundsEnabled: preferences.messageSounds.isEnabled
         )
     }
 

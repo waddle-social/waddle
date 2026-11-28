@@ -1,4 +1,5 @@
 import SwiftUI
+import WaddleKit
 #if os(iOS)
 import UIKit
 #endif
@@ -46,14 +47,14 @@ struct SettingsPrivacySection: View {
 struct SettingsNotificationsSection: View {
     @Bindable var preferences: Preferences
     let pushRegistrationStatus: AppState.PushRegistrationStatus
-    let notificationPermissionGranted: Bool?
+    let notificationPermission: NotificationControl.Permission
     @Environment(\.openURL) private var openURL
 
     var body: some View {
         Section {
             FormToggle("Show message previews", isOn: $preferences.showsNotificationPreviews)
-            FormToggle("Push notifications", isOn: $preferences.receivesPush)
-            if preferences.receivesPush {
+            FormToggle("Notifications", isOn: $preferences.notificationsEnabled)
+            if preferences.notificationsEnabled {
                 FormValueRow(title: "Push registration", value: pushRegistrationStatus.title)
                 if case let .failed(message) = pushRegistrationStatus {
                     Text(message)
@@ -61,7 +62,7 @@ struct SettingsNotificationsSection: View {
                         .foregroundStyle(Theme.Colors.dangerText)
                 }
             }
-            if notificationPermissionGranted == false {
+            if notificationPermission == .denied {
                 Label("Notifications are turned off in system settings.", systemImage: "bell.slash")
                     .huddleText(Theme.Typography.caption)
                     .foregroundStyle(Theme.Colors.warningText)
@@ -74,15 +75,15 @@ struct SettingsNotificationsSection: View {
         } header: {
             FormSectionHeader("Notifications")
         } footer: {
-            FormSectionFooter(Self.footer(receivesPush: preferences.receivesPush))
+            FormSectionFooter(footer)
         }
     }
 
-    static func footer(receivesPush: Bool) -> String {
+    private var footer: String {
         let conversations = "Choose how each conversation notifies you, and whether its notifications show messages, from its details."
-        return receivesPush
+        return preferences.notificationsEnabled
             ? "\(conversations) Push notifications reach this device while Waddle is closed, if the server has them set up."
-            : "\(conversations) With push notifications off, this device is notified only while Waddle is open, and calls ring only while it is open. Your other devices are not affected."
+            : "\(conversations) Message alerts and sounds are off on this device. Calls can still ring while Waddle is open."
     }
 
     private static var systemSettingsURL: URL? {
