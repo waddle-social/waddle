@@ -2470,7 +2470,7 @@ fn single_volume_drifted(l_vol: &Volume, d_vol: &Volume) -> bool {
 }
 
 fn container_drifted(live: &Container, desired: &Container) -> bool {
-    if live.image != desired.image
+    live.image != desired.image
         || (desired.image_pull_policy.is_some()
             && live.image_pull_policy != desired.image_pull_policy)
         || container_security_context_drifted(
@@ -2503,11 +2503,6 @@ fn container_drifted(live: &Container, desired: &Container) -> bool {
             live.volume_mounts.as_deref().unwrap_or(&[]),
             desired.volume_mounts.as_deref().unwrap_or(&[]),
         )
-    {
-        return true;
-    }
-
-    false
 }
 
 fn container_security_context_drifted(

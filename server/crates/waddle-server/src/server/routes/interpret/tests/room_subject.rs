@@ -202,7 +202,7 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
             }
             if self
                 .fanout_check_errors_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()

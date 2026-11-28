@@ -7,25 +7,34 @@
 
 use kameo::remote;
 use libp2p::allow_block_list::{self, AllowedPeers};
-use libp2p::swarm::NetworkBehaviour;
 use libp2p::PeerId;
 use std::collections::HashSet;
 
-// `derive(NetworkBehaviour)` auto-generates the out-event enum named after the
-// struct — `WaddleBehaviourEvent` — with one variant per field.
-#[derive(NetworkBehaviour)]
-pub struct WaddleBehaviour {
-    /// Peer authorization (ADR element 3): connections from peers not on the
-    /// enrolled allowlist are denied at establishment, and `disallow_peer`
-    /// closes live connections — completing the Noise handshake is necessary
-    /// but never sufficient. Composed FIRST so its deny verdict is reached
-    /// before any other behaviour handles the connection (denial by any
-    /// composed behaviour denies the connection regardless of order; the
-    /// position is for clarity).
-    pub allowed: allow_block_list::Behaviour<AllowedPeers>,
-    /// kameo remote actors: request-response messaging plus the kademlia-based
-    /// registry (demoted to node discovery only this phase).
-    pub kameo: remote::Behaviour,
+pub use composed::{WaddleBehaviour, WaddleBehaviourEvent};
+
+#[expect(
+    unreachable_code,
+    reason = "libp2p's derive wraps the allowlist's uninhabited event (rust-libp2p#6600)"
+)]
+mod composed {
+    use kameo::remote;
+    use libp2p::allow_block_list::{self, AllowedPeers};
+    use libp2p::swarm::NetworkBehaviour;
+
+    #[derive(NetworkBehaviour)]
+    pub struct WaddleBehaviour {
+        /// Peer authorization (ADR element 3): connections from peers not on the
+        /// enrolled allowlist are denied at establishment, and `disallow_peer`
+        /// closes live connections — completing the Noise handshake is necessary
+        /// but never sufficient. Composed FIRST so its deny verdict is reached
+        /// before any other behaviour handles the connection (denial by any
+        /// composed behaviour denies the connection regardless of order; the
+        /// position is for clarity).
+        pub allowed: allow_block_list::Behaviour<AllowedPeers>,
+        /// kameo remote actors: request-response messaging plus the kademlia-based
+        /// registry (demoted to node discovery only this phase).
+        pub kameo: remote::Behaviour,
+    }
 }
 
 impl WaddleBehaviour {

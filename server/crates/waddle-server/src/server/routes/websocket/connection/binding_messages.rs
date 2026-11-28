@@ -27,7 +27,7 @@ impl ConnectionActorOperationId {
     pub(in crate::server::routes::websocket) fn fresh() -> Option<Self> {
         static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
         NEXT_OPERATION_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .ok()

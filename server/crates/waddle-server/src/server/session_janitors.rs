@@ -1314,7 +1314,7 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
             .push(std::time::Instant::now());
         if self
             .delete_failures_remaining
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
                 |remaining| remaining.checked_sub(1),

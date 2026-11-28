@@ -81,14 +81,10 @@ impl PresencePayloadPreflight {
     }
 
     fn add_plain_field(&mut self, field: &str, copies: usize) -> bool {
-        if !self.has_raw_capacity(field.len())
-            || !xml_characters_are_valid(field)
-            || !self.add_raw_bytes(field.len())
-            || !self.add_serialized_bytes(field.len().saturating_mul(copies))
-        {
-            return false;
-        }
-        true
+        self.has_raw_capacity(field.len())
+            && xml_characters_are_valid(field)
+            && self.add_raw_bytes(field.len())
+            && self.add_serialized_bytes(field.len().saturating_mul(copies))
     }
 
     fn add_escaped_field(&mut self, field: &str, attribute_context: bool) -> bool {

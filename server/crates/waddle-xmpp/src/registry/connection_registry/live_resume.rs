@@ -162,7 +162,7 @@ impl LiveResumeControl {
     ) -> LocalResumeReply {
         if self
             .outstanding
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < MAX_LIVE_RESUME_REQUESTS).then_some(count + 1)
             })
             .is_err()

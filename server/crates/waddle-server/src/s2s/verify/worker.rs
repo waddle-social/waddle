@@ -148,7 +148,7 @@ struct Waiter<'a>(&'a AtomicUsize);
 impl<'a> Waiter<'a> {
     fn enter(waiting: &'a AtomicUsize, max_waiting: usize) -> Result<Self, WorkerError> {
         waiting
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
                 (waiting < max_waiting).then_some(waiting + 1)
             })
             .map(|_| Self(waiting))
