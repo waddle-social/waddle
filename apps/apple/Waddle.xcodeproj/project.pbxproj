@@ -256,6 +256,7 @@
 		47B4A291E7250DC6CD9CBFB9 /* CallChromeFaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F1EEE932C6FA66B13B5E60 /* CallChromeFaderTests.swift */; };
 		4804FD21F8E5A69889F11B31 /* FeedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A02DE6A87AC803C9D1A2F526 /* FeedView.swift */; };
 		4834B6FC72D3B360B831588D /* MessageSafetyScoresSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BF52D49E9087D0B27F5A109 /* MessageSafetyScoresSheet.swift */; };
+		483824610CA0ACB7FADE15D9 /* EventReplyAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62141174AEAD372D6B05DA6C /* EventReplyAction.swift */; };
 		4870BBF3B2C03366C4E65D0C /* CallCaptureSources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6335B8C8EADE7F859BCF8CE2 /* CallCaptureSources.swift */; };
 		491006B8C265B3EE6B43AE0E /* ComposerModel+LinkPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DB75C053840B2AC091B285 /* ComposerModel+LinkPreview.swift */; };
 		4A5671201D93D19B3C4DFAA2 /* DirectNavigationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374CC0B599AEDF69DFD7E5BF /* DirectNavigationRow.swift */; };
@@ -269,6 +270,7 @@
 		4B7576880A7AB8C980404C7B /* AttachmentPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F675EC377CC84AAEBF1449BB /* AttachmentPolicy.swift */; };
 		4B85E9D528FE9EC737CC180D /* GifSearchClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C05E9EECFC4491F0A579C1CC /* GifSearchClient.swift */; };
 		4BAA9B1AFFB844FA34A2823E /* CallPushToTalkKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF35F3B8809B8EB7231AAAF /* CallPushToTalkKeys.swift */; };
+		4BC63587A39B044F522F8AA9 /* EventReplyAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62141174AEAD372D6B05DA6C /* EventReplyAction.swift */; };
 		4BE0842EDE0CFDADE9B31754 /* FakePort+Stickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = C18D276868295C8A8ADB00CF /* FakePort+Stickers.swift */; };
 		4C2A848898D5C57370AF4EB9 /* FFIInbound.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9295908F61E540E4185F41C3 /* FFIInbound.swift */; };
 		4C62E03C642CA3F42A717F84 /* EventsCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */; };
@@ -1122,6 +1124,7 @@
 		601116D6B535017B344EB136 /* ComposerCommandPresentations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerCommandPresentations.swift; sourceTree = "<group>"; };
 		6087F6B4F1325A892FCCC8DB /* CallOnStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallOnStage.swift; sourceTree = "<group>"; };
 		608DAEE7A80A5519229564DA /* AtkinsonHyperlegibleMono.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = AtkinsonHyperlegibleMono.ttf; sourceTree = "<group>"; };
+		62141174AEAD372D6B05DA6C /* EventReplyAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventReplyAction.swift; sourceTree = "<group>"; };
 		62B9FDAA89E008D76DA699AB /* FFIRFC3339.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIRFC3339.swift; sourceTree = "<group>"; };
 		6335B8C8EADE7F859BCF8CE2 /* CallCaptureSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCaptureSources.swift; sourceTree = "<group>"; };
 		634D6E85B9587FDAA2C5DA74 /* FFIXmppPort+LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIXmppPort+LinkPreview.swift"; sourceTree = "<group>"; };
@@ -2486,6 +2489,7 @@
 				E64AA032FB5EC36C79E56055 /* EventDurationRows.swift */,
 				4FD3364EDD46C6BC806C8958 /* EventEditorParts.swift */,
 				B9EC4DD4A44AFCE3C7C39AD3 /* EventEditorSheet.swift */,
+				62141174AEAD372D6B05DA6C /* EventReplyAction.swift */,
 				8BBCDABC7A2B437D07FACB9C /* EventReplyCard.swift */,
 				7FDDC6F055B97ED2BE7C8BCE /* EventsAgenda.swift */,
 				6DA3C5E96F1D87DEAE5EEFB5 /* EventsCopy.swift */,
@@ -2887,6 +2891,7 @@
 				72F1467F1E399CC3E6EEE0C4 /* EventDurationRows.swift in Sources */,
 				B5E01FEDC9B9B8A708B104C0 /* EventEditorParts.swift in Sources */,
 				5AFA94C0F8AFB92F61A8294C /* EventEditorSheet.swift in Sources */,
+				4BC63587A39B044F522F8AA9 /* EventReplyAction.swift in Sources */,
 				5EBA8910814DD582CCBF6C34 /* EventReplyCard.swift in Sources */,
 				CF6763A9A38B8CBFBA58F610 /* EventsAgenda.swift in Sources */,
 				4C62E03C642CA3F42A717F84 /* EventsCopy.swift in Sources */,
@@ -3355,6 +3360,7 @@
 				EDBB23094F0D6E9110982422 /* EventDurationRows.swift in Sources */,
 				931FD6FD6BAE478301997F66 /* EventEditorParts.swift in Sources */,
 				6C05CDEEC2CC3CD7341BEC21 /* EventEditorSheet.swift in Sources */,
+				483824610CA0ACB7FADE15D9 /* EventReplyAction.swift in Sources */,
 				8DBF6088EA2475D63056580F /* EventReplyCard.swift in Sources */,
 				09FD245D216203374756C959 /* EventsAgenda.swift in Sources */,
 				DE21C84C1350FC446AC673F5 /* EventsCopy.swift in Sources */,

@@ -6,7 +6,7 @@ struct EventAgendaCard<Header: View>: View {
     @Environment(SessionCoordinator.self) private var session
     let eventID: String
     var insetsFooter = true
-    let onReplyError: (String) -> Void
+    let replyAction: EventReplyAction
     @ViewBuilder let header: Header
 
     var body: some View {
@@ -18,11 +18,11 @@ struct EventAgendaCard<Header: View>: View {
                     HuddleDivider()
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: Theme.Spacing.m) {
-                            choices(rsvp)
+                            choices
                             counts(rsvp)
                         }
                         VStack(alignment: .leading, spacing: Theme.Spacing.s) {
-                            choices(rsvp)
+                            choices
                             counts(rsvp)
                         }
                     }
@@ -33,9 +33,9 @@ struct EventAgendaCard<Header: View>: View {
         }
     }
 
-    private func choices(_ rsvp: EventRSVP) -> some View {
+    private var choices: some View {
         HuddleSegmentedControl(
-            selection: Binding(get: { rsvp.selection }, set: sendReply),
+            selection: replyAction.selection(for: eventID, in: session),
             segments: EventReply.allCases.map { .init(value: $0, title: EventRSVP.choiceLabel(for: $0)) }
         )
         .accessibilityLabel(Text("RSVP"))
@@ -46,16 +46,5 @@ struct EventAgendaCard<Header: View>: View {
             .huddleText(Theme.Typography.caption)
             .foregroundStyle(Theme.Colors.fgMuted)
             .monospacedDigit()
-    }
-
-    private func sendReply(_ reply: EventReply?) {
-        guard let reply else { return }
-        Task {
-            do {
-                try await session.reply(reply, to: eventID)
-            } catch {
-                onReplyError(ActionErrorCopy.message(for: error, fallback: "Try again."))
-            }
-        }
     }
 }

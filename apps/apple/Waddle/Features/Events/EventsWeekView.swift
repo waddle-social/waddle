@@ -5,7 +5,6 @@ import WaddleKit
 struct EventsWeekView<InitialState: View>: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.eventsCalendar) private var calendar
-    @State private var replyError: String?
     let now: Date
     let filter: EventFilter
     let onOpen: (OpenEvent) -> Void
@@ -13,10 +12,14 @@ struct EventsWeekView<InitialState: View>: View {
     @ViewBuilder let initialState: InitialState
 
     var body: some View {
+        EventReplyAlert(content: weekContent)
+    }
+
+    private func weekContent(_ reply: EventReplyAction) -> some View {
         let week = EventsWeek(now: now, timeZone: calendar.timeZone)
         let occurrences = session.eventOccurrences(in: week.range, timeZone: calendar.timeZone, filter: filter)
         let sections = week.sections(for: occurrences, locale: calendar.locale ?? .current)
-        VStack(alignment: .leading, spacing: Theme.Spacing.l) {
+        return VStack(alignment: .leading, spacing: Theme.Spacing.l) {
             if sections.isEmpty {
                 if session.events.isLoading || !session.events.hasLoaded {
                     initialState
@@ -31,26 +34,17 @@ struct EventsWeekView<InitialState: View>: View {
                         .foregroundStyle(Theme.Colors.fgMuted)
                         .accessibilityAddTraits(.isHeader)
                     ForEach(section.entries, id: \.occurrence.id) { entry in
-                        card(entry)
+                        card(entry, reply: reply)
                     }
                 }
             }
         }
-        .alert("Couldn't send your answer", isPresented: replyErrorBinding) {
-            Button("OK", role: .cancel) { replyError = nil }
-        } message: {
-            Text(replyError ?? "")
-        }
     }
 
-    private var replyErrorBinding: Binding<Bool> {
-        Binding(get: { replyError != nil }, set: { if !$0 { replyError = nil } })
-    }
-
-    private func card(_ entry: EventsWeek.Entry) -> some View {
+    private func card(_ entry: EventsWeek.Entry, reply: EventReplyAction) -> some View {
         let occurrence = entry.occurrence
         return HuddleCard(isLive: entry.status != nil) {
-            EventAgendaCard(eventID: occurrence.eventID, insetsFooter: false, onReplyError: { replyError = $0 }) {
+            EventAgendaCard(eventID: occurrence.eventID, insetsFooter: false, replyAction: reply) {
                 EventsWeekCardHeader(entry: entry) {
                     onOpen(OpenEvent(eventID: occurrence.eventID, occurrence: occurrence))
                 }

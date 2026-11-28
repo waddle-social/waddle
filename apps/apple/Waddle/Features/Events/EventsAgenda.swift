@@ -6,8 +6,7 @@ import WaddleKit
 struct EventsAgenda<Placeholder: View>: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(\.eventsCalendar) private var calendar
-    @State private var replyError: String?
-    /// Each occurrence that runs on `from` or later, earliest first.
+    /// Occurrences from the calendar query, earliest first.
     let occurrences: [EventOccurrence]
     let from: CalendarDay
     let today: CalendarDay
@@ -21,18 +20,23 @@ struct EventsAgenda<Placeholder: View>: View {
     private var copy: EventsCopy { EventsCopy(calendar: calendar) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.l) {
+        EventReplyAlert(content: agenda)
+    }
+
+    private func agenda(_ reply: EventReplyAction) -> some View {
+        let days = EventsAgendaWindow(startingAt: from, timeZone: calendar.timeZone).sections(for: occurrences)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.l) {
             if session.events.events.isEmpty {
                 placeholder
             } else {
-                if occurrences.isEmpty {
+                if days.isEmpty {
                     nothingPlanned
                 }
                 ForEach(days, id: \.day) { group in
                     section(copy.agendaTitle(group.day, today: today)) {
                         ForEach(Array(group.occurrences.enumerated()), id: \.element.id) { index, occurrence in
                             if index > 0 { HuddleDivider() }
-                            EventAgendaCard(eventID: occurrence.eventID, onReplyError: { replyError = $0 }) {
+                            EventAgendaCard(eventID: occurrence.eventID, replyAction: reply) {
                                 EventsAgendaRow(occurrence: occurrence, day: group.day, status: occurrence.status(at: now)) {
                                     onOpen(OpenEvent(eventID: occurrence.eventID, occurrence: occurrence))
                                 }
@@ -44,7 +48,7 @@ struct EventsAgenda<Placeholder: View>: View {
                     section("No date yet") {
                         ForEach(Array(undated.enumerated()), id: \.element.id) { index, event in
                             if index > 0 { HuddleDivider() }
-                            EventAgendaCard(eventID: event.id, onReplyError: { replyError = $0 }) {
+                            EventAgendaCard(eventID: event.id, replyAction: reply) {
                                 EventsUndatedRow(event: event) { onOpen(OpenEvent(eventID: event.id, occurrence: nil)) }
                             }
                         }
@@ -52,22 +56,6 @@ struct EventsAgenda<Placeholder: View>: View {
                 }
             }
         }
-        .alert("Couldn't send your answer", isPresented: replyErrorBinding) {
-            Button("OK", role: .cancel) { replyError = nil }
-        } message: {
-            Text(replyError ?? "")
-        }
-    }
-
-    // A reply can hide the row in the Going or maybe filter while it is being sent.
-    private var replyErrorBinding: Binding<Bool> {
-        Binding(get: { replyError != nil }, set: { if !$0 { replyError = nil } })
-    }
-
-    /// Each occurrence once: under its first day from `from` on.
-    private var days: [(day: CalendarDay, occurrences: [EventOccurrence])] {
-        let grouped = Dictionary(grouping: occurrences) { max($0.days(in: calendar.timeZone).lowerBound, from) }
-        return grouped.keys.sorted().map { ($0, grouped[$0] ?? []) }
     }
 
     private var nothingPlanned: some View {

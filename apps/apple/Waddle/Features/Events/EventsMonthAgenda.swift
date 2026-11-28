@@ -19,10 +19,8 @@ struct EventsMonthAgenda<Placeholder: View>: View {
         let selected = selection ?? today
         let shown = month ?? EventsMonth(containing: selected)
         let grid = shown.days(firstWeekday: calendar.firstWeekday)
-        let agendaEnd = selected.advanced(by: 28)
-        let from = min(grid.lowerBound, selected).start(in: timeZone)
-        let to = max(grid.upperBound.advanced(by: 1), agendaEnd).start(in: timeZone)
-        let occurrences = session.eventOccurrences(in: from..<to, timeZone: timeZone, filter: filter)
+        let window = EventsAgendaWindow(startingAt: selected, timeZone: timeZone)
+        let occurrences = session.eventOccurrences(in: window.range(including: grid), timeZone: timeZone, filter: filter)
         let monthCard = EventsMonthCard(
             month: shown,
             days: grid,
@@ -34,10 +32,7 @@ struct EventsMonthAgenda<Placeholder: View>: View {
             onToday: { select(today) }
         )
         let agenda = EventsAgenda(
-            occurrences: occurrences.filter {
-                let days = $0.days(in: timeZone)
-                return days.upperBound >= selected && days.lowerBound < agendaEnd
-            },
+            occurrences: occurrences,
             from: selected,
             today: today,
             now: now,
@@ -63,37 +58,5 @@ struct EventsMonthAgenda<Placeholder: View>: View {
     private func select(_ day: CalendarDay) {
         selection = day
         month = EventsMonth(containing: day)
-    }
-}
-
-/// A month of the Gregorian calendar.
-struct EventsMonth: Hashable {
-    let year: Int
-    let month: Int
-
-    init(year: Int, month: Int) {
-        self.year = year
-        self.month = month
-    }
-
-    init(containing day: CalendarDay) {
-        self.init(year: day.year, month: day.month)
-    }
-
-    var first: CalendarDay { CalendarDay(year: year, month: month, day: 1) }
-
-    func advanced(by months: Int) -> EventsMonth {
-        let index = year * 12 + (month - 1) + months
-        return EventsMonth(year: index / 12, month: index % 12 + 1)
-    }
-
-    /// The weeks that hold this month's days, from the calendar's first
-    /// weekday: whole rows, so they begin and end in the months beside it.
-    func days(firstWeekday: Int) -> ClosedRange<CalendarDay> {
-        let leading = (first.weekday.rawValue - firstWeekday + 7) % 7
-        let length = first.distance(to: advanced(by: 1).first)
-        let weeks = (leading + length + 6) / 7
-        let start = first.advanced(by: -leading)
-        return start...start.advanced(by: weeks * 7 - 1)
     }
 }
