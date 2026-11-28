@@ -290,6 +290,19 @@ final class CallStageSnapshotTests: XCTestCase {
         )
     }
 
+    #if os(macOS)
+    func testRoomWithAMicrophoneInUseAndNoCamera() {
+        assertStage(
+            subtitle: "1 other in call", tiles: [Self.you, Self.linus], isMicrophoneOn: false,
+            issues: [
+                CallMediaIssue(kind: .microphone, reason: .inUse),
+                CallMediaIssue(kind: .camera, reason: .missing),
+            ],
+            checkingIssues: [.camera]
+        )
+    }
+    #endif
+
     // MARK: - Connection
 
     private func assertConnection(

@@ -128,6 +128,20 @@ final class CallStageCommandsTests: XCTestCase {
         XCTAssertTrue(prompts.checking.isEmpty, "the check ends, so the device can be checked again")
     }
 
+    func testAnOldCheckCannotKeepOrClearTheNextCallsCheckingState() {
+        let prompts = CallStagePrompts()
+        let old = prompts.startChecking(.camera)
+        prompts.reset()
+        XCTAssertTrue(prompts.checking.isEmpty)
+
+        let current = prompts.startChecking(.camera)
+        prompts.finishChecking(.camera, check: old)
+        XCTAssertEqual(prompts.checking, [.camera])
+
+        prompts.finishChecking(.camera, check: current)
+        XCTAssertTrue(prompts.checking.isEmpty)
+    }
+
     func testTogglingScreenShareStopsAnActiveOrStartingShare() async throws {
         let sample = await activeSession()
         let sid = try XCTUnwrap(sample.coordinator.calls.state.sid)
@@ -169,7 +183,7 @@ final class CallStageCommandsTests: XCTestCase {
         let sample = await activeSession()
         let sid = try XCTUnwrap(sample.coordinator.calls.state.sid)
         let media = FakeCallMedia()
-        media.isMicrophoneBlocked = true
+        media.captureIssues[.microphone] = .denied
         media.mediaRefusals = [.microphone: 1]
         let commands = makeCommands(sid: sid, in: sample, media: media, prompts: CallStagePrompts())
 

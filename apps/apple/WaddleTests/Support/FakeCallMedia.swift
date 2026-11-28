@@ -24,8 +24,7 @@ final class FakeCallMedia: CallMediaControls {
     var mediaUpSince: Date?
     var isMicrophoneOn = false
     var isCameraOn = false
-    var isMicrophoneBlocked = false
-    var isCameraBlocked = false
+    var captureIssues: [CallMediaIssue.Kind: CallMediaIssue.Reason] = [:]
     var participants: [CallMediaParticipant] = []
     var activeSpeakersLoudestFirst: [String] = []
     var dockCameraIdentities = CallDockCameraIdentities()

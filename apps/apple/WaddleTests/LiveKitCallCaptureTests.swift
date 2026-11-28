@@ -63,7 +63,7 @@ final class LiveKitCallCaptureTests: XCTestCase {
         let call = try await call(video: true)
         try await until { self.published(.camera, by: call).count == 1 }
         XCTAssertTrue(call.media.isCameraOn)
-        XCTAssertFalse(call.media.isCameraBlocked)
+        XCTAssertNil(call.media.captureIssues[.camera])
         XCTAssertEqual(call.capture.asked, [.video])
         XCTAssertEqual(call.capture.cameras.count, 1)
         XCTAssertNotNil(call.capture.cameras.first?.capturer.processor, "frames never leave without the processor")
@@ -87,15 +87,47 @@ final class LiveKitCallCaptureTests: XCTestCase {
     func testACameraTheSystemRefusesIsBlockedAndNeverMade() async throws {
         let call = try await call(video: true) { $0.allows[.video] = false }
         XCTAssertFalse(call.media.isCameraOn)
-        XCTAssertTrue(call.media.isCameraBlocked)
+        try await until { call.media.captureIssues[.camera] == .denied }
         XCTAssertTrue(call.capture.cameras.isEmpty)
 
         // Allowed since, in the system's settings: asking again turns it on.
         call.capture.allows[.video] = true
         await call.media.setCamera(true)
         XCTAssertTrue(call.media.isCameraOn)
-        XCTAssertFalse(call.media.isCameraBlocked)
+        XCTAssertNil(call.media.captureIssues[.camera])
         XCTAssertEqual(call.capture.cameras.count, 1)
+    }
+
+    func testCheckingAgainFindsACameraConnectedAfterTheFirstAttempt() async throws {
+        let call = try await call { $0.cameraDevices = [] }
+        await call.media.setCamera(true)
+        XCTAssertEqual(call.media.captureIssues[.camera], .missing)
+        XCTAssertTrue(call.capture.cameras.isEmpty)
+
+        call.capture.cameraDevices = [CallDevice(id: "connected-camera", name: "Test camera")]
+        await call.media.setCamera(true)
+        XCTAssertTrue(call.media.isCameraOn)
+        XCTAssertNil(call.media.captureIssues[.camera])
+        XCTAssertEqual(call.capture.cameras.count, 1)
+    }
+
+    func testAMissingCameraNoticeEndsWithTheCall() async throws {
+        let call = try await call { $0.cameraDevices = [] }
+        await call.media.setCamera(true)
+        XCTAssertEqual(call.media.captureIssues[.camera], .missing)
+
+        await call.media.disconnect()
+        XCTAssertTrue(call.media.captureIssues.isEmpty)
+        XCTAssertTrue(call.media.mediaRefusals.isEmpty)
+    }
+
+    func testOnlyDeviceErrorsExplainWhyCaptureCouldNotStart() {
+        let inUse = NSError(domain: AVFoundationErrorDomain, code: AVError.deviceInUseByAnotherApplication.rawValue)
+        XCTAssertEqual(CallDeviceStartError.reason(for: LiveKitError(.webRTC, internalError: inUse)), .inUse)
+        XCTAssertEqual(CallDeviceStartError.reason(for: LiveKitError(.deviceNotFound)), .missing)
+        XCTAssertEqual(CallDeviceStartError.reason(for: LiveKitError(.deviceAccessDenied)), .denied)
+        XCTAssertEqual(CallDeviceStartError.reason(for: LiveKitError(.timedOut)), .failed)
+        XCTAssertEqual(CallDeviceStartError.reason(for: LiveKitError(.insufficientPermissions)), .failed)
     }
 
     func testACallWithoutVideoAsksForNothingUntilTheCameraIsTurnedOn() async throws {
@@ -116,7 +148,7 @@ final class LiveKitCallCaptureTests: XCTestCase {
         }
         call.media.setBackground(.blur)
         // No frame, so the SDK gives up on the track and there is no camera.
-        try await until(timeout: .seconds(40)) { call.capture.cameras.count == 1 && call.media.isBackgroundFailing }
+        try await until(timeout: .seconds(40)) { call.media.captureIssues[.camera] == .failed && call.media.isBackgroundFailing }
         XCTAssertFalse(call.media.isCameraOn)
 
         call.capture.feedsCameras = true
@@ -136,7 +168,7 @@ final class LiveKitCallCaptureTests: XCTestCase {
         call.capture.answerPrompts()
         await turningOn.value
 
-        XCTAssertFalse(call.media.isCameraBlocked, "the answer was for a call that is over")
+        XCTAssertNil(call.media.captureIssues[.camera], "the answer was for a call that is over")
         XCTAssertTrue(call.media.mediaRefusals.isEmpty)
     }
 

@@ -150,7 +150,7 @@ import Testing
     }
 
     @Test func aNoticePutAwayStaysAwayForItsCallOnly() {
-        let report = CallMediaIssues.Report(isCameraBlocked: true, refusals: [.camera: 1])
+        let report = CallMediaIssues.Report(cameraIssue: .denied, refusals: [.camera: 1])
         var memory = CallStageMemory()
         memory.follow(call: "a")
         memory.dismissedMediaIssues.dismiss(.camera, in: report)

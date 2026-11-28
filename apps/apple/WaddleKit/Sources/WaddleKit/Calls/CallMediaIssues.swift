@@ -11,7 +11,11 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
     public enum Reason: Equatable, Sendable {
         /// The person has not allowed Waddle the device.
         case denied
-        /// It was allowed and still did not start.
+        /// No device of this kind is available.
+        case missing
+        /// Another app is using the device.
+        case inUse
+        /// The start failed or timed out.
         case failed
     }
 
@@ -45,12 +49,14 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
     public func message(on platform: Platform = .current) -> String {
         switch (kind, reason) {
         case (.microphone, .denied): "Waddle is not allowed to use the microphone, so nobody hears you. \(Self.remedy(on: platform))"
-        case (.microphone, .failed): "Your microphone could not be started, so nobody hears you."
+        case (.microphone, .missing), (.camera, .missing): "No \(deviceName) detected. Connect one, then check again."
+        case (.microphone, .inUse), (.camera, .inUse): "Your \(deviceName) is in use by another app. Close it, then check again."
+        case (.microphone, .failed): "Couldn't start your microphone — you joined as a listener."
         case (.camera, .denied): "Waddle is not allowed to use the camera, so nobody sees you. \(Self.remedy(on: platform))"
-        case (.camera, .failed): "Your camera could not be started, so nobody sees you."
+        case (.camera, .failed): "Couldn't start your camera — you joined without video."
         case (.screen, .denied):
             "Waddle cannot share the screen until you allow it under Screen & System Audio Recording in System Settings and reopen Waddle."
-        case (.screen, .failed): "That could not be shared. Try again."
+        case (.screen, _): "That could not be shared. Try again."
         case (.background, _):
             "Your background could not be blurred, so your camera's picture is being held back. Check again, or turn the blur off in call settings."
         }
@@ -67,11 +73,12 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
     public var line: String {
         switch (kind, reason) {
         case (.microphone, .denied): "Waddle is not allowed to use the microphone. Change that in Settings."
-        case (.microphone, .failed): "Your microphone could not be started."
+        case (.microphone, .missing), (.camera, .missing): "No \(deviceName) detected."
+        case (.microphone, .inUse), (.camera, .inUse): "Your \(deviceName) is in use by another app."
+        case (.microphone, .failed), (.camera, .failed): "Couldn't start your \(deviceName)."
         case (.camera, .denied): "Waddle is not allowed to use the camera. Change that in Settings."
-        case (.camera, .failed): "Your camera could not be started."
         case (.screen, .denied): "Waddle is not allowed to record the screen. Change that in System Settings."
-        case (.screen, .failed): "That could not be shared. Try again."
+        case (.screen, _): "That could not be shared. Try again."
         case (.background, _): "Your background could not be blurred, so your camera's picture is held back."
         }
     }
@@ -99,8 +106,8 @@ public struct CallMediaIssue: Equatable, Identifiable, Sendable {
 public enum CallMediaIssues {
     /// What a call's media reports about our own devices.
     public struct Report: Equatable, Sendable {
-        public var isMicrophoneBlocked = false
-        public var isCameraBlocked = false
+        public var microphoneIssue: CallMediaIssue.Reason?
+        public var cameraIssue: CallMediaIssue.Reason?
         public var isScreenBlocked = false
         public var didScreenShareFail = false
         /// The blur is on and is not producing a picture, so nothing of the camera is sent.
@@ -110,12 +117,12 @@ public enum CallMediaIssues {
         public var refusals: [CallMediaIssue.Kind: Int] = [:]
 
         public init(
-            isMicrophoneBlocked: Bool = false, isCameraBlocked: Bool = false, isScreenBlocked: Bool = false,
+            microphoneIssue: CallMediaIssue.Reason? = nil, cameraIssue: CallMediaIssue.Reason? = nil, isScreenBlocked: Bool = false,
             didScreenShareFail: Bool = false, isBackgroundFailing: Bool = false,
             refusals: [CallMediaIssue.Kind: Int] = [:]
         ) {
-            self.isMicrophoneBlocked = isMicrophoneBlocked
-            self.isCameraBlocked = isCameraBlocked
+            self.microphoneIssue = microphoneIssue
+            self.cameraIssue = cameraIssue
             self.isScreenBlocked = isScreenBlocked
             self.didScreenShareFail = didScreenShareFail
             self.isBackgroundFailing = isBackgroundFailing
@@ -124,7 +131,7 @@ public enum CallMediaIssues {
     }
 
     /// The notices a person has put away, each with how often its device
-    /// had been refused by then. One more refusal, from the stage, the dock
+    /// had failed by then. One more failure, from the stage, the dock
     /// or the sidebar's card alike, is news, and the notice is back.
     public struct Dismissals: Equatable, Sendable {
         private var refusalsWhenDismissed: [CallMediaIssue.Kind: Int] = [:]
@@ -144,8 +151,8 @@ public enum CallMediaIssues {
     /// hears us. One the person put away for this call is left out.
     public static func shown(for report: Report, dismissed: Dismissals = Dismissals()) -> [CallMediaIssue] {
         var issues: [CallMediaIssue] = []
-        if report.isMicrophoneBlocked { issues.append(CallMediaIssue(kind: .microphone, reason: .denied)) }
-        if report.isCameraBlocked { issues.append(CallMediaIssue(kind: .camera, reason: .denied)) }
+        if let reason = report.microphoneIssue { issues.append(CallMediaIssue(kind: .microphone, reason: reason)) }
+        if let reason = report.cameraIssue { issues.append(CallMediaIssue(kind: .camera, reason: reason)) }
         if report.isScreenBlocked {
             issues.append(CallMediaIssue(kind: .screen, reason: .denied))
         } else if report.didScreenShareFail {

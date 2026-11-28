@@ -71,6 +71,15 @@ final class CallDockSnapshotTests: XCTestCase {
         )
     }
 
+    #if os(macOS)
+    func testInCallWithAMicrophoneThatFailedToStart() {
+        assertDock(
+            .inCall(peer: Self.peer.bare, media: Self.audio), elapsed: .seconds(12), isMicrophoneOn: false,
+            notice: CallMediaIssues.line(for: .init(microphoneIssue: .failed))
+        )
+    }
+    #endif
+
     func testCalling() {
         assertDock(.calling(to: Self.peer.bare, media: Self.audio))
     }
