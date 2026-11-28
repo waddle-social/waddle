@@ -13,8 +13,8 @@ struct SettingsAppearanceSection: View {
         Section {
             SettingsTilePicker(
                 selection: $preferences.appearance,
-                options: Preferences.Appearance.settingsOrder.map {
-                    .init(value: $0, title: $0.title, systemImage: $0.symbol)
+                options: AppearancePreference.allCases.map {
+                    .init(value: $0, title: $0.title, systemImage: symbol(for: $0))
                 },
                 label: "Appearance"
             ) { appearance in
@@ -25,6 +25,14 @@ struct SettingsAppearanceSection: View {
             FormSectionHeader("Appearance")
         } footer: {
             FormSectionFooter("Compact messages use smaller avatars and tighter spacing.")
+        }
+    }
+
+    private func symbol(for appearance: AppearancePreference) -> String {
+        switch appearance {
+        case .system: "circle.lefthalf.filled"
+        case .light: "sun.max"
+        case .dark: "moon"
         }
     }
 }
@@ -98,7 +106,7 @@ struct SettingsNotificationsSection: View {
 /// A miniature of the app in one appearance (web `settings` Appearance
 /// swatch): the ground, a muted bar and the accent.
 private struct AppearancePreview: View {
-    let appearance: Preferences.Appearance
+    let appearance: AppearancePreference
 
     var body: some View {
         switch appearance.colorScheme {

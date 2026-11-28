@@ -1,34 +1,20 @@
 import SwiftUI
 import WaddleKit
 
-/// The signed-in user at the foot of the sidebar, with settings.
+/// The signed-in user at the foot of the sidebar, with quick account actions.
 struct SidebarAccountBar: View {
     @Environment(SessionCoordinator.self) private var session
+    #if os(macOS)
+    @Environment(AppState.self) private var app
+    @State private var showsMenu = false
+    let menuColorScheme: ColorScheme
+    #else
     @Environment(NavigationModel.self) private var navigation
+    #endif
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
-            Button {
-                navigation.sheet = .profile
-            } label: {
-                SidebarAccountLabel(
-                    jid: session.account.jid,
-                    name: session.account.nick,
-                    availability: AccountStatusLine.availability(
-                        connection: session.connection,
-                        chosen: session.status.availability
-                    ),
-                    statusLine: AccountStatusLine.text(
-                        connection: session.connection,
-                        availability: session.status.availability,
-                        statusText: session.status.statusText
-                    )
-                )
-            }
-            .buttonStyle(.plain)
-            .help("Profile and status")
-            .accessibilityHint(Text("Opens your profile and status"))
-
+            accountButton
             SidebarSettingsButton()
         }
         .padding(.horizontal, Theme.Spacing.m)
@@ -36,6 +22,53 @@ struct SidebarAccountBar: View {
         .overlay(alignment: .top) {
             HuddleDivider()
         }
+    }
+
+    private var accountButton: some View {
+        #if os(macOS)
+        Button {
+            showsMenu.toggle()
+        } label: {
+            accountLabel
+        }
+        .buttonStyle(.plain)
+        .help("Account menu")
+        .accessibilityLabel(Text("\(session.account.nick) — Account menu"))
+        .accessibilityValue(Text(statusLine))
+        .popover(isPresented: $showsMenu, arrowEdge: .top) {
+            SidebarAccountMenu(preferences: app.preferences)
+                .environment(\.colorScheme, menuColorScheme)
+        }
+        #else
+        Button {
+            navigation.sheet = .profile
+        } label: {
+            accountLabel
+        }
+        .buttonStyle(.plain)
+        .help("Profile and status")
+        .accessibilityHint(Text("Opens your profile and status"))
+        #endif
+    }
+
+    private var accountLabel: some View {
+        SidebarAccountLabel(
+            jid: session.account.jid,
+            name: session.account.nick,
+            availability: AccountStatusLine.availability(
+                connection: session.connection,
+                chosen: session.status.availability
+            ),
+            statusLine: statusLine
+        )
+    }
+
+    private var statusLine: String {
+        AccountStatusLine.text(
+            connection: session.connection,
+            availability: session.status.availability,
+            statusText: session.status.statusText
+        )
     }
 }
 
@@ -45,10 +78,11 @@ struct SidebarAccountLabel: View {
     let name: String
     let availability: Availability
     let statusLine: String
+    var avatarSize = Theme.Size.rowAvatar
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
-            PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: Theme.Size.rowAvatar)
+            PeerPresenceAvatar(jid: jid, name: name, availability: availability, size: avatarSize)
             VStack(alignment: .leading, spacing: 0) {
                 Text(name)
                     .huddleText(Theme.Typography.label)

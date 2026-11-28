@@ -5,9 +5,10 @@ struct AccountSignOutButton: View {
     @Environment(AppState.self) private var app
     @State private var isConfirming = false
     @State private var isSigningOut = false
+    var title = "Sign out"
 
     var body: some View {
-        FormActionButton(title: "Sign out", symbol: "rectangle.portrait.and.arrow.right", isDestructive: true) {
+        FormActionButton(title: title, symbol: "rectangle.portrait.and.arrow.right", isDestructive: true) {
             isConfirming = true
         } trailing: {
             if isSigningOut {

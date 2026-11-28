@@ -7,42 +7,6 @@ import WaddleKit
 @MainActor
 @Observable
 final class Preferences {
-    enum Appearance: String, CaseIterable, Identifiable {
-        case system
-        case light
-        case dark
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .system: return "System"
-            case .light: return "Daylight"
-            case .dark: return "Night"
-            }
-        }
-
-        /// As Settings lists them (web `settings`): System, Night, Daylight.
-        static let settingsOrder: [Appearance] = [.system, .dark, .light]
-
-        /// Android `settings` segment glyphs.
-        var symbol: String {
-            switch self {
-            case .system: return "circle.lefthalf.filled"
-            case .light: return "sun.max"
-            case .dark: return "moon"
-            }
-        }
-
-        var colorScheme: ColorScheme? {
-            switch self {
-            case .system: return nil
-            case .light: return .light
-            case .dark: return .dark
-            }
-        }
-    }
-
     /// Where the newest message sits. `social` flips the timeline so the
     /// newest message leads and the composer sits above it, as the web
     /// client's "Newest at top" scroll direction does.
@@ -69,7 +33,7 @@ final class Preferences {
         var isNewestFirst: Bool { self == .social }
     }
 
-    var appearance: Appearance {
+    var appearance: AppearancePreference {
         didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
     }
 
@@ -123,7 +87,7 @@ final class Preferences {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         messageSounds = MessageSoundPreference(defaults: defaults)
-        appearance = defaults.string(forKey: Keys.appearance).flatMap(Appearance.init(rawValue:)) ?? .system
+        appearance = defaults.string(forKey: Keys.appearance).flatMap(AppearancePreference.init(rawValue:)) ?? .system
         sendsChatStates = defaults.object(forKey: Keys.chatStates) as? Bool ?? true
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
         showsNotificationPreviews = defaults.object(forKey: Keys.previews) as? Bool ?? true
@@ -140,5 +104,23 @@ final class Preferences {
         static let notificationsEnabled = "waddle.apple.receives-push"
         static let compact = "waddle.apple.compact-messages"
         static let messageOrder = "waddle.apple.message-order"
+    }
+}
+
+extension AppearancePreference {
+    var title: String {
+        switch self {
+        case .system: "System"
+        case .light: "Daylight"
+        case .dark: "Night"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
     }
 }
