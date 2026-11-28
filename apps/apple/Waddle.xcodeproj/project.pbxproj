@@ -49,6 +49,7 @@
 		0C36753DC620BCF8966005B4 /* CallDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 931B91F62774BEC1541CC962 /* CallDock.swift */; };
 		0C4CB4D510FCEC201A3B356C /* FeedComposerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2C9E2456F42C82B9D56503E /* FeedComposerCard.swift */; };
 		0C88F343B48FA2E5741C4CA0 /* AttachmentVideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 882C2C5C92E7230AFDABDBDA /* AttachmentVideoPlayer.swift */; };
+		0C92DC4BFCAA20CB16C0666C /* SettingsMessagesSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDC189ECA2CD725254085A6E /* SettingsMessagesSection.swift */; };
 		0E1290861700F1C6E84115BE /* ComposerFormattingBubbleContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570D50F134E9BF6BC2721DDF /* ComposerFormattingBubbleContent.swift */; };
 		0E5EBB85A4744CF8A2A4360B /* FeedPostCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3C54D5AD6E8BCD5E9D0FE01 /* FeedPostCard.swift */; };
 		0EC039A2869E923100121994 /* ProfileAvailabilityOption.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB8BD216820ED9BAEB871364 /* ProfileAvailabilityOption.swift */; };
@@ -919,6 +920,7 @@
 		FA8D7A34ADF8F2E92B0BB1E9 /* SampleSession+Calls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0E0370F3AF85FAA38E9CCD /* SampleSession+Calls.swift */; };
 		FA92CF2F3D8F0AAB189CE0E8 /* AttachmentUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EDD2090A6B7D1DACB814ECC /* AttachmentUploader.swift */; };
 		FA981EF410D2B656BA21E7AC /* CallStageKeyboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCAE5AEB7FB49F7F350D100 /* CallStageKeyboardTests.swift */; };
+		FAD1AA8BF16F6AFAA96A2BD1 /* SettingsMessagesSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDC189ECA2CD725254085A6E /* SettingsMessagesSection.swift */; };
 		FBEE73188DCB2A05B1429910 /* FakePort.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81704B7DBD86ABF17B4778B /* FakePort.swift */; };
 		FC46EBB35DB5BF70DF1D816F /* MessageHoverToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA4F9E90E92EE7A83BC58E4A /* MessageHoverToolbar.swift */; };
 		FC475A28440AF24D1E9848B7 /* ComposerAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C114E8607FE4BC5DC460FB /* ComposerAttachment.swift */; };
@@ -1347,6 +1349,7 @@
 		DCF434E6AEFA6BF5F8F7C957 /* SelfMuteMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfMuteMarker.swift; sourceTree = "<group>"; };
 		DD90267CD2CEC512024017D9 /* RemoteImageDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteImageDataView.swift; sourceTree = "<group>"; };
 		DD90F68460EE6F6D2E23EA6B /* FakePort+Calls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FakePort+Calls.swift"; sourceTree = "<group>"; };
+		DDC189ECA2CD725254085A6E /* SettingsMessagesSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMessagesSection.swift; sourceTree = "<group>"; };
 		DFE8DFECBE88CCBCBD9F5BDA /* UserInputMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserInputMonitor.swift; sourceTree = "<group>"; };
 		E0331D56B66C8F49E37D436C /* FFIXmppPort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIXmppPort.swift; sourceTree = "<group>"; };
 		E1E5B9CFF85D4D0A89A8E3DD /* FFIInbound+Directory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFIInbound+Directory.swift"; sourceTree = "<group>"; };
@@ -1743,6 +1746,7 @@
 				520AC6A7D5F8E34A0A5EF018 /* SettingsAppVersion.swift */,
 				402B9E2889E11F49E0801467 /* SettingsBlockedSection.swift */,
 				361CBD76B193AC38008E364F /* SettingsMessageOrderPicker.swift */,
+				DDC189ECA2CD725254085A6E /* SettingsMessagesSection.swift */,
 				C2FCD21C5931F86CC13AF643 /* SettingsPreferenceSections.swift */,
 				C06B7010B667045F63391C16 /* SettingsTilePicker.swift */,
 				DA7DB82B1A228C6DF0FC1AD4 /* SettingsView.swift */,
@@ -3043,6 +3047,7 @@
 				CCF01AFB15AA3CFD545B666D /* SettingsAppVersion.swift in Sources */,
 				91738D0937D4E18F138306A8 /* SettingsBlockedSection.swift in Sources */,
 				9F3B012A4B596DF133BAA3A8 /* SettingsMessageOrderPicker.swift in Sources */,
+				FAD1AA8BF16F6AFAA96A2BD1 /* SettingsMessagesSection.swift in Sources */,
 				3BED28B913CADEB301B04E80 /* SettingsPreferenceSections.swift in Sources */,
 				CBAD4F3353067CBF93C5C02A /* SettingsTilePicker.swift in Sources */,
 				87CD38A22FD0346BC8C1FB10 /* SettingsView.swift in Sources */,
@@ -3506,6 +3511,7 @@
 				E2B059E77108F5B554615800 /* SettingsAppVersion.swift in Sources */,
 				479607FEFCDC631309572718 /* SettingsBlockedSection.swift in Sources */,
 				734C19E459C749D10F71A258 /* SettingsMessageOrderPicker.swift in Sources */,
+				0C92DC4BFCAA20CB16C0666C /* SettingsMessagesSection.swift in Sources */,
 				4D270761A871BBF4F7C3F44B /* SettingsPreferenceSections.swift in Sources */,
 				95654FC8793D4A98935A74ED /* SettingsTilePicker.swift in Sources */,
 				C33EB30DA6A8237F195C5F1A /* SettingsView.swift in Sources */,

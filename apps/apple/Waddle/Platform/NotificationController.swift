@@ -26,6 +26,7 @@ final class NotificationController: NSObject {
     var onPushAction: (@MainActor (PushRegistrationStore.Owner, AppState.NotificationAction) async -> Void)?
 
     private let center = UNUserNotificationCenter.current()
+    private let messageSounds: MessageSoundPreference
     private var hasRequestedAuthorization = false
 
     private enum Identifier {
@@ -43,7 +44,8 @@ final class NotificationController: NSObject {
         static let pushRoutingKey = "waddle"
     }
 
-    override init() {
+    init(messageSounds: MessageSoundPreference) {
+        self.messageSounds = messageSounds
         super.init()
         center.delegate = self
         // Foreground: the app must be running with a live session to send;
@@ -130,7 +132,7 @@ final class NotificationController: NSObject {
             content.title = alert.senderName
         }
         content.body = showsPreviews ? alert.body : Self.hiddenPreview(mentionsMe: alert.mentionsMe)
-        content.sound = .default
+        content.sound = messageSounds.isEnabled ? .default : nil
         content.threadIdentifier = alert.conversation.description
         content.categoryIdentifier = Identifier.category
         content.userInfo = [
@@ -216,16 +218,22 @@ extension NotificationController: UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         if notification.request.trigger is UNPushNotificationTrigger {
-            let target = Self.target(from: notification.request.content.userInfo)
-            let hasLiveSession = await MainActor.run {
-                guard self.isAppActive, let target else { return false }
-                if let owner = target.owner { return self.hasLivePushSession?(owner) == true }
-                return self.hasLiveSession?(target.account) == true
+            let userInfo = notification.request.content.userInfo
+            let target = Self.target(from: userInfo)
+            let route = userInfo[Identifier.pushRoutingKey] as? [String: Any]
+            let isMissedCall = route?["class"] as? String == "missed_call"
+            return await MainActor.run {
+                // A matching live session posts a richer local message alert.
+                if self.isAppActive, let target {
+                    let hasLiveSession = if let owner = target.owner {
+                        self.hasLivePushSession?(owner) == true
+                    } else {
+                        self.hasLiveSession?(target.account) == true
+                    }
+                    if hasLiveSession { return [] }
+                }
+                return isMissedCall || self.messageSounds.isEnabled ? [.banner, .sound, .list] : [.banner, .list]
             }
-            // The matching live XMPP session posts a richer local alert for
-            // messages it receives. When that session is absent, keep the
-            // APNs banner visible instead of suppressing the only alert.
-            return hasLiveSession ? [] : [.banner, .sound, .list]
         }
         return [.banner, .sound, .list]
     }

@@ -47,7 +47,7 @@ final class AppState {
     @ObservationIgnored var restartPushRegistration: (@MainActor () -> Void)?
     @ObservationIgnored var setVoIPPushEnabled: (@MainActor (Bool) -> Void)?
 
-    let notifications = NotificationController()
+    let notifications: NotificationController
     @ObservationIgnored private let userInput = UserInputMonitor()
     @ObservationIgnored private let pdfAttachments = PDFAttachmentStore.shared
     @ObservationIgnored private lazy var ringer = CallRinger(notifications: notifications)
@@ -58,7 +58,7 @@ final class AppState {
     @ObservationIgnored private var finishedCallPushes: [CallPush] = []
     @ObservationIgnored private var pendingCallDeclines: [String: CallPush] = [:]
     #endif
-    let preferences = Preferences()
+    let preferences: Preferences
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var isBootstrapping = false
@@ -69,6 +69,9 @@ final class AppState {
     @ObservationIgnored private var client: AuthClient
 
     init() {
+        let preferences = Preferences()
+        self.preferences = preferences
+        notifications = NotificationController(messageSounds: preferences.messageSounds)
         let server = ServerSettings.current
         self.server = server
         self.client = AuthClient(baseURL: server)

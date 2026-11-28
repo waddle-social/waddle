@@ -84,6 +84,7 @@ name the issue that tracks them.
 | Feature | XEP(s) | Baseline | Now | Notes |
 | --- | --- | --- | --- | --- |
 | Local notifications | — | ❌ | ✅ | Inline reply and mark-read actions, grouped per conversation. Baseline: in-app toast for broadcast mentions only |
+| Message sounds | — | ❌ | ✅ | Settings › Messages has a device-local switch, on by default. Turn it off to silence in-app message alerts while keeping their banners. The switch also applies to message pushes presented in the foreground (#2643) |
 | Push (APNs) | 0357 + push.<domain> 0050 | ❌ | ✅ | Client registers with push.<domain>; the Push Service delivers a minimal alert (class-specific banner, badge, routing context; no sender or body unless the conversation opted in, see Push controls) and a tap opens the conversation on the right account. Baseline: `enablePushNotifications` was an empty stub |
 | Push controls | 0357, 0492 | — | ✅ | Settings › Notifications turns push off for this install: its alert and call registrations are retired for every account on it (a per-device opt-out; the account's other devices keep theirs), and it stops asking Apple for tokens. A conversation's details turn on "Show messages in notifications", stored with the notification mode and shared by all the account's devices; with it on, the push names the sender and shows the message (needs the server from #2555). The sender is shown by account name or room nick, not display name |
 

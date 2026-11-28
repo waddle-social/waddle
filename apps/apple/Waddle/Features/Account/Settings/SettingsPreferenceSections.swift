@@ -28,29 +28,6 @@ struct SettingsAppearanceSection: View {
     }
 }
 
-struct SettingsMessageOrderSection: View {
-    @Bindable var preferences: Preferences
-
-    var body: some View {
-        Section {
-            SettingsMessageOrderPicker(selection: $preferences.messageOrder)
-        } header: {
-            FormSectionHeader("Message order")
-        } footer: {
-            FormSectionFooter(footer)
-        }
-    }
-
-    private var footer: String {
-        switch preferences.messageOrder {
-        case .chat:
-            return "The classic chat flow: new messages arrive at the bottom, next to the composer."
-        case .social:
-            return "Read like a feed: the composer sits at the top and the newest messages come first as you scroll down."
-        }
-    }
-}
-
 struct SettingsPrivacySection: View {
     @Bindable var preferences: Preferences
 

@@ -46,26 +46,40 @@ struct FormSectionFooter: View {
 struct FormToggle: View {
     let title: String
     var symbol: String?
+    let caption: String?
     @Binding var isOn: Bool
 
-    init(_ title: String, symbol: String? = nil, isOn: Binding<Bool>) {
+    init(_ title: String, symbol: String? = nil, caption: String? = nil, isOn: Binding<Bool>) {
         self.title = title
         self.symbol = symbol
+        self.caption = caption
         _isOn = isOn
     }
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            if let symbol {
-                FormRowLabel(title: title, symbol: symbol)
+            if let caption {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+                    titleLabel
+                    FormSectionFooter(caption)
+                }
             } else {
-                Text(title)
-                    .huddleText(Theme.Typography.body)
-                    .foregroundStyle(Theme.Colors.fg)
+                titleLabel
             }
         }
         .toggleStyle(.huddle)
         .frame(minHeight: Theme.Size.formRow)
+    }
+
+    @ViewBuilder
+    private var titleLabel: some View {
+        if let symbol {
+            FormRowLabel(title: title, symbol: symbol)
+        } else {
+            Text(title)
+                .huddleText(Theme.Typography.body)
+                .foregroundStyle(Theme.Colors.fg)
+        }
     }
 }
 

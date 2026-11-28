@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import WaddleKit
 
 /// User preferences persisted in UserDefaults.
 @MainActor
@@ -89,6 +90,8 @@ final class Preferences {
         didSet { defaults.set(showsNotificationPreviews, forKey: Keys.previews) }
     }
 
+    let messageSounds: MessageSoundPreference
+
     /// Whether this install registers with Apple's push service. Off
     /// means it is only notified while Waddle is running.
     var receivesPush: Bool {
@@ -114,6 +117,7 @@ final class Preferences {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        messageSounds = MessageSoundPreference(defaults: defaults)
         appearance = defaults.string(forKey: Keys.appearance).flatMap(Appearance.init(rawValue:)) ?? .system
         sendsChatStates = defaults.object(forKey: Keys.chatStates) as? Bool ?? true
         sendsReadReceipts = defaults.object(forKey: Keys.readReceipts) as? Bool ?? true
