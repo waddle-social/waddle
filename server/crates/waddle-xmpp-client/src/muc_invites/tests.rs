@@ -46,7 +46,7 @@ fn xep0045_outbound_invite_and_decline_address_the_room() {
 
 #[test]
 fn xep0045_continuation_keeps_empty_flag_and_thread_id() {
-    let stanza: Element = "<message xmlns='jabber:client' from='coven@chat.example/witch'>\
+    let stanza: Element = "<message xmlns='jabber:client' from='coven@chat.example'>\
       <x xmlns='http://jabber.org/protocol/muc#user'>\
         <invite from='alice@example.com/desktop'><reason>Join us</reason><continue thread='t1'/></invite>\
         <invite from='coven@chat.example/nick'><continue/></invite>\
@@ -98,6 +98,8 @@ fn xep0045_non_mediated_messages_do_not_produce_invitation_events() {
             <x xmlns='http://jabber.org/protocol/muc#user'><invite to='bob@example.com'/></x></message>",
         "<message xmlns='jabber:client' from='coven@chat.example'>\
             <x xmlns='http://jabber.org/protocol/muc#user'><decline from=''/></x></message>",
+        "<message xmlns='jabber:client' from='coven@chat.example/nick'>\
+            <x xmlns='http://jabber.org/protocol/muc#user'><invite from='bob@example.com'/></x></message>",
         "<message xmlns='jabber:client' from='coven@chat.example' type='error'>\
             <x xmlns='http://jabber.org/protocol/muc#user'><invite from='bob@example.com'/></x></message>",
         "<message xmlns='jabber:client'>\
